@@ -1,41 +1,11 @@
 //! SlopOS TTY subsystem — per-terminal TTY abstraction, modelled after
 //! Linux's `tty_struct` + `n_tty` line discipline.
 //!
-//! # Architecture
+//! All public functions take an explicit `TtyIndex`; the `TtyServices` function
+//! pointers do the `u8 → TtyIndex` conversion at the syscall boundary.
 //!
-//! Each `Tty` instance owns:
-//! - A `LineDisc` (line discipline) for input processing
-//! - A `TtyDriverKind` (hardware backend — serial or virtual console)
-//! - A `TtySession` (session/foreground pgrp + focused task)
-//! - A `WaitQueue` for tasks blocked on input
-//!
-//! The `TTY_SLOTS` array (in `table.rs`) holds up to `MAX_TTYS` terminal
-//! instances, each with its own `SpinLock` for fully independent per-TTY
-//! locking.
-//!
-//! # Public API
-//!
-//! All public functions take an explicit `TtyIndex` — there are no global
-//! shims.  The `TtyServices` function pointers (registered in
-//! `syscall_services_init.rs`) perform the `u8 → TtyIndex` conversion at the
-//! boundary.
-//!
-//! # Locking Convention
-//!
-//! Methods that operate on a `Tty` while the slot `SpinLock` is already held
-//! use the `*_locked()` suffix (e.g. `drain_hw_input_locked`).  This makes the
-//! caller responsible for acquiring the lock and documents the precondition at
-//! the call site.
-//!
-//! # Module Organisation
-//!
-//! The implementation is decomposed into focused sub-modules:
-//!
-//! - [`io`] — read, write, push_input, hardware drain, data queries
-//! - [`termios`] — termios get/set, window size, ldisc, ioctls, drain
-//! - [`job_control`] — session, foreground pgrp, controlling terminal
-//! - [`lifecycle`] — hangup, vhangup, active TTY routing, init
-//! - [`poll`] — poll readiness, poll sleep, compositor focus
+//! Methods with a `*_locked()` suffix run with the slot `SpinLock` already held —
+//! acquiring it is the caller's job.
 
 pub mod backing;
 pub mod driver;
@@ -45,9 +15,8 @@ pub mod session;
 pub mod table;
 pub mod vconsole;
 
-/// VT100/ANSI escape sequence parser, re-exported from the standalone
-/// `slopos-vt` crate so the kernel virtual console and the userland terminal
-/// emulator share one state machine.
+/// VT100/ANSI escape-sequence parser, re-exported from `slopos-vt` so the kernel
+/// virtual console and the userland terminal emulator share one state machine.
 pub mod vtparser {
     pub use slopos_vt::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 }
@@ -71,15 +40,9 @@ use slopos_ostd::KArc;
 use slopos_ostd::sync::BUS;
 use slopos_ostd::task::ProcessGroup;
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-/// Re-export `TtyIndex` from the ABI crate so that it is the single
-/// definition used across the entire kernel.
+/// Re-exported from the ABI crate so it is the kernel's single definition.
 pub use slopos_abi::syscall::TtyIndex;
 
-/// Maximum number of TTY instances.
 pub use slopos_abi::event::MAX_TTYS;
 
 bitflags! {
@@ -107,20 +70,15 @@ bitflags! {
     }
 }
 
-/// The central TTY structure — one per terminal.
 pub struct Tty {
     pub(crate) index: TtyIndex,
 
-    /// The line discipline owned by this TTY.
     pub(crate) ldisc: LdiscKind,
 
-    /// Hardware driver backend.
     pub(crate) driver: TtyDriverKind,
 
-    /// Session/foreground state (includes focused_task_id).
     pub(crate) session: TtySession,
 
-    /// Window size (for TIOCGWINSZ / TIOCSWINSZ).
     pub(crate) winsize: UserWinsize,
     pub(crate) flags: TtyFlags,
     pub(crate) packet_events: PacketEvents,
@@ -140,10 +98,6 @@ impl Drop for Tty {
         self.session.detach();
     }
 }
-
-// ---------------------------------------------------------------------------
-// PostLockWork — RAII helper for deferred actions after lock release
-// ---------------------------------------------------------------------------
 
 /// Accumulates work that must run **after** the per-TTY lock drops, because it
 /// emits output, delivers a signal, or wakes a waiter.
@@ -179,7 +133,6 @@ const _: () = assert!(
 );
 
 impl PostLockWork {
-    /// Create a new empty deferred work accumulator.
     pub(crate) const fn new() -> Self {
         Self {
             signal: None,
@@ -207,17 +160,14 @@ impl PostLockWork {
             && self.wake_poll == 0
     }
 
-    /// Queue a signal for delivery to a (live) foreground process group.
     #[inline]
     pub(crate) fn add_signal(&mut self, pgrp: KArc<ProcessGroup>, signum: u8) {
         self.signal = Some((pgrp, signum));
     }
 
-    /// Ask for `slot`'s staged echo to be emitted once its guard drops.
-    ///
-    /// Only ever the slot whose own guard the caller holds: flushing a peer
-    /// would take its write lock while holding this one's, the inverse of the
-    /// single legal nesting direction.
+    /// Ask for `slot`'s staged echo to be emitted once its guard drops. Only ever
+    /// the slot whose own guard the caller holds: flushing a peer would take its
+    /// write lock while holding this one's — the inverse of the legal nesting.
     #[inline]
     pub(crate) fn request_echo_flush(&mut self, slot: usize, nesting: WriteNesting) {
         if slot < MAX_TTYS {
@@ -276,10 +226,8 @@ impl PostLockWork {
         self.wake_poll_slot(slot);
     }
 
-    /// Throw the accumulated work away without running it, for a test that
-    /// built an accumulator only to inspect it.  Dropping staged work silently
-    /// is the failure mode the `Drop` assertion exists to catch, so production
-    /// code has no reason to reach for this.
+    /// Throw accumulated work away without running it, for a test that only
+    /// inspects it; silently dropping staged work is what `Drop` asserts against.
     #[cfg(feature = "test-hooks")]
     pub(crate) fn discard(mut self) {
         #[cfg(debug_assertions)]
@@ -290,8 +238,7 @@ impl PostLockWork {
     }
 
     pub(crate) fn execute(mut self) {
-        // `mut` is needed in debug builds for the assertion tracking below.
-        // In release the cfg block is stripped, making `mut` appear unused.
+        // `mut` is used only by the debug-only cfg block below.
         let _ = &mut self;
         #[cfg(debug_assertions)]
         {
@@ -299,8 +246,7 @@ impl PostLockWork {
         }
         use slopos_kernel_services::driver_runtime::signal_process_group;
 
-        // Echo first: a signal character echoes its caret form, and `^C` has
-        // to reach the terminal before the SIGINT it announces.
+        // Echo first: `^C` must reach the terminal before the SIGINT it announces.
         let mut bits = self.echo_flush;
         while bits != 0 {
             let slot = bits.trailing_zeros() as usize;
@@ -331,8 +277,7 @@ impl PostLockWork {
         bits = self.wake_poll;
         while bits != 0 {
             let slot = bits.trailing_zeros() as usize;
-            // Poll waiters register on both the input and output queues, so
-            // wake both to cover either readiness direction.
+            // Poll waiters register on both queues, so wake both.
             BUS.publish(tty_input_event(slot));
             BUS.publish(tty_output_event(slot));
             bits &= bits - 1;
@@ -350,42 +295,31 @@ impl Drop for PostLockWork {
     }
 }
 
-/// Kernel-internal error type for TTY operations.
 pub use slopos_abi::tty_error::TtyError;
 
-// ---------------------------------------------------------------------------
-// Re-exports from decomposed sub-modules (preserves public API)
-// ---------------------------------------------------------------------------
-
-// io.rs: I/O paths
 pub use self::io::{
     bytes_available, has_data, output_queued_bytes, push_input, push_input_batch, read,
     read_with_attach, write,
 };
 
-// io.rs: PTY re-exports (originally in mod.rs, routed through io.rs)
 pub use self::io::{
     get_packet_mode, get_pty_lock, get_pty_number, is_pty_slave, is_slave_locked, pty_alloc,
     queue_packet_event, set_packet_mode, set_pty_lock,
 };
 
-// termios.rs: terminal configuration and control ioctls
 pub use self::termios::{
     get_ldisc, get_termios, get_winsize, is_output_idle, set_ldisc, set_termios, set_termios_flush,
     set_termios_wait, set_winsize, tcflush, tcsbrk, tcxonc,
 };
 
-// job_control.rs: session and foreground pgrp management
 pub use self::job_control::{
     acquire_controlling_terminal, attach_session, detach_controlling_terminal, detach_session,
     get_foreground_pgrp, get_session_id, release_controlling_terminal, set_foreground_pgrp,
     set_foreground_pgrp_checked,
 };
 
-// backing.rs: open/close lifetime — clone/drop of the owning references
 pub use self::backing::{TtyBacking, TtySlaveOpen, open_tty, pty_open_peer, pty_open_slave};
 
-// lifecycle.rs: hangup, active TTY, init, exclusive mode
 #[cfg(feature = "test-hooks")]
 pub use self::lifecycle::clear_hangup;
 pub use self::lifecycle::{
@@ -393,11 +327,9 @@ pub use self::lifecycle::{
     set_default_console_tty, set_exclusive, switch_active_tty, vhangup,
 };
 
-// poll.rs: poll readiness and compositor focus
 pub use self::poll::{
     get_compositor_focus, poll_dequeue, poll_enqueue, poll_events, poll_sleep, poll_sleep_on,
     set_compositor_focus,
 };
 
-// session.rs: direct re-export
 pub use self::session::detach_session_by_id;

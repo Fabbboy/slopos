@@ -34,9 +34,9 @@ const VIRTIO_BLK_T_OUT: u32 = 1;
 const VIRTIO_BLK_T_FLUSH: u32 = 4;
 const VIRTIO_BLK_S_OK: u8 = 0;
 
-/// `VIRTIO_BLK_F_FLUSH` (device feature bit 9): the device has a write-back
-/// cache and honours `VIRTIO_BLK_T_FLUSH` requests. Requested as an *optional*
-/// feature; a backend that does not offer it has no cache to flush.
+/// Device feature bit 9: the device has a write-back cache and honours
+/// `VIRTIO_BLK_T_FLUSH`. Optional — a backend that does not offer it has no
+/// cache to flush.
 const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
 
 const SECTOR_SIZE: u64 = 512;
@@ -44,12 +44,10 @@ const REQUEST_TIMEOUT_MS: u32 = 5000;
 
 /// Maximum sectors per data request — bounded by the single bounce page.
 const MAX_DATA_SECTORS: usize = 4096 / SECTOR_SIZE as usize;
-/// Bounce-buffer capacity in bytes (one page).
 const BOUNCE_CAPACITY: usize = MAX_DATA_SECTORS * SECTOR_SIZE as usize;
 
-/// Concurrent request-slot table depth. Logical requests are serialized
-/// by `io_lock`, so at most one slot is `InFlight`; the remaining slots
-/// absorb quarantined (timed-out) chains the device still owns.
+/// Logical requests are serialized by `io_lock`, so at most one slot is
+/// `InFlight`; the rest absorb quarantined chains the device still owns.
 const NUM_REQUEST_SLOTS: usize = 8;
 
 #[repr(C)]
@@ -89,9 +87,8 @@ impl VirtioBlkDevice {
 ///                  Orphaned ──IRQ harvest──▶ OrphanDone ──task-context reap──┘
 /// ```
 ///
-/// While `Orphaned`, the device still owns the descriptor chain and the DMA
-/// pages, so neither may be reused or freed until the completion is observed
-/// on the used ring.
+/// While `Orphaned`, the device still owns the chain and its DMA pages; neither
+/// may be reused or freed until the completion is seen on the used ring.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SlotState {
     Free,
@@ -109,9 +106,8 @@ struct RequestSlot {
     /// Every descriptor index of the chain, `descs[0] == head`.
     descs: [u16; 3],
     desc_count: u8,
-    /// DMA pages owned by this request. Held by the slot, not the submitting
-    /// function, so a timed-out request cannot free pages the device still has
-    /// descriptors pointing at.
+    /// Held by the slot rather than the submitting function, so a timed-out
+    /// request cannot free pages the device still points descriptors at.
     buffers: Option<RequestBuffers>,
 }
 
@@ -125,7 +121,6 @@ impl RequestSlot {
     };
 }
 
-/// Transfer direction + data slice for one sector-aligned request.
 enum Xfer<'a> {
     Read(&'a mut [u8]),
     Write(&'a [u8]),
@@ -140,9 +135,8 @@ struct VirtioBlkState {
 }
 
 impl VirtioBlkState {
-    /// In-place recipe for the empty (pre-probe) state: written field by field
-    /// into the heap slot so the ~280-byte aggregate never lands on the
-    /// prober's stack (the 2 KiB frame gate).
+    /// Written field by field into the heap slot so the ~280-byte aggregate
+    /// never lands on the prober's stack (the 2 KiB frame gate).
     fn init_empty() -> impl Init<Self, AllocError> {
         init_struct_with(
             |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
@@ -155,10 +149,9 @@ impl VirtioBlkState {
         )
     }
 
-    /// Consume every pending used-ring entry, transitioning the matching slot
-    /// by its chain-head id. Runs in IRQ context (under the state `SpinLock`)
-    /// and opportunistically from task context; an entry with an unknown id is
-    /// dropped rather than attributed to whatever request is waiting.
+    /// Transition each pending used-ring entry's slot, matched by chain-head id;
+    /// an entry with an unknown id is dropped rather than attributed to whatever
+    /// request is waiting. Runs in IRQ context under the state `SpinLock`.
     fn harvest_used(&mut self) {
         while let Some(elem) = self.device.queue.try_pop_used() {
             let head = elem.id as u16;
@@ -167,7 +160,6 @@ impl VirtioBlkState {
                 .iter_mut()
                 .find(|s| !matches!(s.state, SlotState::Free) && s.head == head)
             else {
-                // Spurious or duplicate completion — nothing to attribute it to.
                 continue;
             };
             slot.state = match slot.state {
@@ -179,9 +171,8 @@ impl VirtioBlkState {
         }
     }
 
-    /// Release descriptors + DMA pages of every orphaned chain whose
-    /// completion has since been harvested. Task context only (frees
-    /// pages back to the allocator).
+    /// Release descriptors + DMA pages of orphaned chains whose completion has
+    /// since been harvested. Task context only — it frees pages to the allocator.
     fn reap_finished_orphans(&mut self) {
         for i in 0..NUM_REQUEST_SLOTS {
             if self.slots[i].state != SlotState::OrphanDone {
@@ -197,8 +188,8 @@ impl VirtioBlkState {
         }
     }
 
-    /// Collect a `Complete` slot: free its descriptors and hand the DMA
-    /// pages (with the device-written status byte) back to the waiter.
+    /// Free a `Complete` slot's descriptors and hand its DMA pages — carrying
+    /// the device-written status byte — back to the waiter.
     fn try_collect(&mut self, slot_idx: usize) -> Option<RequestBuffers> {
         if self.slots[slot_idx].state != SlotState::Complete {
             return None;
@@ -214,27 +205,23 @@ impl VirtioBlkState {
     }
 }
 
-/// Owned per-device state for one claimed virtio-blk device.
-///
-/// Lives on the heap inside a [`KArc`] so its address is stable: the per-device
-/// IRQ closure and the registry both hold clones, and the closure harvests the
-/// used ring + wakes `req_waiters` from interrupt context.
+/// Owned per-device state, heap-resident inside a [`KArc`] so its address is
+/// stable: the per-device IRQ closure and the registry each hold a clone.
 #[derive(slopos_ostd::SlotFields)]
 struct VirtioBlkInner {
-    /// `LOCK_LEVEL_RESOURCE`; the `SpinLock` disables IRQs while held, so the
-    /// IRQ-side harvest never interleaves with a task-side submit/collect.
+    /// The `SpinLock` disables IRQs while held, so the IRQ-side harvest never
+    /// interleaves with a task-side submit/collect.
     state: SpinLock<VirtioBlkState>,
-    /// Serializes logical requests, one at a time per device. Sleeping, so a
-    /// slow request never monopolizes a CPU.
+    /// Serializes logical requests; sleeping, so a slow request never
+    /// monopolizes a CPU.
     io_lock: Mutex<()>,
-    /// Waiters parked for request completion; woken by the IRQ handler after it
-    /// harvests the used ring.
+    /// Woken by the IRQ handler once it has harvested the used ring.
     req_waiters: WaitQueue,
 }
 
 impl VirtioBlkInner {
-    /// In-place recipe for a fresh, empty device: built via [`KArc::try_init`]
-    /// so nothing ever materialises on the caller's stack.
+    /// Built via [`KArc::try_init`] so nothing materialises on the caller's
+    /// stack.
     fn init_empty() -> impl Init<Self, AllocError> {
         init_struct_with(
             |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
@@ -261,8 +248,8 @@ impl VirtioBlkInner {
         )
     }
 
-    /// IRQ-side completion path. The wake runs after the state lock is dropped,
-    /// so the wait queue's internal lock never nests inside the device lock.
+    /// The wake runs after the state lock is dropped, so the wait queue's
+    /// internal lock never nests inside the device lock.
     fn handle_queue_irq(&self) {
         {
             let mut state = self.state.lock();
@@ -279,8 +266,6 @@ impl VirtioBlkInner {
         self.state.lock().device.capacity_sectors * SECTOR_SIZE
     }
 
-    /// Whether `[offset, offset + len)` lies fully within the device.
-    /// `checked_add` also rejects an `offset + len` that overflows `u64`.
     fn span_in_bounds(&self, offset: u64, len: usize) -> bool {
         offset
             .checked_add(len as u64)
@@ -292,11 +277,10 @@ impl VirtioBlkInner {
         self.state.lock().msix_state.clone()
     }
 
-    /// Build, submit and record one request chain under the state lock.
-    /// `data` is `Some((len, write))` for a read/write (3-descriptor chain:
-    /// header → bounce → status) or `None` for a flush (2-descriptor chain:
-    /// header → status). The DMA pages move into the request slot, so their
-    /// lifetime is tied to device ownership. Returns the slot index.
+    /// Build, submit and record one request chain. `data` is `Some((len, write))`
+    /// for a read/write (header → bounce → status) or `None` for a flush
+    /// (header → status). The DMA pages move into the request slot, so their
+    /// lifetime is tied to device ownership.
     fn submit_chain(&self, buffers: RequestBuffers, data: Option<(u32, bool)>) -> Option<usize> {
         let req_phys = buffers.req_page.phys_u64();
         let status_offset = size_of::<VirtioBlkReqHeader>();
@@ -309,8 +293,7 @@ impl VirtioBlkInner {
             return None;
         }
 
-        // Reclaim chains whose late completions have since arrived, so
-        // descriptor pressure is bounded to chains the device still owns.
+        // Bounds descriptor pressure to the chains the device still owns.
         state.reap_finished_orphans();
 
         let slot_idx = state
@@ -397,13 +380,9 @@ impl VirtioBlkInner {
         Some(slot_idx)
     }
 
-    /// Park until the chain in `slot_idx` completes, then return its DMA pages
-    /// (carrying the device-written status byte). The predicate re-harvests
-    /// opportunistically, so a lost interrupt is recovered on the next wake.
-    ///
-    /// On timeout the chain is quarantined (`Orphaned`): its descriptors and
-    /// pages remain reserved until the device's late completion is harvested,
-    /// never freed while the device may still DMA into them.
+    /// Park until the chain in `slot_idx` completes, then return its DMA pages.
+    /// The predicate re-harvests opportunistically, so a lost interrupt is
+    /// recovered on the next wake; on timeout the chain is quarantined.
     fn wait_for_completion(&self, slot_idx: usize) -> Option<RequestBuffers> {
         let collect = || {
             let mut state = self.state.lock();
@@ -417,8 +396,8 @@ impl VirtioBlkInner {
         {
             Ok(buffers) => Some(buffers),
             Err(WaitAbort::NoRuntime) => {
-                // Pre-scheduler context (probe / early boot): poll the
-                // used ring directly under the HPET deadline.
+                // Pre-scheduler context (probe / early boot): poll the used ring
+                // under the HPET deadline.
                 virtio::hpet_poll_wait(
                     &|| {
                         let mut state = self.state.lock();
@@ -456,8 +435,8 @@ impl VirtioBlkInner {
     }
 
     /// Transfer whole sectors (at most one bounce page) starting at `sector`.
-    /// The slice length must be a non-zero multiple of the sector size —
-    /// callers chunk via [`read_offset`](Self::read_offset) /
+    /// The slice length must be a non-zero multiple of the sector size; callers
+    /// chunk via [`read_offset`](Self::read_offset) /
     /// [`write_offset`](Self::write_offset).
     fn do_request(&self, sector: u64, xfer: Xfer<'_>) -> bool {
         let (len, write) = match &xfer {
@@ -528,13 +507,11 @@ impl VirtioBlkInner {
         success
     }
 
-    /// Issue a `VIRTIO_BLK_T_FLUSH` and block until the device acknowledges it,
-    /// forcing every previously-ACKed write onto non-volatile media. This is
-    /// the durability barrier the filesystem relies on between ordered phases
-    /// and at `sync`/shutdown.
+    /// Block until the device acknowledges a `VIRTIO_BLK_T_FLUSH`, forcing every
+    /// previously-ACKed write onto non-volatile media.
     ///
-    /// Without `VIRTIO_BLK_F_FLUSH` the device has no volatile cache to flush
-    /// (writes are already durable on ACK), so this is a successful no-op.
+    /// Without `VIRTIO_BLK_F_FLUSH` the device has no volatile cache to flush,
+    /// so this is a successful no-op.
     fn do_flush(&self) -> bool {
         let Ok(_io) = self.io_lock.lock() else {
             return false;
@@ -587,9 +564,9 @@ impl VirtioBlkInner {
         status == VIRTIO_BLK_S_OK
     }
 
-    /// Byte-granular read: partial head/tail sectors go through a small stack
-    /// staging buffer; the sector-aligned middle is transferred in chains of up
-    /// to [`MAX_DATA_SECTORS`] sectors straight into the caller's slice.
+    /// Partial head/tail sectors go through a stack staging buffer; the
+    /// sector-aligned middle is transferred in chains of up to
+    /// [`MAX_DATA_SECTORS`] sectors straight into the caller's slice.
     fn read_offset(&self, offset: u64, buffer: &mut [u8]) -> bool {
         if buffer.is_empty() {
             return true;
@@ -638,9 +615,8 @@ impl VirtioBlkInner {
         true
     }
 
-    /// Byte-granular write, mirror of [`read_offset`](Self::read_offset):
-    /// partial head/tail sectors are read-modify-written through a stack
-    /// staging buffer so bytes outside the span are never clobbered.
+    /// Partial head/tail sectors are read-modify-written through a stack
+    /// staging buffer, so bytes outside the span are never clobbered.
     fn write_offset(&self, offset: u64, buffer: &[u8]) -> bool {
         if buffer.is_empty() {
             return true;
@@ -714,9 +690,8 @@ impl RequestBuffers {
 
 const MAX_BLK_DEVICES: usize = 8;
 
-/// Opaque, unforgeable handle to a registered virtio-blk device: a
-/// generation-checked [`Handle`] over the registry's [`DevState`] slots, so a
-/// stale handle fails validation instead of aliasing a different device.
+/// Generation-checked handle over the registry's [`DevState`] slots: a stale
+/// handle fails validation instead of aliasing a different device.
 pub type DevHandle = Handle<DevState>;
 
 /// Error from acquiring an exclusive write capability on a device.
@@ -724,7 +699,6 @@ pub type DevHandle = Handle<DevState>;
 pub enum BlkClaimError {
     /// The handle does not refer to a live device (freed/never existed).
     Stale,
-    /// Another holder already owns the exclusive write capability.
     AlreadyClaimed,
 }
 
@@ -732,10 +706,9 @@ pub enum BlkClaimError {
 /// [`HandleTable`], this carries the device state plus its capability bits.
 pub struct DevState {
     inner: KArc<VirtioBlkInner>,
-    /// Stable probe-order index (disk0 = first probed). Devices are never
-    /// removed, so this equals the device's position in registration order.
+    /// Stable probe-order index (disk0 = first probed); devices are never
+    /// removed, so it equals the position in registration order.
     index: u16,
-    /// Whether a [`BlockWriteToken`] currently holds the exclusive write claim.
     write_claimed: bool,
 }
 
@@ -750,10 +723,9 @@ fn with_registry<R>(f: impl FnOnce(&mut HandleTable<DevState>) -> R) -> R {
     f(table)
 }
 
-/// Register a freshly-probed device, assigning the next probe-order index
-/// (disk0, disk1, …) — devices are never removed, so the live count is the
-/// next index. Called from `virtio_blk_probe` while the PCI `ENUM_STATE` lock
-/// is held; the only nesting is `ENUM_STATE -> BLK_REGISTRY`, never the reverse.
+/// Assigns the next probe-order index — devices are never removed, so the live
+/// count is the next index. Called with the PCI `ENUM_STATE` lock held; the only
+/// nesting is `ENUM_STATE -> BLK_REGISTRY`, never the reverse.
 fn register_device(inner: KArc<VirtioBlkInner>) -> Option<BlockDeviceIndex> {
     with_registry(|t| {
         let index = t.len() as u16;
@@ -767,8 +739,8 @@ fn register_device(inner: KArc<VirtioBlkInner>) -> Option<BlockDeviceIndex> {
     })
 }
 
-/// Clone the device's owned state out from under the registry lock, so the
-/// (potentially blocking) I/O path never runs while holding the registry.
+/// Clones the state out from under the registry lock, so the (potentially
+/// blocking) I/O path never runs while holding the registry.
 fn clone_inner(handle: DevHandle) -> Option<KArc<VirtioBlkInner>> {
     with_registry(|t| t.get(handle).map(|s| s.inner.clone()).ok())
 }
@@ -777,12 +749,10 @@ pub fn blk_device_count() -> usize {
     with_registry(|t| t.len())
 }
 
-/// Look a device up by stable probe-order index (disk0 = first probed).
 pub fn blk_device_by_index(index: BlockDeviceIndex) -> Option<DevHandle> {
     with_registry(|t| t.iter().find(|(_, s)| s.index == index.0).map(|(h, _)| h))
 }
 
-/// Read-only block access through a borrowed handle (no exclusivity needed).
 pub fn blk_read(handle: DevHandle, offset: u64, buffer: &mut [u8]) -> bool {
     clone_inner(handle).is_some_and(|inner| inner.read_offset(offset, buffer))
 }
@@ -801,9 +771,9 @@ pub fn blk_msix_state(handle: DevHandle) -> Option<VirtioMsixState> {
     clone_inner(handle).and_then(|inner| inner.msix_state())
 }
 
-/// Acquire the EXCLUSIVE write capability for a device. Returns an owned
-/// [`BlockWriteToken`]; a second `open_writer` on the same device returns
-/// [`BlkClaimError::AlreadyClaimed`] until the first token is dropped.
+/// Acquire the exclusive write capability. A second `open_writer` on the same
+/// device returns [`BlkClaimError::AlreadyClaimed`] until the first token is
+/// dropped.
 pub fn open_writer(handle: DevHandle) -> Result<BlockWriteToken, BlkClaimError> {
     with_registry(|t| match t.get_mut(handle) {
         Ok(s) if s.write_claimed => Err(BlkClaimError::AlreadyClaimed),
@@ -816,8 +786,7 @@ pub fn open_writer(handle: DevHandle) -> Result<BlockWriteToken, BlkClaimError> 
     })
 }
 
-/// Owned, exclusive read+write capability for one block device. Dropping it
-/// releases the exclusive write claim.
+/// Owned, exclusive read+write capability; dropping it releases the claim.
 pub struct BlockWriteToken {
     handle: DevHandle,
     inner: KArc<VirtioBlkInner>,
@@ -906,8 +875,7 @@ fn virtio_blk_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
     }
     let flush_supported = feat_result.driver_features & VIRTIO_BLK_F_FLUSH != 0;
 
-    // Allocated up front so the IRQ closure can capture a KArc clone of this
-    // device's own state.
+    // Allocated up front so the IRQ closure can capture a clone of it.
     let inner = match KArc::try_init(VirtioBlkInner::init_empty()) {
         Ok(i) => i,
         Err(_) => return Err(PciProbeError::OutOfMemory),
@@ -930,8 +898,8 @@ fn virtio_blk_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
 
     let capacity_sectors;
     {
-        // Set up in place inside the heap-resident state so the ~200-byte
-        // `Virtqueue` never lands on this probe's stack frame (2 KiB gate).
+        // Set up in place so the ~200-byte `Virtqueue` never lands on this
+        // probe's stack frame (2 KiB gate).
         let mut state = inner.state.lock();
         if !queue::setup_queue_into(
             &caps.common_cfg,

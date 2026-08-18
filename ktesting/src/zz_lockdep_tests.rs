@@ -1,43 +1,21 @@
 //! In-kernel lockdep self-tests.
 //!
-//! The module name sorts last (`zz_`) inside `slopos_testing`, which is itself
-//! the lexicographically-last kernel test crate, so these run at the very end
-//! of the kernel phase — the point at which "is the validator still alive?" is
-//! a meaningful question.
-//!
-//! The gate pattern `check_task_ownership.sh --self-test` already uses applies
-//! here: a validator that has never been observed to fire has not been observed
-//! to work. `lock_graph.rs` is a real lockdep — dependency-edge learning, BFS
-//! cycle detection, a chain-hash cache — and until these tests existed nothing
-//! demonstrated that any of it ran in a booted kernel.
+//! The `zz_` prefix sorts these last inside `slopos_testing`, itself the
+//! lexicographically-last kernel test crate, so they run at the very end of the
+//! kernel phase.
 
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::lock_graph;
 
-use crate::{assert_test, TestResult};
+use crate::{TestResult, assert_test};
 
-/// Synthetic class identities.
-///
-/// `push_lock` treats the pointer purely as an identity token and the poison
-/// callback is a no-op, so nothing ever dereferences these. Chosen outside
-/// every kernel mapping so a future stray deref faults loudly rather than
-/// corrupting a real lock.
+/// Synthetic class identities, chosen outside every kernel mapping so a stray
+/// deref faults loudly rather than corrupting a real lock.
 const SELF_TEST_A: usize = 0x1000_0000_0000_1001;
 const SELF_TEST_B: usize = 0x1000_0000_0000_2002;
 
-/// Take two synthetic locks in both orders and assert the cycle detector
-/// reports the inversion.
-///
-/// The assertion is on `report_only_violations()`, which `report_cycle` bumps
-/// after `path_exists` returned true. That is a claim about the cycle detector
-/// specifically, not about "something panicked". The guard keeps the reporter
-/// in report-only mode so provoking a cycle does not take the machine down;
-/// the reserved class slots keep the test working whatever the class count is.
-/// `lockdep=off` is a supported mode — it is how the validator's own
-/// per-acquire cost is measured — and the checks below are claims about a
-/// running validator, not about the kernel. Skipping says "not asked", which
-/// is the truth; failing would make the measurement run report a broken
-/// kernel.
+/// `lockdep=off` is a supported mode, so checks below skip rather than fail:
+/// they are claims about a running validator, not about the kernel.
 fn validator_deliberately_off() -> bool {
     lock_graph::lockdep_mode() == lock_graph::LockdepMode::Off
 }
@@ -73,7 +51,6 @@ fn lockdep_ab_ba_is_detected() -> TestResult {
     {
         let session = lock_graph::SelfTestGuard::begin();
 
-        // Chain 1: A then B. Learns the edge A -> B.
         session.push(class_a);
         session.push(class_b);
         session.pop(class_b);
@@ -83,9 +60,6 @@ fn lockdep_ab_ba_is_detected() -> TestResult {
             "held stack not drained after chain 1"
         );
 
-        // Chain 2: B then A. Pushing A while B is held makes
-        // `path_exists(A, B)` true via the edge learned above, which is what
-        // `report_cycle` fires on.
         session.push(class_b);
         session.push(class_a);
         session.pop(class_a);
@@ -106,11 +80,8 @@ fn lockdep_ab_ba_is_detected() -> TestResult {
     TestResult::Pass
 }
 
-/// A validator that disables itself must say so.
-///
-/// The `GRAPH_OVERFLOW` latch sites are the only thing that makes "every lock
-/// acquired from here on is unvalidated" visible in a boot log. Green when
-/// nothing overflowed; fails if the warning is lost to a refactor.
+/// A validator that disabled itself must say so: the `GRAPH_OVERFLOW` warning is
+/// the only trace in a boot log that later acquires went unvalidated.
 fn lockdep_overflow_is_announced() -> TestResult {
     if lock_graph::graph_overflowed() {
         assert_test!(
@@ -121,11 +92,8 @@ fn lockdep_overflow_is_announced() -> TestResult {
     TestResult::Pass
 }
 
-/// End-of-kernel-phase assertion that the validator was never disabled.
-///
-/// Class identity is the declaration site, so an array of N like locks costs
-/// one class rather than N and the table is not exhaustible by a loop over a
-/// lock array. Overflow here means a real pool ran out.
+/// Class identity is the declaration site, so an array of N like locks costs one
+/// class: an overflow here means a pool genuinely ran out.
 fn lockdep_graph_overflow_clear_at_boot_end() -> TestResult {
     assert_test!(
         !lock_graph::graph_overflowed(),
@@ -141,18 +109,9 @@ fn lockdep_graph_overflow_clear_at_boot_end() -> TestResult {
     TestResult::Pass
 }
 
-/// Every held-stack update this boot ran with interrupts masked.
-///
-/// The entry write and the depth publish are separate stores, so an interrupt
-/// between them lets the handler's own acquire claim the slot the interrupted
-/// push had filled but not yet counted. What it leaves behind is an entry with
-/// a null address counted inside `depth`, which no `pop_lock` can find — from
-/// then on that CPU reports a lock held forever, and every consumer of the
-/// held stack reads a corrupt one.
-///
-/// A whole boot is the test: `PreemptMutex` and `Epoch::enter` acquire with
-/// interrupts on, the epoch one on every received TCP segment, so the acquire
-/// this covers has run tens of thousands of times by the time it is asked.
+/// The entry write and the depth publish are separate stores: an interrupt
+/// between them leaves a null address counted inside `depth` that no `pop_lock`
+/// can find, so that CPU reports a lock held forever.
 fn lockdep_updates_run_with_interrupts_masked() -> TestResult {
     assert_test!(
         lock_graph::push_irq_state() == lock_graph::PushIrqState::ReachedMasked,
@@ -164,17 +123,8 @@ fn lockdep_updates_run_with_interrupts_masked() -> TestResult {
     TestResult::Pass
 }
 
-/// Two declaration sites whose ids collide are validated as one class, which
-/// can produce a false positive that no amount of reading the reported code
-/// would explain. The hash is 64-bit over `file:line:column`, so this should
-/// never fire; if it does, one of the two sites needs renaming.
-/// No release went unmatched beyond what the poison walk drained.
-///
-/// A release whose address is not on the stack is the instruction that makes
-/// a depth leak permanent — `pop_lock` returns without decrementing and that
-/// CPU reports a lock held forever. Not `== 0`: a recovered panic drains the
-/// stack, and every live guard's `Drop` then pops an address that is gone, so
-/// the honest bound is the drained count.
+/// Not `== 0`: a recovered panic drains the held stack, and every live guard's
+/// `Drop` then pops an address that is gone, so the drained count is the bound.
 fn lockdep_no_unmatched_releases() -> TestResult {
     let misses = lock_graph::pop_misses();
     let drained = lock_graph::poison_drained();
@@ -187,6 +137,8 @@ fn lockdep_no_unmatched_releases() -> TestResult {
     TestResult::Pass
 }
 
+/// Two declaration sites whose ids collide validate as one class, a false
+/// positive nothing in the reported code explains; rename one of the sites.
 fn lockdep_no_class_collisions() -> TestResult {
     assert_test!(
         lock_graph::class_collisions() == 0,
@@ -197,21 +149,14 @@ fn lockdep_no_class_collisions() -> TestResult {
     TestResult::Pass
 }
 
-/// Share of a pool the kernel phase must stay under.
-///
-/// 70%, not 100%: the failure this catches is a new array-of-locks static
-/// landing without a class key, which adds classes by the hundred. A ceiling
-/// at the pool size only fires once the validator has already turned itself
-/// off, which is the state this whole mechanism exists to avoid.
+/// Share of a pool the kernel phase must stay under. 70%, not 100%: a ceiling at
+/// the pool size fires only once the validator has already turned itself off.
 const MAX_POOL_FILL_PCT: usize = 70;
 
-/// Classes the kernel phase must have registered for the numbers above it to
-/// mean anything. Without a floor, "0 classes" satisfies every ceiling and a
-/// validator that stopped registering reports as maximally healthy — the same
-/// hole `min-records` plugs in the stack-size gate.
+/// A floor, because "0 classes" satisfies every ceiling: without it a validator
+/// that stopped registering reports as maximally healthy.
 const MIN_CLASSES: usize = 32;
 
-/// Pool headroom at the end of the kernel phase, logged and bounded.
 fn lockdep_pool_headroom() -> TestResult {
     if validator_deliberately_off() {
         return TestResult::Skipped;

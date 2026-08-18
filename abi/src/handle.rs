@@ -2,8 +2,7 @@
 //!
 //! The interop seam between window providers (the `windowing` crate) and
 //! rendering backends: a backend depends only on `slopos-abi` to consume these
-//! traits. The raw structs hold plain integers; the borrowed wrappers tie a
-//! handle's lifetime to the window or connection that issued it.
+//! traits.
 
 use core::marker::PhantomData;
 
@@ -19,8 +18,7 @@ pub struct RawWindowHandle {
     pub toplevel_id: u32,
 }
 
-/// Raw identifiers for a compositor connection. All fields are plain values, so
-/// the struct is `Send + Sync`.
+/// Raw identifiers for a compositor connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct RawDisplayHandle {

@@ -48,8 +48,6 @@ fn runtime_signal_process_group(pgid: u32, signum: u8) -> bool {
     matched
 }
 
-/// Post `signum` to every member of session `sid`, waking blocked members. True
-/// if at least one member matched.
 fn runtime_signal_session(sid: u32, signum: u8) -> bool {
     if sid == 0 {
         return false;
@@ -116,9 +114,9 @@ fn runtime_current_task_is_killed() -> bool {
     Current::get().is_some_and(|current| current.task().is_killed())
 }
 
-/// Whether the current task must stop waiting, for any reason. The pair, not
-/// either half: a kill is deliberately not a signal — it sits outside the
-/// deliverable range — so polling only for signals never notices one.
+/// Whether the current task must stop waiting. The pair, not either half: a
+/// kill is deliberately not a signal — it sits outside the deliverable range —
+/// so polling only for signals never notices one.
 fn runtime_current_task_wait_aborted() -> bool {
     Current::get().is_some_and(|current| {
         let task = current.task();
@@ -141,10 +139,9 @@ fn runtime_swap_parked_wait_queue(queue: *mut core::ffi::c_void) -> *mut core::f
     }
 }
 
-/// A process group is orphaned when no member has a parent in a *different*
-/// process group of the *same* session. POSIX then requires `EIO` where a
-/// terminal operation would otherwise raise SIGTTOU, since no parent is left to
-/// continue the stopped group.
+/// Orphaned when no member has a parent in a *different* process group of the
+/// *same* session. POSIX then requires `EIO` where a terminal operation would
+/// otherwise raise SIGTTOU.
 fn runtime_is_pgrp_orphaned(pgid: u32, sid: u32) -> bool {
     if pgid == 0 || sid == 0 {
         return false;
@@ -154,8 +151,6 @@ fn runtime_is_pgrp_orphaned(pgid: u32, sid: u32) -> bool {
         return true; // no members at all — effectively orphaned
     }
 
-    // Assume orphaned; one member with a parent in a different pgrp of the same
-    // session disproves it.
     let mut is_orphaned = true;
     task::task_try_for_each_active(|task| {
         if task.pgid() != pgid || task.sid() != sid {

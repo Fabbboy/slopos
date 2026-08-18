@@ -28,7 +28,6 @@ impl VfsHandle {
     }
 }
 
-/// Open flags for [`vfs_open`].
 pub struct VfsOpenFlags {
     pub create: bool,
     pub exclusive: bool,
@@ -212,17 +211,16 @@ pub fn vfs_list(path: &[u8], entries: &mut [UserFsEntry]) -> VfsResult<usize> {
         }
     }
 
-    // Overlay child mount points (Linux VFS behaviour: mount points appear
-    // as directory entries in the parent listing even when the underlying
-    // filesystem has no matching entry).
+    // Mount points appear as directory entries in the parent listing even when
+    // the underlying filesystem has no matching entry (Linux VFS behaviour).
     with_mount_table(|mt| {
         mt.for_each_child_mount(path, &mut |child_name| {
             if count >= max {
                 return false;
             }
 
-            // If an entry with this name already exists, just ensure it
-            // shows as a directory (mount points are always directories).
+            // A mount point always lists as a directory, whatever the entry it
+            // shadows was.
             for i in 0..count {
                 let elen = entries[i]
                     .name

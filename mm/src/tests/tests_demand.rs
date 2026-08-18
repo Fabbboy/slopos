@@ -7,7 +7,6 @@ use crate::process_vm::{process_vm_alloc, process_vm_get_region};
 use crate::tests::test_fixtures::ProcessVmGuard;
 use crate::vma_region::{Protection, RegionBacking, RegionPurpose, VmaRegion};
 
-/// Helper to construct anonymous lazy user VMA regions for tests.
 fn anon_region(prot: Protection) -> VmaRegion {
     VmaRegion {
         protection: prot,
@@ -151,13 +150,8 @@ pub fn test_demand_permission_allow_write() -> TestResult {
 }
 
 pub fn test_demand_dispatch_absent_for_a_reaped_process() -> TestResult {
-    // `demand::handle_demand_fault` is reached only via
-    // `process_vm_with_vm_space`, which must answer `None` for a process that
-    // no longer exists — the failure path `try_resolve_user_fault` hits.
-    //
-    // Driven with a *stale* designator rather than `INVALID_PROCESS_ID`: the
-    // argument is no longer a number a caller can reach by omission, so the
-    // reachable failure is a reference outliving its process.
+    // `handle_demand_fault` is reached only through `process_vm_with_vm_space`,
+    // so this drives the `None` arm `try_resolve_user_fault` depends on.
     let Some(vm) = crate::tests::test_fixtures::ProcessVmGuard::new() else {
         return fail!("could not create a process VM");
     };

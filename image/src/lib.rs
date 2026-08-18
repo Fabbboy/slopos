@@ -778,8 +778,7 @@ fn inflate_stored(
 }
 
 fn extend_vec_from_slice(out: &mut Vec<u8>, bytes: &[u8]) {
-    // SlopOS userland has exposed corruption in large bulk slice copies; keep
-    // compressed payload assembly on the byte-wise path until that is fixed.
+    // TODO(tech-debt): bulk slice copy corrupts in SlopOS userland; drop the byte loop when fixed.
     out.reserve(bytes.len());
     for &byte in bytes {
         out.push(byte);

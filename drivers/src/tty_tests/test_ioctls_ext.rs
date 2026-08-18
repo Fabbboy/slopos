@@ -1260,7 +1260,6 @@ pub fn test_tcxonc_unallocated_slot() -> TestResult {
     TestResult::Pass
 }
 
-/// TCXONC on out-of-range index returns InvalidIndex.
 pub fn test_tcxonc_invalid_index() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(255);
@@ -1281,11 +1280,6 @@ pub fn test_tcxonc_invalid_index() -> TestResult {
 
     TestResult::Pass
 }
-// ---------------------------------------------------------------------------
-// Output Queue Visibility (TIOCOUTQ) tests
-// ---------------------------------------------------------------------------
-
-/// TIOCOUTQ ABI constant is correct.
 pub fn test_tiocoutq_abi_constant() -> TestResult {
     if slopos_abi::syscall::TIOCOUTQ != 0x5411 {
         klog_info!(
@@ -1297,12 +1291,10 @@ pub fn test_tiocoutq_abi_constant() -> TestResult {
     TestResult::Pass
 }
 
-/// output_queued_bytes returns 0 when idle.
 pub fn test_output_queued_zero_when_idle() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
-    // With no in-flight output, queued bytes should be 0.
     match tty::output_queued_bytes(idx) {
         Ok(0) => TestResult::Pass,
         Ok(n) => {
@@ -1319,19 +1311,16 @@ pub fn test_output_queued_zero_when_idle() -> TestResult {
     }
 }
 
-/// output_queued_bytes reflects TTY_OUTPUT_INFLIGHT.
 pub fn test_output_queued_reflects_inflight() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let slot = idx.0 as usize;
 
-    // Artificially set inflight counter.
     crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].store(7, Ordering::Release);
 
     let result = tty::output_queued_bytes(idx);
 
-    // Reset before checking (avoid polluting other tests).
     crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
 
     match result {
@@ -1347,14 +1336,12 @@ pub fn test_output_queued_reflects_inflight() -> TestResult {
     }
 }
 
-/// output_queued_bytes returns 0 after TCOFLUSH.
 pub fn test_output_queued_zero_after_flush() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let slot = idx.0 as usize;
 
-    // Set inflight, then flush output.
     crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].store(5, Ordering::Release);
     tty::tcflush(idx, slopos_abi::syscall::TCOFLUSH).unwrap();
 
@@ -1377,10 +1364,8 @@ pub fn test_output_queued_zero_after_flush() -> TestResult {
     }
 }
 
-/// output_queued_bytes on unallocated slot returns error.
 pub fn test_output_queued_unallocated() -> TestResult {
     tty::table::tty_table_init();
-    // Slot 5 is never allocated by tty_table_init().
     let idx = TtyIndex(5);
 
     match tty::output_queued_bytes(idx) {
@@ -1395,7 +1380,6 @@ pub fn test_output_queued_unallocated() -> TestResult {
     }
 }
 
-/// output_queued_bytes on invalid index returns error.
 pub fn test_output_queued_invalid_index() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(255);
@@ -1412,18 +1396,15 @@ pub fn test_output_queued_invalid_index() -> TestResult {
     }
 }
 
-/// FIONREAD behavior is unchanged by TIOCOUTQ addition.
 pub fn test_fionread_unchanged() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Push data (canonical: need newline to commit to cooked).
     tty::push_input(idx, b'A');
     tty::push_input(idx, b'B');
     tty::push_input(idx, b'\n');
 
-    // bytes_available (FIONREAD equivalent) should report 3.
     match tty::bytes_available(idx) {
         Ok(3) => {}
         other => {
@@ -1440,12 +1421,10 @@ pub fn test_fionread_unchanged() -> TestResult {
     TestResult::Pass
 }
 
-/// output_queued_bytes on console TTY 1 works.
 pub fn test_output_queued_vconsole() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(1);
 
-    // Console should report 0 queued bytes (synchronous driver).
     match tty::output_queued_bytes(idx) {
         Ok(0) => TestResult::Pass,
         Ok(n) => {
@@ -1464,10 +1443,6 @@ pub fn test_output_queued_vconsole() -> TestResult {
         }
     }
 }
-// ===========================================================================
-// TIOCOUTQ Byte Accounting & Packet Mode Edge Fix
-// ===========================================================================
-
 pub fn test_inflight_byte_granularity() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
@@ -1651,8 +1626,6 @@ pub fn test_packet_mode_1byte_data_no_events() -> TestResult {
     TestResult::Pass
 }
 
-/// PTY master uses RawDisc (VMIN=0, VTIME=0) so empty nonblock reads
-/// return immediately with 0 bytes.
 pub fn test_packet_mode_1byte_no_data_nonblock() -> TestResult {
     let Some((master, slave, saved, _hold)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
@@ -1661,9 +1634,8 @@ pub fn test_packet_mode_1byte_no_data_nonblock() -> TestResult {
 
     tty::set_packet_mode(master, true).unwrap();
 
-    // No data, no pending packet event, non-blocking: WouldBlock, exactly
-    // like Linux. The master's RawDisc carries VMIN=1, so the EOF-shaped
-    // `Ok(0)` is reserved for peer-close/hangup.
+    // The master's RawDisc carries VMIN=1, so the EOF-shaped `Ok(0)` is
+    // reserved for peer-close/hangup.
     let mut buf = [0u8; 1];
     match tty::read(master, &mut buf, true) {
         Err(TtyError::WouldBlock) => {}
@@ -1780,10 +1752,6 @@ pub fn test_echo_inflight_byte_granularity() -> TestResult {
     drain_tty_nonblock(TtyIndex(0));
     TestResult::Pass
 }
-// ===========================================================================
-// TIOCGSID, TIOCEXCL/TIOCNXCL/TIOCGEXCL & HUPCL Enforcement
-// ===========================================================================
-
 pub fn test_excl_hupcl_tiocgsid_abi_constant() -> TestResult {
     if slopos_abi::syscall::TIOCGSID != 0x5429 {
         return TestResult::Fail;
@@ -2051,9 +2019,6 @@ pub fn test_excl_hupcl_close_clears_exclusive() -> TestResult {
         }
     }
 }
-
-// ===========================================================================
-// ===========================================================================
 
 pub fn test_ttyflags_default_empty() -> TestResult {
     let flags = TtyFlags::empty();

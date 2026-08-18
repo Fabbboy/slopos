@@ -1,11 +1,6 @@
 //! VirtIO MSI-X integration regression tests.
 //!
-//! These tests verify that the VirtIO drivers (block and net) successfully
-//! configure MSI-X during probe, that allocated vectors are in the valid IDT
-//! range, and that the MSI-X table entries match the allocated vectors.
-//!
-//! All tests run after PCI enumeration and VirtIO probe have completed on the
-//! QEMU q35 platform.
+//! Run after PCI enumeration and VirtIO probe have completed on QEMU q35.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
@@ -16,20 +11,15 @@ use crate::pci::{pci_config_read16, pci_get_device, pci_get_device_count};
 use crate::virtio_blk;
 use crate::virtio_net;
 
-/// MSI vector range: 48–223 (allocated by `msi_alloc_vector`).
+/// Mirrors the vector range `msi_alloc_vector` allocates from.
 const MSI_VECTOR_BASE: u8 = 48;
 const MSI_VECTOR_MAX: u8 = 223;
 
-/// Handle to disk0 (the root-fs virtio-blk device) via the capability registry.
+/// Handle to the root-fs virtio-blk device.
 fn disk0() -> Option<virtio_blk::DevHandle> {
     virtio_blk::blk_device_by_index(BlockDeviceIndex(0))
 }
 
-// =============================================================================
-// Helpers
-// =============================================================================
-
-/// Find a PCI device by vendor and device ID.
 fn find_device(vendor: u16, device: u16) -> Option<crate::pci::PciDeviceInfo> {
     for i in 0..pci_get_device_count() {
         if let Some(dev) = pci_get_device(i) {
@@ -49,11 +39,6 @@ fn msix_control_bits(dev: &crate::pci::PciDeviceInfo, cap_offset: u16) -> (bool,
     (enabled, fmask)
 }
 
-// =============================================================================
-// 1. VirtIO-blk MSI-X integration
-// =============================================================================
-
-/// VirtIO-blk must be ready after probe.
 pub fn test_virtio_blk_ready() -> TestResult {
     assert_test!(
         disk0().is_some_and(virtio_blk::blk_is_ready),
@@ -62,7 +47,6 @@ pub fn test_virtio_blk_ready() -> TestResult {
     pass!()
 }
 
-/// VirtIO-blk must have MSI-X state (not MSI fallback) on QEMU q35.
 pub fn test_virtio_blk_has_msix_state() -> TestResult {
     let state = match disk0().and_then(virtio_blk::blk_msix_state) {
         Some(s) => s,
@@ -75,7 +59,6 @@ pub fn test_virtio_blk_has_msix_state() -> TestResult {
     pass!()
 }
 
-/// VirtIO-blk queue 0 vector must be in the valid IDT MSI range.
 pub fn test_virtio_blk_vector_in_range() -> TestResult {
     let state = match disk0().and_then(virtio_blk::blk_msix_state) {
         Some(s) => s,
@@ -93,8 +76,7 @@ pub fn test_virtio_blk_vector_in_range() -> TestResult {
     pass!()
 }
 
-/// The MSI-X table entry for queue 0 must contain the correct vector in its
-/// Message Data field (bits 7:0).
+/// The vector sits in bits 7:0 of the entry's Message Data field.
 pub fn test_virtio_blk_table_entry_matches_vector() -> TestResult {
     let state = match disk0().and_then(virtio_blk::blk_msix_state) {
         Some(s) => s,
@@ -114,7 +96,6 @@ pub fn test_virtio_blk_table_entry_matches_vector() -> TestResult {
     pass!()
 }
 
-/// The MSI-X table entry for queue 0 must target APIC ID 0 (BSP).
 pub fn test_virtio_blk_table_entry_targets_bsp() -> TestResult {
     let state = match disk0().and_then(virtio_blk::blk_msix_state) {
         Some(s) => s,
@@ -134,7 +115,7 @@ pub fn test_virtio_blk_table_entry_targets_bsp() -> TestResult {
     pass!()
 }
 
-/// The MSI-X table entry for queue 0 must be unmasked (vector control bit 0 = 0).
+/// The per-entry mask is bit 0 of the vector control word.
 pub fn test_virtio_blk_entry_unmasked() -> TestResult {
     let state = match disk0().and_then(virtio_blk::blk_msix_state) {
         Some(s) => s,
@@ -151,7 +132,6 @@ pub fn test_virtio_blk_entry_unmasked() -> TestResult {
     pass!()
 }
 
-/// MSI-X must be enabled in PCI config space for the VirtIO-blk device.
 pub fn test_virtio_blk_msix_enabled_in_config() -> TestResult {
     let dev = match find_device(0x1af4, 0x1042) {
         Some(d) => d,
@@ -167,11 +147,6 @@ pub fn test_virtio_blk_msix_enabled_in_config() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 2. VirtIO-net MSI-X integration
-// =============================================================================
-
-/// VirtIO-net must be ready after probe.
 pub fn test_virtio_net_ready() -> TestResult {
     assert_test!(
         virtio_net::virtio_net_is_ready(),
@@ -180,7 +155,6 @@ pub fn test_virtio_net_ready() -> TestResult {
     pass!()
 }
 
-/// VirtIO-net must have MSI-X state with 2 queue vectors (RX + TX).
 pub fn test_virtio_net_has_msix_state() -> TestResult {
     let state = match virtio_net::virtio_net_msix_state() {
         Some(s) => s,
@@ -194,7 +168,6 @@ pub fn test_virtio_net_has_msix_state() -> TestResult {
     pass!()
 }
 
-/// Both VirtIO-net queue vectors must be in the valid IDT MSI range.
 pub fn test_virtio_net_vectors_in_range() -> TestResult {
     let state = match virtio_net::virtio_net_msix_state() {
         Some(s) => s,
@@ -219,7 +192,6 @@ pub fn test_virtio_net_vectors_in_range() -> TestResult {
     pass!()
 }
 
-/// VirtIO-net RX and TX vectors must be distinct (per-queue isolation).
 pub fn test_virtio_net_vectors_distinct() -> TestResult {
     let state = match virtio_net::virtio_net_msix_state() {
         Some(s) => s,
@@ -236,7 +208,6 @@ pub fn test_virtio_net_vectors_distinct() -> TestResult {
     pass!()
 }
 
-/// MSI-X table entries for both net queues must contain the correct vectors.
 pub fn test_virtio_net_table_entries_match_vectors() -> TestResult {
     let state = match virtio_net::virtio_net_msix_state() {
         Some(s) => s,
@@ -258,7 +229,6 @@ pub fn test_virtio_net_table_entries_match_vectors() -> TestResult {
     pass!()
 }
 
-/// MSI-X table entries for both net queues must target APIC ID 0 (BSP).
 pub fn test_virtio_net_table_entries_target_bsp() -> TestResult {
     let state = match virtio_net::virtio_net_msix_state() {
         Some(s) => s,
@@ -279,7 +249,6 @@ pub fn test_virtio_net_table_entries_target_bsp() -> TestResult {
     pass!()
 }
 
-/// Both MSI-X table entries for net queues must be unmasked.
 pub fn test_virtio_net_entries_unmasked() -> TestResult {
     let state = match virtio_net::virtio_net_msix_state() {
         Some(s) => s,
@@ -299,7 +268,6 @@ pub fn test_virtio_net_entries_unmasked() -> TestResult {
     pass!()
 }
 
-/// MSI-X must be enabled in PCI config space for the VirtIO-net device.
 pub fn test_virtio_net_msix_enabled_in_config() -> TestResult {
     let dev = match find_device(0x1af4, 0x1041) {
         Some(d) => d,
@@ -315,11 +283,6 @@ pub fn test_virtio_net_msix_enabled_in_config() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 3. Cross-device validation
-// =============================================================================
-
-/// VirtIO-blk and VirtIO-net must not share any MSI-X vectors.
 pub fn test_blk_and_net_vectors_disjoint() -> TestResult {
     let blk = match disk0().and_then(virtio_blk::blk_msix_state) {
         Some(s) => s,
@@ -350,11 +313,7 @@ pub fn test_blk_and_net_vectors_disjoint() -> TestResult {
     pass!()
 }
 
-/// On QEMU q35 with VirtIO modern devices, MSI-X should always be preferred
-/// over MSI.  Verify this by confirming MSI-X cap is present and enabled on
-/// both VirtIO devices.
 pub fn test_msix_preferred_over_msi_on_q35() -> TestResult {
-    // VirtIO-blk
     let blk_dev = match find_device(0x1af4, 0x1042) {
         Some(d) => d,
         None => return fail!("VirtIO-blk (1af4:1042) not found"),
@@ -364,7 +323,6 @@ pub fn test_msix_preferred_over_msi_on_q35() -> TestResult {
         "VirtIO-blk should have MSI-X capability"
     );
 
-    // VirtIO-net
     let net_dev = match find_device(0x1af4, 0x1041) {
         Some(d) => d,
         None => return fail!("VirtIO-net (1af4:1041) not found"),
@@ -374,7 +332,6 @@ pub fn test_msix_preferred_over_msi_on_q35() -> TestResult {
         "VirtIO-net should have MSI-X capability"
     );
 
-    // Both should have MSI-X state (not MSI fallback)
     assert_test!(
         disk0().and_then(virtio_blk::blk_msix_state).is_some(),
         "virtio-blk should use MSI-X, not MSI fallback"
@@ -386,19 +343,15 @@ pub fn test_msix_preferred_over_msi_on_q35() -> TestResult {
     pass!()
 }
 
-/// The queue_msix_entry helper must return the correct table entry index for
-/// assigned queues and VIRTIO_MSI_NO_VECTOR for unassigned ones.
 pub fn test_queue_msix_entry_helper() -> TestResult {
     let state = match virtio_net::virtio_net_msix_state() {
         Some(s) => s,
         None => return fail!("virtio-net MSI-X state is None"),
     };
 
-    // Queues 0 and 1 are assigned — entry index == queue index.
     assert_eq_test!(state.queue_msix_entry(0), 0, "queue 0 entry should be 0");
     assert_eq_test!(state.queue_msix_entry(1), 1, "queue 1 entry should be 1");
 
-    // Queue 99 is not assigned — should return NO_VECTOR.
     assert_eq_test!(
         state.queue_msix_entry(99),
         crate::virtio::VIRTIO_MSI_NO_VECTOR,
@@ -407,11 +360,6 @@ pub fn test_queue_msix_entry_helper() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Suite registration
-// =============================================================================
-
-// VirtIO-blk
 slopos_testing::stest!(name = test_virtio_blk_ready, suite = virtio_msix);
 slopos_testing::stest!(name = test_virtio_blk_has_msix_state, suite = virtio_msix);
 slopos_testing::stest!(name = test_virtio_blk_vector_in_range, suite = virtio_msix);
@@ -428,7 +376,6 @@ slopos_testing::stest!(
     name = test_virtio_blk_msix_enabled_in_config,
     suite = virtio_msix
 );
-// VirtIO-net
 slopos_testing::stest!(name = test_virtio_net_ready, suite = virtio_msix);
 slopos_testing::stest!(name = test_virtio_net_has_msix_state, suite = virtio_msix);
 slopos_testing::stest!(name = test_virtio_net_vectors_in_range, suite = virtio_msix);
@@ -446,7 +393,6 @@ slopos_testing::stest!(
     name = test_virtio_net_msix_enabled_in_config,
     suite = virtio_msix
 );
-// Cross-device
 slopos_testing::stest!(
     name = test_blk_and_net_vectors_disjoint,
     suite = virtio_msix

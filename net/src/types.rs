@@ -1,41 +1,25 @@
-//! Type-safe network primitives for the SlopOS networking stack.
-//!
-//! This module provides newtype wrappers that eliminate entire classes of bugs
-//! at compile time: byte-order mixups, address/port confusion, and raw numeric
-//! comparisons for protocol fields.  All types are zero-cost (`#[repr(transparent)]`)
-//! and designed for a `#![no_std]` kernel environment.
+//! Type-safe network primitives for the SlopOS networking stack: newtype
+//! wrappers for addresses, ports and protocol fields.
 
 use core::fmt;
 
 use slopos_abi::net::{AF_INET, SockAddrIn};
 
-// =============================================================================
-// 1A.1 — Newtype wrappers
-// =============================================================================
-
 /// IPv4 address stored in **network byte order** (`[u8; 4]`).
-///
-/// The inner representation is always big-endian, matching the wire format.
-/// Conversion to/from host-order `u32` is explicit via [`from_u32_be`] / [`to_u32_be`].
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ipv4Addr(pub [u8; 4]);
 
 impl Ipv4Addr {
-    /// `0.0.0.0` — the unspecified address (bind to any interface).
     pub const UNSPECIFIED: Self = Self([0, 0, 0, 0]);
-    /// `255.255.255.255` — the limited broadcast address.
     pub const BROADCAST: Self = Self([255, 255, 255, 255]);
-    /// `127.0.0.1` — the loopback address.
     pub const LOCALHOST: Self = Self([127, 0, 0, 1]);
 
-    /// Construct from a big-endian `u32`.
     #[inline]
     pub const fn from_u32_be(val: u32) -> Self {
         Self(val.to_be_bytes())
     }
 
-    /// Return the address as a big-endian `u32`.
     #[inline]
     pub const fn to_u32_be(self) -> u32 {
         u32::from_be_bytes(self.0)
@@ -43,10 +27,7 @@ impl Ipv4Addr {
 
     /// The network address of `self` under a `prefix_len`-bit mask.
     ///
-    /// Normalising is what makes `10.0.2.15/24` and `10.0.2.0/24` name the same
-    /// route, so a delete finds what an add stored. A prefix of 0 masks to
-    /// `0.0.0.0` and 32 returns the address unchanged; both are special-cased
-    /// because shifting a `u32` by 32 overflows.
+    /// Prefixes of 0 and 32 are special-cased: shifting a `u32` by 32 overflows.
     #[inline]
     pub const fn masked(self, prefix_len: u8) -> Self {
         if prefix_len == 0 {
@@ -64,7 +45,6 @@ impl Ipv4Addr {
         self.0[0] == 127
     }
 
-    /// `true` if the address is `255.255.255.255`.
     #[inline]
     pub const fn is_broadcast(&self) -> bool {
         self.0[0] == 255 && self.0[1] == 255 && self.0[2] == 255 && self.0[3] == 255
@@ -76,15 +56,11 @@ impl Ipv4Addr {
         self.0[0] >= 224 && self.0[0] <= 239
     }
 
-    /// `true` if the address is `0.0.0.0`.
     #[inline]
     pub const fn is_unspecified(&self) -> bool {
         self.0[0] == 0 && self.0[1] == 0 && self.0[2] == 0 && self.0[3] == 0
     }
 
-    /// `true` if `addr` falls within the subnet defined by `self` and `mask`.
-    ///
-    /// Both `addr` and `mask` are in network byte order.
     #[inline]
     pub const fn in_subnet(addr: Ipv4Addr, network: Ipv4Addr, mask: Ipv4Addr) -> bool {
         let a = addr.to_u32_be();
@@ -93,13 +69,11 @@ impl Ipv4Addr {
         (a & m) == (n & m)
     }
 
-    /// Convert from a raw `[u8; 4]` (already in network byte order).
     #[inline]
     pub const fn from_bytes(bytes: [u8; 4]) -> Self {
         Self(bytes)
     }
 
-    /// Return the raw bytes in network byte order.
     #[inline]
     pub const fn as_bytes(&self) -> &[u8; 4] {
         &self.0
@@ -119,28 +93,21 @@ impl fmt::Display for Ipv4Addr {
 }
 
 /// Port number in **host byte order**.
-///
-/// Conversion to/from network (big-endian) byte order is explicit via
-/// [`to_network_bytes`] / [`from_network_bytes`].  This prevents accidentally
-/// passing a host-order value where network-order is expected.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Port(pub u16);
 
 impl Port {
-    /// Construct a port from a host-order `u16`.
     #[inline]
     pub const fn new(val: u16) -> Self {
         Self(val)
     }
 
-    /// Serialize to big-endian bytes for the wire.
     #[inline]
     pub const fn to_network_bytes(self) -> [u8; 2] {
         self.0.to_be_bytes()
     }
 
-    /// Deserialize from big-endian wire bytes.
     #[inline]
     pub const fn from_network_bytes(bytes: [u8; 2]) -> Self {
         Self(u16::from_be_bytes(bytes))
@@ -158,7 +125,6 @@ impl Port {
         self.0 < 1024
     }
 
-    /// Return the raw host-order `u16` value.
     #[inline]
     pub const fn as_u16(self) -> u16 {
         self.0
@@ -178,18 +144,13 @@ impl fmt::Display for Port {
 }
 
 /// Ethernet MAC address (6 bytes).
-///
-/// Distinct type prevents confusion with other 6-byte arrays.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MacAddr(pub [u8; 6]);
 
 impl MacAddr {
-    /// `ff:ff:ff:ff:ff:ff` — the broadcast address.
     pub const BROADCAST: Self = Self([0xff; 6]);
-    /// `00:00:00:00:00:00` — the zero / unset address.
     pub const ZERO: Self = Self([0; 6]);
 
-    /// `true` if the address is `ff:ff:ff:ff:ff:ff`.
     #[inline]
     pub const fn is_broadcast(&self) -> bool {
         self.0[0] == 0xff
@@ -206,7 +167,6 @@ impl MacAddr {
         self.0[0] & 0x01 != 0
     }
 
-    /// `true` if the address is all zeros.
     #[inline]
     pub const fn is_zero(&self) -> bool {
         self.0[0] == 0
@@ -217,7 +177,6 @@ impl MacAddr {
             && self.0[5] == 0
     }
 
-    /// Return the raw bytes.
     #[inline]
     pub const fn as_bytes(&self) -> &[u8; 6] {
         &self.0
@@ -245,8 +204,6 @@ impl fmt::Display for MacAddr {
 }
 
 /// Device index — uniquely identifies a registered network device.
-///
-/// Cannot be confused with a socket index, connection ID, or other `usize`.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DevIndex(pub usize);
@@ -263,55 +220,31 @@ impl fmt::Display for DevIndex {
     }
 }
 
-// =============================================================================
-// 1A.2 — NetError
-// =============================================================================
-
-/// Comprehensive network error type.
-///
-/// Internal code uses `NetError` exclusively.  Conversion to POSIX errno
-/// happens at the syscall boundary via [`to_errno`].
+/// Kernel-internal network error, converted to a POSIX errno at the syscall
+/// boundary via [`to_errno`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetError {
-    /// Operation would block (EAGAIN / EWOULDBLOCK).
     WouldBlock,
-    /// Connection refused by remote host (ECONNREFUSED).
     ConnectionRefused,
-    /// Connection reset by remote host (ECONNRESET).
     ConnectionReset,
-    /// Connection aborted locally (ECONNABORTED).
     ConnectionAborted,
-    /// Operation timed out (ETIMEDOUT).
     TimedOut,
-    /// Address already in use (EADDRINUSE).
     AddressInUse,
-    /// Requested address not available on this host (EADDRNOTAVAIL).
     AddressNotAvailable,
-    /// Socket is not connected (ENOTCONN).
     NotConnected,
-    /// Socket is already connected (EISCONN).
     AlreadyConnected,
-    /// Network is unreachable (ENETUNREACH).
     NetworkUnreachable,
-    /// Host is unreachable (EHOSTUNREACH).
     HostUnreachable,
-    /// Permission denied (EPERM).
     PermissionDenied,
-    /// Invalid argument (EINVAL).
     InvalidArgument,
-    /// No buffer space available (ENOBUFS).
     NoBufferSpace,
-    /// Protocol not supported (EPROTONOSUPPORT).
     ProtocolNotSupported,
-    /// Address family not supported (EAFNOSUPPORT).
     AddressFamilyNotSupported,
-    /// Socket not bound — `bind()` was not called (EINVAL).
+    /// `bind()` was not called.
     SocketNotBound,
-    /// Non-blocking connect in progress (EINPROGRESS).
     InProgress,
-    /// Operation not supported on this socket type (EOPNOTSUPP).
     OperationNotSupported,
-    /// Write after shutdown (EPIPE).
+    /// Write after shutdown.
     Shutdown,
 }
 
@@ -370,14 +303,8 @@ impl fmt::Display for NetError {
     }
 }
 
-// =============================================================================
-// 1A.3 — SockAddr
-// =============================================================================
-
-/// Kernel-internal socket address combining an [`Ipv4Addr`] and [`Port`].
-///
-/// This is the single conversion point between the kernel's type-safe address
-/// representation and the userspace-visible [`SockAddrIn`] layout.
+/// Kernel-internal socket address, and the single conversion point to and from
+/// the userspace-visible [`SockAddrIn`] layout.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SockAddr {
     pub ip: Ipv4Addr,
@@ -385,30 +312,25 @@ pub struct SockAddr {
 }
 
 impl SockAddr {
-    /// Create a new `SockAddr` from components.
     #[inline]
     pub const fn new(ip: Ipv4Addr, port: Port) -> Self {
         Self { ip, port }
     }
 
-    /// Parse from a userspace [`SockAddrIn`], validating `sin_family == AF_INET`
-    /// and converting byte order.
+    /// Parse from a userspace [`SockAddrIn`], validating `sin_family == AF_INET`.
     pub fn from_user(raw: &SockAddrIn) -> Result<Self, NetError> {
         if raw.family != AF_INET {
             return Err(NetError::AddressFamilyNotSupported);
         }
         Ok(Self {
             ip: Ipv4Addr(raw.addr),
-            // SockAddrIn.port stores htons(port) — convert back to host order.
             port: Port(u16::from_be(raw.port)),
         })
     }
 
-    /// Serialize to the userspace-visible [`SockAddrIn`] layout.
     pub fn to_user(&self) -> SockAddrIn {
         SockAddrIn {
             family: AF_INET,
-            // Store as htons(port) — big-endian u16 value.
             port: self.port.0.to_be(),
             addr: self.ip.0,
             _pad: [0; 8],
@@ -428,24 +350,15 @@ impl fmt::Display for SockAddr {
     }
 }
 
-// =============================================================================
-// 1A.4 — EtherType and IpProtocol enums
-// =============================================================================
-
 /// Ethernet frame type field values.
-///
-/// Pattern matching on this enum replaces raw `0x0800` / `0x0806` comparisons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum EtherType {
-    /// IPv4 (`0x0800`).
     Ipv4 = 0x0800,
-    /// ARP (`0x0806`).
     Arp = 0x0806,
 }
 
 impl EtherType {
-    /// Parse from a raw big-endian `u16` value.  Returns `None` for unknown types.
     #[inline]
     pub const fn from_u16(val: u16) -> Option<Self> {
         match val {
@@ -455,7 +368,6 @@ impl EtherType {
         }
     }
 
-    /// Return the raw `u16` value.
     #[inline]
     pub const fn as_u16(self) -> u16 {
         self as u16
@@ -477,21 +389,15 @@ impl fmt::Display for EtherType {
 }
 
 /// IP protocol number field values.
-///
-/// Pattern matching on this enum replaces raw `6` / `17` comparisons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum IpProtocol {
-    /// ICMP (`1`).
     Icmp = 1,
-    /// TCP (`6`).
     Tcp = 6,
-    /// UDP (`17`).
     Udp = 17,
 }
 
 impl IpProtocol {
-    /// Parse from a raw `u8` value.  Returns `None` for unknown protocols.
     #[inline]
     pub const fn from_u8(val: u8) -> Option<Self> {
         match val {
@@ -502,7 +408,6 @@ impl IpProtocol {
         }
     }
 
-    /// Return the raw `u8` value.
     #[inline]
     pub const fn as_u8(self) -> u8 {
         self as u8

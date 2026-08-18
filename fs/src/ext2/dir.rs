@@ -66,7 +66,6 @@ pub fn for_each_entry(
     Ok(())
 }
 
-/// Look up a child inode by name in a directory.
 pub fn lookup_child(
     parent: &Inode,
     name: &[u8],
@@ -94,10 +93,9 @@ pub fn lookup_child(
     found.ok_or(Ext2Error::PathNotFound)
 }
 
-/// Remove a directory entry by name with correct rec_len merging.
-///
-/// Per ext2 spec: extend the predecessor's rec_len to absorb the deleted entry.
-/// For the first entry in a block (no predecessor), zero the inode field.
+/// Remove a directory entry by name. Per ext2: extend the predecessor's
+/// `rec_len` to absorb the deleted entry; for the first entry in a block, zero
+/// the inode field instead.
 pub fn remove_dir_entry(
     parent: &Inode,
     name: &[u8],
@@ -143,14 +141,12 @@ pub fn remove_dir_entry(
                 if &data[name_start..name_end] == name {
                     match prev_cursor {
                         Some(prev) => {
-                            // Extend predecessor's rec_len to absorb this entry
                             let prev_rec =
                                 u16::from_le_bytes([data[prev + 4], data[prev + 5]]) as usize;
                             let new_rec = (prev_rec + rec_len) as u16;
                             data[prev + 4..prev + 6].copy_from_slice(&new_rec.to_le_bytes());
                         }
                         None => {
-                            // First entry in block: zero the inode field
                             data[cursor..cursor + 4].copy_from_slice(&0u32.to_le_bytes());
                         }
                     }
@@ -186,15 +182,13 @@ pub fn is_dir_empty(
                 true
             } else {
                 count += 1;
-                false // found non-dot entry, stop
+                false
             }
         },
     )?;
     Ok(count <= 2)
 }
 
-/// Append a directory entry to a parent directory.
-/// Scans existing blocks for free space, allocates a new block if needed.
 pub fn append_dir_entry(
     parent_inode: &mut Inode,
     child: InodeNum,
@@ -209,7 +203,6 @@ pub fn append_dir_entry(
     let needed = dir_entry_size(name.len());
     let bs = block_size as usize;
 
-    // Scan existing directory blocks for space
     let mut offset = 0u32;
     while offset < parent_inode.size {
         let file_block = FileBlock(offset / block_size);
@@ -243,7 +236,6 @@ pub fn append_dir_entry(
 
             if slack >= needed {
                 if entry_inode != 0 {
-                    // Shrink existing entry, place new entry after it
                     data[cursor + 4..cursor + 6]
                         .copy_from_slice(&(actual_size as u16).to_le_bytes());
                     let new_cursor = cursor + actual_size;
@@ -256,7 +248,6 @@ pub fn append_dir_entry(
                         new_rec_len,
                     );
                 } else {
-                    // Reuse deleted slot
                     write_dir_entry(
                         &mut data[cursor..cursor + rec_len],
                         child,
@@ -272,7 +263,6 @@ pub fn append_dir_entry(
         offset += block_size;
     }
 
-    // No space found: allocate a new block and add to parent's block map
     let file_block = FileBlock(parent_inode.size / block_size);
     blockmap::ensure_data_block(
         parent_inode,
@@ -283,10 +273,8 @@ pub fn append_dir_entry(
         superblock,
         block_size,
     )?;
-    // Re-map to get the newly allocated block number
     let new_block = blockmap::map_block(parent_inode, file_block, ptrs_per_block, cache, device)?;
 
-    // Write the new entry into the fresh block
     let mut block = cache.get_zero(new_block, device)?;
     let data = block.data_mut();
     write_dir_entry(&mut data[..bs], child, name, file_type, bs);
@@ -297,7 +285,6 @@ pub fn append_dir_entry(
     Ok(())
 }
 
-/// Update the ".." entry in a directory to point to a new parent.
 pub fn update_dotdot(
     dir_inode: &Inode,
     new_parent: InodeNum,
@@ -317,7 +304,6 @@ pub fn update_dotdot(
     let data = block.data_mut();
     let bs = block_size as usize;
 
-    // Walk entries in the first block to find ".."
     let mut cursor = 0usize;
     while cursor + DIR_ENTRY_HEADER_SIZE <= bs {
         let rec_len = u16::from_le_bytes([data[cursor + 4], data[cursor + 5]]) as usize;

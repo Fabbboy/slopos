@@ -1018,7 +1018,6 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
         }
     };
 
-    // Unlock slave so /dev/pts/N open succeeds.
     let _ = slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
     let Some(pid) = task_guard
@@ -1086,15 +1085,13 @@ pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
     else {
         return TestResult::Fail;
     };
-    // file_poll_register_fd registers the current task as the waiter, so the
-    // FD-owning task must be PCR.current_task (mirrors the real poll path).
+    // `file_poll_register_fd` takes PCR.current_task as the waiter, so the
+    // fd-owning task has to be current, as the real poll path leaves it.
     make_task_current(task_id);
 
     let slave_fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY | O_NOCTTY as u32);
     assert_test!(slave_fd >= 0, "open(/dev/pts/N) failed");
 
-    // The registration carries only a KWeak<OpenFile> — never a strong ref —
-    // so it resolves to the live open file while the fd is open.
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, slave_fd, POLLIN);
     assert_test!(!reg.is_stale(), "fresh registration must not be stale");
 
@@ -1295,7 +1292,7 @@ pub fn test_user_ptr_kernel_address() -> TestResult {
 pub fn test_user_ptr_misaligned() -> TestResult {
     use slopos_mm::user_ptr::UserPtr;
     let _result = UserPtr::<u64>::try_new(0x1001);
-    // Just verify it doesn't crash; alignment policy is implementation-defined
+    // TODO(tech-debt): asserts nothing — pin the alignment policy down and assert it.
     TestResult::Pass
 }
 
@@ -1344,11 +1341,9 @@ pub fn test_memfd_create_boundaries() -> TestResult {
         let rc = slopos_mm::memfd::memfd_ftruncate(handle, 4096);
         assert_eq_test!(rc, 0, "ftruncate(4096) should succeed");
 
-        // Sizing is one-shot.
         let rc = slopos_mm::memfd::memfd_ftruncate(handle, 8192);
         assert_test!(rc < 0, "ftruncate twice should fail");
 
-        // Dropping the backing runs the memfd teardown.
         drop(backing);
     }
     TestResult::Pass
@@ -1880,8 +1875,8 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
 
     // Simulate the handler's `ret` popping the restorer.
     user_frame.regs_mut().rsp = user_frame.rsp().wrapping_add(8);
-    // Sigreturn restores the FPU image through the `Current` witness and
-    // refuses the frame without one, so run it as current like production.
+    // Sigreturn refuses a frame without the `Current` witness, so run it as
+    // current like production.
     make_task_current(task_id);
     let _ = with_user_process_context(pid, || {
         crate::syscall::dispatch::dispatch_handler(
@@ -1902,9 +1897,8 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
         "rt_sigreturn did not restore RSP"
     );
 
-    // One byte of the XSAVE image turned into a component XCR0 does not enable.
-    // `XRSTOR64` faults on that in ring 0, so sigreturn must refuse the whole
-    // frame, and refuse it before committing any register.
+    // A component XCR0 does not enable: `XRSTOR64` faults on it in ring 0, so
+    // sigreturn must refuse the whole frame before committing any register.
     let poison_addr = sigframe_addr
         .wrapping_add(core::mem::size_of::<SignalFrame>() as u64)
         .wrapping_add(slopos_ostd::task::XSTATE_BV_OFFSET as u64 + 7);
@@ -1925,8 +1919,8 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
             &mut *user_frame,
         )
     });
-    // The poison must not survive in the task's own save area either: the
-    // scheduler restores that slot on the next context switch.
+    // The scheduler restores the task's own save area on the next context
+    // switch, so the poison must not survive there either.
     let leftover = {
         let current = assert_some!(Current::get(), "current task after dispatch");
         current.task().with_fpu_bytes_mut(&current, |data| {
@@ -1960,8 +1954,8 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     TestResult::Pass
 }
 
-/// A synthetic user-mode `InterruptFrame` (`cs & 3 == 3`) carrying the given
-/// RIP/RSP. Heap-backed to keep it off the test stack.
+/// A synthetic user-mode `InterruptFrame` (`cs & 3 == 3`); heap-backed to keep
+/// it off the test stack.
 fn user_irq_frame(rip: u64, rsp: u64) -> KBox<slopos_arch::InterruptFrame> {
     let mut frame: KBox<slopos_arch::InterruptFrame> = KBox::zeroed().expect("alloc");
     frame.rip = rip;
@@ -1972,9 +1966,9 @@ fn user_irq_frame(rip: u64, rsp: u64) -> KBox<slopos_arch::InterruptFrame> {
     frame
 }
 
-/// The working directory round-trips through its witness cell. A regression in
-/// the cell's bounds handling or in the publish-length-after-bytes ordering
-/// surfaces as a corrupted path in userland, not as a fault.
+/// A regression in the cell's bounds handling or in its
+/// publish-length-after-bytes ordering surfaces as a corrupted path in
+/// userland, not as a fault.
 pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -2002,8 +1996,7 @@ pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
         .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice());
     assert_test!(round_trip, "cwd did not round-trip through the cell");
 
-    // The bounds check is the cell's own: one byte short of the buffer is the
-    // longest path that fits with its NUL.
+    // One byte short of the buffer is the longest path that fits with its NUL.
     let too_long = [b'a'; 256];
     assert_test!(
         !current.task().set_cwd(&current, &too_long),
@@ -2078,8 +2071,6 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
 
     let frame_ptr = &mut *frame as *mut slopos_arch::InterruptFrame;
     let _ = with_user_process_context(pid, || deliver_pending_signal_on_irq_exit(frame_ptr));
-    // Restore the bootstrap current-task so task_terminate below does not
-    // run the is_current Zombie path against the test task.
     park_bootstrap_on_current_cpu();
 
     assert_eq_test!(
@@ -2091,9 +2082,8 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
     assert_eq_test!(frame.rsi, 0, "RSI not zeroed");
     assert_eq_test!(frame.rdx, 0, "RDX not zeroed");
 
-    // Handler RSP points at the restorer word, the SignalFrame at RSP + 8, then
-    // the FPU save area — aligned so the handler enters with `rsp % 16 == 8`
-    // (SysV: `(rsp + 8) % 16 == 0` at a function's entry point).
+    // Restorer word at RSP, the `SignalFrame` at RSP + 8, then the FPU save
+    // area, aligned so the handler enters with `rsp % 16 == 8` per SysV.
     let total_size =
         8 + core::mem::size_of::<SignalFrame>() as u64 + slopos_ostd::task::FPU_STATE_SIZE as u64;
     let expected_frame_addr = (original_rsp.wrapping_sub(total_size) & !0xF).wrapping_sub(8);
@@ -2221,8 +2211,6 @@ pub fn test_signal_delivery_on_irq_exit_copy_failure_rearms() -> TestResult {
     let _ = task::task_signal_raise(&*task_guard, sig_bit(SIGINT));
     make_task_current(task_id);
 
-    // RSP points into an unmapped user address, so the restorer `copy_to_user`
-    // fails and delivery must abort without touching the frame.
     let original_rip = 0x5500_3333;
     let original_rsp = 0x0000_3000_0000_0000; // valid user range, unmapped
     let mut frame = user_irq_frame(original_rip, original_rsp);
@@ -2366,16 +2354,14 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
 }
 
 pub fn test_sigchld_and_wait_interaction() -> TestResult {
-    // Scope is SIGCHLD's send-time disposition gate: its default is Ignore, so
-    // an unblocked default-disposition parent never accumulates the bit, while
-    // a parent that blocked it (the signalfd pattern) must still see it pend.
+    // SIGCHLD's default is Ignore, so an unblocked default-disposition parent
+    // never accumulates the bit; one that blocked it (signalfd) must still pend.
     let _fixture = SyscallFixture::new();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent");
     let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
 
-    // Unblocked + SIG_DFL: the exit-path raise is dropped at the send site.
     let child_id = task_fork(&parent_guard, None);
     assert_test!(child_id != INVALID_TASK_ID, "task_fork failed");
     task_set_state(child_id, TaskStatus::Blocked);
@@ -2389,7 +2375,6 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
         "default-ignored SIGCHLD must be dropped at send, not pend"
     );
 
-    // Blocked SIGCHLD must pend so a signalfd drain can observe the exit.
     parent_guard.set_signal_blocked(sig_bit(SIGCHLD));
 
     let child2_id = task_fork(&parent_guard, None);
@@ -2757,8 +2742,7 @@ pub fn test_pipe_buffer_full() -> TestResult {
     TestResult::Pass
 }
 
-/// When the current task exits its file table must be destroyed, so pipe writer
-/// refs are released and peer readers observe EOF.
+/// Exiting destroys the task's file table, so a peer reader observes EOF.
 pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -2802,7 +2786,6 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
         "file table clone failed"
     );
 
-    // Keep only the read end in pid2.
     assert_eq_test!(file_close_fd(pid2, write_fd), 0, "pid2 close write failed");
 
     // Current, so `task_terminate` takes the current-task cleanup path.
@@ -2819,8 +2802,7 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
     TestResult::Pass
 }
 
-/// Fork-style clones keep close-on-exec descriptors; only exec strips them
-/// (POSIX fork semantics).
+/// Only exec strips close-on-exec descriptors, not fork (POSIX).
 pub fn test_fork_clone_keeps_cloexec_fds() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -2882,9 +2864,9 @@ pub fn test_fork_clone_keeps_cloexec_fds() -> TestResult {
     TestResult::Pass
 }
 
-/// A SlopRing fd is process-private, so a fork-style clone leaves the child's
-/// table empty there. The ordinary pipe fd beside it is the control: it must
-/// still be inherited, proving the clone ran rather than failing wholesale.
+/// A SlopRing fd is process-private, so a fork-style clone leaves it behind.
+/// The pipe fd beside it is the control: it must still be inherited, proving
+/// the clone ran rather than failing wholesale.
 pub fn test_ring_fd_not_inherited_by_fork() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -2949,8 +2931,8 @@ pub fn test_ring_fd_not_inherited_by_fork() -> TestResult {
     TestResult::Pass
 }
 
-/// `exec` tears a SlopRing fd down: the ring's user mapping does not survive
-/// the image replacement, so neither does the descriptor naming it.
+/// The ring's user mapping does not survive an image replacement, so neither
+/// does the descriptor naming it.
 pub fn test_ring_fd_closed_on_exec() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -2987,7 +2969,6 @@ pub fn test_ring_fd_closed_on_exec() -> TestResult {
     TestResult::Pass
 }
 
-/// A spawned child with no actions starts with an empty fd table — no stdio.
 pub fn test_spawn_empty_table_unless_actions() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3017,8 +2998,6 @@ pub fn test_spawn_empty_table_unless_actions() -> TestResult {
     TestResult::Pass
 }
 
-/// CloneFd shares the description: after the parent closes its own write end,
-/// the child's cloned end keeps the pipe open, so the reader sees no EOF.
 pub fn test_spawn_clone_fd_shares_backing() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3086,8 +3065,6 @@ pub fn test_spawn_clone_fd_shares_backing() -> TestResult {
     TestResult::Pass
 }
 
-/// TransferFd moves the description: the parent slot is emptied and the child
-/// receives it at the target fd.
 pub fn test_spawn_transfer_fd_moves() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3153,8 +3130,6 @@ pub fn test_spawn_transfer_fd_moves() -> TestResult {
     TestResult::Pass
 }
 
-/// A mid-list bad fd aborts the whole action list: a `Transfer` staged before
-/// the failing action must not have emptied its parent slot.
 pub fn test_spawn_actions_all_or_nothing() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3196,7 +3171,7 @@ pub fn test_spawn_actions_all_or_nothing() -> TestResult {
         "create empty failed"
     );
 
-    // fd 99 is out of range → the second action fails and the list aborts.
+    // fd 99 is out of range.
     let actions = [
         FdAction::Transfer {
             src_fd: write_fd,
@@ -3261,7 +3236,7 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
         "failed to write path into user memory"
     );
     let attrs = SpawnAttrs {
-        priority: 2, // TaskPriority::Normal (KernelIo=1 is kernel-only)
+        priority: 2, // TaskPriority::Normal
         _pad: [0; 3],
         flags: 0,
         _pad2: 0,
@@ -3301,7 +3276,7 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
     let _ = with_user_process_context(pid, || {
         crate::syscall::dispatch::dispatch_handler(syscall_spawn_path, &task_guard, &mut frame_ok)
     });
-    // ExecError::NoEntry = -2, returned via ctx.ok(err as i32 as u64).
+    // ExecError::NoEntry = -2.
     let exec_no_entry = (-2i32) as u64;
     assert_eq_test!(
         frame_ok.rax(),
@@ -3313,9 +3288,7 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
     TestResult::Pass
 }
 
-/// A spawn request cannot name its own privileges. `NO_PREEMPT` is the worst
-/// case: it has no setter anywhere in the tree, and one non-preemptible spinner
-/// pinned per CPU wedges the machine. The calling task holds
+/// A spawn request cannot name its own privileges. The calling task holds
 /// `TASK_FLAG_USER_MODE` and nothing else, which is the principal under test.
 pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
     use crate::syscall::handlers::syscall_spawn_path;
@@ -3386,8 +3359,8 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
     let einval = slopos_abi::Errno::EINVAL.as_u64();
     const NORMAL: u8 = 2;
 
-    // EPERM rather than a malformed-request answer: the caller is asking for
-    // something real that it may not have.
+    // EPERM, not EINVAL: the caller is asking for something real that it may
+    // not have.
     assert_eq_test!(
         spawn(NORMAL, TASK_FLAG_COMPOSITOR),
         eperm,
@@ -3439,20 +3412,18 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
         einval,
         "the retired FPU_INITIALIZED bit must stay EINVAL"
     );
-    // The retired TASK_FLAG_FPU_INITIALIZED. Retired, not freed.
     assert_eq_test!(
         spawn(NORMAL, 0x0040),
         einval,
         "the retired FPU_INITIALIZED bit must stay refused"
     );
-    // EINVAL, not the NoMem `task_build`'s `None` would become.
     assert_eq_test!(
         spawn(NORMAL, slopos_abi::task::TASK_FLAG_KERNEL_MODE),
         einval,
         "KERNEL_MODE must be diagnosed as EINVAL, not mislabelled NoMem"
     );
-    // Order: a reserved bit is answered before privilege, so probing reserved
-    // bits cannot learn from an EPERM that a bit means something.
+    // Ordering is a disclosure boundary: an EPERM would tell a prober that a
+    // reserved bit means something.
     assert_eq_test!(
         spawn(
             NORMAL,
@@ -3476,8 +3447,8 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
         "an out-of-range tier must be EINVAL"
     );
 
-    // Control: without it the table above would also pass against a handler
-    // that refused everything.
+    // Control: without it the table above would pass against a handler that
+    // refused everything.
     assert_eq_test!(
         spawn(NORMAL, TASK_FLAG_USER_MODE | TASK_FLAG_NEW_PGRP),
         (-2i32) as u64,
@@ -3488,9 +3459,9 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
     TestResult::Pass
 }
 
-/// `set_cpu_affinity` must check the caller-versus-target relation: without it
-/// a `NO_PREEMPT` spinner pinned per CPU wedges the machine. Sharing an address
-/// space is the boundary — a sibling can already run code inside the target.
+/// Without the caller-versus-target relation check, a `NO_PREEMPT` spinner
+/// pinned per CPU wedges the machine. Sharing an address space is the boundary
+/// — a sibling can already run code inside the target.
 pub fn test_set_cpu_affinity_rejects_other_process() -> TestResult {
     use crate::syscall::handlers::{syscall_get_cpu_affinity, syscall_set_cpu_affinity};
 
@@ -3511,8 +3482,8 @@ pub fn test_set_cpu_affinity_rejects_other_process() -> TestResult {
     let before = target.cpu_affinity();
     let eperm = slopos_abi::Errno::EPERM.as_u64();
 
-    // One frame, reused. An `InterruptFrame` per case would put four of them
-    // live at once and push this past the 2 KiB stack-frame ceiling.
+    // One frame, reused: a frame per case would put four live at once and push
+    // this past the 2 KiB stack-frame ceiling.
     let mut frame = zero_frame();
     let mut call = |handler: crate::syscall::common::SyscallHandler, rdi: u64, rsi: u64| -> u64 {
         frame = zero_frame();
@@ -3555,7 +3526,6 @@ pub fn test_set_cpu_affinity_rejects_other_process() -> TestResult {
     TestResult::Pass
 }
 
-/// execve resets caught handlers to SIG_DFL but preserves SIG_IGN.
 pub fn test_execve_resets_caught_signals_keeps_ignored() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3592,8 +3562,8 @@ pub fn test_execve_resets_caught_signals_keeps_ignored() -> TestResult {
     }
 }
 
-/// `sigdefault` (POSIX_SPAWN_SETSIGDEF and the syscall) forces masked signals
-/// to SIG_DFL, overriding a caught handler or SIG_IGN.
+/// `sigdefault` (POSIX_SPAWN_SETSIGDEF) forces masked signals to SIG_DFL over
+/// a caught handler or SIG_IGN.
 pub fn test_sigdefault_forces_default_over_ignore() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3628,7 +3598,6 @@ pub fn test_sigdefault_forces_default_over_ignore() -> TestResult {
     }
 }
 
-/// Without a controlling terminal, `open("/dev/tty")` must return ENXIO (-6).
 pub fn test_dev_tty_no_ctty_returns_enxio() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3671,7 +3640,7 @@ pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
 
     let mut frame = zero_frame();
-    frame.regs_mut().rdi = 0; // fd 0 (console)
+    frame.regs_mut().rdi = 0;
     frame.regs_mut().rsi = TIOCSCTTY;
     frame.regs_mut().rdx = 0;
     let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, &task_guard, &mut frame);
@@ -3818,8 +3787,8 @@ pub fn test_vhangup_syscall_in_dispatch_table() -> TestResult {
     TestResult::Pass
 }
 
-/// dup must not copy close-on-exec: cloexec is per-fd-entry, not a property of
-/// the open file.
+/// cloexec is per-fd-entry, not a property of the open file, so dup must not
+/// copy it.
 pub fn test_dup_does_not_copy_cloexec() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3887,8 +3856,6 @@ pub fn test_dup_does_not_copy_cloexec() -> TestResult {
     TestResult::Pass
 }
 
-/// Closing an fd twice is safe: the second finds an empty slot and returns
-/// EBADF, never a double teardown of the backing object.
 pub fn test_close_twice_is_safe() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3926,8 +3893,6 @@ pub fn test_close_twice_is_safe() -> TestResult {
     TestResult::Pass
 }
 
-/// Closing one of two dup'd write ends must not tear down the shared backing:
-/// the peer reader sees EOF only when the *last* write alias closes.
 pub fn test_close_while_dup_keeps_object_alive() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -3983,9 +3948,8 @@ pub fn test_close_while_dup_keeps_object_alive() -> TestResult {
     TestResult::Pass
 }
 
-/// Forcing EMFILE on a tty open must tear down only the open that failed: the
-/// backing clone minted for the attempt drops exactly once inside the failed
-/// install, and the live tty survives untouched.
+/// The backing clone minted for the attempt drops exactly once inside the
+/// failed install, and the live tty survives untouched.
 pub fn test_open_tty_fd_emfile_no_double_teardown() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -4000,7 +3964,7 @@ pub fn test_open_tty_fd_emfile_no_double_teardown() -> TestResult {
         return TestResult::Fail;
     };
 
-    // Open a PTY master to get a real, independently-tracked tty index.
+    // A PTY master gives a real, independently-tracked tty index.
     let master_fd = file_open_for_process(pid, b"/dev/ptmx", O_RDONLY);
     assert_test!(master_fd >= 0, "ptmx open failed");
     let Some(master_tty) = slopos_fs::fileio::file_get_tty_index(pid, master_fd) else {
@@ -4017,8 +3981,8 @@ pub fn test_open_tty_fd_emfile_no_double_teardown() -> TestResult {
         }
     }
 
-    // Baseline probe clone: fd aliases share one OpenFile, so the count is the
-    // fd-table owner plus this probe.
+    // fd aliases share one `OpenFile`, so the count is the fd-table owner plus
+    // this probe.
     let probe_backing = match slopos_kernel_services::syscall_services::tty::open_tty(master_tty) {
         Ok(b) => b,
         Err(_) => {
@@ -4030,7 +3994,7 @@ pub fn test_open_tty_fd_emfile_no_double_teardown() -> TestResult {
     let before = slopos_ostd::KArc::strong_count(&probe_backing);
 
     // Mirror the syscall caller: mint a backing, then attempt the open with a
-    // full table. The failed install consumes and drops the mint.
+    // full table.
     let mint = match slopos_kernel_services::syscall_services::tty::open_tty(master_tty) {
         Ok(b) => b,
         Err(_) => {
@@ -4058,8 +4022,8 @@ pub fn test_open_tty_fd_emfile_no_double_teardown() -> TestResult {
     TestResult::Pass
 }
 
-/// TTY ioctls must never change the terminal's open state: only opening
-/// (cloning the backing) and closing (dropping a clone) may move the count.
+/// Only opening (cloning the backing) and closing (dropping a clone) may move
+/// a terminal's open count.
 pub fn test_tty_ioctl_never_changes_open_state() -> TestResult {
     use slopos_kernel_services::syscall_services::tty as ttysvc;
 
@@ -4122,9 +4086,8 @@ pub fn test_tty_ioctl_never_changes_open_state() -> TestResult {
     TestResult::Pass
 }
 
-/// Passing a TTY fd via SCM_RIGHTS must be lifetime-balanced: in-flight custody
-/// shares the sender's open-file description, and the receiver's close never
-/// tears down the sender's terminal.
+/// In-flight SCM_RIGHTS custody shares the sender's open-file description
+/// rather than minting a second reference to the terminal.
 pub fn test_scm_rights_tty_balanced() -> TestResult {
     use slopos_kernel_services::syscall_services::tty as ttysvc;
     use slopos_net::unix_socket;
@@ -4258,7 +4221,7 @@ impl slopos_abi::FileOps for SeekProbeOps {
 static SEEK_PROBE_OPS: SeekProbeOps = SeekProbeOps;
 
 /// dup'd fds share one open file description, so they share the file offset
-/// (POSIX): a read through either advances the position seen by both.
+/// (POSIX).
 pub fn test_dup_shares_offset() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -4840,8 +4803,6 @@ pub fn test_unix_socket_poll_before_send() -> TestResult {
         }
     };
 
-    // `file_poll_register_fd` registers PCR.current_task as the waiter, as the
-    // real `syscall_poll` path does.
     make_task_current(task_id);
 
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
@@ -4877,9 +4838,8 @@ pub fn test_unix_socket_poll_before_send() -> TestResult {
     TestResult::Pass
 }
 
-/// `sleep_current_task_ms`'s `CAS(Running, Blocked)` must fail when the task is
-/// not `Running`: a wait path that already CAS'd it to `Blocked` under a wait
-/// queue's SpinLock must reject a concurrent sleep-blocking attempt.
+/// A wait path that already CAS'd the task to `Blocked` under a queue's
+/// SpinLock must make a concurrent `sleep_current_task_ms` CAS fail.
 pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -4887,7 +4847,7 @@ pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
 
-    // Tasks are `Blocked` at creation; publish Ready then Running first.
+    // Tasks are `Blocked` at creation; publish Ready then Running.
     assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
     assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
     let blocked_cas = task_set_state_from_with_reason(
@@ -4918,8 +4878,7 @@ pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
     TestResult::Pass
 }
 
-/// After a wake transitions the task `Blocked → Ready`, a stale blocker that
-/// retries `CAS(Running, Blocked)` must fail: the state is no longer `Running`.
+/// A stale blocker retrying `CAS(Running, Blocked)` after a wake must fail.
 pub fn test_block_current_task_toctou_allows_reblock() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -4932,11 +4891,9 @@ pub fn test_block_current_task_toctou_allows_reblock() -> TestResult {
     // The wait-queue protocol commits Blocked under the queue lock.
     let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
     assert_eq_test!(cas_block, 0);
-    // The producer wakes it: Blocked → Ready.
     let cas_wake = task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready);
     assert_eq_test!(cas_wake, 0);
 
-    // The stale "block again" CAS, sourced from `Running`.
     let result = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
     let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(state, TaskStatus::Ready, "state should still be Ready");
@@ -4946,8 +4903,8 @@ pub fn test_block_current_task_toctou_allows_reblock() -> TestResult {
     TestResult::Pass
 }
 
-/// The wait-queue protocol: a waiter CAS-flips Running → Blocked under the
-/// queue lock, and a racing producer observes that and flips it to Ready.
+/// A waiter CAS-flips Running → Blocked under the queue lock; a racing producer
+/// observes that and flips it to Ready.
 pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -4981,8 +4938,7 @@ pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
 }
 
 /// `unblock_task` against a still-`Running` task — the producer's `wake_one`
-/// beat the consumer into the queue lock — is a benign no-op; the consumer's
-/// re-check inside the lock then observes the update and skips the block.
+/// beat the consumer into the queue lock — is a benign no-op.
 pub fn test_wq_correct_order_wakeup_preserved() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -5003,9 +4959,8 @@ pub fn test_wq_correct_order_wakeup_preserved() -> TestResult {
     TestResult::Pass
 }
 
-/// `try_transition_from(Running, Blocked)` rejects Ready and succeeds from
-/// Running. The wait-queue protocol relies on that asymmetry to detect a wake
-/// that already won the race and skip the CAS that would re-sleep the task.
+/// The wait-queue protocol relies on this asymmetry to detect a wake that
+/// already won the race and skip the CAS that would re-sleep the task.
 pub fn test_try_transition_from_rejects_wrong_state() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -5046,7 +5001,6 @@ pub fn test_task_state_fused_cas() -> TestResult {
     assert_eq_test!(before.status, TaskStatus::Running);
     assert_eq_test!(before.reason, BlockReason::None);
 
-    // Status and reason flip in one CAS.
     let r = s.try_transition(
         TaskStatus::Running,
         TaskStatus::Blocked,
@@ -5100,7 +5054,7 @@ pub fn test_task_state_fused_cas() -> TestResult {
     }
 
     // The u32::MAX → 0 wrap uses the same `wrapping_add(1)` as every other
-    // increment, so mod-2^32 over 16 bumps covers it without 2^32 iterations.
+    // increment, so 16 bumps mod 2^32 cover it.
     s.force_set(TaskStatus::Ready, BlockReason::None);
     let e0 = s.snapshot().epoch;
     for _ in 0..16 {
@@ -5122,9 +5076,7 @@ pub fn test_task_state_fused_cas() -> TestResult {
 }
 
 /// The full kernel poll path end to end: WQ registration, readiness check,
-/// `block_current_task_with_timeout`, and wakeup via `unix_send`. Two variants:
-/// data already buffered (poll returns immediately) and no data with a short
-/// timeout (poll returns 0 within margin).
+/// `block_current_task_with_timeout`, and wakeup via `unix_send`.
 pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
     use crate::syscall::fs::syscall_poll;
     use slopos_abi::syscall::UserPollFd;
@@ -5158,7 +5110,6 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
         }
     };
 
-    // Variant 1: data written first, so poll must return immediately.
     let payload = b"e2e-test";
     let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
     assert_eq_test!(written as usize, payload.len(), "write failed");
@@ -5201,7 +5152,6 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
         &mut KernelIoBuf::new(&mut out[..payload.len()]),
     );
 
-    // Variant 2: no data, so poll must return 0 when the timeout expires.
     let pfd_empty = UserPollFd {
         fd: cli_fd,
         events: POLLIN,
@@ -5227,8 +5177,6 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
         "poll timeout duration out of range"
     );
 
-    // Variant 3: pre-buffered data under a long timeout must not sleep — the
-    // compositor handshake pattern.
     let payload2 = b"OutputInfo-sim";
     let written2 = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload2));
     assert_eq_test!(written2 as usize, payload2.len(), "write2 failed");
@@ -5263,9 +5211,8 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
     TestResult::Pass
 }
 
-/// The compositor-shell handshake: listen → connect(backlog) → accept → send →
-/// poll. Catches an accept/send path that fails to make data visible to the
-/// client's readiness check.
+/// Catches an accept/send path that fails to make data visible to the client's
+/// readiness check.
 pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     use slopos_net::unix_socket;
     use slopos_net::unix_socket_file_ops::UNIX_SOCKET_FILE_OPS;
@@ -5356,8 +5303,6 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     TestResult::Pass
 }
 
-/// A unix socket write reaches the recv wait queue and CAS-flips the registered
-/// task `Blocked → Ready`, end to end.
 pub fn test_unix_send_wakes_blocked_poll_waiter() -> TestResult {
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
@@ -5379,8 +5324,8 @@ pub fn test_unix_send_wakes_blocked_poll_waiter() -> TestResult {
         }
     };
 
-    // Dispatch sets the task Running, the precondition for the wait-queue
-    // protocol's Running → Blocked CAS.
+    // Dispatch sets the task Running, the precondition for the Running →
+    // Blocked CAS.
     make_task_current(task_id);
 
     // Register before checking readiness; that ordering is the whole point.
@@ -5389,8 +5334,6 @@ pub fn test_unix_send_wakes_blocked_poll_waiter() -> TestResult {
     let revents = file_poll_fd(pid, cli_fd, POLLIN);
     assert_test!((revents & POLLIN) == 0, "STEP1: no data before write");
 
-    // Commit Blocked under the wait queue's SpinLock, modelled by an explicit
-    // CAS — `wait_event`'s lock-held push + CAS closes the same window.
     let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
     assert_eq_test!(cas_block, 0, "STEP2: Running → Blocked");
 
@@ -5412,9 +5355,8 @@ pub fn test_unix_send_wakes_blocked_poll_waiter() -> TestResult {
     TestResult::Pass
 }
 
-/// The check-first-register-second race: `wake_all` fires against an empty
-/// queue and the committed-Blocked task stays `Blocked`. That lost-wakeup
-/// signature is what the register-first ordering exists to prevent.
+/// Demonstrates the check-first-register-second race: `wake_all` fires against
+/// an empty queue and the committed-Blocked task stays `Blocked`.
 pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
@@ -5446,7 +5388,6 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
     let revents = file_poll_fd(pid, cli_fd, POLLIN);
     assert_test!((revents & POLLIN) == 0, "no data yet");
 
-    // Data arrives; `wake_all` fires with nobody on the queue.
     let payload = b"race-demo";
     let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
     assert_eq_test!(written as usize, payload.len(), "write");
@@ -5457,7 +5398,6 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
     let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(state, TaskStatus::Blocked, "wakeup lost — still Blocked");
 
-    // Undo the manual Blocked transition before terminate.
     let _ = task_set_state(task_id, TaskStatus::Ready);
     slopos_fs::fileio::file_poll_unregister_fd(&reg);
     file_close_fd(pid, srv_fd);
@@ -5467,8 +5407,6 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
     TestResult::Pass
 }
 
-/// Register-first-then-check preserves the wakeup: `wake_all` finds the task on
-/// the queue and CAS-flips it Blocked → Ready.
 pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
@@ -5495,7 +5433,6 @@ pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
     assert_test!(reg.registered, "register");
 
-    // Commit Blocked under the queue lock, modelled by a direct CAS.
     let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
     assert_eq_test!(cas_block, 0, "Running → Blocked");
 
@@ -5559,11 +5496,8 @@ slopos_testing::stest!(
     suite = poll_wakeup_race
 );
 
-// `unix_sendmsg` must publish data bytes and ancillary fds together: the peer's
-// `unix_recvmsg` sees both or neither.
-
-/// Build a connected AF_UNIX pair and return the raw socket handles rather than
-/// fd-table-installed `i32`s, for tests working below the fd layer.
+/// Raw socket handles rather than fd-table-installed `i32`s, for tests working
+/// below the fd layer.
 fn unix_create_connected_pair_raw() -> Option<(
     slopos_net::unix_socket::SocketHandle,
     slopos_net::unix_socket::SocketHandle,
@@ -5600,15 +5534,14 @@ fn unix_create_connected_pair_raw() -> Option<(
     };
     unix_socket::unix_close(srv);
     // Non-blocking, so probing an empty FIFO returns EAGAIN instead of parking
-    // the test on the per-slot wait queue with no scheduler context.
+    // the test on a wait queue with no scheduler context.
     unix_socket::unix_set_nonblocking(accepted, true);
     unix_socket::unix_set_nonblocking(cli, true);
     Some((accepted, cli))
 }
 
 /// SCM_RIGHTS atomicity: one `unix_sendmsg` carrying data and an fd delivers
-/// both to the peer's next `unix_recvmsg`, never the data alone with the fd
-/// trailing in a separate ancillary state.
+/// both to the peer's next `unix_recvmsg`, or neither.
 pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
     let _fixture = SyscallFixture::new();
     use slopos_net::unix_socket;
@@ -5678,7 +5611,6 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
     assert_eq_test!(n_fds, 1, "recvmsg must deliver the companion fd");
     assert_test!(&buf[..payload.len()] == payload, "recvmsg payload mismatch");
 
-    // The delivered alias shares the sender's open-file description.
     let recv_fd = slopos_fs::fileio_install_file_ref(pid, out.pop().expect("delivered file"));
     assert_test!(recv_fd >= 0, "install of delivered file failed");
     let (kind, handle) =
@@ -5698,9 +5630,8 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
     pass!()
 }
 
-/// A `sendmsg` that would push the per-direction anc queue past
-/// `MAX_INFLIGHT_FDS` rejects with ENOMEM, leaving the aliases with the caller
-/// and publishing nothing to the peer.
+/// A `sendmsg` past `MAX_INFLIGHT_FDS` rejects with ENOMEM, leaving the aliases
+/// with the caller and publishing nothing to the peer.
 pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
     let _fixture = SyscallFixture::new();
     use slopos_net::unix_socket;
@@ -5762,8 +5693,8 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
     );
     drop(overflow);
 
-    // Drain anc with an empty data slice: that skips `unix_recv`, so the empty
-    // non-blocking FIFO does not trip EAGAIN. The data FIFO is probed after.
+    // An empty data slice skips `unix_recv`, so the empty non-blocking FIFO
+    // does not trip EAGAIN.
     let mut out: slopos_ostd::KVec<slopos_fs::FileRef> =
         slopos_ostd::KVec::with_capacity(16).expect("out vec alloc");
     let (anc_drain_bytes, n_fds) = unix_socket::unix_recvmsg(cli, &mut [], &mut out, 16);
@@ -5786,9 +5717,8 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
     pass!()
 }
 
-/// A failed send must not strand the passed file: the alias stays with
-/// the caller (whose drop closes it), and the sender's own fd keeps the
-/// file alive — no leak, no double teardown.
+/// A failed send leaves the alias with the caller, and the sender's own fd
+/// keeps the file alive — no leak, no double teardown.
 pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
     let _fixture = SyscallFixture::new();
     use slopos_net::unix_socket;
@@ -5875,9 +5805,8 @@ slopos_testing::stest!(
 );
 
 /// An in-flight `SCM_RIGHTS` descriptor is charged to the **sender** until it
-/// stops being in flight. Without the `Custody` axis those `FileRef`s are held
-/// by a `ConnectionPair` and by no descriptor table, so they count against
-/// nothing; Linux answers the same hole with a per-user in-flight counter.
+/// stops being in flight: held by a `ConnectionPair` and by no descriptor
+/// table, without the `Custody` axis it would count against nothing.
 pub fn test_quota_custody_charges_the_sender() -> TestResult {
     let _fixture = SyscallFixture::new();
     use slopos_abi::quota::ResourceKind;
@@ -5937,7 +5866,7 @@ pub fn test_quota_custody_charges_the_sender() -> TestResult {
     }
 
     // Receiving moves each reference into the receiver's table, where custody
-    // ends and a descriptor number takes over.
+    // ends.
     let mut received: slopos_ostd::KVec<slopos_fs::FileRef> = slopos_ostd::KVec::new();
     let _ = unix_socket::unix_recvmsg(_cli, &mut [0u8; 4], &mut received, SENT as usize);
     drop(received);
@@ -5958,8 +5887,6 @@ slopos_testing::stest!(
     suite = unix_scm_rights
 );
 
-/// The default-action table: informational signals are ignored, job-control
-/// signals stop/continue, everything else terminates.
 pub fn test_sig_default_action_table() -> TestResult {
     assert_test!(
         matches!(sig_default_action(SIGWINCH), SigDefault::Ignore),
@@ -5988,7 +5915,7 @@ pub fn test_sig_default_action_table() -> TestResult {
         );
     }
     // Send-time droppability is strictly the Ignore class: Stop/Continue stay
-    // deliverable so real job control needs no revisit of the raise sites.
+    // deliverable for real job control.
     assert_test!(
         sig_default_ignores(SIGWINCH),
         "SIGWINCH must be send-time droppable"
@@ -6008,8 +5935,6 @@ pub fn test_sig_default_action_table() -> TestResult {
     pass!()
 }
 
-/// `task_signal_post` drops unblocked signals whose disposition discards
-/// them, and pends everything else.
 pub fn test_signal_post_disposition_gate() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6040,7 +5965,7 @@ pub fn test_signal_post_disposition_gate() -> TestResult {
     task_guard.set_signal_pending(0);
 
     // Blocked pends regardless of disposition: a signalfd reader or a
-    // later-installed handler may drain it after unblocking.
+    // later-installed handler may drain it.
     task_guard.set_signal_blocked(sig_bit(SIGWINCH));
     assert_test!(
         task::task_signal_post(&*task_guard, SIGWINCH),
@@ -6087,8 +6012,7 @@ pub fn test_signal_post_disposition_gate() -> TestResult {
 }
 
 /// `kill(SIGWINCH)` against a default-disposition task succeeds per POSIX and
-/// the target survives — via the send-time drop, and for a directly-pended bit
-/// via the delivery-point discard.
+/// the target survives: dropped at the send site, discarded at delivery.
 pub fn test_kill_default_ignored_sigwinch_target_survives() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6116,8 +6040,7 @@ pub fn test_kill_default_ignored_sigwinch_target_survives() -> TestResult {
         "SIGWINCH must be dropped at the send site"
     );
 
-    // A bit pended directly, bypassing the send gate, must be discarded at the
-    // delivery point rather than terminating.
+    // Raised directly, bypassing the send gate.
     let _ = task::task_signal_raise(&*task_guard, sig_bit(SIGWINCH));
     let original_rip = 0x5000_4321u64;
     let mut user_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
@@ -6156,11 +6079,9 @@ slopos_testing::stest!(
     suite = signal_dispositions
 );
 
-/// `kill(-pgid)` reaches a task that is registered but never published:
-/// `task_create` writes `pgid = task_id` before registering, so the task is
+/// `task_create` writes `pgid = task_id` before registering, so a task is
 /// registered, Blocked and `SchedPlacement::Nascent` when a group signal names
-/// it. The kill must succeed and the signal pend, but placement must stay
-/// `Nascent` — no runqueue grows.
+/// it: the kill must pend the signal without publishing it to a runqueue.
 pub fn test_kill_process_group_reaches_nascent_task_without_publishing() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6232,10 +6153,9 @@ pub fn test_kill_process_group_reaches_nascent_task_without_publishing() -> Test
     TestResult::Pass
 }
 
-/// A forked child inherits the parent's working directory and the two diverge
-/// from there. The exact-slice compare is what catches a copied buffer with an
-/// uncopied `cwd_len`: `with_cwd` slices by the length, so a stale one surfaces
-/// as a truncated or over-long path rather than a fault.
+/// The exact-slice compare catches a copied buffer with an uncopied `cwd_len`:
+/// `with_cwd` slices by the length, so a stale one surfaces as a truncated or
+/// over-long path rather than a fault.
 pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6243,7 +6163,6 @@ pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResul
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
     let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
 
-    // A non-default cwd before the fork.
     make_task_current(parent_id);
     let seeded = Current::get().is_some_and(|current| {
         current.task().set_cwd(&current, b"/usr/share")
@@ -6292,10 +6211,8 @@ pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResul
     TestResult::Pass
 }
 
-/// `rt_sigaction` round-trips every field of the disposition, filters the
-/// uncatchable signals out of `sa_mask`, and keeps signals independent.
-/// `sa_mask` is OR'd into the blocked set at delivery, so an unfiltered one
-/// would let a handler block SIGKILL.
+/// `sa_mask` is OR'd into the blocked set at delivery, so `rt_sigaction` must
+/// filter the uncatchable signals out of it or a handler could block SIGKILL.
 pub fn test_rt_sigaction_round_trips_every_field() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6325,7 +6242,6 @@ pub fn test_rt_sigaction_round_trips_every_field() -> TestResult {
         sa_handler: 0x4321_0000,
         sa_flags: SA_RESTART | SA_NODEFER,
         sa_restorer: 0x8765_0000,
-        // SIGKILL and SIGSTOP must be filtered out; SIGCHLD must survive.
         sa_mask: sig_bit(SIGCHLD) | sig_bit(SIGKILL) | sig_bit(SIGSTOP),
     };
     assert_test!(
@@ -6526,8 +6442,7 @@ pub fn test_rt_sigaction_bounds_signum_at_nsig() -> TestResult {
 
     let einval = slopos_abi::Errno::EINVAL.as_u64();
 
-    // NSIG itself is a real slot — the last one. An off-by-one in the other
-    // direction would make this EINVAL.
+    // An off-by-one in the other direction would make this EINVAL.
     assert_eq_test!(
         query(NSIG as u64),
         0,
@@ -6551,7 +6466,6 @@ pub fn test_rt_sigaction_bounds_signum_at_nsig() -> TestResult {
         einval,
         "signum NSIG+1 has no table slot and must be EINVAL"
     );
-    // 64 was the old literal ceiling; it indexes past the end of the table.
     assert_eq_test!(
         query(64),
         einval,
@@ -6583,9 +6497,8 @@ slopos_testing::stest!(
 );
 
 /// A kernel-private pending bit is invisible to signal delivery, and no public
-/// writer can disturb it. An unmasked bit at or above `NSIG` would yield
-/// `signum = NSIG + 1`, whose `sig_bit` is 0 — the clearing `fetch_and(!0)` is
-/// a no-op, so the bit re-delivers forever off the end of the action table.
+/// writer can disturb it. An unmasked bit at or above `NSIG` has `sig_bit` 0,
+/// so the clearing `fetch_and(!0)` is a no-op and the bit re-delivers forever.
 pub fn test_kernel_private_pending_bit_is_not_a_signal() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6600,8 +6513,8 @@ pub fn test_kernel_private_pending_bit_is_not_a_signal() -> TestResult {
         return TestResult::Fail;
     };
 
-    // One bit above the kill flag: private, with no meaning attached, so this
-    // exercises the masking alone rather than kill semantics.
+    // One bit above the kill flag: private and meaningless, so this exercises
+    // the masking alone rather than kill semantics.
     let private_bit: SigSet = 1u64 << (NSIG + 1);
     assert_test!(
         private_bit != slopos_abi::signal::SIGNAL_KILLED,
@@ -6636,7 +6549,6 @@ pub fn test_kernel_private_pending_bit_is_not_a_signal() -> TestResult {
         "a kernel-private bit must not terminate the target"
     );
 
-    // The public writers own the signal range only.
     task_guard.set_signal_pending(0);
     assert_eq_test!(
         task_guard.signal_pending(),
@@ -6668,8 +6580,7 @@ slopos_testing::stest!(
 );
 
 /// A broadcast `kill` never names a kernel task: the SIGKILL path is not
-/// signal-gated, so collecting one into a fanout would tear down a driver
-/// thread that owns device state and an interrupt line.
+/// signal-gated, so a fanout would tear down a driver thread and its IRQ line.
 pub fn test_broadcast_kill_spares_kernel_tasks() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6701,7 +6612,6 @@ pub fn test_broadcast_kill_spares_kernel_tasks() -> TestResult {
     );
     drop(kernel_guard);
 
-    // The damaging arm: an explicitly named kernel task would be torn down.
     let mut named_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     named_frame.regs_mut().rdi = kernel_id as u64;
     named_frame.regs_mut().rsi = SIGKILL as u64;
@@ -6728,9 +6638,8 @@ slopos_testing::stest!(
     suite = syscall_signal
 );
 
-/// A task may not signal one holding a privilege it does not hold itself.
-/// `task.flags` is the whole privilege model, so this is the relation POSIX
-/// expresses with user ids.
+/// A task may not signal one holding a privilege it does not hold itself:
+/// `task.flags` is the whole privilege model, the relation POSIX puts on uids.
 pub fn test_kill_refuses_a_more_privileged_target() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6777,7 +6686,7 @@ pub fn test_kill_refuses_a_more_privileged_target() -> TestResult {
     );
 
     // `kill(pid, 0)` is the existence-and-permission probe, so it answers the
-    // permission question too rather than reporting the target as reachable.
+    // permission question too.
     let mut probe: KBox<UserContext> = KBox::zeroed().expect("alloc");
     probe.regs_mut().rdi = privileged_id as u64;
     probe.regs_mut().rsi = 0;
@@ -6790,7 +6699,6 @@ pub fn test_kill_refuses_a_more_privileged_target() -> TestResult {
         "kill(pid, 0) reported a target the caller may not signal as reachable"
     );
 
-    // Downward: a privileged sender reaches an unprivileged target.
     let mut down: KBox<UserContext> = KBox::zeroed().expect("alloc");
     down.regs_mut().rdi = plain_id as u64;
     down.regs_mut().rsi = SIGTERM as u64;
@@ -6862,9 +6770,8 @@ pub fn test_broadcast_kill_spares_privileged_tasks() -> TestResult {
     pass!()
 }
 
-/// Only the parent reaps: `task_consume_zombie` unlinks from whoever the parent
-/// is and drops that owning reference, so a stranger's wait would take the exit
-/// code and leave the real parent with `ECHILD`.
+/// Only the parent reaps: a stranger's wait would take the exit code and leave
+/// the real parent with `ECHILD`.
 pub fn test_waitpid_refuses_a_task_that_is_not_a_child() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6885,8 +6792,8 @@ pub fn test_waitpid_refuses_a_task_that_is_not_a_child() -> TestResult {
         return TestResult::Fail;
     };
 
-    // WNOHANG so the permitted case reports "alive, nothing to reap" instead
-    // of blocking the test on a task that never exits.
+    // WNOHANG so the permitted case reports "alive, nothing to reap" rather
+    // than blocking on a task that never exits.
     let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     frame.regs_mut().rdi = child_id as u64;
     frame.regs_mut().rsi = 1;

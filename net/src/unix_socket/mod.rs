@@ -1,34 +1,12 @@
 //! Kernel AF_UNIX (Unix domain) stream socket implementation.
 //!
-//! # Design
+//! Per-slot state is a [`slot::SlotState`] typestate enum, so each variant
+//! carries only the data meaningful in that state. Connected halves share one
+//! refcounted [`pair::ConnectionPair`], freed when the second close drops it.
 //!
-//! Per-slot state is encoded as a [`slot::SlotState`] enum: `Free`,
-//! `Created`, `Bound`, `Listening`, `Connected`.  Each variant carries
-//! exactly the data meaningful in that state — paths only exist when
-//! bound, backlog only when listening, pair handle only when
-//! connected.  The compiler enforces these invariants statically.
-//!
-//! Connected pairs share a [`pair::ConnectionPair`] managed by
-//! [`pair::PairTable`] — both halves reference the same pair via a
-//! [`pair::PairHandle`], and the pair owns the bidirectional FIFOs and
-//! SCM_RIGHTS queues exactly once.  The pair's refcount keeps it alive
-//! while either endpoint still references it; the pair is freed when
-//! the second close decrements the count to zero.
-//!
-//! # Locking
-//!
-//! Slot data and the pair table are both protected by [`UNIX_STATE`].
-//! Wait queues live in separate statics indexed by slot, so wakers and
-//! sleepers never hold `UNIX_STATE` and a wait-queue lock
-//! simultaneously (same pattern as `fs/src/pipe.rs`).
-//!
-//! # Module layout
-//!
-//! - [`handle`] — `SocketHandle` + slot/generation encoding.
-//! - [`buffer`] — `UnixFifo` (typed bounded byte FIFO).
-//! - [`pair`] — `ConnectionPair`, `PairTable`, `AncillaryQueue`, `PairSide`.
-//! - [`slot`] — `UnixSlot` + `SlotState` typestate enum.
-//! - this module — global state, public API.
+//! [`UNIX_STATE`] covers both slot data and the pair table; wait queues live in
+//! separate statics, so no path holds a wait-queue lock and `UNIX_STATE` at
+//! once.
 
 mod buffer;
 mod handle;
@@ -51,12 +29,10 @@ use slot::{MAX_BACKLOG, SlotState, UNIX_PATH_MAX, UnixSlot};
 pub use buffer::UNIX_BUF_SIZE;
 pub use handle::SocketHandle;
 
-/// Maximum number of concurrent AF_UNIX sockets.
 pub use slopos_abi::event::MAX_UNIX_SOCKETS;
 
-/// The readiness event for a Unix socket slot. Recv- and send-blockers share
-/// one queue per socket, so a single publish wakes both — preserving the
-/// pre-migration `SOCKET_WQS[idx].wake_all()` semantics.
+/// Readiness event for a Unix socket slot. Recv- and send-blockers share one
+/// queue per socket, so a single publish wakes both.
 #[inline]
 fn unix_ev(slot: usize) -> KernelEvent {
     KernelEvent::UnixSocket {
@@ -64,16 +40,10 @@ fn unix_ev(slot: usize) -> KernelEvent {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Global state
-// ---------------------------------------------------------------------------
-
 struct UnixSocketState {
     slots: HandleTable<UnixSlot>,
     pairs: PairTable,
 }
-
-// SAFETY: UnixSocketState is only accessed through the UNIX_STATE SpinLock.
 
 impl UnixSocketState {
     const fn new() -> Self {
@@ -88,10 +58,6 @@ static UNIX_STATE: SpinLock<UnixSocketState> = SpinLock::new(
     UnixSocketState::new(),
     lock_class!("UNIX_STATE", LOCK_LEVEL_REGISTRY),
 );
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 /// Allocate a new AF_UNIX socket slot. Returns a [`SocketHandle`], or `None`
 /// when the system-wide cap is reached.
@@ -130,7 +96,6 @@ pub fn unix_bind(handle: SocketHandle, path: &[u8]) -> i32 {
         Err(_) => return Errno::EBADF.raw(),
     }
 
-    // Check for duplicate path among other sockets.
     for (other_h, other) in state.slots.iter() {
         if other_h == h {
             continue;
@@ -153,7 +118,6 @@ pub fn unix_bind(handle: SocketHandle, path: &[u8]) -> i32 {
 
 /// Mark a bound socket as listening.
 pub fn unix_listen(handle: SocketHandle, _backlog: u32) -> i32 {
-    // Pre-allocate the backlog deque outside the lock.
     let backlog: KVecDeque<SocketHandle> = match KVecDeque::with_capacity(MAX_BACKLOG) {
         Ok(d) => d,
         Err(_) => return Errno::ENOMEM.raw(),
@@ -164,12 +128,9 @@ pub fn unix_listen(handle: SocketHandle, _backlog: u32) -> i32 {
         return Errno::EBADF.raw();
     };
 
-    // Take ownership of the existing path by swapping in the neutral
-    // placeholder.
     let path = match core::mem::replace(&mut slot.state, SlotState::Created) {
         SlotState::Bound { path } => path,
         other => {
-            // Not Bound — restore and reject.
             slot.state = other;
             return Errno::EINVAL.raw();
         }
@@ -178,9 +139,8 @@ pub fn unix_listen(handle: SocketHandle, _backlog: u32) -> i32 {
     0
 }
 
-/// Accept a pending connection from a listening socket.
-///
-/// Blocks the caller until a connection arrives (unless non-blocking).
+/// Accept a pending connection from a listening socket. Blocks until one
+/// arrives unless the socket is non-blocking.
 pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
     let Some(wq_idx) = handle.slot_for_wq() else {
         return Err(Errno::EBADF.raw());
@@ -211,10 +171,10 @@ pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
         let waited = BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
             let state = UNIX_STATE.lock();
             match state.slots.get(handle.handle()) {
-                Err(_) => true, // slot reused/gone — bail out
+                Err(_) => true,
                 Ok(slot) => match &slot.state {
                     SlotState::Listening { backlog, .. } => !backlog.is_empty(),
-                    _ => true, // state changed unexpectedly — bail out
+                    _ => true,
                 },
             }
         });
@@ -226,10 +186,8 @@ pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
 
 /// Connect to a listening socket identified by path.
 ///
-/// Allocates a new pair (with both FIFOs) and a fresh slot for the
-/// accepted side.  Both sides reference the same pair handle; the
-/// listener's backlog records the accepted-side handle for `accept()`
-/// to dequeue.
+/// Allocates the pair and a fresh slot for the accepted side; the listener's
+/// backlog records that handle for `accept()` to dequeue.
 pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     if path.is_empty() || path.len() > UNIX_PATH_MAX {
         return Errno::EINVAL.raw();
@@ -238,7 +196,6 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     let mut state = UNIX_STATE.lock();
     let h_a = handle.handle();
 
-    // Caller must be Created or Bound (not Connected, Listening, etc.).
     match state.slots.get(h_a) {
         Ok(slot) => match slot.state {
             SlotState::Created | SlotState::Bound { .. } => {}
@@ -248,7 +205,6 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
         Err(_) => return Errno::EBADF.raw(),
     }
 
-    // Find the listener and verify backlog has space.
     let mut listener = None;
     for (lh, slot) in state.slots.iter() {
         if let SlotState::Listening {
@@ -269,29 +225,15 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
         return Errno::ECONNREFUSED.raw();
     };
 
-    // Reserve room for the accepted side (side B) before committing.
     if state.slots.len() >= MAX_UNIX_SOCKETS {
         return Errno::ENFILE.raw();
     }
 
-    // The *connecting client's* syscall allocates side B's slot, the pair
-    // entry and both 16 KiB FIFOs — storage the server will use but the
-    // client pays for. That is deliberate and load-bearing, not incidental:
-    // moving these allocations to `accept` would flip 32 clients' worth of
-    // kernel storage onto the compositor's budget and make a connect flood
-    // exhaust the server rather than the caller. Keep the allocation here.
-    //
-    // The FIFOs' *pages* are charged elsewhere and deliberately not here. At
-    // 16 KiB each they are well past `MAX_SLAB_CLASS_BYTES`, so they come from
-    // the large-alloc tier, which charges its backing to the root as
-    // `KernelMeta` in `mm::slab::page::alloc_large_pages`. Charging them again
-    // here would count the same pages twice and stop the root's row
-    // reconciling against the buddy. Attributing them to the connecting client
-    // *instead* of to the root would need the frame allocator to take an
-    // account witness — the bank question — which is to be answered
-    // deliberately rather than drifted into.
-    //
-    // Allocate a pair entry; this is where the 16 KiB×2 FIFO heap allocations happen.
+    // The connecting client pays for side B's slot, the pair entry and both
+    // FIFOs, so a connect flood exhausts the caller rather than the server;
+    // keep the allocation here. The FIFOs' pages are charged to the root as
+    // `KernelMeta` by the large-alloc tier, so charging them again here would
+    // double-count them.
     let pair_handle = match state.pairs.allocate() {
         Ok(Some(ph)) => ph,
         Ok(None) => return Errno::ENFILE.raw(),
@@ -299,10 +241,9 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     };
 
     let Ok(h_b) = state.slots.insert(UnixSlot::created()) else {
-        // Capacity was checked above; if the insert nonetheless fails, drop
-        // both endpoint refs of the just-allocated pair rather than leak it —
-        // `ConnectionPair::new` starts at a refcount of two. Its queues are
-        // still empty, so the in-lock drop is inert.
+        // `ConnectionPair::new` starts at a refcount of two, so both endpoint
+        // refs must be released rather than leaked. Its queues are still
+        // empty, so the in-lock drop is inert.
         drop(state.pairs.release(pair_handle));
         drop(state.pairs.release(pair_handle));
         return Errno::ENFILE.raw();
@@ -310,7 +251,6 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     let a_handle = SocketHandle::from_handle(h_a);
     let b_handle = SocketHandle::from_handle(h_b);
 
-    // Set up caller (side A).
     if let Ok(slot) = state.slots.get_mut(h_a) {
         slot.state = SlotState::Connected {
             pair: pair_handle,
@@ -320,7 +260,6 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
         };
     }
 
-    // Set up accepted side (side B).
     if let Ok(slot) = state.slots.get_mut(h_b) {
         slot.state = SlotState::Connected {
             pair: pair_handle,
@@ -330,10 +269,8 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
         };
     }
 
-    // Enqueue B in the listener's backlog.
     if let Ok(slot) = state.slots.get_mut(h_listener) {
         if let SlotState::Listening { backlog, .. } = &mut slot.state {
-            // Pre-reserved at unix_listen, so push_back never realloc'd.
             backlog
                 .push_back(b_handle)
                 .expect("backlog pre-reserved at listen");
@@ -349,11 +286,8 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
 
 /// Send data on a connected AF_UNIX socket (no SCM_RIGHTS ancillary).
 ///
-/// Thin wrapper around [`unix_sendmsg`] — the `write(2)` syscall path
-/// and every caller that never carries fds reach the same atomic
-/// data+fd publish primitive as `sendmsg(2)`. Keeping a single
-/// implementation means there is exactly one place where the data
-/// FIFO + ancillary queue + peer-wake ordering invariants live.
+/// Thin wrapper around [`unix_sendmsg`], so the FIFO, ancillary-queue and
+/// peer-wake ordering invariants live in exactly one place.
 pub fn unix_send(handle: SocketHandle, data: &[u8]) -> i32 {
     let mut no_files: KVec<FileRef> = KVec::new();
     // No fds, so no custody is ever charged and the account is never read.
@@ -418,7 +352,7 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
                 let waited = BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
                     match state.slots.get(handle.handle()) {
-                        Err(_) => true, // slot reused/gone — bail out
+                        Err(_) => true,
                         Ok(slot) => match slot.state {
                             SlotState::Connected {
                                 pair,
@@ -446,10 +380,9 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
     }
 }
 
-/// Single-direct-copy [`unix_recv`]: drain the recv FIFO straight into the
-/// pinned user pages (via `writer`) with one volatile copy per byte — no kernel
-/// scratch. Mirrors `unix_recv`'s EOF / blocking / wake semantics; the byte
-/// count is what the writer accepted.
+/// Single-direct-copy [`unix_recv`]: drains the recv FIFO straight into the
+/// pinned user pages via `writer`, with no kernel scratch. Same EOF, blocking
+/// and wake semantics; returns the byte count the writer accepted.
 pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWriter<'_>) -> i32 {
     if !writer.has_remain() {
         return 0;
@@ -507,7 +440,7 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
                 let waited = BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
                     match state.slots.get(handle.handle()) {
-                        Err(_) => true, // slot reused/gone — bail out
+                        Err(_) => true,
                         Ok(slot) => match slot.state {
                             SlotState::Connected {
                                 pair,
@@ -539,60 +472,16 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
 ///
 /// # Atomicity contract
 ///
-/// Data bytes and ancillary fds become visible to the peer **together**:
-/// the peer's next `unix_recvmsg` either sees both or neither. This
-/// matches Linux (`unix_scm_to_skb` attaches `scm->fp` to the skb
-/// *before* `__skb_queue_tail` and *before* `sk_data_ready`), FreeBSD
-/// (`unp_internalize` chains the `MT_CONTROL` mbuf into the data mbuf
-/// chain before `sbappendaddr_locked`), and Asterinas (a single
-/// `RangedAuxiliaryData` entry stamped with the data's byte range,
-/// all committed under one mutex). Without this guarantee, the peer
-/// can observe data bytes whose companion fds are still in transit
-/// and a Wayland-style decoder ends up with `buffer_fd: None` for
-/// messages that require an SCM_RIGHTS fd (e.g. `SurfaceAttach`).
+/// Data bytes and ancillary fds become visible to the peer **together**: the
+/// peer's next `unix_recvmsg` either sees both or neither. One critical section
+/// capacity-checks both targets (ancillary all-or-nothing; data may write
+/// partially, per Linux's per-skb semantics), pushes fds before data, then
+/// unlocks once and wakes once.
 ///
-/// The pre-refactor implementation took `UNIX_STATE` in two disjoint
-/// critical sections (data write — unlock — wake — re-lock — fd push
-/// — unlock — wake). The lazy-wake scheduler made that benign; the
-/// preempt-on-enqueue path in `sched::scheduler::schedule_task`
-/// (Phase 1.2) makes the peer drain the data FIFO between the two
-/// critical sections.
-///
-/// # Single-critical-section shape
-///
-/// 1. Lock `UNIX_STATE`, validate the slot, resolve `(pair, side, peer)`.
-/// 2. Capacity-check both publish targets:
-///    - data FIFO: any space if `data` is non-empty — partial writes
-///      are valid, mirroring Linux's per-skb behaviour where the
-///      first skb takes as much data as fits + all fds and the
-///      caller retries the remainder.
-///    - ancillary queue: `current_len + fd_count <= MAX_INFLIGHT_FDS`
-///      so a multi-fd send never publishes a partial set.
-/// 3. Push all fds first, then write data — fds-before-data ordering
-///    in the same critical section means a racing peer that reads
-///    the data after unlock-then-wake always sees the companion fds
-///    already queued.
-/// 4. Unlock once, `wake_all` once.
-///
-/// # Failure modes (no partial publish)
-///
-/// - Ancillary queue would overflow → release the caller's fds,
-///   return `ENOMEM`. The peer observes neither data nor fds.
-/// - Data FIFO is full, non-blocking → release fds, return `EAGAIN`.
-/// - Data FIFO is full, blocking → wait on the sender's wait queue;
-///   fds stay in the caller's `inflight_fds` array (not yet
-///   committed) and the next iteration runs the full capacity check
-///   + atomic publish again.
-/// - Slot reused / peer closed → release fds, return
-///   `EBADF`/`ENOTCONN`/`EPIPE`.
-/// Send data plus optional in-flight files (SCM_RIGHTS).
-///
-/// `files` are owned aliases minted by the syscall handler
-/// (`fileio_clone_file_ref`). On commit they move into the peer's
-/// ancillary queue (all-or-nothing); on any error return they stay in
-/// the caller's `KVec` and close when the caller drops it — no net lock
-/// is held at that point, so the (possibly recursive) file teardown is
-/// safe.
+/// Nothing publishes partially. `files` are owned aliases: on commit they move
+/// into the peer's ancillary queue, and on any error return they stay in the
+/// caller's `KVec` and close when it drops them — no net lock is held there, so
+/// the possibly recursive file teardown is safe.
 pub fn unix_sendmsg(
     handle: SocketHandle,
     data: &[u8],
@@ -631,34 +520,21 @@ pub fn unix_sendmsg(
                 None => return Errno::EPIPE.raw(),
             };
 
-            // Ancillary capacity check first: all-or-nothing fds.
             let fd_count = files.len();
             if fd_count > 0 && pair.send_anc(side).len() + fd_count > pair::MAX_INFLIGHT_FDS {
                 return Errno::ENOMEM.raw();
             }
 
-            // Data capacity check. Empty data trivially fits;
-            // otherwise any free byte in the FIFO is enough for a
-            // partial write (Linux per-skb semantics).
             let data_has_space = data.is_empty() || pair.send_fifo(side).has_space();
             if !data_has_space {
                 Err(nonblocking)
             } else {
-                // Commit. Push fds first so a peer that races us
-                // post-unlock always sees the companion fds before
-                // any data byte. We hold `UNIX_STATE` across both
-                // operations, so the peer cannot observe an
-                // intermediate state — but the in-CS ordering also
-                // closes the lock-free `unix_poll_events` window
-                // where readers snapshot `recv_fifo_ref().is_empty()`
-                // outside the state lock.
                 if fd_count > 0 {
                     let anc = pair.send_anc(side);
                     for file in files.drain(..) {
-                        // Capacity was checked above and the queue's storage
-                        // is pre-reserved, so the only refusal left is the
-                        // sender's custody ceiling. A refused file drops here,
-                        // closing that alias, rather than travelling uncharged.
+                        // The only refusal left is the sender's custody
+                        // ceiling; a refused file drops here rather than
+                        // travelling uncharged.
                         if let Err(refused) = anc.push(file, sender_account) {
                             drop(refused);
                         }
@@ -681,19 +557,15 @@ pub fn unix_sendmsg(
                 return n;
             }
             Err(true) => {
-                // Non-blocking with no data space; capacity check
-                // failed in the same iteration so no fds were
-                // committed — they stay with the caller.
+                // No fds were committed this iteration; they stay with the caller.
                 return Errno::EAGAIN.raw();
             }
             Err(false) => {
-                // Block until peer drains, slot reuses, or peer closes. The
-                // frame keeps the files across the park: an abort returns
-                // through here, and `files` belongs to the caller either way.
+                // `files` stays with the caller across the park, abort included.
                 let waited = BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
                     match state.slots.get(handle.handle()) {
-                        Err(_) => true, // slot reused/gone — bail out
+                        Err(_) => true,
                         Ok(slot) => match slot.state {
                             SlotState::Connected {
                                 pair,
@@ -709,7 +581,7 @@ pub fn unix_sendmsg(
                                     None => true,
                                 }
                             }
-                            _ => true, // state diverged — bail out
+                            _ => true,
                         },
                     }
                 });
@@ -721,13 +593,10 @@ pub fn unix_sendmsg(
     }
 }
 
-/// Single-direct-copy `unix_send` (no fds): append the data pulled straight
-/// from the pinned user pages (via `reader`) into the peer FIFO with one
-/// volatile copy per byte — no kernel scratch. This is the non-blocking
-/// data-only subset of [`unix_sendmsg`] that the SlopRing fixed-buffer send
-/// path uses (it forces the socket non-blocking, so a full FIFO returns
-/// `-EAGAIN` rather than parking). Returns bytes written, `-EAGAIN`, or an
-/// errno.
+/// Single-direct-copy `unix_send` (no fds): appends data pulled straight from
+/// the pinned user pages via `reader` into the peer FIFO, with no kernel
+/// scratch. Never parks — a full FIFO returns `-EAGAIN`. Returns bytes written,
+/// `-EAGAIN`, or an errno.
 pub fn unix_send_from(handle: SocketHandle, reader: &mut slopos_ostd::mm::VmReader<'_>) -> i32 {
     let (n, peer_idx) = {
         let mut state = UNIX_STATE.lock();
@@ -777,8 +646,8 @@ pub fn unix_send_from(handle: SocketHandle, reader: &mut slopos_ostd::mm::VmRead
 /// `out_files`; any excess is carried out of the state lock and dropped
 /// here (closing those aliases). Returns the number delivered.
 fn drain_ancillary(handle: SocketHandle, out_files: &mut KVec<FileRef>, max_fds: usize) -> usize {
-    // Pure move out of the locked region: nothing is dropped while the
-    // state lock is held.
+    // Pure move out of the locked region: nothing drops while the state lock
+    // is held.
     let mut drained = {
         let mut state = UNIX_STATE.lock();
         let conn = match state.slots.get(handle.handle()) {
@@ -799,22 +668,17 @@ fn drain_ancillary(handle: SocketHandle, out_files: &mut KVec<FileRef>, max_fds:
 
     let mut received = 0usize;
     for entry in drained.drain(..) {
-        // The custody charge drops with the entry as the file moves out, so
-        // the sender's in-flight count falls exactly when the reference stops
-        // being in flight — whether the receiver takes it or the cap drops it.
+        // The custody charge drops with the entry, so the sender's in-flight
+        // count falls whether the receiver takes the file or the cap drops it.
         if received < max_fds && out_files.push(entry.file).is_ok() {
             received += 1;
         }
-        // Beyond the cap (or on push failure) the file drops here,
-        // closing that alias — matching the overflow policy of the old
-        // raw-reference queue.
     }
     received
 }
 
-/// Receive data from a connected AF_UNIX socket, with optional in-flight
-/// files. Delivered files are appended to `out_files` (the receive side
-/// installs them into the destination fd table).
+/// Receive data from a connected AF_UNIX socket, with any in-flight files
+/// appended to `out_files`.
 pub fn unix_recvmsg(
     handle: SocketHandle,
     buf: &mut [u8],
@@ -826,10 +690,9 @@ pub fn unix_recvmsg(
     (bytes_read, received_fds)
 }
 
-/// Single-direct-copy [`unix_recvmsg`]: the data is drained straight into the
-/// pinned user pages (via `writer`) by [`unix_recv_into`] with no kernel
-/// scratch; any SCM_RIGHTS files are drained into `out_files` exactly as
-/// `unix_recvmsg` does. Returns `(bytes_read, n_fds)`.
+/// Single-direct-copy [`unix_recvmsg`]: data drains straight into the pinned
+/// user pages via `writer` with no kernel scratch; SCM_RIGHTS files drain into
+/// `out_files`. Returns `(bytes_read, n_fds)`.
 pub fn unix_recvmsg_into(
     handle: SocketHandle,
     writer: &mut slopos_ostd::mm::VmWriter<'_>,
@@ -841,12 +704,12 @@ pub fn unix_recvmsg_into(
     (bytes_read, received_fds)
 }
 
-/// Tear down a closing listener's pending backlog: each entry is a
-/// side-B slot created by `unix_connect()` and never accepted. Marks
-/// every side-A peer closed, records their slots for post-lock wakes,
-/// and detaches freed pairs into `freed_pairs`. Returns the wake count.
-/// Split out of [`unix_close`] to keep its stack frame under the kernel
-/// gate.
+/// Tear down a closing listener's pending backlog: each entry is a side-B slot
+/// created by `unix_connect()` and never accepted. Marks every side-A peer
+/// closed, records their slots for post-lock wakes, and detaches freed pairs
+/// into `freed_pairs`. Returns the wake count.
+///
+/// Split out of [`unix_close`] to keep its stack frame under the kernel gate.
 #[inline(never)]
 fn close_listener_backlog(
     slots: &mut HandleTable<UnixSlot>,
@@ -885,11 +748,9 @@ fn close_listener_backlog(
     wake_count
 }
 
-/// Close an AF_UNIX socket. Wakes all waiters on the peer if connected.
-///
-/// For listeners, all pending backlog entries (side-B slots that were
-/// created by `unix_connect()` but never `accept()`-ed) are closed
-/// and their side-A peers are notified.
+/// Close an AF_UNIX socket. Wakes all waiters on the peer if connected; for a
+/// listener, every unaccepted backlog entry is closed and its side-A peer
+/// notified.
 pub fn unix_close(handle: SocketHandle) -> i32 {
     let Some(wq_idx) = handle.slot_for_wq() else {
         return Errno::EBADF.raw();
@@ -901,11 +762,10 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
     let mut backlog_wake_count = 0usize;
     let mut was_listener = false;
 
-    // Pairs freed by this close are detached under the lock and dropped
-    // here, after it releases: their ancillary queues can hold in-flight
-    // `FileRef`s whose teardown may recurse back into this module (a
-    // socket passed over a socket). Reserved up-front so collecting the
-    // freed pairs never allocates under the state lock.
+    // Freed pairs drop only after the lock releases: their ancillary queues can
+    // hold in-flight `FileRef`s whose teardown may recurse back into this
+    // module. Reserved up front so collecting them never allocates under the
+    // state lock.
     let mut freed_pairs = match KVec::with_capacity(MAX_BACKLOG + 1) {
         Ok(v) => v,
         Err(_) => return Errno::ENOMEM.raw(),
@@ -915,16 +775,12 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
         let mut state = UNIX_STATE.lock();
         let UnixSocketState { slots, pairs } = &mut *state;
 
-        // Remove the closing slot, taking ownership of its state (the table
-        // bumps the slot's generation, so any leftover handle goes stale).
         let Ok(closed) = slots.remove(handle.handle()) else {
             return Errno::EBADF.raw();
         };
 
         match closed.state {
             SlotState::Connected { pair, peer, .. } => {
-                // Mark the peer's half closed; a removed/recycled peer slot
-                // resolves to a typed miss and is skipped.
                 if let Ok(peer_slot) = slots.get_mut(peer.handle()) {
                     if let SlotState::Connected {
                         peer_closed: ref mut pc,
@@ -949,13 +805,10 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
                     &mut freed_pairs,
                 );
             }
-            // Created / Bound — nothing extra to release.
             _ => {}
         }
     }
 
-    // State lock released: tear the freed pairs (and any in-flight files
-    // they still carried) down now.
     drop(freed_pairs);
 
     if let Some(peer) = wake_peer {
@@ -976,9 +829,8 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
     0
 }
 
-/// Compute the POLL* bitmask of currently ready events.  Shared
-/// between `unix_poll_events` and `unix_poll_fused` so both views
-/// stay in lockstep.
+/// POLL* bitmask of currently ready events, shared by both poll entry points
+/// so the two views stay in lockstep.
 fn compute_revents(state: &UnixSocketState, handle: SocketHandle, requested: u16) -> u16 {
     let Ok(slot) = state.slots.get(handle.handle()) else {
         return 0;
@@ -1069,9 +921,7 @@ pub fn unix_set_nonblocking(handle: SocketHandle, nonblocking: bool) -> i32 {
     0
 }
 
-/// Read a Unix socket's stored non-blocking flag. Returns `None` for a
-/// stale handle. Used by the SlopRing `OP_ACCEPT` glue to restore the
-/// listener's original mode after a forced-nonblocking probe.
+/// Read a Unix socket's stored non-blocking flag. `None` for a stale handle.
 pub fn unix_is_nonblocking(handle: SocketHandle) -> Option<bool> {
     let state = UNIX_STATE.lock();
     state.slots.get(handle.handle()).ok().map(|s| s.nonblocking)

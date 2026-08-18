@@ -1,21 +1,20 @@
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_abi::DisplayInfo;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::video_traits::VideoResult;
-use slopos_abi::DisplayInfo;
 
 /// Task ID of the compositor process, set on first framebuffer flip.
 static COMPOSITOR_TASK_ID: AtomicU32 = AtomicU32::new(0);
 
-/// Record the compositor's task ID (called from the fb_flip syscall handler).
 #[inline]
 pub fn set_compositor_task_id(task_id: u32) {
     COMPOSITOR_TASK_ID.store(task_id, Ordering::Relaxed);
 }
 
-/// Get the recorded compositor task ID (0 if none).
+/// Recorded compositor task ID; 0 if none.
 #[inline]
 pub fn compositor_task_id() -> u32 {
     COMPOSITOR_TASK_ID.load(Ordering::Relaxed)
@@ -34,7 +33,6 @@ slopos_service_core::define_service! {
 }
 
 /// Upload a hardware-cursor image (validated kernel buffer) with its hotspot.
-/// Returns `true` on success.
 #[inline(always)]
 pub fn cursor_set_image(image: &[u8], hot_x: u32, hot_y: u32) -> bool {
     (video_services().cursor_set_image)(image.as_ptr(), image.len(), hot_x, hot_y)

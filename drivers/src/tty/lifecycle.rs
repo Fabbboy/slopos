@@ -46,7 +46,6 @@ pub fn switch_active_tty(idx: TtyIndex) -> Result<(), TtyError> {
 
     set_active_tty(idx);
     if scheduler_is_enabled() != 0 {
-        // Poll waiters park on the input queue too, so one publish covers both.
         BUS.publish(tty_input_event(slot));
     }
     Ok(())
@@ -73,9 +72,8 @@ pub fn hangup(idx: TtyIndex) {
 }
 
 /// The locked half of a hangup; returns the detached session id for
-/// [`hangup_notify`], or `None` when the slot is empty. Split so a caller
-/// serialising against reopen can hold its own outer lock across this half
-/// while signals and wakeups stay outside every lock.
+/// [`hangup_notify`], or `None` when the slot is empty. Split so a caller can
+/// hold an outer lock across it while signals and wakeups stay outside.
 pub(crate) fn hangup_mark(idx: TtyIndex) -> Option<u32> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -85,8 +83,7 @@ pub(crate) fn hangup_mark(idx: TtyIndex) -> Option<u32> {
     let tty = guard.as_mut()?;
     let sid = tty.session.session_id();
     tty.ldisc.flush_all();
-    // The resulting packet events are deferred past the lock drop: emitting them
-    // here would self-deadlock.
+    // Packet events are deferred past the lock drop; emitting here self-deadlocks.
     tty.session.detach();
     tty.mark_hung_up();
     Some(sid)
@@ -101,7 +98,7 @@ pub(crate) fn hangup_notify(idx: TtyIndex, session_id: u32) {
         slopos_abi::syscall::TIOCPKT_FLUSHREAD | slopos_abi::syscall::TIOCPKT_FLUSHWRITE,
     );
 
-    // The whole session, not just fg_pgrp: every process in it gets the pair.
+    // The whole session, not just fg_pgrp.
     if session_id != 0 {
         let _ = clear_session_controlling_tty(session_id, idx);
         let _ = signal_session(session_id, SIGHUP);
@@ -109,8 +106,7 @@ pub(crate) fn hangup_notify(idx: TtyIndex, session_id: u32) {
     }
 
     if scheduler_is_enabled() != 0 {
-        // Poll waiters park on both queues; readers, writers and poll waiters
-        // must all get the chance to observe POLLHUP.
+        // Readers, writers and poll waiters must all get to observe POLLHUP.
         BUS.publish(tty_input_event(slot));
         BUS.publish(tty_output_event(slot));
     }

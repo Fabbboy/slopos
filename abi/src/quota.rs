@@ -93,8 +93,9 @@ impl ResourceKind {
         }
     }
 
-    /// Always the code the corresponding call site already returns on its own
-    /// capacity failure, so enforcement mints no new code at the ABI boundary.
+    /// The errno a refused charge is reported as — always the code the call site
+    /// already returns on its own capacity failure, so enforcement mints no new
+    /// code at the ABI boundary.
     #[inline]
     pub const fn errno(self) -> Errno {
         match self {
@@ -218,9 +219,10 @@ pub struct RLimitMapping {
     pub scale: u64,
 }
 
-/// `None` rather than a plausible-looking infinity: a caller cannot distinguish
-/// "unbounded" from "unimplemented", so an unmapped resource is `EINVAL`, which
-/// it can act on.
+/// The [`ResourceKind`] a `RLIMIT_*` names, or `None` for one this kernel does
+/// not enforce. `None` rather than a plausible-looking infinity: a caller cannot
+/// distinguish "unbounded" from "unimplemented", so an unmapped resource is
+/// `EINVAL`, which it can act on.
 #[inline]
 pub const fn rlimit_mapping(resource: u32) -> Option<RLimitMapping> {
     match resource {

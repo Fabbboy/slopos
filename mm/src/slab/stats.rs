@@ -1,9 +1,6 @@
 //! Aggregate heap statistics — the surface that test callers and
-//! diagnostic printers consume.
-//!
-//! `get_heap_stats_owned()` in `compat.rs` is the accessor; `HeapStats`
-//! is `repr(C)` so its field order is pinned for the diagnostic dumps
-//! that read it.
+//! diagnostic printers consume. `HeapStats` is `repr(C)` so its field
+//! order stays pinned for the diagnostic dumps that read it.
 
 use core::sync::atomic::Ordering;
 
@@ -26,11 +23,8 @@ pub struct HeapStats {
     pub free_count: u32,
 }
 
-/// Collect a snapshot. Reads counters under `Relaxed` ordering — the
-/// snapshot is approximate (writers may be racing) but every field
-/// is internally consistent (the writer side updates each counter
-/// once per operation; cross-counter skew is at most a few in-flight
-/// allocations).
+/// Snapshot of the heap counters. `Relaxed` reads, so fields may skew
+/// against each other by the allocations in flight during the walk.
 pub fn snapshot() -> HeapStats {
     let mut alloc_count: u64 = 0;
     let mut free_count: u64 = 0;
@@ -38,12 +32,9 @@ pub fn snapshot() -> HeapStats {
     let mut free_objects: u64 = 0;
     let mut slab_allocated_bytes: u64 = 0;
 
-    // Fold the eight per-class counters with a single loop body rather than
-    // eight inlined macro expansions: in a debug build the per-expansion
-    // temporaries are not coalesced, which pushed this frame past the 2 KiB
-    // stack-frame ceiling that check_stack_sizes.sh enforces. One reused loop
-    // body keeps the frame tiny. The slabs are distinct const-generic types but
-    // share a `SlabClassStats`, so an array of `&SlabClassStats` is uniform.
+    // One reused loop body rather than eight inlined expansions: in a debug
+    // build the per-expansion temporaries pushed this frame past the 2 KiB
+    // ceiling check_stack_sizes.sh enforces.
     let class_stats: [&SlabClassStats; SIZE_CLASSES.len()] = [
         &KERNEL_SLAB.slab16.stats,
         &KERNEL_SLAB.slab32.stats,

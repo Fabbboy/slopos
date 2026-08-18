@@ -3,45 +3,24 @@
 //! A [`NetDevice`](crate::netdev::NetDevice) moves bytes. An [`Iface`] is what
 //! that device *is* to the rest of the system — a name, a stable index, an
 //! administrative intent, a link state, and the addresses assigned to it.
-//! Keeping the two apart is what lets the device registry stay a pure
-//! data-plane concern while everything a person configures lives here.
 //!
-//! # Three states that are not one state
+//! `admin_up` is intent, `carrier` is the physical link, and [`OperState`] is
+//! what those combine to, following IANA `ifOperStatus` (RFC 2863).
 //!
-//! `admin_up` is **intent**: somebody asked for this interface to be usable.
-//! `carrier` is the **physical link**. [`OperState`] is what those combine to,
-//! following IANA `ifOperStatus` (RFC 2863) so the vocabulary matches what
-//! `ip link` and `/sys/class/net/*/operstate` report elsewhere. Collapsing them
-//! into one boolean is the classic mistake: an unplugged cable and a
-//! deliberately disabled interface are both "not working" and want completely
-//! different words in a UI.
-//!
-//! # The master switch
-//!
-//! [`set_enabled`] is a **gate**, not a bulk edit. The invariant is
+//! [`set_enabled`] is a **gate**, not a bulk edit:
 //!
 //! ```text
 //! realised(iface) == iface.admin_up && (NET_ENABLED || kind == Loopback)
 //! ```
 //!
-//! Disabling never writes `admin_up`, so `admin_up` *is* the memory of what the
-//! operator wanted and there is no remembered set to go stale. That matters for
-//! the case a snapshot-and-restore design gets wrong: a device probed *while*
-//! networking is disabled was in nobody's snapshot, but it still must come up
-//! unrealised and be realised by the next enable.
+//! Disabling never writes `admin_up`, so there is no remembered set to go
+//! stale and a device probed while networking is disabled still comes up
+//! unrealised. Loopback is exempt at the predicate because taking `127.0.0.1`
+//! away would break AF_INET localhost IPC.
 //!
-//! Loopback is exempt at the predicate rather than at each call site. Taking
-//! `127.0.0.1` away would break AF_INET localhost IPC that has nothing to do
-//! with networking being switched off, which is also why NetworkManager's
-//! `NetworkingEnabled` leaves `lo` alone.
-//!
-//! # Storage
-//!
-//! Fixed arrays, sized by [`NET_MAX_IFACES`] and [`NET_MAX_ADDRS_PER_IFACE`].
-//! Nothing here allocates, which is what makes every operation safe to perform
-//! under the table's own cli-disabling lock — the allocator is where every
-//! subsystem meets, and reaching it from under this lock would be a deadlock
-//! edge for no benefit at a bound of eight.
+//! Storage is fixed arrays sized by [`NET_MAX_IFACES`] and
+//! [`NET_MAX_ADDRS_PER_IFACE`]; nothing here allocates, so every operation is
+//! safe under the table's own cli-disabling lock.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -57,15 +36,11 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use crate::netmon::netmon_post;
 use crate::types::{DevIndex, Ipv4Addr, MacAddr};
 
-// =============================================================================
-// Names
-// =============================================================================
-
 /// An interface name: at most [`NET_IFNAMSIZ`] bytes, NUL-padded.
 ///
-/// Names are **reusable** — a re-probed NIC becomes `eth0` again, which is what
-/// a person expects. Indices are not. Anything that caches per-interface state
-/// must therefore key on [`Iface::ifindex`], never on the name.
+/// Names are **reusable** — a re-probed NIC becomes `eth0` again. Indices are
+/// not, so anything caching per-interface state must key on
+/// [`Iface::ifindex`], never on the name.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct IfName([u8; NET_IFNAMSIZ]);
 
@@ -115,15 +90,10 @@ impl core::fmt::Debug for IfName {
     }
 }
 
-// =============================================================================
-// Enumerations
-// =============================================================================
-
 /// What kind of thing this interface is.
 ///
-/// Deliberately only the two kinds that exist. The ABI reserves a value for
-/// 802.11 so adding it later does not renumber anything, but nothing here
-/// produces it and no code should branch on a wireless case that cannot occur.
+/// The ABI reserves a value for 802.11 so adding it later renumbers nothing,
+/// but nothing here produces it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum IfaceKind {
@@ -181,17 +151,7 @@ pub enum AddrScope {
     Host = slopos_abi::net::NET_ADDR_SCOPE_HOST,
 }
 
-// =============================================================================
-// Pure derivations
-// =============================================================================
-//
-// No locks, no I/O, no table access. That is deliberate: these three functions
-// are the entirety of the interface state model, so keeping them pure makes the
-// whole model a unit test rather than something only observable by booting.
-
 /// Whether the interface's administrative intent is actually in effect.
-///
-/// See the module docs for why loopback ignores the master switch.
 #[inline]
 pub const fn realised(kind: IfaceKind, admin_up: bool, enabled: bool) -> bool {
     admin_up && (enabled || kind.is_loopback())
@@ -200,9 +160,8 @@ pub const fn realised(kind: IfaceKind, admin_up: bool, enabled: bool) -> bool {
 /// The RFC 2863 operational state implied by intent, the master switch and the
 /// link.
 ///
-/// A realised loopback reports `Unknown`, not `Up` — it has no lower layer
-/// whose state could be reported, and `Unknown` is what Linux reports for `lo`
-/// and therefore what `ip link show lo` prints everywhere else.
+/// A realised loopback reports `Unknown`, not `Up`: it has no lower layer whose
+/// state could be reported, and `Unknown` is what `ip link show lo` prints.
 #[inline]
 pub const fn oper_state(
     kind: IfaceKind,
@@ -224,9 +183,8 @@ pub const fn oper_state(
 
 /// The `IFF_*` word a tool renders as `<BROADCAST,MULTICAST,UP>`.
 ///
-/// The SlopOS-private bits exist so a UI can say *why* an interface that was
-/// asked to be up is not: held down by the master switch, no carrier, or a
-/// driver that cannot observe carrier at all and is therefore guessing.
+/// The SlopOS-private bits say *why* an interface that was asked to be up is
+/// not: the master switch, no carrier, or a driver that cannot observe carrier.
 #[inline]
 pub const fn if_flags(
     kind: IfaceKind,
@@ -246,8 +204,7 @@ pub const fn if_flags(
         flags |= IFF_BROADCAST | IFF_MULTICAST;
     }
 
-    // RUNNING tracks the operational state, not the intent: it is set exactly
-    // when traffic could actually flow.
+    // RUNNING tracks the operational state, not the intent.
     match oper_state(kind, admin_up, enabled, carrier) {
         OperState::Up | OperState::Unknown => flags |= IFF_RUNNING,
         _ => {}
@@ -269,10 +226,6 @@ pub const fn if_flags(
     }
     flags
 }
-
-// =============================================================================
-// Addresses
-// =============================================================================
 
 /// One address assigned to an interface.
 #[derive(Clone, Copy)]
@@ -306,20 +259,17 @@ impl IfaceAddr {
         }
     }
 
-    /// The netmask implied by the prefix length.
     #[inline]
     pub const fn netmask(&self) -> Ipv4Addr {
         Ipv4Addr::from_u32_be(prefix_to_mask(self.prefix_len))
     }
 
-    /// The subnet's broadcast address.
     #[inline]
     pub const fn broadcast(&self) -> Ipv4Addr {
         let mask = prefix_to_mask(self.prefix_len);
         Ipv4Addr::from_u32_be(self.addr.to_u32_be() | !mask)
     }
 
-    /// The network prefix this address sits in.
     #[inline]
     pub const fn network(&self) -> Ipv4Addr {
         let mask = prefix_to_mask(self.prefix_len);
@@ -346,16 +296,11 @@ pub const fn prefix_to_mask(prefix_len: u8) -> u32 {
     }
 }
 
-// =============================================================================
-// The interface itself
-// =============================================================================
-
 /// One network interface.
 #[derive(Clone, Copy)]
 pub struct Iface {
     /// Monotonic and **never reused**. Device-registry slots recycle, so a
-    /// monitor consumer that missed a removal would otherwise apply a later
-    /// event to a different interface wearing the same index.
+    /// reused index would let a missed removal misattribute a later event.
     pub ifindex: u32,
     /// The device this interface fronts.
     pub dev: DevIndex,
@@ -371,7 +316,6 @@ pub struct Iface {
     pub carrier_detect: bool,
     /// Set while an administrative transition is in flight, so a concurrent
     /// caller is refused rather than interleaved with a half-applied change.
-    /// Mirrors `DeviceSlot::retiring` in the device registry.
     pub admin_busy: bool,
     /// A DHCP client is running on this interface.
     pub dhcp_managed: bool,
@@ -380,7 +324,6 @@ pub struct Iface {
 }
 
 impl Iface {
-    /// The addresses assigned to this interface.
     #[inline]
     pub fn addrs(&self) -> &[IfaceAddr] {
         &self.addrs[..self.n_addrs as usize]
@@ -405,7 +348,6 @@ impl Iface {
         )
     }
 
-    /// Whether this interface's administrative intent is in effect.
     #[inline]
     pub fn is_realised(&self, enabled: bool) -> bool {
         realised(self.kind, self.admin_up, enabled)
@@ -419,16 +361,10 @@ impl Iface {
     }
 }
 
-// =============================================================================
-// The table
-// =============================================================================
-
 /// A set of interfaces.
 ///
-/// Addressable rather than global, following [`RouteTable`](crate::route::RouteTable)
-/// and [`NeighborCache`](crate::neighbor::NeighborCache): a test builds a
-/// scratch table and asserts against it, instead of reaching for the live one
-/// and destroying the boot configuration that every other test reads.
+/// Addressable rather than global so a test can assert against a scratch table
+/// instead of destroying the boot configuration every other test reads.
 pub struct IfaceTable {
     inner: SpinLock<IfaceTableInner>,
     /// The master networking switch, per table so a scratch instance can be
@@ -440,11 +376,9 @@ struct IfaceTableInner {
     slots: [Option<Iface>; NET_MAX_IFACES],
 }
 
-/// Source of interface indices, shared by every table.
-///
-/// Global on purpose: an index must be unique for the lifetime of the kernel,
-/// and a per-table counter would let a scratch table mint an index the live
-/// table is already using.
+/// Source of interface indices, shared by every table: an index must be unique
+/// for the lifetime of the kernel, so a per-table counter could mint one the
+/// live table is already using.
 static NEXT_IFINDEX: AtomicU32 = AtomicU32::new(1);
 
 /// The kernel's interface table.
@@ -469,9 +403,8 @@ pub enum IfaceError {
 }
 
 impl IfaceTable {
-    /// An empty table. The class comes from the caller so a scratch table built
-    /// by a test is a different lockdep class from the live one — they are
-    /// genuinely different locks.
+    /// An empty table. The class comes from the caller so a scratch table is a
+    /// different lockdep class from the live one.
     pub const fn new(class: &'static slopos_ostd::sync::lock_tracking::LockClassKey) -> Self {
         Self {
             inner: SpinLock::new(
@@ -492,9 +425,8 @@ impl IfaceTable {
 
     /// Move the master switch, reporting whether it changed.
     ///
-    /// This only moves the gate. Realising or unrealising the interfaces it now
-    /// covers is the caller's job, because that has to happen with no interface
-    /// lock held — see [`crate::iface_ctl`].
+    /// Only the gate moves. Realising the interfaces it now covers is
+    /// [`crate::iface_ctl`]'s job, and must happen with no interface lock held.
     #[inline]
     pub fn set_enabled_flag(&self, on: bool) -> bool {
         self.enabled.swap(on, Ordering::AcqRel) != on
@@ -504,15 +436,11 @@ impl IfaceTable {
     /// device registry.
     ///
     /// Called **after** `NetDeviceRegistry::register` returns, never from
-    /// inside it. Keeping the two sequential is what stops the device registry
-    /// and this table from ever appearing in each other's lock-order edges: an
-    /// administrative down needs this table and then the registry, so an edge
-    /// the other way would close a cycle.
+    /// inside it: an administrative down takes this table and then the
+    /// registry, so an edge the other way would close a cycle.
     ///
     /// A device attached while networking is disabled comes up with `admin_up`
-    /// set — matching "a probed NIC is immediately usable" — but unrealised.
-    /// The next enable realises it. That is the case a remembered-set design
-    /// gets wrong, because the device was in nobody's snapshot.
+    /// set but unrealised; the next enable realises it.
     pub fn attach(
         &self,
         dev: DevIndex,
@@ -597,10 +525,8 @@ impl IfaceTable {
             .copied()
     }
 
-    /// Copy every interface into `out`, returning `(written, total)`.
-    ///
-    /// Both numbers matter: a caller with a short buffer needs to know it was
-    /// truncated, which it cannot infer from `written` alone.
+    /// Copy every interface into `out`, returning `(written, total)`; `total`
+    /// is what tells a short-buffered caller it was truncated.
     pub fn snapshot(&self, out: &mut [Iface]) -> (usize, usize) {
         let table = self.inner.lock();
         let mut total = 0usize;
@@ -617,9 +543,7 @@ impl IfaceTable {
 
     /// Visit every interface under the table lock.
     ///
-    /// `f` must not allocate or take another network lock. The intended use is
-    /// pushing into a `KVec` that the caller reserved *before* calling, so the
-    /// fill itself cannot reach the allocator.
+    /// `f` must not allocate or take another network lock.
     pub fn for_each(&self, mut f: impl FnMut(&Iface)) {
         let table = self.inner.lock();
         for iface in table.slots.iter().flatten() {
@@ -634,8 +558,7 @@ impl IfaceTable {
 
     /// Apply `f` to the interface with `ifindex`, under the table lock.
     ///
-    /// `f` must not allocate, block, or take another network lock — the whole
-    /// point of the fixed-array storage is that nothing here needs to.
+    /// `f` must not allocate, block, or take another network lock.
     fn with_mut<T>(&self, ifindex: u32, f: impl FnOnce(&mut Iface) -> T) -> Result<T, IfaceError> {
         let mut table = self.inner.lock();
         let iface = table
@@ -666,9 +589,8 @@ impl IfaceTable {
     /// Set administrative intent without realising it, returning the
     /// operational state before and after.
     ///
-    /// Realisation — calling into the device, withdrawing routes, flushing
-    /// neighbours — happens in [`crate::iface_ctl`] with no lock held.
-    /// Splitting it this way is what keeps this module free of out-edges.
+    /// Realisation happens in [`crate::iface_ctl`] with no lock held, which is
+    /// what keeps this module free of out-edges.
     pub fn set_admin_intent(
         &self,
         ifindex: u32,
@@ -706,8 +628,8 @@ impl IfaceTable {
 
     /// Set the interface MTU.
     pub fn set_mtu(&self, ifindex: u32, mtu: u16) -> Result<(), IfaceError> {
-        // Below the IPv4 minimum reassembly buffer there is nothing the stack
-        // could legally send.
+        // 68 is the IPv4 minimum reassembly buffer; below it nothing is legally
+        // sendable.
         if mtu < 68 {
             return Err(IfaceError::Invalid);
         }
@@ -755,9 +677,6 @@ impl IfaceTable {
     }
 
     /// Keep only the addresses `pred` accepts, returning how many went.
-    ///
-    /// This is how an administrative down drops a lease while keeping a static
-    /// assignment: the operator's configuration is not the lease's to discard.
     pub fn retain_addrs(
         &self,
         ifindex: u32,
@@ -825,8 +744,8 @@ impl IfaceTable {
 
     /// The first address of any realised non-loopback interface.
     ///
-    /// Loopback is skipped because it registers first and would otherwise
-    /// answer every "what is our address" question with `127.0.0.1`.
+    /// Loopback is skipped: it registers first and would otherwise answer every
+    /// "what is our address" question with `127.0.0.1`.
     pub fn first_ipv4(&self) -> Option<Ipv4Addr> {
         let enabled = self.is_enabled();
         let table = self.inner.lock();
@@ -846,11 +765,8 @@ impl IfaceTable {
             })
     }
 
-    /// Empty the table and re-enable networking.
-    ///
-    /// Test-only. Production has no reason to empty this table, and doing so
-    /// mid-boot would strand every route pointing at a device that no longer
-    /// has a name.
+    /// Empty the table and re-enable networking. Test-only: doing this mid-boot
+    /// would strand every route pointing at a device that no longer has a name.
     #[cfg(feature = "test-hooks")]
     pub fn clear(&self) {
         let mut table = self.inner.lock();
@@ -876,8 +792,8 @@ impl IfaceTable {
 
 /// Pick the next free name for `kind`: `lo` for loopback, `ethN` for the rest.
 ///
-/// Names are reused deliberately, so this looks for the lowest unused suffix
-/// rather than counting attachments.
+/// Names are reused, so this looks for the lowest unused suffix rather than
+/// counting attachments.
 fn allocate_name(table: &IfaceTableInner, kind: IfaceKind) -> Option<IfName> {
     if kind.is_loopback() {
         return IfName::new(b"lo");
@@ -901,27 +817,14 @@ fn allocate_name(table: &IfaceTableInner, kind: IfaceKind) -> Option<IfName> {
     None
 }
 
-// =============================================================================
-// Kernel-table shorthands
-// =============================================================================
-//
-// The protocol path asks "what is our address" far more often than it asks
-// "which table", so these delegate to [`IFACE_TABLE`] and keep those call sites
-// readable.
-//
-// They are also where a change to the kernel table becomes a monitor event.
-// That placement is deliberate on two counts. The [`IfaceTable`] method still
-// holds its lock while it computes what to return, and posting from inside it
-// would give the table an out-edge into the event bus — the one thing
-// [`crate::netmon`] is shaped to avoid. And a scratch table built by a test is
-// not the system's state; only the kernel's table has any business narrating
-// itself to a subscriber.
+// Monitor events are posted from these kernel-table shorthands, not from the
+// [`IfaceTable`] methods: those still hold the table lock, and posting under it
+// would give the table an out-edge into the event bus.
 
 /// Describe an interface for a `NET_EV_IFACE_*` record.
 ///
-/// `oper_old`/`oper_new` are the transition; every other field is read from the
-/// row as it now stands, so a consumer can render the interface from the event
-/// alone without a follow-up query.
+/// Every field but the transition is read from the row as it now stands, so a
+/// consumer can render the interface from the event alone.
 fn iface_event_payload(iface: &Iface, oper_old: OperState, oper_new: OperState) -> [u8; 16] {
     let enabled = IFACE_TABLE.is_enabled();
     NetEvent::iface_payload(
@@ -942,15 +845,15 @@ fn post_iface_event(kind: u16, iface: &Iface, oper_old: OperState, oper_new: Ope
     );
 }
 
-/// Announce that an interface changed. Public to the crate because the control
-/// plane posts the administrative transition itself — that event means "the
-/// whole sequence finished", which only [`crate::iface_ctl`] knows.
+/// Announce that an interface changed. `pub(crate)` because
+/// [`crate::iface_ctl`] posts the administrative transition itself, once its
+/// whole sequence has finished.
 pub(crate) fn post_iface_changed(iface: &Iface, oper_old: OperState, oper_new: OperState) {
     post_iface_event(NET_EV_IFACE_CHANGED, iface, oper_old, oper_new);
 }
 
 /// Announce that an interface's flag word moved without an operational
-/// transition — an MTU or DHCP-management change, which a renderer still shows.
+/// transition — an MTU or DHCP-management change.
 fn post_iface_attr_changed(ifindex: u32) {
     if let Some(iface) = IFACE_TABLE.get(ifindex) {
         let oper = iface.oper_state(IFACE_TABLE.is_enabled());
@@ -986,9 +889,8 @@ pub fn set_enabled_flag(on: bool) -> bool {
 /// Register an interface in the kernel table. See [`IfaceTable::attach`].
 ///
 /// The `NET_EV_IFACE_ADDED` record reports a transition *from*
-/// [`OperState::NotPresent`], which is the RFC 2863 state of an interface that
-/// did not exist — so a consumer folding operational transitions needs no
-/// special case for the first event about an interface.
+/// [`OperState::NotPresent`], the RFC 2863 state of an interface that did not
+/// exist, so a consumer folding transitions needs no first-event special case.
 pub fn attach(
     dev: DevIndex,
     kind: IfaceKind,
@@ -1005,10 +907,8 @@ pub fn attach(
     Ok(ifindex)
 }
 
-/// Remove an interface from the kernel table.
-///
-/// The removal record describes the row as it last stood, because after this
-/// returns there is nothing left to describe it with.
+/// Remove an interface from the kernel table. The removal record describes the
+/// row as it last stood, since nothing afterwards can.
 pub fn detach(dev: DevIndex) -> Option<Iface> {
     let iface = IFACE_TABLE.detach(dev)?;
     let oper = iface.oper_state(IFACE_TABLE.is_enabled());
@@ -1067,9 +967,7 @@ pub fn add_addr(ifindex: u32, new: IfaceAddr) -> Result<(), IfaceError> {
 
 /// Remove an address from the kernel table.
 pub fn del_addr(ifindex: u32, addr: Ipv4Addr, prefix_len: u8) -> Result<(), IfaceError> {
-    // Read the row before the removal: origin and scope live only there, and a
-    // record that omitted them would make a consumer re-query for state that no
-    // longer exists.
+    // Read the row before the removal: origin and scope live only there.
     let doomed = IFACE_TABLE.get(ifindex).and_then(|iface| {
         iface
             .addrs()
@@ -1086,9 +984,8 @@ pub fn del_addr(ifindex: u32, addr: Ipv4Addr, prefix_len: u8) -> Result<(), Ifac
 
 /// Keep only the kernel-table addresses `pred` accepts.
 ///
-/// What went is established by comparing the row before and after rather than
-/// by instrumenting `pred`: the predicate belongs to the caller, and the table
-/// is the only authority on what it actually kept.
+/// What went is found by diffing the row before and after rather than by
+/// instrumenting the caller's `pred`.
 pub fn retain_addrs(
     ifindex: u32,
     pred: impl FnMut(&IfaceAddr) -> bool,
@@ -1116,17 +1013,12 @@ pub fn retain_addrs(
 
 /// Record a carrier transition on the kernel table.
 ///
-/// [`IfaceTable::set_carrier`] reports only a real transition, so the edge
-/// detection a poller would otherwise have to keep lives here: calling this
-/// every tick with an unchanged link posts nothing.
+/// Edge-detected: calling this every tick with an unchanged link posts nothing.
 pub fn set_carrier(dev: DevIndex, up: bool) -> Option<(u32, OperState, OperState)> {
     let (ifindex, before, after) = IFACE_TABLE.set_carrier(dev, up)?;
     if let Some(iface) = IFACE_TABLE.get(ifindex) {
         post_iface_changed(&iface, before, after);
     }
-    // A lease outlives a cable, but the client still has to know: it stops its
-    // timers while the link is down and confirms the address it holds when the
-    // link returns, rather than letting a renewal time out into a teardown.
     crate::dhcp::on_carrier(dev, up);
     Some((ifindex, before, after))
 }
@@ -1149,10 +1041,8 @@ pub fn end_admin(ifindex: u32) {
     IFACE_TABLE.end_admin(ifindex)
 }
 
-/// Mark DHCP management on the kernel table.
-///
-/// Reported because it moves `IFF_SLOP_DHCP`, which is how a UI tells an
-/// address a client is maintaining from one somebody typed in.
+/// Mark DHCP management on the kernel table. Reported because it moves
+/// `IFF_SLOP_DHCP`.
 pub fn set_dhcp_managed(ifindex: u32, managed: bool) -> Result<(), IfaceError> {
     IFACE_TABLE.set_dhcp_managed(ifindex, managed)?;
     post_iface_attr_changed(ifindex);
@@ -1193,9 +1083,7 @@ pub fn iface_for_local(ip: Ipv4Addr) -> Option<Iface> {
 /// Pick the source address for a packet destined to `dst`.
 ///
 /// Route first, per RFC 1122 §3.3.4.2: the address to use is the one on the
-/// interface the route chose. The fallback is [`first_ipv4`], which skips
-/// loopback — loopback registers before the NIC, so taking simply the first
-/// address we hold would put `127.0.0.1` in outbound SYNs.
+/// interface the route chose. Falls back to [`first_ipv4`].
 pub fn source_ip_for(dst: Ipv4Addr) -> Option<Ipv4Addr> {
     if let Some((dev, _next_hop)) = crate::route::ROUTE_TABLE.lookup(dst)
         && let Some(ip) = our_ip(dev)

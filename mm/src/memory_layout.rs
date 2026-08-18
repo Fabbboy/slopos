@@ -9,12 +9,11 @@ static KERNEL_IMAGE_START: AtomicU64 = AtomicU64::new(0);
 static KERNEL_IMAGE_END: AtomicU64 = AtomicU64::new(0);
 static BOUNDS_INIT: InitFlag = InitFlag::new();
 
-/// Resolve linker-provided `_kernel_start` / `_kernel_end` symbols and cache
-/// their raw addresses.  Idempotent — only the first call has an effect.
+/// Resolve linker-provided `_kernel_start` / `_kernel_end` and cache their
+/// addresses. Idempotent — only the first call has an effect.
 ///
-/// The stored values are linker symbol addresses and may be virtual (e.g.
-/// higher-half) depending on the link script.  Callers that need true physical
-/// addresses must translate via `virt_to_phys_kernel()` or equivalent.
+/// The cached values are linker symbol addresses and may be virtual; callers
+/// needing physical addresses must translate via `virt_to_phys_kernel()`.
 pub fn init_kernel_bounds() {
     if !BOUNDS_INIT.init_once() {
         return;

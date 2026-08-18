@@ -7,25 +7,18 @@ use slopos_abi::syscall::TtyIndex;
 
 use crate::tty;
 
-// ---------------------------------------------------------------------------
-// TtyHandle — type-safe handle for TTY kernel objects
-// ---------------------------------------------------------------------------
-
-/// Lightweight newtype wrapping a TTY index for type-safe passage through
-/// the `FileOps` `handle: usize` boundary. Liveness is not its concern:
-/// every TTY fd owns a `KArc<TtyBacking>` that pins the slot behind this
-/// index for the open file's whole lifetime.
+/// Wraps a TTY index for passage through the `FileOps` `handle: usize`
+/// boundary. Liveness is not its concern: every TTY fd owns a
+/// `KArc<TtyBacking>` that pins the slot for the open file's whole lifetime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct TtyHandle(u8);
 
 impl TtyHandle {
-    /// Convert to usize for storage in OpenFileEntry.handle.
     pub fn as_usize(self) -> usize {
         self.0 as usize
     }
 
-    /// Reconstruct from usize stored in OpenFileEntry.handle.
     /// Returns `None` if the value exceeds `u8::MAX`.
     pub fn from_usize(v: usize) -> Option<Self> {
         if v > u8::MAX as usize {
@@ -35,7 +28,6 @@ impl TtyHandle {
         }
     }
 
-    /// Return the underlying [`TtyIndex`].
     pub fn index(self) -> TtyIndex {
         TtyIndex(self.0)
     }
@@ -58,9 +50,8 @@ impl FileOps for TtyFileOps {
             return 0;
         }
         let nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
-        // Sized to the request, capped at the staging bound: a line editor
-        // reading keystrokes one byte at a time must not cost a 4 KiB kernel
-        // allocation per byte.
+        // Sized to the request, capped at the staging bound: a one-byte
+        // keystroke read must not cost a 4 KiB allocation.
         let mut tmp = match slopos_ostd::KVec::<u8>::zeroed(buf.len().min(IO_STAGING_SIZE)) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
@@ -68,13 +59,11 @@ impl FileOps for TtyFileOps {
         let read_len = buf.len().min(tmp.len());
         match tty::read(th.index(), &mut tmp[..read_len], nonblock) {
             Ok(n) => {
-                // Clamp defensively — tty::read structurally cannot exceed
-                // read_len, but a kernel panic is never acceptable.
+                // tty::read structurally cannot exceed read_len; the clamp
+                // guards a panic.
                 let n = n.min(read_len);
-                // Linux TTY model: ldisc.read() is destructive (peek+pop).
-                // If copy_to_user faults afterwards, the keystrokes are lost.
-                // This matches Linux drivers/tty/n_tty.c behaviour — a process
-                // that passes a bogus buffer to read(2) loses the data.
+                // The ldisc read is destructive, so a faulting copy-out loses
+                // the keystrokes — as documented for the Linux TTY model.
                 match buf.copy_in(0, &tmp[..n]) {
                     Ok(written) => written as isize,
                     Err(e) => e.as_isize(),
@@ -132,7 +121,7 @@ impl FileOps for TtyFileOps {
     }
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
-        // Register FIRST, then check readiness (Linux pattern).
+        // Register FIRST, then check readiness.
         let registered = self.poll_wait(handle);
         let revents = self.poll_events(handle, events);
         slopos_abi::file_ops::FusedPollResult {

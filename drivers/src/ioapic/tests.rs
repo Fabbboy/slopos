@@ -1,4 +1,4 @@
-//! IOAPIC/APIC tests - targeting untested initialization and routing edge cases.
+//! IOAPIC/APIC initialization and routing tests.
 
 use super::regs::*;
 use slopos_ostd::klog_info;

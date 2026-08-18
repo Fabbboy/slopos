@@ -1,5 +1,4 @@
-// Test modules for mm.
-// The parent lib.rs gates this entire module behind #[cfg(feature = "test-hooks")].
+// lib.rs gates this entire module behind #[cfg(feature = "test-hooks")].
 
 pub mod kernel_mapping_tests;
 pub mod mmio_tests;

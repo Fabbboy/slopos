@@ -1,14 +1,11 @@
 //! HPET (High Precision Event Timer) driver.
 //!
-//! Primary monotonic time source for SlopOS.  Provides LAPIC timer
-//! calibration reference and nanosecond-precision polled delays.
+//! Primary monotonic time source and LAPIC-timer calibration reference. HPET is
+//! mandatory: the kernel panics at boot if the ACPI HPET table is missing or the
+//! hardware is unavailable.
 //!
-//! HPET is mandatory; the kernel panics at boot if
-//! the ACPI HPET table is missing or the hardware is unavailable.
-//!
-//! Init after IOAPIC setup.  The main counter is safe to read from any
-//! CPU without synchronization.  Init is guarded by [`InitFlag`] +
-//! [`StateFlag`] for SMP safety.
+//! Init runs after IOAPIC setup. The main counter is safe to read from any CPU
+//! without synchronization.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -21,15 +18,14 @@ use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_ostd::sync::{InitFlag, OnceLock, StateFlag};
 use slopos_ostd::{klog_debug, klog_info};
 
-/// General Capabilities and ID (64-bit RO).
-/// [63:32] CLK_PERIOD (fs), [15] LEG_RT_CAP, [13] COUNT_SIZE_CAP,
+/// 64-bit RO. [63:32] CLK_PERIOD (fs), [15] LEG_RT_CAP, [13] COUNT_SIZE_CAP,
 /// [12:8] NUM_TIM_CAP (timers-1), [7:0] REV_ID.
 const REG_GENERAL_CAP: usize = 0x000;
 
-/// General Configuration (64-bit RW). [1] LEG_RT_CNF, [0] ENABLE_CNF.
+/// 64-bit RW. [1] LEG_RT_CNF, [0] ENABLE_CNF.
 const REG_GENERAL_CONFIG: usize = 0x010;
 
-/// Main Counter Value (64-bit RW). Monotonic; writes require counter halted.
+/// 64-bit RW. Monotonic; writes require the counter halted.
 const REG_MAIN_COUNTER: usize = 0x0F0;
 
 const CONFIG_ENABLE: u64 = 1 << 0;
@@ -47,15 +43,11 @@ static HPET_INIT_IN_PROGRESS: StateFlag = StateFlag::new();
 /// Tick period in femtoseconds — cached for lock-free conversion.
 static PERIOD_FS: AtomicU32 = AtomicU32::new(0);
 
-/// MMIO region — cached for hot-path counter reads.  Wrapped in
-/// [`OnceLock`] so the `read_counter` lookup is lock-free after a
-/// single `Acquire` load.
+/// [`OnceLock`] so the `read_counter` lookup stays lock-free after a single
+/// `Acquire` load.
 static MMIO_REGION: OnceLock<MmioRegion> = OnceLock::new();
 
-/// Initialize the HPET from ACPI tables.
-///
-/// Returns `0` on success, `-1` on failure.  The boot sequence treats
-/// failure as fatal (panics) since HPET is mandatory.
+/// Returns `0` on success, `-1` on failure.
 pub fn init() -> i32 {
     if HPET_READY.is_set() {
         return 0;
@@ -74,7 +66,7 @@ pub fn init() -> i32 {
     result
 }
 
-/// Read the HPET main counter (64-bit monotonic). Returns `0` if not init'd.
+/// Returns `0` if the HPET is not initialised.
 #[inline]
 pub fn read_counter() -> u64 {
     match MMIO_REGION.get() {
@@ -83,8 +75,6 @@ pub fn read_counter() -> u64 {
     }
 }
 
-/// Convert ticks to nanoseconds: `ns = ticks × period_fs / 1_000_000`.
-/// Uses u128 to avoid overflow on large tick counts.
 #[inline]
 pub fn nanoseconds(ticks: u64) -> u64 {
     let period = PERIOD_FS.load(Ordering::Relaxed) as u64;
@@ -94,7 +84,6 @@ pub fn nanoseconds(ticks: u64) -> u64 {
     ((ticks as u128 * period as u128) / 1_000_000) as u64
 }
 
-/// Spin-wait for the specified nanoseconds.
 pub fn delay_ns(ns: u64) {
     let period = PERIOD_FS.load(Ordering::Relaxed) as u64;
     if period == 0 {
@@ -107,7 +96,6 @@ pub fn delay_ns(ns: u64) {
     }
 }
 
-/// Spin-wait for the specified milliseconds.
 #[inline]
 pub fn delay_ms(ms: u32) {
     delay_ns(ms as u64 * 1_000_000);
@@ -118,20 +106,19 @@ pub fn is_available() -> bool {
     HPET_READY.is_set()
 }
 
-/// Counter tick period in femtoseconds, or `0` if unavailable.
+/// `0` if the HPET is unavailable.
 #[inline]
 pub fn period_femtoseconds() -> u32 {
     PERIOD_FS.load(Ordering::Relaxed)
 }
 
-/// Return the HPET tick period in femtoseconds (0 if not initialized).
+// TODO(tech-debt): identical to `period_femtoseconds` — collapse to one name.
 #[inline]
 pub fn period_fs() -> u32 {
     PERIOD_FS.load(Ordering::Relaxed)
 }
 
-/// Convert milliseconds to HPET counter ticks. Returns `None` if HPET
-/// is unavailable (period_fs == 0).
+/// `None` when the HPET is unavailable.
 #[inline]
 pub fn ms_to_ticks(ms: u32) -> Option<u64> {
     let period = period_fs() as u128;
@@ -184,7 +171,6 @@ fn init_inner() -> i32 {
         return -1;
     }
 
-    // Halt counter → disable legacy routing → reset → enable.
     let mut config: u64 = mmio.read::<u64>(REG_GENERAL_CONFIG);
     config &= !CONFIG_ENABLE;
     config &= !CONFIG_LEGACY_REPLACE;

@@ -1,12 +1,8 @@
-//! Split from test_ldisc.rs: test_ldisc_utf8.rs
+//! Line-discipline tests for IUTF8 editing: character width, multi-byte erase,
+//! word erase and column tracking.
 
 use super::fixtures::*;
 
-// ===========================================================================
-// UTF-8 Aware Editing (IUTF8)
-// ===========================================================================
-
-/// utf8_char_width: ASCII = 1, CJK = 2, emoji = 2.
 pub fn test_utf8_char_width() -> TestResult {
     use crate::tty::ldisc::utf8_char_width;
     if utf8_char_width(b'A' as u32) != 1 {

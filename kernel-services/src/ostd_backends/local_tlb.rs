@@ -1,5 +1,3 @@
-//! `LocalTlbFlush` impl that delegates to the karch `invlpg` helper.
-
 use slopos_abi::addr::VirtAddr;
 use slopos_ostd::mm::tlb::LocalTlbFlush;
 

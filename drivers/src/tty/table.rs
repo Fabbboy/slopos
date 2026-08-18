@@ -1,33 +1,11 @@
 //! Global TTY table — the central registry of all terminal instances.
 //!
-//! # Lock Architecture
-//!
-//! Each TTY slot has its own `SpinLock`, enabling fully independent
-//! operations on different TTYs.  There is no global table lock — each slot
-//! in `TTY_SLOTS` is independently locked, so a 1 KB serial write on TTY 0
-//! never blocks TTY 1.
-//!
-//! ## Lock Ordering Rules
-//!
-//! 1. **`TTY_SLOTS[i]`** (per-TTY) — held for ldisc/session/termios
-//!    operations.  **Never hold two per-TTY locks simultaneously.**
-//!    Functions that iterate all slots (like `detach_session_by_id`) acquire
-//!    and release each lock in turn.
-//! 2. **Output** goes through `super::output`, whose `TTY_WRITE_LOCKS[i]` is
-//!    strictly **outside** every `TTY_SLOTS[j]` — a driver write for a PTY
-//!    end delivers into the peer's slot.  A slot guard is therefore never
-//!    live across an emission: every output path copies the `DriverId` out
-//!    from under the slot lock, drops it, and only then emits.
-//! 3. **Blocking waits** go through the kernel event bus
-//!    (`KernelEvent::TtyInput` / `KernelEvent::TtyOutput`) — never hold a
-//!    per-TTY slot lock across a blocking wait.  The `wait_event` condition
-//!    closure may transiently acquire the same per-TTY lock (this is safe
-//!    because `wait_event` releases its internal lock before calling the
-//!    closure).
-//!
-//! Blocking and wakeups are keyed by TTY slot through the event bus, so a
-//! sleeper never holds the slot lock while a waker holds the wait-queue
-//! lock (the condition closure locks the slot internally to check for data).
+//! Locking: each slot in [`TTY_SLOTS`] is independently locked; there is no
+//! global table lock, and two per-TTY locks are never held at once.
+//! `super::output`'s `TTY_WRITE_LOCKS[i]` is strictly **outside** every
+//! `TTY_SLOTS[j]`, so every output path copies the `DriverId` out from under the
+//! slot lock, drops it, and only then emits. Blocking waits go through the
+//! kernel event bus; a slot lock is never held across one.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use slopos_ostd::lock_class;
@@ -44,8 +22,7 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{AllocError, PinBox};
 use slopos_ostd::{AtomicBitmap, words_for};
 
-/// The input-side event for a TTY slot (cooked input or a poll-relevant
-/// status change became readable).
+/// Input-side event for a TTY slot: cooked input or a readable status change.
 #[inline]
 pub(crate) fn tty_input_event(slot: usize) -> KernelEvent {
     KernelEvent::TtyInput {
@@ -53,8 +30,8 @@ pub(crate) fn tty_input_event(slot: usize) -> KernelEvent {
     }
 }
 
-/// The output-side event for a TTY slot (flow control resumed, or a
-/// poll-relevant status change became writable).
+/// Output-side event for a TTY slot: flow control resumed, or a writable
+/// status change.
 #[inline]
 pub(crate) fn tty_output_event(slot: usize) -> KernelEvent {
     KernelEvent::TtyOutput {
@@ -62,36 +39,24 @@ pub(crate) fn tty_output_event(slot: usize) -> KernelEvent {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Per-TTY slots
-// ---------------------------------------------------------------------------
-
-/// Lockdep class of every [`TTY_SLOTS`] instance.  Named so its ordering can
-/// be declared at init rather than discovered from whichever direction happens
-/// to execute first.
+/// Lockdep class of every [`TTY_SLOTS`] instance. Named so its ordering can be
+/// declared at init rather than discovered from whichever direction runs first.
 pub(crate) const TTY_SLOTS_CLASS: &slopos_ostd::sync::LockClassKey =
     lock_class!("TTY_SLOTS", LOCK_LEVEL_RESOURCE);
 
-/// Per-TTY locked slots.  Each element is independently locked, so operations
-/// on TTY 0 never contend with TTY 1–7.  Slot 0 is the serial console (COM1)
-/// and slot 1 the virtual console; the rest are PTY ends.
+/// Per-TTY locked slots. Slot 0 is the serial console (COM1) and slot 1 the
+/// virtual console; the rest are PTY ends.
 pub static TTY_SLOTS: [SpinLock<Option<PinBox<Tty>>>; MAX_TTYS] =
     [const { SpinLock::new(None, TTY_SLOTS_CLASS) }; MAX_TTYS];
 
-/// Per-TTY output-in-flight **byte** counter.  Tracks the number of
-/// bytes that have been processed through the line discipline but have
-/// not yet completed the unlocked hardware write.  Used by
-/// `wait_output_idle()` to block `TCSETSW` / `TCSETSF` until all
-/// in-flight output reaches the hardware, and by `TIOCOUTQ` to report
-/// accurate queue depth.
-///
-/// Maintained by `output::InflightGuard`, which wraps every emission.
+/// Per-TTY output-in-flight **byte** counter: bytes through the line discipline
+/// but not yet through the unlocked hardware write. Read by `wait_output_idle()`
+/// (`TCSETSW`/`TCSETSF`) and `TIOCOUTQ`; maintained by `output::InflightGuard`.
 pub static TTY_OUTPUT_INFLIGHT: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(0) }; MAX_TTYS];
 
-/// Per-slot weak handle to the live [`TtyBacking`] — the open-by-index
-/// registry (`/dev/pts/N`, `/dev/tty`, bootstrap console fds). Weak by
-/// design: the registry must never keep a TTY open, and an upgrade that
-/// fails means the backing (and with it the slot's lifetime) is gone.
+/// Per-slot weak handle to the live [`TtyBacking`] — the open-by-index registry
+/// (`/dev/pts/N`, `/dev/tty`, bootstrap console fds). Weak by design: the
+/// registry must never keep a TTY open.
 ///
 /// Lock ordering: `TTY_BACKINGS[i]` → `TTY_SLOTS[j]` (never the reverse).
 pub(crate) static TTY_BACKINGS: [SpinLock<KWeak<TtyBacking>>; MAX_TTYS] = [const {
@@ -111,10 +76,9 @@ pub(crate) static TTY_SLAVE_OPENS: [SpinLock<KWeak<super::backing::TtySlaveOpen>
 };
     MAX_TTYS];
 
-/// Free a PTY slot after its backing dropped: take the `Tty` out, run its
-/// drop (ldisc flush + session detach) outside the lock, clear the
-/// registry entry, and only then mark the slot reusable — an allocator
-/// that wins the bit sees a fully-empty slot.
+/// Free a PTY slot after its backing dropped. The `Tty` drop runs outside the
+/// lock and the slot is marked reusable last, so an allocator that wins the bit
+/// sees a fully-empty slot.
 pub(crate) fn free_slot(idx: TtyIndex) {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -128,39 +92,25 @@ pub(crate) fn free_slot(idx: TtyIndex) {
 }
 
 /// Allocation bitmap — bit N is set when slot N contains a live `Tty`.
-///
-/// Enables O(1) free-slot search via `trailing_zeros()` on the inverted
-/// bitmap, and O(popcount) idle-callback iteration via `trailing_zeros()`
-/// on the bitmap itself.  Bits 0–1 are always set after init (serial +
-/// vconsole).  Updated atomically alongside `TTY_SLOTS` mutations.
+/// Bits 0–1 are always set after init (serial + vconsole).
 pub(crate) static TTY_ALLOC_BITMAP: AtomicBitmap<{ words_for(MAX_TTYS) }> = AtomicBitmap::new();
 
-// ---------------------------------------------------------------------------
-// Initialisation
-// ---------------------------------------------------------------------------
-
-/// Initialise the TTY table.  Runs once, during early boot, after the serial
-/// port is ready; later calls return without touching the table.
+/// Initialise the TTY table: TTY 0 → `SerialConsoleDriver` (COM1), TTY 1 →
+/// `VConsoleDriver`. Runs once, during early boot, after the serial port is
+/// ready; later calls return without touching the table.
 ///
-/// Allocates:
-/// - TTY 0  → SerialConsoleDriver (COM1)
-/// - TTY 1  → VConsoleDriver (PS/2 + framebuffer)
-///
-/// The once-only guard is load-bearing rather than a convenience for repeat
-/// callers. The body drops every live `Tty` and clears the whole allocation
-/// bitmap while every idle CPU is sweeping those same slots through
-/// `input_available_cb`, and while a drainer may hold a slot's echo claim.
-/// There is no point after boot at which that is safe, so there is no second
-/// time it runs.
+/// The once-only guard is load-bearing: the body drops every live `Tty` and
+/// clears the whole allocation bitmap while every idle CPU is sweeping those
+/// same slots through `input_available_cb`, and there is no point after boot at
+/// which that is safe.
 pub fn tty_table_init() {
     static INITIALISED: AtomicBool = AtomicBool::new(false);
     if INITIALISED.swap(true, Ordering::AcqRel) {
         return;
     }
 
-    // Before the first TTY lock, so a driver write reached with a slot guard
-    // live is a finding on any boot — not only on one that happened to
-    // exercise the legal direction first.
+    // Before the first TTY lock, so a driver write with a slot guard live is a
+    // finding on any boot, not only one that took the legal direction first.
     if let Err(err) =
         slopos_ostd::sync::declare_order(super::output::TTY_WRITE_CLASS, TTY_SLOTS_CLASS)
     {
@@ -196,14 +146,8 @@ pub fn tty_table_init() {
     TTY_ALLOC_BITMAP.set(1);
 }
 
-// ---------------------------------------------------------------------------
-// Lookup helpers
-// ---------------------------------------------------------------------------
-
-/// Execute a closure with a mutable reference to the `Tty` at `idx`, if it
-/// exists.  Returns `None` if the slot is empty or index is out of range.
-///
-/// The per-TTY lock is held for the duration of the closure.
+/// Run `f` with the `Tty` at `idx`, holding its per-TTY lock for the duration.
+/// `None` if the slot is empty or the index is out of range.
 pub fn with_tty<F, R>(idx: TtyIndex, f: F) -> Option<R>
 where
     F: FnOnce(&mut Tty) -> R,
@@ -216,7 +160,6 @@ where
     guard.as_deref_mut().map(f)
 }
 
-/// Execute a closure with an immutable reference to the `Tty` at `idx`.
 pub fn with_tty_ref<F, R>(idx: TtyIndex, f: F) -> Option<R>
 where
     F: FnOnce(&Tty) -> R,
@@ -230,12 +173,8 @@ where
 }
 
 impl Tty {
-    /// Create a new TTY with the given index and driver backend.
-    ///
-    /// Allocates the TTY on the heap through `slopos-ostd::PinBox` so
-    /// the struct never materialises on a caller's stack.  The
-    /// line-discipline allocation is the dominant cost (~12 KiB for
-    /// `LineDisc`); that routes through `LineDisc::new_pinned`.
+    /// Heap-allocated through `PinBox` so the struct never materialises on a
+    /// caller's stack; `LineDisc` (~12 KiB) dominates the allocation.
     pub fn new(index: TtyIndex, driver: TtyDriverKind) -> Result<PinBox<Self>, AllocError> {
         let ldisc = LdiscKind::NTty(LineDisc::new_pinned()?);
         PinBox::try_new(Self {
@@ -320,19 +259,16 @@ pub fn find_free_slot_excluding(excluded: usize) -> Option<usize> {
     if slot >= MAX_TTYS { None } else { Some(slot) }
 }
 
-/// Mark a slot as allocated in the bitmap.
 #[inline]
 pub(crate) fn mark_slot_allocated(slot: usize) {
     TTY_ALLOC_BITMAP.set(slot);
 }
 
-/// Mark a slot as free in the bitmap.
 #[inline]
 pub(crate) fn mark_slot_free(slot: usize) {
     TTY_ALLOC_BITMAP.clear(slot);
 }
 
-/// Returns the current allocation bitmap for iteration.
 #[inline]
 pub(crate) fn active_slots_bitmap() -> usize {
     TTY_ALLOC_BITMAP.load_word(0)

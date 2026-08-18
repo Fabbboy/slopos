@@ -1,12 +1,6 @@
-//! VirtIO completion primitive regression tests.
-//!
-//! Tests cover the completion model:
-//! - `IrqEdgeEvent`: scheduler-backed edge event signalled from IRQ context
-//! - `Mutex`: the sleeping mutex serializing logical block requests
-//! - Virtqueue descriptor free-list invariants
-//! - HPET `period_fs()` accessor used for deadline computation
-//! - Integration tests through live virtio-blk after probe (per-request
-//!   slot tracking, IRQ-side used-ring harvest, multi-sector batching)
+//! VirtIO completion primitive regression tests: `IrqEdgeEvent`, the sleeping
+//! `Mutex`, virtqueue descriptor free-list invariants, HPET `period_fs()`, and
+//! live virtio-blk I/O after probe.
 
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
@@ -27,10 +21,6 @@ use crate::virtio_blk::BlkClaimError;
 /// test harness. Destructive block tests target THIS index, never disk0 (the
 /// live root-fs image).
 const SCRATCH: BlockDeviceIndex = BlockDeviceIndex(1);
-
-// =============================================================================
-// 1. IrqEdgeEvent unit tests (pure logic — no hardware)
-// =============================================================================
 
 pub fn test_edge_event_new_not_signaled() -> TestResult {
     let ev = IrqEdgeEvent::new();
@@ -138,10 +128,6 @@ pub fn test_edge_event_wait_timeout() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 2. Sleeping-Mutex unit tests (serializes logical blk requests)
-// =============================================================================
-
 pub fn test_sleep_mutex_lock_unlock() -> TestResult {
     let m = Mutex::new(7u32, lock_class!("test.virtio_mutex1", LOCK_LEVEL_RESOURCE));
     {
@@ -183,7 +169,6 @@ pub fn test_sleep_mutex_relock_after_try() -> TestResult {
         };
         *g = 2;
     }
-    // A blocking lock after a try_lock release must observe the write.
     let Ok(g) = m.lock() else {
         return fail!("uncontended lock must succeed");
     };
@@ -191,20 +176,13 @@ pub fn test_sleep_mutex_relock_after_try() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 2b. Virtqueue descriptor free-list invariants
-// =============================================================================
-
 pub fn test_virtqueue_unready_alloc_none() -> TestResult {
-    // A queue that was never set up has zero descriptors: the free-list
-    // allocator must refuse rather than hand out a bogus index.
     let mut q = Virtqueue::new();
     assert_eq_test!(q.free_count(), 0, "fresh queue advertises no descriptors");
     assert_test!(
         q.alloc_desc().is_none(),
         "alloc_desc on an unready queue must return None"
     );
-    // free_desc of an out-of-range index must be ignored, not corrupt state.
     q.free_desc(3);
     assert_eq_test!(
         q.free_count(),
@@ -213,10 +191,6 @@ pub fn test_virtqueue_unready_alloc_none() -> TestResult {
     );
     pass!()
 }
-
-// =============================================================================
-// 3. HPET period_fs() accessor
-// =============================================================================
 
 pub fn test_hpet_period_fs_nonzero() -> TestResult {
     assert_test!(hpet::is_available(), "HPET must be available for this test");
@@ -238,10 +212,6 @@ pub fn test_hpet_period_fs_matches_full_name() -> TestResult {
     );
     pass!()
 }
-
-// =============================================================================
-// 4. Integration: interrupt-driven I/O (slot-tracked, IRQ-harvested path)
-// =============================================================================
 
 pub fn test_virtio_blk_read_interrupt_driven() -> TestResult {
     // Reads target disk0 (the root-fs image), which carries the ext2 superblock.
@@ -274,12 +244,10 @@ pub fn test_virtio_blk_consecutive_reads() -> TestResult {
 }
 
 pub fn test_virtio_blk_write_readback_interrupt_driven() -> TestResult {
-    // Destructive round-trip against the DISPOSABLE scratch device (disk1),
-    // never the live root-fs image (disk0). The scratch disk is attached only
-    // for the test harness and recreated blank each run, and we acquire an
-    // EXCLUSIVE write capability for it — so this test cannot corrupt an
-    // on-disk binary (the nightly-2026-05-25 io_capture incident) nor race
-    // the filesystem. No save/restore is needed: the device is throwaway.
+    // Destructive round-trip against the disposable scratch device (disk1),
+    // never the live root-fs image (disk0): the scratch disk is recreated blank
+    // each run and the write capability is exclusive, so no save/restore is
+    // needed.
     let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
         return fail!("scratch block device (disk1) not present");
     };
@@ -326,11 +294,10 @@ pub fn test_virtio_blk_multisector_write_readback() -> TestResult {
         Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
     };
 
-    // 3 sectors, distinct per-byte pattern, at a sector-aligned offset far
-    // from the single-sector test's region (sector 8192) and inside the
-    // 8 MiB (16384-sector) scratch image.
-    // 3772 bytes of buffers in one frame would step past the 4 KiB guard page,
-    // which `stack-probes: none` gives no chance to catch.
+    // Sector-aligned offset clear of the single-sector test's region and
+    // inside the 8 MiB scratch image.
+    // Heap buffers: 3772 bytes in one frame would step past the 4 KiB guard
+    // page, which `stack-probes: none` gives no chance to catch.
     const SPAN: usize = 3 * 512;
     let offset = 2048u64 * 512;
     let mut pattern = assert_ok!(KVec::<u8>::zeroed(SPAN), "pattern buffer");
@@ -368,7 +335,7 @@ pub fn test_virtio_blk_multisector_write_readback() -> TestResult {
 }
 
 /// The durability barrier must complete promptly through the scheduler-backed
-/// wait (a hung flush was the exact failure that used to freeze the system).
+/// wait.
 pub fn test_virtio_blk_flush_completes() -> TestResult {
     let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
         return fail!("scratch block device (disk1) not present");
@@ -378,8 +345,7 @@ pub fn test_virtio_blk_flush_completes() -> TestResult {
         Err(e) => return fail!("open_writer(scratch) failed: {:?}", e),
     };
 
-    // Sector 4000 — inside the 8 MiB scratch image, disjoint from the
-    // other write tests' regions.
+    // Sector 4000: inside the scratch image, disjoint from the other tests.
     let pattern = [0xA5u8; 512];
     assert_test!(
         token.write_at(4000 * 512, &pattern).is_ok(),
@@ -393,9 +359,7 @@ pub fn test_virtio_blk_flush_completes() -> TestResult {
 }
 
 /// The exclusive-write capability FSM: a device admits at most one live
-/// [`BlockWriteToken`]; dropping it releases the claim. This is the invariant
-/// that makes "two writers to the same device" — the root of the io_capture
-/// corruption — structurally impossible (cf. Linux `bd_writers`).
+/// [`BlockWriteToken`]; dropping it releases the claim.
 pub fn test_block_device_exclusive_write_claim() -> TestResult {
     let Some(handle) = virtio_blk::blk_device_by_index(SCRATCH) else {
         return fail!("scratch block device (disk1) not present");
@@ -406,7 +370,6 @@ pub fn test_block_device_exclusive_write_claim() -> TestResult {
         Err(e) => return fail!("first open_writer should succeed: {:?}", e),
     };
 
-    // A second claim while the first token is live is rejected.
     assert_test!(
         matches!(
             virtio_blk::open_writer(handle),
@@ -415,7 +378,6 @@ pub fn test_block_device_exclusive_write_claim() -> TestResult {
         "second open_writer must return AlreadyClaimed while a token is live"
     );
 
-    // Dropping the token releases the claim; it can be re-acquired.
     drop(token);
     assert_test!(
         virtio_blk::open_writer(handle).is_ok(),
@@ -445,11 +407,6 @@ pub fn test_block_device_lookup_bounds() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Suite registration
-// =============================================================================
-
-// IrqEdgeEvent unit tests
 slopos_testing::stest!(
     name = test_edge_event_new_not_signaled,
     suite = virtio_completion
@@ -482,7 +439,6 @@ slopos_testing::stest!(
     name = test_edge_event_wait_timeout,
     suite = virtio_completion
 );
-// Sleeping-mutex unit tests
 slopos_testing::stest!(
     name = test_sleep_mutex_lock_unlock,
     suite = virtio_completion
@@ -495,12 +451,10 @@ slopos_testing::stest!(
     name = test_sleep_mutex_relock_after_try,
     suite = virtio_completion
 );
-// Virtqueue descriptor free-list
 slopos_testing::stest!(
     name = test_virtqueue_unready_alloc_none,
     suite = virtio_completion
 );
-// HPET accessor
 slopos_testing::stest!(
     name = test_hpet_period_fs_nonzero,
     suite = virtio_completion
@@ -509,7 +463,6 @@ slopos_testing::stest!(
     name = test_hpet_period_fs_matches_full_name,
     suite = virtio_completion
 );
-// Integration: IRQ-driven, slot-tracked I/O
 slopos_testing::stest!(
     name = test_virtio_blk_read_interrupt_driven,
     suite = virtio_completion

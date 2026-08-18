@@ -37,8 +37,7 @@ impl GlyphAtlas {
         let cell_h = (ascender - descender + line_gap / 2) as u16;
 
         // Deliberately ASCII-only: extending the glyph set must not move the
-        // cell geometry the terminal grid is sized from. Wider extended glyphs
-        // are centered and clipped into the same cell.
+        // cell geometry the terminal grid is sized from; wider glyphs are clipped.
         let mut max_advance: u16 = 0;
         for cp in ASCII_FIRST..=ASCII_LAST {
             if let Some(gid) = renderer.font.glyph_index(cp) {
@@ -523,13 +522,12 @@ mod global_atlas {
     use slopos_ostd::KBox;
     use slopos_ostd::sync::{RcuCell, RcuCellGuard};
 
-    /// RCU-protected borrow of the global glyph atlas.
     pub type AtlasGuard = RcuCellGuard<GlyphAtlas>;
 
     static GLOBAL_ATLAS: RcuCell<GlyphAtlas> = RcuCell::empty();
 
-    /// Monotonic counter bumped by every `replace_global`; compared instead of
-    /// pointer identity, which a recycled heap address would make ABA-unsafe.
+    /// Bumped by every `replace_global`; compared instead of pointer identity,
+    /// which a recycled heap address would make ABA-unsafe.
     static ATLAS_GENERATION: AtomicU64 = AtomicU64::new(0);
 
     static FONT_CHANGE_CALLBACK: slopos_ostd::sync::SpinLock<Option<fn()>> =
@@ -606,8 +604,8 @@ mod global_atlas {
         true
     }
 
-    /// Acquire the global glyph atlas. The RCU read-side critical section lasts
-    /// exactly as long as the returned guard, so drop it promptly.
+    /// The RCU read-side critical section lasts exactly as long as the
+    /// returned guard, so drop it promptly.
     pub fn global() -> Option<AtlasGuard> {
         GLOBAL_ATLAS.load()
     }
@@ -713,7 +711,6 @@ mod tests {
             let cp = slot_codepoint(slot).expect("every slot names a codepoint");
             assert_eq!(glyph_slot(cp), Some(slot));
         }
-        // Outside the set: controls, C1, and an uncovered codepoint.
         assert_eq!(glyph_slot(0x1F), None);
         assert_eq!(glyph_slot(0x7F), None);
         assert_eq!(glyph_slot(0x9F), None);

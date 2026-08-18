@@ -1,13 +1,5 @@
-//! Out-of-order reassembly tests for the interval-merging [`Assembler`].
-//!
-//! Exercises `Assembler::insert`, `drain_contiguous`, `sack_blocks`, and
-//! `RingBuffer::write_at_offset` + `advance_head` — the full OOO receive
-//! path without going through `tcp_input`.
-//!
-//! Covers: single OOO segment, multiple non-contiguous ranges, overlapping
-//! inserts, adjacent merge, drain contiguous, SACK block generation,
-//! write_at_offset wrap-around, capacity limits, sequence-space wrap,
-//! recv-buffer-full, and a commutativity fuzz.
+//! Out-of-order reassembly tests for the interval-merging [`Assembler`],
+//! driving the OOO receive path without going through `tcp_input`.
 
 use slopos_ostd::KBox;
 use slopos_testing::TestResult;
@@ -15,10 +7,6 @@ use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::tcp::buffer::{TCP_BUFFER_SIZE, TcpRecvState};
 use crate::tcp::reasm::Assembler;
-
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
 
 fn fresh_recv() -> TcpRecvState {
     TcpRecvState::new(TCP_BUFFER_SIZE).expect("alloc")
@@ -28,7 +16,6 @@ fn fresh_asm() -> Assembler {
     Assembler::new()
 }
 
-/// Drain the receive buffer into a `KVec`.
 fn drain_to_vec(recv: &mut TcpRecvState) -> slopos_ostd::KVec<u8> {
     let mut out = slopos_ostd::KVec::<u8>::with_capacity(recv.available()).expect("test alloc");
     let mut buf = [0u8; 512];
@@ -42,12 +29,6 @@ fn drain_to_vec(recv: &mut TcpRecvState) -> slopos_ostd::KVec<u8> {
     out
 }
 
-// -----------------------------------------------------------------------------
-// Single OOO segment
-// -----------------------------------------------------------------------------
-
-/// Write one OOO segment into the ring buffer via write_at_offset, record
-/// the interval in the Assembler, then drain after advancing past the gap.
 pub fn test_reasm_single_ooo_segment() -> TestResult {
     let mut asm = fresh_asm();
     let mut recv = fresh_recv();
@@ -55,64 +36,49 @@ pub fn test_reasm_single_ooo_segment() -> TestResult {
     let rcv_nxt: u32 = 100;
     let seg_seq: u32 = 200;
     let payload = b"hello";
-    let offset = seg_seq.wrapping_sub(rcv_nxt) as usize; // 100
+    let offset = seg_seq.wrapping_sub(rcv_nxt) as usize;
 
     let wrote = recv.buf.write_at_offset(offset, payload);
     assert_eq_test!(wrote, 5, "wrote 5 bytes at offset");
     asm.insert(seg_seq, wrote);
 
-    // Gap not filled yet — drain returns 0.
     assert_eq_test!(asm.drain_contiguous(rcv_nxt), 0, "gap still open");
 
-    // Simulate gap fill: enqueue 100 bytes of in-order data.
     let gap_data = [0xAAu8; 100];
     let gap_wrote = recv.enqueue(&gap_data, 0);
     assert_eq_test!(gap_wrote, 100, "gap fill wrote");
-    let new_rcv_nxt = rcv_nxt.wrapping_add(gap_wrote as u32); // 200
+    let new_rcv_nxt = rcv_nxt.wrapping_add(gap_wrote as u32);
 
-    // Drain: Assembler has [200, 205), starts at new rcv_nxt.
     let drained = asm.drain_contiguous(new_rcv_nxt);
     assert_eq_test!(drained, 5, "drained OOO segment");
     recv.buf.advance_head(drained);
     assert_test!(asm.is_empty(), "assembler empty after drain");
 
-    // Read the full stream: 100 gap bytes + "hello".
     let out = drain_to_vec(&mut recv);
     assert_eq_test!(out.len(), 105, "total bytes");
     assert_eq_test!(&out[100..], b"hello", "OOO payload correct");
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// Multiple non-contiguous ranges
-// -----------------------------------------------------------------------------
-
-/// Two disjoint OOO ranges; filling the first gap delivers only the first
-/// range — the second stays in the assembler.
 pub fn test_reasm_non_contiguous_ranges() -> TestResult {
     let mut asm = fresh_asm();
     let mut recv = fresh_recv();
 
-    // Range A: [100, 103)
     recv.buf.write_at_offset(100, b"aaa");
     asm.insert(100, 3);
-    // Range B: [200, 203)
     recv.buf.write_at_offset(200, b"bbb");
     asm.insert(200, 3);
 
     assert_eq_test!(asm.range_count(), 2, "two disjoint ranges");
 
-    // Fill gap to 100: enqueue 100 bytes.
     recv.enqueue(&[0u8; 100], 0);
     let drained = asm.drain_contiguous(100);
     assert_eq_test!(drained, 3, "drained first range");
     recv.buf.advance_head(drained);
 
-    // Second range still present.
     assert_eq_test!(asm.range_count(), 1, "one range remains");
     assert_test!(!asm.is_empty(), "not empty");
 
-    // Verify bytes: 100 gap + "aaa".
     let out = drain_to_vec(&mut recv);
     assert_eq_test!(out.len(), 103, "103 bytes total");
     assert_eq_test!(&out[100..], b"aaa", "first range payload");

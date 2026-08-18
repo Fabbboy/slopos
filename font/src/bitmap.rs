@@ -51,8 +51,8 @@ pub fn bitmap_to_coverage(
         return None;
     }
 
-    // Sized to the full glyph set but only the ASCII slots are filled: the
-    // bitmap fallback is ASCII-only, so the extended slots stay blank.
+    // Sized to the full glyph set; the bitmap fallback is ASCII-only, so the
+    // extended slots stay blank.
     let stride = cell_w.checked_mul(cell_h)?;
     let coverage_len = GLYPH_COUNT.checked_mul(stride)?;
     let mut coverage = KVec::<u8>::zeroed(coverage_len).ok()?;

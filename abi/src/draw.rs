@@ -37,7 +37,6 @@ impl Color32 {
         self.0 as u8
     }
 
-    /// Get the raw u32 value (0xAARRGGBB).
     #[inline]
     pub const fn to_u32(self) -> u32 {
         self.0

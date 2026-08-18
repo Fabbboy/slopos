@@ -1,11 +1,10 @@
 //! Program-identity privilege grants.
 //!
 //! `task.flags` is the whole of SlopOS's privilege model. The privileged bits
-//! come from a fixed table keyed on the path of the program being loaded,
-//! applied by [`spawn_program_with_attrs`](super::spawn_program_with_attrs)
-//! *after* the syscall boundary has stripped every privileged bit the caller
-//! asked for: that boundary is purely subtractive — it can reject or strip,
-//! never confer.
+//! come from a fixed table keyed on the program's path, applied by
+//! [`spawn_program_with_attrs`](super::spawn_program_with_attrs) *after* the
+//! syscall boundary stripped every privileged bit the caller asked for: that
+//! boundary is purely subtractive — it can reject or strip, never confer.
 //!
 //! `SYSTEM` deliberately appears nowhere below; naming `/sbin/init` here would
 //! let any task re-spawn it and inherit console administration.
@@ -18,16 +17,14 @@ use slopos_abi::task::{
     TASK_FLAG_NET_ADMIN, TASK_FLAG_PROC_ADMIN, TaskPriority,
 };
 
-/// One program's kernel-conferred attributes.
 struct ProgramGrant {
-    /// The exact path the spawn must name, compared byte-for-byte against the
-    /// NUL-trimmed request: a non-canonical spelling fails closed rather than
-    /// making this a parser.
+    /// Compared byte-for-byte against the NUL-trimmed request: a non-canonical
+    /// spelling fails closed rather than making this a parser.
     path: &'static [u8],
-    /// Flags OR-ed into the child's flag word.
+    /// OR-ed into the child's flag word.
     flags: u16,
-    /// A scheduling tier that replaces the caller's request, for a program that
-    /// needs one user space may not ask for.
+    /// Replaces the caller's requested tier, for a program needing one user
+    /// space may not ask for.
     priority: Option<TaskPriority>,
 }
 
@@ -48,14 +45,14 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         priority: None,
     },
     // The one writer of the kernel keyboard layout, a single global table
-    // feeding every TTY and the compositor. Reading it needs nothing.
+    // feeding every TTY and the compositor; reading it needs nothing.
     ProgramGrant {
         path: b"/bin/keymap",
         flags: TASK_FLAG_CONSOLE_ADMIN,
         priority: None,
     },
-    // The sanctioned mutator of the network configuration: every mutating net
-    // syscall is gated on this bit, so the control plane has one grammar.
+    // Every mutating net syscall is gated on this bit, so the control plane
+    // has one grammar.
     ProgramGrant {
         path: b"/bin/ip",
         flags: TASK_FLAG_NET_ADMIN,

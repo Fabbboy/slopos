@@ -4,12 +4,11 @@ use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_ostd::sync::SpinLock;
 use slopos_ostd::sync::lock_tracking::LockClassKey;
 
-const RAMFS_MAX_FILE_SIZE: usize = 16 * 1024 * 1024; // 16 MB per file
+const RAMFS_MAX_FILE_SIZE: usize = 16 * 1024 * 1024;
 use crate::MAX_NAME_LEN;
 /// Soft ceiling on the number of inodes a single ramfs instance may hold. The
-/// inode pool grows on demand (so a real root filesystem is not capped at a
-/// handful of files), but this bound keeps a malformed or hostile initramfs
-/// from exhausting kernel memory. It comfortably exceeds any real root.
+/// pool grows on demand, but the bound keeps a malformed or hostile initramfs
+/// from exhausting kernel memory.
 const RAMFS_MAX_INODES: usize = 4096;
 
 const ROOT_INODE: InodeId = 1;
@@ -147,13 +146,11 @@ impl RamFsInner {
     }
 
     fn alloc_inode(&mut self) -> VfsResult<InodeId> {
-        // Reuse a freed slot if one exists (skip the index-0 sentinel and root).
         for id in (ROOT_INODE as usize + 1)..self.inodes.len() {
             if !self.inodes[id].in_use {
                 return Ok(id as InodeId);
             }
         }
-        // Otherwise grow the pool, bounded by the soft ceiling.
         if self.inodes.len() >= RAMFS_MAX_INODES {
             return Err(VfsError::NoSpace);
         }
@@ -192,10 +189,9 @@ pub struct RamFs {
 }
 
 impl RamFs {
-    /// Inode storage is allocated lazily on first access via
-    /// `ensure_initialized`.
+    /// Inode storage is allocated lazily on first access.
     ///
-    /// The class comes from the caller: a path walk that crosses a mount
+    /// The lock class comes from the caller: a path walk that crosses a mount
     /// point holds one mount's lock while taking another's, and two mounts
     /// sharing a class would make that legal-but-unordered nesting.
     pub const fn new_const(class: &'static LockClassKey) -> Self {
@@ -304,7 +300,6 @@ impl FileSystem for RamFs {
                 return Err(VfsError::NoSpace);
             }
 
-            // Grow the data vector if needed
             if end > ram_inode.data.len() {
                 ram_inode
                     .data

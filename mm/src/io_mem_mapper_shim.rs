@@ -1,16 +1,13 @@
 //! Bridges `slopos_ostd::mm::io_mem::IoMemMapper` to the kernel-virt
 //! MMIO window allocator and the kernel-half mapping path.
 //!
-//! Lives in `slopos-mm` (rather than `slopos-ostd`) so `slopos-ostd`
-//! has no dependency on `slopos-mm`. The boot path registers it with
-//! `slopos_ostd::mm::register_io_mem_mapper` before the init phases
-//! run, so it backs every `MmioRegion::map` in the kernel.
+//! Lives in `slopos-mm` so `slopos-ostd` keeps no dependency on it; the
+//! boot path registers it via `slopos_ostd::mm::register_io_mem_mapper`
+//! before the init phases run.
 //!
-//! Cache-policy mapping mirrors the firmware-default PAT layout
-//! described in [`crate::pat`]: WriteCombining sets PWT=1 (PA1 = WC),
-//! Uncacheable sets PCD=1 (PA4 = UC), WriteThrough also sets PWT=1
-//! against the unmodified PAT default (PA1 = WT), WriteBack leaves
-//! both bits clear (PA0 = WB).
+//! Cache policies index the firmware-default PAT ([`crate::pat`]):
+//! PWT=1 → PA1 (WC, and WT against the unmodified default), PCD=1 →
+//! PA4 (UC), both bits clear → PA0 (WB).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -59,11 +56,9 @@ pub struct LegacyIoMemMapperShim;
 
 pub static LEGACY_IO_MEM_MAPPER_SHIM: LegacyIoMemMapperShim = LegacyIoMemMapperShim;
 
-/// Doubly-indirect handle the OSTD `register_io_mem_mapper` hook
-/// consumes — `&'static &'static dyn IoMemMapper`. `pub` because the
-/// boot caller in `boot::early_init::kernel_main_impl` registers it
-/// inline (the former `register_with_ostd(token)` shim has been
-/// inlined, taking `&BspToken<'_>` from the boot ctx).
+/// Doubly-indirect handle (`&'static &'static dyn IoMemMapper`) the OSTD
+/// `register_io_mem_mapper` hook consumes; `pub` for the inline
+/// registration in `boot::early_init::kernel_main_impl`.
 pub static LEGACY_IO_MEM_MAPPER_DYN: &dyn IoMemMapper = &LEGACY_IO_MEM_MAPPER_SHIM;
 
 impl IoMemMapper for LegacyIoMemMapperShim {
@@ -93,7 +88,7 @@ impl IoMemMapper for LegacyIoMemMapperShim {
     }
 
     fn unmap(&self, _virt: u64, _size: usize) {
-        // Mappings are leaked: the legacy kernel-virt allocator at
-        // `MMIO_NEXT_VIRT` is bump-only and has no recycle path.
+        // TODO(tech-debt): unmap leaks the window — `MMIO_NEXT_VIRT` is
+        // bump-only; needs a kernel-virt allocator with a recycle path.
     }
 }

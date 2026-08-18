@@ -4,7 +4,6 @@ use slopos_ostd::KVec;
 
 use crate::rasterizer::RasterizedGlyph;
 
-/// Maximum number of cached glyph entries.
 const MAX_CACHE_SIZE: usize = 512;
 
 /// Cache key: (codepoint, size_px).
@@ -17,16 +16,12 @@ struct CacheEntry {
 }
 
 /// A fixed-capacity LRU glyph cache.
-///
-/// Stores rasterized glyphs keyed by `(codepoint, size_px)` and evicts the
-/// least-recently-used entry when full.
 pub struct GlyphCache {
     entries: KVec<CacheEntry>,
     access_counter: u64,
 }
 
 impl GlyphCache {
-    /// Create a new empty glyph cache.
     pub fn new() -> Self {
         Self {
             entries: KVec::with_capacity(64).expect("GlyphCache: alloc"),
@@ -34,7 +29,6 @@ impl GlyphCache {
         }
     }
 
-    /// Look up a cached glyph. Returns `None` on cache miss.
     pub fn get(&mut self, codepoint: u32, size_px: u16) -> Option<&RasterizedGlyph> {
         let key = (codepoint, size_px);
         self.access_counter += 1;
@@ -47,7 +41,6 @@ impl GlyphCache {
             }
         }
 
-        // Re-search for the immutable reference
         for entry in self.entries.iter() {
             if entry.key == key {
                 return Some(&entry.glyph);
@@ -62,7 +55,6 @@ impl GlyphCache {
         let key = (codepoint, size_px);
         self.access_counter += 1;
 
-        // Check if already present (replace)
         for entry in self.entries.iter_mut() {
             if entry.key == key {
                 entry.glyph = glyph;
@@ -71,7 +63,6 @@ impl GlyphCache {
             }
         }
 
-        // If at capacity, evict LRU
         if self.entries.len() >= MAX_CACHE_SIZE {
             let mut min_access = u64::MAX;
             let mut min_idx = 0;

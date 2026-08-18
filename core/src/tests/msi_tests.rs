@@ -1,15 +1,8 @@
 //! MSI infrastructure tests.
 //!
-//! MSI vector allocation lives in OSTD (`IrqAllocator::alloc`) and dispatch
-//! goes through `slopos_ostd::irq::dispatch`.
-//!
-//! These tests verify:
-//!   - the OSTD vector allocator on the MSI range (48-223) hands out
-//!     distinct vectors and respects platform reservations
-//!   - `IdtBuilder::install_default_handlers` populated every IDT slot
-//!     with the right gate type, DPL, and selector
-//!   - the SYSCALL_VECTOR (0x80) trap gate has DPL=3 (user-reachable)
-//!   - the legacy IRQ vector range (32-47) has interrupt gates installed
+//! Vector allocation lives in OSTD (`IrqAllocator::alloc`) and dispatch goes
+//! through `slopos_ostd::irq::dispatch`; the IDT half checks the gate type,
+//! DPL and selector `IdtBuilder::install_default_handlers` left behind.
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -45,10 +38,6 @@ fn load_idt_entry(vector: u8) -> Result<IdtEntry, TestResult> {
     Ok(entry)
 }
 
-// ---------------------------------------------------------------------------
-// OSTD-backed MSI vector allocation
-// ---------------------------------------------------------------------------
-
 pub fn test_msi_alloc_returns_valid_range() -> TestResult {
     let line = IrqAllocator::alloc().expect("alloc");
     let v = line.vector();
@@ -65,7 +54,6 @@ pub fn test_msi_alloc_distinct_vectors() -> TestResult {
     for slot in lines.iter_mut() {
         *slot = Some(IrqAllocator::alloc().expect("alloc"));
     }
-    // Verify all distinct.
     for i in 0..4 {
         for j in (i + 1)..4 {
             let vi = lines[i].as_ref().unwrap().vector();
@@ -81,9 +69,8 @@ pub fn test_msi_alloc_drop_returns_to_pool() -> TestResult {
         let line = IrqAllocator::alloc().expect("alloc");
         line.vector()
     };
-    // Drop happened; bit should be free in OSTD's bitmap. We don't
-    // require exact reuse (other tests may interleave) but the basic
-    // drop path must complete without panic.
+    // Exact reuse is not asserted — other tests interleave; the drop path only
+    // has to complete.
     assert_test!(v >= 32, "vector still in range");
     TestResult::Pass
 }
@@ -127,10 +114,6 @@ pub fn test_msi_reserve_specific_out_of_msi_range() -> TestResult {
     );
     TestResult::Pass
 }
-
-// ---------------------------------------------------------------------------
-// OSTD register_callback + dispatch (replaces msi_register_handler tests)
-// ---------------------------------------------------------------------------
 
 static MSI_FIRE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -213,7 +196,6 @@ pub fn test_msi_unregister_via_handle_drop() -> TestResult {
             .expect("register");
         dispatch(v, 0);
     }
-    // Handle dropped; dispatch slot must now be empty.
     dispatch(v, 0);
     assert_test!(
         FIRED.load(Ordering::SeqCst) == 1,
@@ -227,10 +209,6 @@ pub fn test_msi_dispatch_unregistered_vector_noop() -> TestResult {
     dispatch(210, 0);
     TestResult::Pass
 }
-
-// ---------------------------------------------------------------------------
-// IDT verification: install_default_handlers populated every gate
-// ---------------------------------------------------------------------------
 
 pub fn test_msi_idt_entries_present() -> TestResult {
     for &v in &MSI_SAMPLE_VECTORS {
@@ -365,8 +343,7 @@ pub fn test_legacy_irq_vectors_intact() -> TestResult {
 }
 
 pub fn test_exception_vectors_intact() -> TestResult {
-    // Vectors 0..=19 (minus 9, 15 reserved) must all have handlers
-    // installed by install_default_handlers.
+    // Vectors 9 and 15 are reserved.
     for v in 0u8..=19 {
         if v == 9 || v == 15 {
             continue;
@@ -386,11 +363,10 @@ pub fn test_exception_vectors_intact() -> TestResult {
 pub fn test_ipi_vectors_intact() -> TestResult {
     // 0xEC = LAPIC_TIMER, 0xFB..=0xFF = IPIs / shutdown / spurious.
     //
-    // 0xFA is deliberately absent, and this list is what pins that: frame
-    // reuse is gated on the TLB-quiesce epoch, which needs no IPI, so the
-    // kernel runs exactly one cross-CPU rendezvous protocol (0xFD). A second
-    // one is what makes an interrupts-off CPU unable to answer — it can only
-    // poll for the protocol the spin-relax hook services.
+    // 0xFA is deliberately absent, and this list pins that: the kernel runs
+    // exactly one cross-CPU rendezvous protocol (0xFD), because an
+    // interrupts-off CPU can only poll for the one the spin-relax hook
+    // services.
     for &v in &[0xECu8, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF] {
         let entry = match load_idt_entry(v) {
             Ok(e) => e,

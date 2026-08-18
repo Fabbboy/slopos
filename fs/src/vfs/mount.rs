@@ -129,19 +129,14 @@ impl MountTable {
         self.count
     }
 
-    /// Iterate over mount points that are direct children of `parent_path`.
-    ///
-    /// For each child mount, calls `callback` with the child's name component
-    /// (e.g., `b"tmp"` when parent is `b"/"` and mount is `b"/tmp"`).
-    /// Returns the number of children visited. This is the kernel-level
-    /// mechanism that lets directory listings include mounted sub-filesystems,
-    /// mirroring how Linux VFS synthesises mount-point entries in readdir.
+    /// Iterate over mount points that are direct children of `parent_path`,
+    /// calling `callback` with the child's name component (`b"tmp"` when parent
+    /// is `b"/"` and the mount is `b"/tmp"`). Returns the number visited.
     pub fn for_each_child_mount(
         &self,
         parent_path: &[u8],
         callback: &mut dyn FnMut(&[u8]) -> bool,
     ) -> usize {
-        // Normalise parent: strip trailing slashes (keep root "/")
         let plen = {
             let mut len = parent_path.len();
             while len > 1 && parent_path[len - 1] == b'/' {

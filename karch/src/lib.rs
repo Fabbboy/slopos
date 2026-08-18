@@ -1,10 +1,5 @@
-//! `slopos-arch` is a thin re-export shim over `slopos-ostd`.
-//!
-//! The CPU/arch primitives that used to live in this crate were folded
-//! into `slopos-ostd` so that every kernel `unsafe` block lives in one
-//! place. This crate exists only to preserve the historical
-//! `slopos_arch::*` import paths used by ~60 consumer files. New code
-//! should import from `slopos_ostd` directly.
+//! Re-export shim preserving the historical `slopos_arch::*` import paths.
+//! New code should import from `slopos_ostd` directly.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -40,9 +35,9 @@ pub use slopos_ostd::irq::interrupt_frame::InterruptFrame;
 pub use slopos_ostd::sync::init_flag::InitFlag;
 
 pub use slopos_ostd::cpu::x86_64::pcr::{
-    apic_id_from_cpu_index, cpu_index_from_apic_id, get_bsp_apic_id, get_cpu_count,
+    MAX_CPUS, apic_id_from_cpu_index, cpu_index_from_apic_id, get_bsp_apic_id, get_cpu_count,
     get_current_cpu, get_online_cpu_count, is_bsp, is_cpu_online, mark_cpu_offline,
-    mark_cpu_online, MAX_CPUS,
+    mark_cpu_online,
 };
 
 #[macro_export]

@@ -1,9 +1,5 @@
-//! Auto-repeat (typematic) state machine, keyed on canonical usages.
-//!
-//! Ported from the old `appkit::input::KeyRepeatState` and generalized over the
-//! canonical `u16` keycode. A consumer that does not get hardware typematic
-//! (e.g. a userland reactor synthesizing repeats) drives this from its frame
-//! tick.
+//! Auto-repeat (typematic) state machine, keyed on canonical usages, for
+//! consumers that get no hardware typematic and drive it from a periodic tick.
 
 use slopos_abi::input::keycode::*;
 
@@ -12,7 +8,6 @@ pub const REPEAT_DELAY_MS: u64 = 500;
 /// Interval between auto-repeats once repeating (~30 Hz).
 pub const REPEAT_INTERVAL_MS: u64 = 33;
 
-/// Tracks the currently-held key and emits repeat ticks.
 #[derive(Debug, Clone, Copy)]
 pub struct KeyRepeat {
     key: Option<u16>,
@@ -44,7 +39,6 @@ impl KeyRepeat {
         true
     }
 
-    /// Call on key-up.
     pub fn on_key_up(&mut self, key: u16) {
         if self.key == Some(key) {
             self.key = None;
@@ -122,13 +116,9 @@ mod tests {
         let mut r = KeyRepeat::new();
         assert!(r.on_key_down(KEY_A, 0));
         assert!(!r.on_key_down(KEY_A, 10)); // same key held
-        // Before the delay: no repeat.
         assert_eq!(r.tick(100), None);
-        // After the delay: first repeat.
         assert_eq!(r.tick(REPEAT_DELAY_MS), Some(KEY_A));
-        // Within an interval: none.
         assert_eq!(r.tick(REPEAT_DELAY_MS + 1), None);
-        // After an interval: another repeat.
         assert_eq!(r.tick(REPEAT_DELAY_MS + REPEAT_INTERVAL_MS), Some(KEY_A));
     }
 

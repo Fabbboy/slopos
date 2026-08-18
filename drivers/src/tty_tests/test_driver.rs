@@ -12,7 +12,7 @@ pub fn test_driver_none_no_panic() -> TestResult {
     TestResult::Pass
 }
 
-/// VConsoleDriver drain_input returns 0 (input is interrupt-driven).
+/// VConsole input is interrupt-driven, so there is nothing to drain.
 pub fn test_vconsole_drain_returns_zero() -> TestResult {
     let driver = TtyDriverKind::VConsole(VConsoleDriver);
     let mut buf = [0u8; 16];

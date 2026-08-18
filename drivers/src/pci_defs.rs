@@ -1,13 +1,6 @@
 //! PCI bus hardware definitions, configuration space constants, and device structures.
 //!
-//! Single source of truth for PCI constants used across the driver subsystem.
-//! Add new constants here only when a consumer exists.
-//!
-//! All PCI structures are `#[repr(C)]` for ABI stability between kernel subsystems.
-
-// =============================================================================
-// Configuration Space Register Offsets
-// =============================================================================
+//! Single source of truth for PCI constants; add new ones only when a consumer exists.
 
 /// Vendor ID register offset (16-bit).
 pub const PCI_VENDOR_ID_OFFSET: u16 = 0x00;
@@ -48,16 +41,8 @@ pub const PCI_INTERRUPT_LINE_OFFSET: u16 = 0x3C;
 /// Interrupt Pin register offset (8-bit).
 pub const PCI_INTERRUPT_PIN_OFFSET: u16 = 0x3D;
 
-// =============================================================================
-// Status Register Bits
-// =============================================================================
-
 /// Status: Capabilities list present (bit 4).
 pub const PCI_STATUS_CAP_LIST: u16 = 0x10;
-
-// =============================================================================
-// Command Register Bits
-// =============================================================================
 
 /// Enable memory space access (bit 1).
 pub const PCI_COMMAND_MEMORY_SPACE: u16 = 0x0002;
@@ -68,86 +53,69 @@ pub const PCI_COMMAND_BUS_MASTER: u16 = 0x0004;
 /// Disable legacy INTx assertion (bit 10).
 /// Must be set when MSI or MSI-X is enabled.
 pub const PCI_COMMAND_INTX_DISABLE: u16 = 0x0400;
-// =============================================================================
-// Device Classes
-// =============================================================================
 
-/// Display controller.
 pub const PCI_CLASS_DISPLAY: u8 = 0x03;
 
-// =============================================================================
-// Capability IDs
-// =============================================================================
-
-/// PCI Capability ID: MSI (Message Signaled Interrupts).
+/// Message Signaled Interrupts.
 pub const PCI_CAP_ID_MSI: u8 = 0x05;
 
-/// PCI Capability ID: Vendor-specific.
+/// Vendor-specific.
 pub const PCI_CAP_ID_VNDR: u8 = 0x09;
 
-/// PCI Capability ID: PCI Express.
+/// PCI Express.
 pub const PCI_CAP_ID_PCIE: u8 = 0x10;
 
-/// PCI Capability ID: MSI-X (Extended Message Signaled Interrupts).
+/// Extended Message Signaled Interrupts.
 pub const PCI_CAP_ID_MSIX: u8 = 0x11;
 
-// =============================================================================
-// PCIe Extended Capability IDs (offset 0x100+, ECAM-only)
-// =============================================================================
-
-/// Start offset of the PCIe extended capability list.
-///
-/// Extended capabilities occupy offsets 0x100–0xFFF of the 4096-byte PCIe
-/// configuration space.  Only accessible via ECAM MMIO (not legacy port I/O).
+/// Start of the PCIe extended capability list: offsets 0x100–0xFFF of the
+/// 4096-byte config space, reachable only via ECAM MMIO (not legacy port I/O).
 pub const PCI_EXT_CAP_START: u16 = 0x100;
 
-/// PCIe Extended Capability ID: Advanced Error Reporting (AER).
+/// Advanced Error Reporting.
 pub const PCI_EXT_CAP_ID_AER: u16 = 0x0001;
 
-/// PCIe Extended Capability ID: Virtual Channel (VC).
+/// Virtual Channel.
 pub const PCI_EXT_CAP_ID_VC: u16 = 0x0002;
 
-/// PCIe Extended Capability ID: Device Serial Number.
+/// Device Serial Number.
 pub const PCI_EXT_CAP_ID_DSN: u16 = 0x0003;
 
-/// PCIe Extended Capability ID: Power Budgeting.
+/// Power Budgeting.
 pub const PCI_EXT_CAP_ID_PWR_BUDGET: u16 = 0x0004;
 
-/// PCIe Extended Capability ID: Vendor-Specific Extended Capability.
+/// Vendor-Specific Extended Capability.
 pub const PCI_EXT_CAP_ID_VNDR: u16 = 0x000B;
 
-/// PCIe Extended Capability ID: Access Control Services (ACS).
+/// Access Control Services.
 pub const PCI_EXT_CAP_ID_ACS: u16 = 0x000D;
 
-/// PCIe Extended Capability ID: Alternative Routing-ID Interpretation (ARI).
+/// Alternative Routing-ID Interpretation.
 pub const PCI_EXT_CAP_ID_ARI: u16 = 0x000E;
 
-/// PCIe Extended Capability ID: Address Translation Services (ATS).
+/// Address Translation Services.
 pub const PCI_EXT_CAP_ID_ATS: u16 = 0x000F;
 
-/// PCIe Extended Capability ID: Single Root I/O Virtualization (SR-IOV).
+/// Single Root I/O Virtualization.
 pub const PCI_EXT_CAP_ID_SRIOV: u16 = 0x0010;
 
-/// PCIe Extended Capability ID: Latency Tolerance Reporting (LTR).
+/// Latency Tolerance Reporting.
 pub const PCI_EXT_CAP_ID_LTR: u16 = 0x0018;
 
-/// PCIe Extended Capability ID: Secondary PCI Express.
+/// Secondary PCI Express.
 pub const PCI_EXT_CAP_ID_SEC_PCIE: u16 = 0x0019;
 
-/// PCIe Extended Capability ID: L1 PM Substates.
+/// L1 PM Substates.
 pub const PCI_EXT_CAP_ID_L1SS: u16 = 0x001E;
 
-/// PCIe Extended Capability ID: Designated Vendor-Specific (DVSEC).
+/// Designated Vendor-Specific.
 pub const PCI_EXT_CAP_ID_DVSEC: u16 = 0x0023;
 
-/// PCIe Extended Capability ID: Data Link Feature.
+/// Data Link Feature.
 pub const PCI_EXT_CAP_ID_DLF: u16 = 0x0025;
 
-/// PCIe Extended Capability ID: Physical Layer 16.0 GT/s.
+/// Physical Layer 16.0 GT/s.
 pub const PCI_EXT_CAP_ID_PL16G: u16 = 0x0026;
-// =============================================================================
-// Known Vendor IDs
-// =============================================================================
 
 /// VirtIO vendor ID (Red Hat).
 pub const PCI_VENDOR_ID_VIRTIO: u16 = 0x1AF4;
@@ -155,22 +123,11 @@ pub const PCI_VENDOR_ID_VIRTIO: u16 = 0x1AF4;
 /// Invalid vendor ID (no device present).
 pub const PCI_VENDOR_ID_INVALID: u16 = 0xFFFF;
 
-// =============================================================================
-// Enumeration Limits
-// =============================================================================
-
-/// Maximum number of PCI buses.
 pub const PCI_MAX_BUSES: usize = 256;
 
-/// Maximum tracked PCI devices.
 pub const PCI_MAX_DEVICES: usize = 256;
 
-/// Maximum number of BARs per device.
 pub const PCI_MAX_BARS: usize = 6;
-
-// =============================================================================
-// PCI Device Structures
-// =============================================================================
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
@@ -194,33 +151,25 @@ impl PciBarInfo {
     }
 }
 
-/// A single PCI capability discovered in the configuration space linked list.
-///
-/// Each capability header has an 8-bit ID (see `PCI_CAP_ID_*` constants) and
-/// occupies a variable-length region of config space starting at `offset`.
+/// A PCI capability found in the config-space linked list. The header carries an
+/// 8-bit ID (`PCI_CAP_ID_*`) and a variable-length region starting at `offset`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PciCapability {
     /// Byte offset of this capability header in configuration space.
     pub offset: u16,
-    /// Capability ID (`PCI_CAP_ID_MSI`, `PCI_CAP_ID_MSIX`, etc.).
     pub id: u8,
 }
 
-/// A single PCIe extended capability discovered in the extended config space.
-///
-/// Extended capability headers are 32-bit DWORDs at offsets ≥ 0x100:
-///   bits [15:0]  — capability ID (16-bit, see `PCI_EXT_CAP_ID_*` constants)
-///   bits [19:16] — capability version (4-bit)
-///   bits [31:20] — next capability offset (12-bit, 0 = end of list)
-///
-/// Only accessible via ECAM MMIO (requires 4096-byte PCIe config space).
+/// A PCIe extended capability found in extended config space. Headers are 32-bit
+/// DWORDs at offsets ≥ 0x100, ECAM-only:
+///   bits [15:0]  — capability ID (see `PCI_EXT_CAP_ID_*`)
+///   bits [19:16] — capability version
+///   bits [31:20] — next capability offset (0 = end of list)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PciExtCapability {
     /// Byte offset of this extended capability header in configuration space.
     pub offset: u16,
-    /// Extended capability ID (`PCI_EXT_CAP_ID_AER`, etc.).
     pub id: u16,
-    /// Capability version (4-bit).
     pub version: u8,
 }
 
@@ -241,9 +190,7 @@ pub struct PciDeviceInfo {
     pub irq_pin: u8,
     pub bar_count: u8,
     pub bars: [PciBarInfo; PCI_MAX_BARS],
-    /// Config-space offset of the MSI capability, if present.
     pub msi_cap_offset: Option<u16>,
-    /// Config-space offset of the MSI-X capability, if present.
     pub msix_cap_offset: Option<u16>,
 }
 
@@ -269,13 +216,11 @@ impl PciDeviceInfo {
         }
     }
 
-    /// Whether this device advertises MSI capability.
     #[inline]
     pub const fn has_msi(&self) -> bool {
         self.msi_cap_offset.is_some()
     }
 
-    /// Whether this device advertises MSI-X capability.
     #[inline]
     pub const fn has_msix(&self) -> bool {
         self.msix_cap_offset.is_some()

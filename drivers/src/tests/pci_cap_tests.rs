@@ -1,19 +1,7 @@
 //! PCI capability list parsing regression tests.
 //!
-//! These tests verify:
-//! - PCI subsystem is initialized and devices are enumerated
-//! - Capability list walking produces consistent results across multiple passes
-//! - Known QEMU q35 devices expose the expected capability chains
-//! - VirtIO devices have MSI-X capability discovered and stored
-//! - SATA controllers have MSI capability discovered and stored
-//! - Devices without capabilities correctly report None
-//! - PciDeviceInfo convenience methods (has_msi, has_msix, find_capability)
-//!   agree with the stored offsets
-//! - Iterator guard protects against excessive iteration
-//!
-//! All tests run after PCI enumeration in the test harness.  QEMU q35 exposes
-//! a deterministic set of PCI devices, so we can assert on specific capability
-//! chains.
+//! Run after PCI enumeration; the assertions rely on QEMU q35 exposing a
+//! deterministic set of devices and capability chains.
 
 use slopos_testing::TestResult;
 use slopos_testing::{fail, pass};
@@ -23,11 +11,6 @@ use crate::pci::{
 };
 use crate::pci_defs::*;
 
-// =============================================================================
-// 1. Enumeration sanity
-// =============================================================================
-
-/// PCI subsystem must have discovered at least one device on QEMU q35.
 pub fn test_pci_enumeration_nonempty() -> TestResult {
     let count = pci_get_device_count();
     if count == 0 {
@@ -36,14 +19,8 @@ pub fn test_pci_enumeration_nonempty() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 2. Capability iterator correctness
-// =============================================================================
-
-/// Iterating capabilities on a device with no capabilities must yield nothing.
-/// The q35 host bridge (8086:29c0) has no capabilities on QEMU.
+/// The q35 host bridge (8086:29c0) exposes no capabilities on QEMU.
 pub fn test_cap_iter_empty_for_no_caps_device() -> TestResult {
-    // Find the host bridge (class 0x06, subclass 0x00) — typically bus 0 dev 0.
     let dev = match find_device_by_class(0x06, 0x00) {
         Some(d) => d,
         None => return fail!("No host bridge (class 06:00) found — unexpected q35 topology"),
@@ -61,7 +38,6 @@ pub fn test_cap_iter_empty_for_no_caps_device() -> TestResult {
     pass!()
 }
 
-/// Two consecutive iterations over the same device must yield identical results.
 pub fn test_cap_iter_deterministic() -> TestResult {
     let dev = match find_first_device_with_caps() {
         Some(d) => d,
@@ -109,8 +85,7 @@ pub fn test_cap_iter_deterministic() -> TestResult {
     pass!()
 }
 
-/// Every capability offset must be DWORD-aligned (bottom 2 bits zero)
-/// and within the standard 256-byte config space (>= 0x40, < 0x100).
+/// Every capability offset must be DWORD-aligned and at or above 0x40.
 pub fn test_cap_offsets_valid() -> TestResult {
     for i in 0..pci_get_device_count() {
         let dev = match pci_get_device(i) {
@@ -143,11 +118,6 @@ pub fn test_cap_offsets_valid() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 3. Known QEMU device capability chains
-// =============================================================================
-
-/// VirtIO block device (1af4:1042) must expose MSI-X capability.
 pub fn test_virtio_blk_has_msix() -> TestResult {
     let dev = match find_device_by_vendor_device(PCI_VENDOR_ID_VIRTIO, 0x1042) {
         Some(d) => d,
@@ -163,7 +133,6 @@ pub fn test_virtio_blk_has_msix() -> TestResult {
     pass!()
 }
 
-/// VirtIO network device (1af4:1041) must expose MSI-X capability.
 pub fn test_virtio_net_has_msix() -> TestResult {
     let dev = match find_device_by_vendor_device(PCI_VENDOR_ID_VIRTIO, 0x1041) {
         Some(d) => d,
@@ -179,8 +148,6 @@ pub fn test_virtio_net_has_msix() -> TestResult {
     pass!()
 }
 
-/// VirtIO devices must also have vendor-specific capabilities (used for
-/// common_cfg, notify_cfg, isr_cfg, device_cfg).
 pub fn test_virtio_has_vendor_caps() -> TestResult {
     let dev = match find_device_by_vendor_device(PCI_VENDOR_ID_VIRTIO, 0x1042) {
         Some(d) => d,
@@ -191,8 +158,7 @@ pub fn test_virtio_has_vendor_caps() -> TestResult {
         .filter(|c| c.id == PCI_CAP_ID_VNDR)
         .count();
 
-    // VirtIO modern devices expose at least 4 vendor caps:
-    // common_cfg, notify_cfg, isr_cfg, device_cfg
+    // Modern virtio needs four: common_cfg, notify_cfg, isr_cfg, device_cfg.
     if vendor_count < 4 {
         return fail!(
             "VirtIO block device has only {} vendor caps (need >= 4)",
@@ -202,7 +168,6 @@ pub fn test_virtio_has_vendor_caps() -> TestResult {
     pass!()
 }
 
-/// SATA controller (Intel ICH9, 8086:2922) must expose MSI capability.
 pub fn test_sata_has_msi() -> TestResult {
     let dev = match find_device_by_vendor_device(0x8086, 0x2922) {
         Some(d) => d,
@@ -215,18 +180,12 @@ pub fn test_sata_has_msi() -> TestResult {
     if dev.msi_cap_offset.is_none() {
         return fail!("SATA controller msi_cap_offset is None");
     }
-    // ICH9 SATA should NOT have MSI-X
     if dev.has_msix() {
         return fail!("SATA controller unexpectedly has MSI-X");
     }
     pass!()
 }
 
-// =============================================================================
-// 4. PciDeviceInfo stored fields consistency
-// =============================================================================
-
-/// For every device, has_msi() must agree with msi_cap_offset.is_some().
 pub fn test_has_msi_matches_offset() -> TestResult {
     for i in 0..pci_get_device_count() {
         let dev = match pci_get_device(i) {
@@ -245,7 +204,6 @@ pub fn test_has_msi_matches_offset() -> TestResult {
     pass!()
 }
 
-/// For every device, has_msix() must agree with msix_cap_offset.is_some().
 pub fn test_has_msix_matches_offset() -> TestResult {
     for i in 0..pci_get_device_count() {
         let dev = match pci_get_device(i) {
@@ -264,7 +222,6 @@ pub fn test_has_msix_matches_offset() -> TestResult {
     pass!()
 }
 
-/// Stored msi_cap_offset must match a live pci_find_capability() call.
 pub fn test_stored_msi_offset_matches_live_walk() -> TestResult {
     for i in 0..pci_get_device_count() {
         let dev = match pci_get_device(i) {
@@ -286,7 +243,6 @@ pub fn test_stored_msi_offset_matches_live_walk() -> TestResult {
     pass!()
 }
 
-/// Stored msix_cap_offset must match a live pci_find_capability() call.
 pub fn test_stored_msix_offset_matches_live_walk() -> TestResult {
     for i in 0..pci_get_device_count() {
         let dev = match pci_get_device(i) {
@@ -308,7 +264,6 @@ pub fn test_stored_msix_offset_matches_live_walk() -> TestResult {
     pass!()
 }
 
-/// find_capability() convenience method must agree with the free function.
 pub fn test_find_capability_method_matches_free_fn() -> TestResult {
     for i in 0..pci_get_device_count() {
         let dev = match pci_get_device(i) {
@@ -339,11 +294,6 @@ pub fn test_find_capability_method_matches_free_fn() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 5. Edge cases
-// =============================================================================
-
-/// Searching for a nonexistent capability ID (0xFF) must return None.
 pub fn test_find_nonexistent_cap_returns_none() -> TestResult {
     for i in 0..pci_get_device_count() {
         let dev = match pci_get_device(i) {
@@ -363,10 +313,8 @@ pub fn test_find_nonexistent_cap_returns_none() -> TestResult {
     pass!()
 }
 
-/// On a nonexistent BDF, config reads return all-ones (0xFF).  The Status
-/// register reports capabilities present (bit 4 set in 0xFFFF), and every
-/// capability ID reads as 0xFF.  Searching for a standard ID (e.g. MSI)
-/// must still return `None` because 0xFF != 0x05.
+/// A nonexistent BDF reads all-ones, so Status claims capabilities are present
+/// and every capability ID reads 0xFF: a standard-ID search must still miss.
 pub fn test_find_cap_on_nonexistent_device_returns_none() -> TestResult {
     let result = pci_find_capability(255, 31, 7, PCI_CAP_ID_MSI);
     if result.is_some() {
@@ -377,10 +325,6 @@ pub fn test_find_cap_on_nonexistent_device_returns_none() -> TestResult {
     }
     pass!()
 }
-
-// =============================================================================
-// Helpers
-// =============================================================================
 
 fn find_device_by_class(class: u8, subclass: u8) -> Option<PciDeviceInfo> {
     for i in 0..pci_get_device_count() {
@@ -415,25 +359,17 @@ fn find_first_device_with_caps() -> Option<PciDeviceInfo> {
     None
 }
 
-// =============================================================================
-// Suite registration
-// =============================================================================
-
-// Enumeration sanity
 slopos_testing::stest!(name = test_pci_enumeration_nonempty, suite = pci_cap);
-// Iterator correctness
 slopos_testing::stest!(
     name = test_cap_iter_empty_for_no_caps_device,
     suite = pci_cap
 );
 slopos_testing::stest!(name = test_cap_iter_deterministic, suite = pci_cap);
 slopos_testing::stest!(name = test_cap_offsets_valid, suite = pci_cap);
-// Known QEMU device chains
 slopos_testing::stest!(name = test_virtio_blk_has_msix, suite = pci_cap);
 slopos_testing::stest!(name = test_virtio_net_has_msix, suite = pci_cap);
 slopos_testing::stest!(name = test_virtio_has_vendor_caps, suite = pci_cap);
 slopos_testing::stest!(name = test_sata_has_msi, suite = pci_cap);
-// Stored field consistency
 slopos_testing::stest!(name = test_has_msi_matches_offset, suite = pci_cap);
 slopos_testing::stest!(name = test_has_msix_matches_offset, suite = pci_cap);
 slopos_testing::stest!(
@@ -448,7 +384,6 @@ slopos_testing::stest!(
     name = test_find_capability_method_matches_free_fn,
     suite = pci_cap
 );
-// Edge cases
 slopos_testing::stest!(
     name = test_find_nonexistent_cap_returns_none,
     suite = pci_cap

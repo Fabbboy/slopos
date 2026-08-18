@@ -1,28 +1,11 @@
-//! The diagnostic console's keyboard trigger: a two-step chord.
+//! The diagnostic console's keyboard trigger: a two-step chord — SysRq
+//! (Alt+PrintScreen on an AT keyboard) to arm, then one command key. Both
+//! keypresses are consumed, so neither reaches the TTY or the focused GUI
+//! application.
 //!
-//! Press SysRq (Alt+PrintScreen on an AT keyboard) to arm, then one command
-//! key to run. Both keypresses are consumed, so neither reaches the TTY or the
-//! focused GUI application.
-//!
-//! # Why this runs before the layout
-//!
-//! The command key is a *position*, not a character. Resolving it through the
-//! active layout would make the console's key bindings depend on which layout
-//! happens to be loaded — `t` would be somewhere else on Dvorak, and on a
-//! layout whose level-1 glyph is non-Latin there would be no binding at all.
-//! [`usage_to_command`] is therefore a fixed table over canonical usages and
-//! consults no layout, which is only sound because the caller invokes this
-//! ahead of `resolve()`.
-//!
-//! Running first also protects the dead-key machine: a command key fed through
-//! `resolve()` would compose with a pending accent and silently swallow it.
-//!
-//! # Why it is a struct and not a static
-//!
-//! The caller already holds its own per-keyboard lock when it decodes a
-//! scancode, so the state lives beside the decoder that produces its input. It
-//! also keeps the whole thing a pure function of its inputs, testable on the
-//! host without a kernel.
+//! The caller must feed this *ahead of* `resolve()`: a command key is a position
+//! rather than a character, so [`usage_to_command`] consults no layout, and a key
+//! routed through `resolve()` would compose with a pending dead key instead.
 
 use slopos_abi::input::keycode::*;
 
@@ -42,16 +25,12 @@ pub enum Verdict {
 /// Usages 0..=255, one bit each.
 const EATEN_WORDS: usize = 4;
 
-/// The two-step trigger's state.
 #[derive(Debug, Clone, Copy)]
 pub struct SysrqFsm {
     /// When the trigger was armed, or `None` when idle.
     armed_at_ms: Option<u64>,
-    /// Usages consumed on press, so their release is consumed too.
-    ///
-    /// Without this the key would be delivered as a release with no matching
-    /// press — which a consumer tracking key state reads as a key that is now
-    /// stuck down.
+    /// Usages consumed on press, so their release is consumed too: a release with
+    /// no matching press reads as a key stuck down.
     eaten: [u64; EATEN_WORDS],
 }
 
@@ -69,7 +48,6 @@ impl SysrqFsm {
         }
     }
 
-    /// Whether the trigger is waiting for a command key.
     pub fn is_armed(&self) -> bool {
         self.armed_at_ms.is_some()
     }
@@ -90,11 +68,8 @@ impl SysrqFsm {
         was
     }
 
-    /// Feed one decoded key transition.
-    ///
-    /// `arm_ms` bounds how long an armed trigger waits: an operator who arms by
-    /// accident gets their keyboard back rather than having the next keystroke
-    /// silently become a command.
+    /// Feed one decoded key transition. `arm_ms` bounds how long an armed trigger
+    /// waits, so an accidental arm does not turn the next keystroke into a command.
     pub fn feed(
         &mut self,
         usage: u16,
@@ -121,9 +96,8 @@ impl SysrqFsm {
             return Verdict::Pass;
         };
 
-        // A modifier neither selects nor disarms: an operator reaching for a
-        // shifted command key presses shift first, and losing the arm there
-        // would make the shifted half of the keyspace unreachable.
+        // A modifier neither selects nor disarms: shift is pressed first when
+        // reaching for a shifted command key.
         if is_modifier(usage) {
             return Verdict::Pass;
         }
@@ -139,29 +113,22 @@ impl SysrqFsm {
                 self.mark_eaten(usage);
                 Verdict::Run(key)
             }
-            // A key with no command position — an arrow, a function key — is
-            // far more likely to be the operator moving on than a mistyped
-            // command, so it disarms and is delivered rather than swallowed.
+            // An unmapped key is likelier to be the operator moving on than a
+            // mistyped command, so it disarms and is delivered.
             None => Verdict::Pass,
         }
     }
 }
 
-/// Whether this press arms the trigger.
-///
-/// `KEY_SYSRQ` is what an AT keyboard reports for Alt+PrintScreen. Some
-/// keyboards and emulators instead report plain PrintScreen and leave Alt in
-/// the modifier state, so that spelling arms too — the alternative is a
-/// console that silently does not exist on those machines.
+/// Whether this press arms the trigger. `KEY_SYSRQ` is what an AT keyboard
+/// reports for Alt+PrintScreen; some keyboards and emulators report plain
+/// PrintScreen with Alt in the modifier state, so both spellings arm.
 fn is_arm_key(usage: u16, mods: Mods) -> bool {
     usage == KEY_SYSRQ || (usage == KEY_PRINTSCREEN && mods.alt)
 }
 
-/// Canonical usage → the ASCII key a command is registered under.
-///
-/// Letters and digits only. Punctuation is deliberately absent: its position
-/// varies across the layouts SlopOS ships, and a console key that moves is
-/// worse than one that does not exist.
+/// Canonical usage → the ASCII key a command is registered under. Letters and
+/// digits only: punctuation moves between the layouts SlopOS ships.
 pub const fn usage_to_command(usage: u16) -> Option<u8> {
     // Contiguous HID ranges, so this is arithmetic rather than a table.
     if usage >= KEY_A && usage <= KEY_Z {
@@ -268,15 +235,12 @@ mod tests {
 
     #[test]
     fn every_eaten_press_eats_its_release() {
-        // Otherwise a consumer tracking key state sees a release with no
-        // press and reads the key as stuck down.
         let mut fsm = SysrqFsm::new();
         fsm.feed(KEY_SYSRQ, true, mods(), 0, ARM_MS);
         assert_eq!(fsm.feed(KEY_SYSRQ, false, mods(), 1, ARM_MS), Verdict::Eat);
         fsm.feed(KEY_SYSRQ, true, mods(), 2, ARM_MS);
         fsm.feed(KEY_T, true, mods(), 3, ARM_MS);
         assert_eq!(fsm.feed(KEY_T, false, mods(), 4, ARM_MS), Verdict::Eat);
-        // And a release the FSM never ate still passes.
         assert_eq!(fsm.feed(KEY_G, false, mods(), 5, ARM_MS), Verdict::Pass);
     }
 
@@ -307,7 +271,6 @@ mod tests {
 
     #[test]
     fn the_command_key_is_the_position_not_the_glyph() {
-        // Shift is ignored when selecting, so Shift+T and T are one command.
         let mut fsm = SysrqFsm::new();
         fsm.feed(KEY_SYSRQ, true, mods(), 0, ARM_MS);
         let shifted = Mods {

@@ -674,9 +674,8 @@ fn recvmsg_writeback_cmsg(
     for (j, file) in received.drain(..).enumerate() {
         let new_fd = slopos_fs::fileio_install_file_ref(table, file);
         if new_fd < 0 {
-            // The failed install dropped its alias and ending the drain drops
-            // the rest; a partial install with no cmsg writeback would orphan
-            // the fds already made, so roll those back.
+            // Ending the drain drops the remaining aliases; a partial install
+            // with no cmsg writeback would orphan the fds already made.
             for &fd in fd_nums.iter().take(j) {
                 let _ = slopos_fs::fileio::file_close_fd(table, fd);
             }
@@ -686,8 +685,7 @@ fn recvmsg_writeback_cmsg(
     }
 
     // The fds are installed in the caller's table from here: a faulting copy
-    // back must close them, or the caller never learns their numbers and they
-    // are orphaned (fd-table-exhaustion DoS).
+    // back must close them, or the caller never learns their numbers.
     let writeback = || -> Result<(), Errno> {
         let cmsg = CmsgHdr {
             cmsg_len: needed as u32,

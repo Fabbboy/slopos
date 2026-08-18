@@ -1,17 +1,10 @@
 //! IRQ surface for the kernel side.
 //!
-//! The OSTD-supplied vector allocator and dispatch table own the per-vector
-//! callbacks; this module re-exports the OSTD types/functions that drivers
-//! consume and keeps the small handful of kernel-internal pieces that never
-//! belonged in OSTD:
-//!
-//!   - timer / keyboard event counters (policy state read by tests + diagnostics)
-//!   - the legacy IOAPIC route / mask book-keeping that drivers/src/irq.rs
-//!     queries during boot (per-IRQ-line mask state and GSI mapping)
-//!
-//! Both halves are wrappers around module-local statics with no IRQ-table
-//! data structure of their own; OSTD's [`slopos_ostd::irq::dispatch`] is the
-//! single dispatch path for vectors ≥ 32.
+//! Re-exports the OSTD types drivers consume, and keeps the kernel-internal
+//! timer/keyboard counters plus the IOAPIC route and mask book-keeping that
+//! `drivers/src/irq.rs` queries during boot. OSTD's
+//! [`slopos_ostd::irq::dispatch`] remains the single dispatch path for
+//! vectors ≥ 32.
 
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
@@ -20,12 +13,7 @@ pub use slopos_ostd::irq::*;
 
 use slopos_kernel_services::platform;
 
-// =============================================================================
-// Timer + keyboard event counters
-// =============================================================================
-
-/// Global keyboard event counter, incremented from the PS/2 keyboard
-/// dispatch closure in `drivers/src/irq.rs`.
+/// Incremented from the PS/2 keyboard dispatch closure in `drivers/src/irq.rs`.
 static KEYBOARD_EVENT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
@@ -48,15 +36,8 @@ pub fn increment_keyboard_events() {
     KEYBOARD_EVENT_COUNTER.fetch_add(1, Ordering::Relaxed);
 }
 
-// =============================================================================
-// Per-IRQ-line route / mask book-keeping (legacy IOAPIC bridge)
-// =============================================================================
-//
-// Drivers/src/irq.rs::program_ioapic_route stores the (line, gsi) mapping
-// here so subsequent mask/unmask requests can flush to the IOAPIC via the
-// platform service. The state is plain atomics indexed by IRQ line — there
-// is no entry struct, no callback storage, and no lock.
-
+// `drivers/src/irq.rs::program_ioapic_route` stores the (line, gsi) mapping
+// here so later mask/unmask requests can flush to the IOAPIC.
 static IRQ_GSI: [AtomicU32; IRQ_LINES] = [const { AtomicU32::new(0) }; IRQ_LINES];
 
 /// Per-IRQ-line bitmap: bit 0 = via_ioapic, bit 1 = masked.
@@ -65,7 +46,6 @@ static IRQ_FLAGS: [AtomicU8; IRQ_LINES] = [const { AtomicU8::new(FLAG_MASKED) };
 const FLAG_VIA_IOAPIC: u8 = 1 << 0;
 const FLAG_MASKED: u8 = 1 << 1;
 
-/// IOAPIC route record returned by [`get_irq_route`].
 #[derive(Clone, Copy)]
 pub struct IrqRouteState {
     pub via_ioapic: bool,
@@ -99,12 +79,10 @@ pub fn init() {
 
 #[inline]
 pub fn is_initialized() -> bool {
-    // OSTD's IrqAllocator + DISPATCH table is always available; the
-    // legacy "framework initialised" flag is no longer load-bearing.
+    // OSTD's IrqAllocator and DISPATCH table are always available.
     true
 }
 
-/// Record the IOAPIC GSI mapping for an IRQ line.
 pub fn set_irq_route(irq: u8, gsi: u32) {
     if irq as usize >= IRQ_LINES {
         return;
@@ -113,7 +91,6 @@ pub fn set_irq_route(irq: u8, gsi: u32) {
     flags_set_bits(irq, FLAG_VIA_IOAPIC);
 }
 
-/// Read the IOAPIC GSI mapping for an IRQ line.
 pub fn get_irq_route(irq: u8) -> Option<IrqRouteState> {
     if irq as usize >= IRQ_LINES {
         return None;
@@ -125,8 +102,8 @@ pub fn get_irq_route(irq: u8) -> Option<IrqRouteState> {
     })
 }
 
-/// Whether the line is currently masked (in our book-keeping; the IOAPIC
-/// hardware state may differ if a driver bypassed this surface).
+/// Book-keeping state only; the IOAPIC may differ if a driver bypassed this
+/// surface.
 pub fn is_masked(irq: u8) -> bool {
     if irq as usize >= IRQ_LINES {
         return true;
@@ -134,7 +111,6 @@ pub fn is_masked(irq: u8) -> bool {
     flags_get(irq) & FLAG_MASKED != 0
 }
 
-/// Mask an IRQ line at the IOAPIC and update the local flag.
 pub fn mask_irq_line(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
@@ -150,7 +126,6 @@ pub fn mask_irq_line(irq: u8) {
     }
 }
 
-/// Unmask an IRQ line at the IOAPIC and update the local flag.
 pub fn unmask_irq_line(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
@@ -166,12 +141,10 @@ pub fn unmask_irq_line(irq: u8) {
     }
 }
 
-/// Enable: clears any "unhandled" bookkeeping (no-op now) and unmasks.
 pub fn enable_line(irq: u8) {
     unmask_irq_line(irq);
 }
 
-/// Disable: masks the line.
 pub fn disable_line(irq: u8) {
     mask_irq_line(irq);
 }

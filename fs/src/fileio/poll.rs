@@ -50,8 +50,6 @@ pub fn file_poll_unregister_pipes(table: FdTable, fds: &[(c_int, u16)]) {
 }
 
 /// Clone the `KArc<OpenFile>` behind `fd` (or `None` if the fd is bad).
-/// A helper for the poll paths that want the open file without going
-/// through the full `FdSnapshot`.
 fn snapshot_open_file(inner: &FileTableSlotInner, fd: c_int) -> Option<KArc<OpenFile>> {
     Some(get_fd_entry(inner, fd)?.open_file.clone())
 }
@@ -79,34 +77,23 @@ pub fn file_poll_unregister_fd(reg: &PollRegInfo) {
     if !reg.registered {
         return;
     }
-    // Upgrade-or-skip: if the open file is gone, the backing was torn
-    // down (which already cleared its wait queue), so there is nothing to
-    // unregister and no chance of touching a reused slot.
+    // Upgrade-or-skip: a torn-down backing already cleared its own wait queue,
+    // and the weak can never resurrect a reused slot.
     if let Some(open_file) = reg.open_file.upgrade() {
         open_file.ops.poll_unwait(open_file.handle);
     }
 }
 
-// ── Poll-registration table (KWeak-keyed opaque tokens) ─────────────────────
-//
-// `file_poll_fused` is the kernel-internal poll ABI used by `poll`/`select`
-// and the SlopRing harvest. The ABI carries an opaque `u64` token
-// (`FusedPollResult::open_file_token`) the caller later hands back to
-// `file_poll_unfused_by_token` to unregister from the wait queue. The token is
-// now an opaque *registration id* resolving (in this table) to a
-// `KWeak<OpenFile>`: the registration NEVER keeps the open file alive, and a
-// dead registration upgrades to `None` so it can never touch a reused slot or
-// double-release a backing object (the single-owner invariant — there is no
-// extra strong reference for a stale token to drop).
-
+// `FusedPollResult::open_file_token` is an opaque id into this table, resolving
+// to a `KWeak<OpenFile>`: a registration never keeps the open file alive, so a
+// stale token can neither touch a reused slot nor double-release a backing.
 struct PollRegTable {
     next_id: AtomicU64,
     entries: SpinLock<KBTreeMap<u64, KWeak<OpenFile>>>,
 }
 
 static POLL_REG_TABLE: PollRegTable = PollRegTable {
-    // Start at 1 so 0 stays a never-registered sentinel (matching the
-    // `open_file_token: 0` default the backends return).
+    // Start at 1 so 0 stays the never-registered sentinel.
     next_id: AtomicU64::new(1),
     entries: SpinLock::new(
         KBTreeMap::new(),
@@ -114,11 +101,9 @@ static POLL_REG_TABLE: PollRegTable = PollRegTable {
     ),
 };
 
-/// Live registrations the table will hold at once.
-///
-/// An entry leaves only through [`poll_reg_take`], so a caller that never hands
-/// its token back holds one for the rest of the boot. A bound turns that into a
-/// refusal the caller can act on rather than growth nothing reclaims.
+/// Live registrations the table will hold at once. An entry leaves only through
+/// [`poll_reg_take`], so a caller that never hands its token back holds one for
+/// the rest of the boot; the bound makes that a refusal rather than growth.
 const POLL_REG_MAX: usize = 4096;
 
 /// Record a weak handle to `open_file` and return its opaque token, or 0 when
@@ -134,10 +119,8 @@ fn poll_reg_insert(open_file: &KArc<OpenFile>) -> u64 {
 }
 
 /// Hand back a token for a registration that was just made, undoing the
-/// registration when the table had no room for it.
-///
-/// Reporting `registered` without a token would leave the caller parked on a
-/// wait queue with no way to name the entry that takes it off again.
+/// registration when the table had no room for it: `registered` without a token
+/// would park the caller on a wait queue with no way to name the entry again.
 fn poll_reg_token_or_unwait(
     result: &mut slopos_abi::file_ops::FusedPollResult,
     open_file: &KArc<OpenFile>,
@@ -179,19 +162,14 @@ pub fn file_poll_fused(
             return invalid;
         };
         let mut r = open_file.ops.poll_fused(open_file.handle, events);
-        // Hand the caller an opaque registration token backed by a weak
-        // reference. The weak does not keep the open file alive; if the
-        // fd is closed before unregister, the token upgrades to None.
         poll_reg_token_or_unwait(&mut r, &open_file);
         r
     })
     .unwrap_or(invalid)
 }
 
-/// Fused poll against a held [`FileRef`] — the reference analog of
-/// [`file_poll_fused`], used by the ring harvest to register the calling
-/// task on an in-flight op's wait queue by open-file identity rather than
-/// by an fd number that may have been closed or reused.
+/// Fused poll against a held [`FileRef`]: registers by open-file identity
+/// rather than by an fd number that may have been closed or reused.
 pub fn file_poll_fused_ref(file: &FileRef, events: u16) -> slopos_abi::file_ops::FusedPollResult {
     let mut r = file.open_file.ops.poll_fused(file.open_file.handle, events);
     poll_reg_token_or_unwait(&mut r, &file.open_file);
@@ -199,9 +177,8 @@ pub fn file_poll_fused_ref(file: &FileRef, events: u16) -> slopos_abi::file_ops:
 }
 
 /// Unregister from a wait queue using the opaque registration token from
-/// [`file_poll_fused`]. Upgrade-or-skip: a token whose open file was
-/// already dropped is silently discarded — the backing teardown cleared
-/// its own wait queue, and the weak can never resurrect a reused slot.
+/// [`file_poll_fused`]. A token whose open file was already dropped is
+/// silently discarded.
 pub fn file_poll_unfused_by_token(open_file_token: u64) {
     let Some(weak) = poll_reg_take(open_file_token) else {
         return;
@@ -221,8 +198,7 @@ pub fn file_poll_fd(table: FdTable, fd: c_int, events: u16) -> u16 {
     .unwrap_or(POLLNVAL)
 }
 
-/// Level readiness of a held [`FileRef`] — the reference analog of
-/// [`file_poll_fd`], for the ring's multishot poll re-arm.
+/// Level readiness of a held [`FileRef`], for the ring's multishot poll re-arm.
 pub fn file_poll_ref(file: &FileRef, events: u16) -> u16 {
     file.open_file
         .ops

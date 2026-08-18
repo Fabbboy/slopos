@@ -524,7 +524,6 @@ pub fn test_sgr_standard_colors_unaffected() -> TestResult {
 
 pub fn test_parser_fuzz_utf8_no_panic() -> TestResult {
     let mut parser = VtParser::new();
-    // Feed a mix of valid/invalid UTF-8, escape sequences, and random bytes.
     let chaos: [u8; 30] = [
         0xC3, 0xA9, // valid 2-byte (é)
         0xE4, 0xB8, 0xAD, // valid 3-byte (中)
@@ -551,8 +550,6 @@ pub fn test_vtparser_fuzz_no_panic() -> TestResult {
     let mut parser = VtParser::new();
 
     let assert_ground = |p: &mut VtParser| -> bool {
-        // Send BEL (terminates OSC) + ESC \ (terminates OSC via ST) first,
-        // then probe with a printable char to confirm Ground state.
         let _ = p.advance(0x07); // BEL — terminates OSC string
         let _ = p.advance(0x1B); // ESC
         let _ = p.advance(b'\\'); // ST — terminates any ESC sequence
@@ -624,7 +621,6 @@ pub fn test_replacement_glyph_exists() -> TestResult {
         return TestResult::Fail;
     };
     let coverage = atlas.get_coverage(0xFFFD);
-    // The replacement glyph should not be all zeros.
     let has_nonzero = coverage.iter().any(|&b| b != 0);
     if !has_nonzero {
         klog_info!("TTY_TEST: replacement glyph coverage is all zeros");
@@ -638,7 +634,6 @@ pub fn test_get_glyph_for_codepoint_ascii() -> TestResult {
         klog_info!("TTY_TEST: glyph atlas not initialised");
         return TestResult::Fail;
     };
-    // For ASCII 'A', coverage should have non-zero pixels (it's a visible character).
     let coverage = atlas.get_coverage(b'A' as u32);
     let has_nonzero = coverage.iter().any(|&b| b != 0);
     if !has_nonzero {

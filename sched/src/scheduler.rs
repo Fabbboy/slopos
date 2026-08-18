@@ -14,9 +14,8 @@ use slopos_kernel_services::platform;
 
 use core::sync::atomic::AtomicBool;
 
-/// Per-CPU flag: this CPU's idle path armed a LAPIC one-shot for the next
-/// sleep-queue deadline. The first timer ISR after that restores periodic mode
-/// and clears the flag.
+/// Per-CPU: this CPU's idle path armed a LAPIC one-shot for the next sleep-queue
+/// deadline. The first timer ISR restores periodic mode and clears the flag.
 static ONESHOT_ARMED: [AtomicBool; slopos_arch::MAX_CPUS] = {
     const FALSE: AtomicBool = AtomicBool::new(false);
     [FALSE; slopos_arch::MAX_CPUS]
@@ -25,7 +24,7 @@ static ONESHOT_ARMED: [AtomicBool; slopos_arch::MAX_CPUS] = {
 /// Must match `boot/src/boot_drivers.rs::LAPIC_TIMER_PERIOD_MS`.
 const LAPIC_TIMER_PERIOD_MS: u32 = 10;
 
-/// Ticks to milliseconds, rounded up: waking one tick early busy-loops.
+/// Rounds up: waking one tick early busy-loops.
 #[inline]
 fn ticks_to_ms_ceil(delta_ticks: u64) -> u32 {
     let freq = platform::timer_frequency() as u64;
@@ -124,7 +123,6 @@ pub(crate) fn set_scheduler_enabled(enabled: bool) {
     SCHEDULER_ENABLED.store(value, Ordering::Release);
 }
 
-/// Drive `SCHEDULER_ENABLED` from a test; `init_scheduler` leaves it clear.
 #[cfg(feature = "test-hooks")]
 pub fn set_scheduler_enabled_for_test(enabled: bool) {
     set_scheduler_enabled(enabled);
@@ -162,9 +160,8 @@ fn reset_task_quantum(task: &Task) {
     task.set_time_slice_remaining(slice);
 }
 
-// Recovery and panic-in-flight depth are task-scoped but live in per-CPU PCR
-// slots, so both must ride every switch: an unwinding task can migrate, and a
-// non-zero in-flight count left on the departed CPU would make a later
+// Task-scoped state living in per-CPU PCR slots, so it must ride every switch: a
+// non-zero in-flight count left on a departed CPU would make a later
 // `AbortOnUnwind` drop there abort a healthy kernel.
 #[inline]
 fn save_live_recovery_depth(task: &Task) {
@@ -201,9 +198,8 @@ pub(crate) fn dispatch(cpu_id: usize, task: &Task) {
         "dispatch() must run on the target CPU (SafeStack slot is gs-local)"
     );
 
-    // The id and priority ride along so a peer asking "who is running" or
-    // "would a newcomer preempt it" never dereferences a task whose switch tail
-    // may be destroying it.
+    // The id and priority ride along so a peer asking who is running never
+    // dereferences a task whose switch tail may be destroying it.
     slopos_arch::pcr::set_current_task_typed(
         core::ptr::from_ref(task).cast_mut(),
         task.task_id,
@@ -240,10 +236,9 @@ pub(crate) fn dispatch(cpu_id: usize, task: &Task) {
     }
 }
 
-/// Cross-crate, test-only entry point into [`dispatch`], carrying the same
-/// preconditions. Takes an id so the registry guard that pins the task across
-/// the dispatch is held here rather than by the caller; `false` if the id names
-/// no live task.
+/// Test-only [`dispatch`], carrying the same preconditions. Takes an id so the
+/// registry guard pinning the task across the dispatch is held here rather than
+/// by the caller; `false` if the id names no live task.
 #[cfg(feature = "test-hooks")]
 pub fn dispatch_task_for_test(cpu_id: usize, task_id: u32) -> bool {
     let Some(task) = crate::task::task_find_by_id(task_id) else {
@@ -266,8 +261,7 @@ fn name_looks_idle(name: &[u8]) -> bool {
 }
 
 /// Install `task` as `cpu_id`'s idle task, writing `PCR.idle_task`. Called once
-/// per CPU by `create_idle_task_for_cpu`, which is why the shape screen runs
-/// here rather than on every dispatch.
+/// per CPU, which is why the shape screen runs here rather than on every dispatch.
 #[inline]
 pub(super) fn install_idle_task(cpu_id: usize, task: &Task) {
     debug_assert!(
@@ -295,8 +289,7 @@ fn switch_to_kernel_address_space() {
     kernel_vm_space().lock().activate_kernel_master();
 }
 
-/// Pre-switch housekeeping, in order: FPU save(prev), TLB, FS_BASE, TSS RSP0,
-/// CR3, FPU restore(next). Must run with interrupts disabled, from the scheduler
+/// Pre-switch housekeeping. Must run with interrupts disabled, from the scheduler
 /// hot path only, so the sequencing matches the dispatch state machine.
 fn prepare_switch_to(
     cpu_id: usize,
@@ -364,9 +357,8 @@ fn prepare_switch_to(
         kernel_vm_space().lock().activate_kernel_master();
     }
 
-    // A rejected image is already reset to the init state, and continuing is the
-    // point: the CPU is mid-switch with interrupts off, so stopping here would be
-    // the machine-wide halt the fault-recoverable restore exists to prevent.
+    // A rejected image is already reset to the init state; the CPU is mid-switch
+    // with interrupts off, so stopping here would be a machine-wide halt.
     if !next_window.task().fpu_restore_to_cpu(next_window, xcr0) {
         klog_warn!(
             "SCHED: CPU {} rejected task {} FPU image; reset to init state",
@@ -484,7 +476,7 @@ fn published_priority(task: &Task) -> u8 {
 ///
 /// Reads the priority `cpu` published in its own PCR: dereferencing its
 /// `current_task` races that CPU's `drain_previous_task`, which can run the
-/// task's destructor, so the read could land in freed memory.
+/// task's destructor.
 pub(crate) fn newcomer_outranks_current(cpu: usize, new: &Task) -> bool {
     new.priority.as_u8() < slopos_arch::pcr::current_task_priority_for(cpu)
 }
@@ -543,7 +535,7 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
     // Last resort: relax affinity rather than strand a runnable task.
     for cpu_id in 0..cpu_count {
         if per_cpu::affinity_allows_cpu(affinity, cpu_id) {
-            continue; // already attempted above
+            continue;
         }
         if per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enqueue_local(task)) == Some(0) {
             klog_info!(
@@ -716,8 +708,7 @@ fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: 
     }
 }
 
-/// A publication reservation: the placement to publish `from`, plus the
-/// placement to restore if the publication fails.
+/// A publication reservation: the placement to publish `from`.
 struct Reservation {
     from: SchedPlacement,
     /// Set only when this reservation moved the task out of `Nascent` and
@@ -725,13 +716,13 @@ struct Reservation {
     restore_nascent: bool,
 }
 
-/// Reserve scheduler ownership for an explicit publication. Returns `None` if
-/// the task is nascent and someone else won the promotion.
+/// Reserve scheduler ownership for an explicit publication. `None` if the task
+/// is nascent and someone else won the promotion.
 ///
 /// A reservation that took a task out of `Nascent` **must** be released by
 /// [`release_publication`] if the publication does not complete: `Waking` is a
-/// state `wake_blocked_task` publishes from, so a task left parked there hands
-/// a later wake exactly the half-built task `Nascent` exists to protect.
+/// state `wake_blocked_task` publishes from, so a task left there hands a later
+/// wake the half-built task `Nascent` exists to protect.
 #[inline]
 fn reserve_publication(task: &Task) -> Option<Reservation> {
     match task.sched_placement() {
@@ -779,10 +770,9 @@ pub fn schedule_task(task: &TaskRef) -> c_int {
     rc
 }
 
-/// Put a freshly created task into the placement a *published, then blocked*
-/// task has: owned by nothing, but past construction — the state wake and inbox
-/// tests need and `task_create` does not leave behind. False if the task is gone
-/// or had already left `Nascent`.
+/// Put a freshly created task into the placement a *published, then blocked* task
+/// has: owned by nothing, but past construction. False if the task is gone or had
+/// already left `Nascent`.
 #[cfg(feature = "test-hooks")]
 pub fn clear_nascent_for_test(task_id: u32) -> bool {
     let Some(task) = crate::task::task_find_by_id(task_id) else {
@@ -806,8 +796,7 @@ pub fn schedule_new_task(task: &TaskRef) -> c_int {
 }
 
 /// Publish a fully-initialized new task as runnable without ever exposing
-/// `Ready + no scheduler owner`: reserve `Waking`, publish `Ready`, then
-/// transfer the reservation into a runqueue or remote inbox.
+/// `Ready + no scheduler owner`.
 pub fn publish_new_task(task: &TaskRef) -> c_int {
     let body: &Task = task;
     // The sole sanctioned exit from `Nascent`; every other path refuses the
@@ -837,8 +826,6 @@ pub fn publish_new_task(task: &TaskRef) -> c_int {
     }
     let rc = schedule_task_from_placement(task, SchedPlacement::Waking, true);
     if rc != 0 {
-        // Roll back so a failed publication leaves "never published" still
-        // spelled `Nascent`.
         let _ = body.sched_placement_compare_exchange(SchedPlacement::Waking, reserved_from);
         let _ = body.set_status(previous_status);
     }
@@ -856,11 +843,8 @@ pub fn unschedule_task(task: &Task) -> c_int {
     0
 }
 
-/// Re-place a task after its CPU-affinity mask changes, so the new mask governs
-/// where it runs. Idempotent when the task is still permitted where it is: a
-/// Ready task is pulled and re-scheduled, a Running one is asked to reschedule
-/// and repatriated by its switch-out tail, and a blocked one re-selects on its
-/// next wake.
+/// Re-place a task after its CPU-affinity mask changes. Idempotent when the task
+/// is still permitted where it is.
 pub fn task_apply_affinity(task: &TaskRef, new_affinity: u32) {
     let body: &Task = task;
     let last_cpu = body.last_cpu() as usize;
@@ -986,16 +970,12 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
             switch_context(prev_ctx, next_ctx);
         },
     );
-    // Runs when the switched-out task resumes on a later dispatch.
     switch_abort_guard.disarm();
 }
 
-/// Dispatch one ready task from this CPU's idle context, returning whether one
-/// ran.
 pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool {
-    // Drain cross-core wakes before the pick: the reschedule-IPI trap-exit path
-    // exists to run a just-pushed remote wake, and would otherwise pick from
-    // ready queues that cannot yet see it. `cpu_id` is the owning CPU, which is
+    // Drain cross-core wakes before the pick: a just-pushed remote wake is not
+    // yet visible in the ready queues. `cpu_id` is the owning CPU, which is
     // `drain_remote_inbox`'s single-consumer contract.
     per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.drain_remote_inbox());
 
@@ -1078,12 +1058,11 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     switch_to_kernel_address_space();
     super::task::cleanup_current_task_after_switch(&dispatch_ref);
 
-    // Re-enqueue a task preempted (Running) or already woken (Ready) before its
-    // yield completed, keeping `on_cpu=true` until any Ready task has a
-    // queue/inbox membership. The ordering invariant: a peer may observe a task
-    // as runnable while it is still completing a switch-out, but never
-    // Ready + off-CPU + unqueued. Blocked/Zombie/Terminated tasks are woken by
-    // their own event paths instead.
+    // Re-enqueue a task preempted or already woken before its yield completed,
+    // keeping `on_cpu=true` until any Ready task has a queue/inbox membership: a
+    // peer may observe a task as runnable while it is still completing a
+    // switch-out, but never Ready + off-CPU + unqueued. Blocked/Zombie/Terminated
+    // tasks are woken by their own event paths instead.
     let mut ready_published = false;
     if !next_task.is_exited() {
         let already_ready = next_task.is_ready();
@@ -1205,10 +1184,10 @@ pub(crate) fn drain_previous_task() -> bool {
         return false;
     };
 
-    // The allocator-heavy reap is deliberately not run in this switch tail:
-    // arming the latch defers it to the idle dispatcher, which frees the outgoing
-    // stack on the successor's stack with interrupts enabled. Sampled before the
-    // release — afterwards the pointer must not be touched.
+    // The allocator-heavy reap is deliberately not run in this switch tail: the
+    // latch defers it to the idle dispatcher, which frees the outgoing stack on
+    // the successor's stack with interrupts enabled. Sampled before the release —
+    // afterwards the pointer must not be touched.
     let dispatch_ref = TaskRef::from_placement(node);
     let terminated = dispatch_ref.status() == TaskStatus::Terminated;
     super::task::task_put(dispatch_ref);
@@ -1332,8 +1311,7 @@ pub fn mark_current_blocked() -> bool {
 
 /// A task must never deschedule with preemption disabled: the held
 /// `SpinLock`/`PreemptMutex` would travel with the blocked task and every
-/// contender would spin unpreemptibly until a wake that may itself need the
-/// lock. Fail loud so the offending call chain is in the panic backtrace.
+/// contender would spin unpreemptibly until a wake that may itself need the lock.
 #[inline]
 fn assert_not_blocking_while_atomic() {
     if PreemptGuard::is_active() {
@@ -1341,11 +1319,9 @@ fn assert_not_blocking_while_atomic() {
     }
 }
 
-/// Hard guard at the universal context-switch chokepoint
-/// ([`schedule_internal`]): a switch may only occur at the running baseline
-/// (`preempt_count == 0`), because a held guard would travel with the blocked
-/// task and unbalance `switch_context`'s per-task count swap. Covers every
-/// deschedule path, so the panic lands at the real caller.
+/// A switch may only occur at the running baseline (`preempt_count == 0`): a held
+/// guard would unbalance `switch_context`'s per-task count swap. Sited at the
+/// universal chokepoint, so the panic lands at the real caller.
 #[inline]
 fn assert_switch_preempt_safe() {
     let count = PreemptGuard::count();
@@ -1376,7 +1352,6 @@ pub(crate) fn consume_ready_wake_for_current(current: &Current) -> bool {
     true
 }
 
-/// Drive [`consume_ready_wake_for_current`] from a test.
 #[cfg(feature = "test-hooks")]
 pub fn consume_ready_wake_for_current_for_test(current: &Current) -> bool {
     consume_ready_wake_for_current(current)
@@ -1514,11 +1489,10 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
     // not that this producer owns publication.
     //
     // Totality contract: this returns only once the wake is conclusive — Ready
-    // published, the task observably no longer Blocked, or exited/invalid. It
-    // must never give up while the task is still Blocked, because wake sources
-    // are one-shot (a popped deadline, a masked-until-drained edge) and a dropped
-    // wake strands the sleeper forever; the transient `OnCpu` and `Waking`
-    // windows last microseconds and are waited out with `spin_loop`.
+    // published, the task observably no longer Blocked, or exited/invalid. Wake
+    // sources are one-shot (a popped deadline, a masked-until-drained edge), so
+    // giving up while the task is still Blocked strands the sleeper forever; the
+    // transient `OnCpu` and `Waking` windows are waited out with `spin_loop`.
     let body: &Task = task;
     loop {
         if body.is_exited() || (body.status() == TaskStatus::Invalid) {
@@ -1529,13 +1503,11 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
         }
         match body.sched_placement() {
             // Registered but never published: its creator has not finished
-            // building it. Terminal rather than a retry, and compatible with the
-            // totality contract — a nascent task has never executed, so it holds
-            // no one-shot wake source, and the senders that can name it (kill,
-            // the process-group and session fanouts) set the durable
-            // `signal_pending` bit, which survives this refusal. Returns 0, not
-            // -1: -1 means gone, which `kill` would turn into ESRCH for a task
-            // that very much exists.
+            // building it. Terminal rather than a retry — a nascent task has
+            // never executed, so it holds no one-shot wake source, and the
+            // senders that can name it set the durable `signal_pending` bit,
+            // which survives this refusal. Returns 0, not -1: -1 means gone, and
+            // `kill` would turn that into ESRCH for a task that exists.
             SchedPlacement::Nascent => return 0,
             SchedPlacement::OnCpu => {
                 // `OnCpu` is also the dispatcher's transient claim between a
@@ -1613,10 +1585,9 @@ pub fn unblock_task(task: &TaskRef) -> c_int {
     wake_blocked_task(task, task_id)
 }
 
-/// Wake the task named by `task_id`.
-///
-/// Resolving the id through the registry keeps the liveness-checked upgrade in
-/// one place instead of once per caller. `-1` when the id names no live task.
+/// Wake the task named by `task_id`. Resolving the id through the registry keeps
+/// the liveness-checked upgrade in one place instead of once per caller. `-1`
+/// when the id names no live task.
 pub fn unblock_task_id(task_id: u32) -> c_int {
     let Some(task) = crate::task::task_find_by_id(task_id) else {
         return -1;
@@ -1669,9 +1640,8 @@ extern "sysv64" fn ostd_task_exit_hook() -> ! {
 }
 
 /// Install the OSTD task-exit hook. Must run once at boot, after the scheduler
-/// is initialised and before any task can return from its entry function. The
-/// `&BspToken<'brand>` binds the call to the scope opened by
-/// `slopos_ostd::sync::run_bsp_init`; the OSTD registration is one-shot.
+/// is initialised and before any task can return from its entry function; the
+/// OSTD registration is one-shot.
 pub fn install_ostd_task_exit_hook<'b>(token: &slopos_ostd::sync::BspToken<'b>) {
     slopos_ostd::task::switch::register_task_exit_hook(token, ostd_task_exit_hook);
     slopos_ostd::panic_recovery::register_oops_task_id_provider(current_task_id);
@@ -1684,8 +1654,7 @@ fn deferred_reschedule_callback() {
 
     // An involuntary reschedule must never park a task that has committed
     // `Running → Blocked` but is still executing its blocking protocol: it would
-    // deschedule with no wake armed and no timeout yet, parking the task forever.
-    // Its own voluntary `schedule()` is a few instructions away.
+    // deschedule with no wake armed and no timeout yet, parking it forever.
     let skip = Current::get().is_some_and(|current| {
         task_has_no_preempt_flag(current.task()) || current.task().status() == TaskStatus::Blocked
     });
@@ -1712,8 +1681,7 @@ pub fn init_scheduler() -> c_int {
 
 /// Register the deferred-reschedule callback with OSTD's preempt backend, once
 /// from the BSP boot path. Kept separate from [`init_scheduler`] so test-scope
-/// reinit — which holds no `BspToken` — can rerun that without contending with
-/// OSTD's one-shot callback slot.
+/// reinit can rerun that without contending with OSTD's one-shot callback slot.
 pub fn install_reschedule_callback<'b>(token: &slopos_ostd::sync::BspToken<'b>) {
     slopos_ostd::sync::register_reschedule_callback(token, deferred_reschedule_callback);
 }
@@ -1799,15 +1767,11 @@ pub fn scheduler_timer_tick() {
 
     // Conditional: a reader disables preemption but not interrupts, so this ISR
     // can land inside one, and reporting there tells `synchronize_rcu` that
-    // reader has finished while it is still dereferencing. Declining only delays
-    // a grace period.
+    // reader has finished while it is still dereferencing.
     slopos_ostd::sync::rcu_note_qs_from_interrupt();
 
-    // Lock-free and allocation-free, so it is legal from an ISR.
     slopos_ostd::sync::rcu_gp_poll();
 
-    // Only arms the drain; invocation happens later, from a CPU that finds
-    // nothing to dispatch.
     slopos_ostd::sync::rcu_raise_softirq();
 
     let idle = Idle::current();

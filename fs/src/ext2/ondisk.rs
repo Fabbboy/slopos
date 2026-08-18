@@ -27,8 +27,6 @@ pub const DIR_FT_SYMLINK: u8 = 7;
 /// Maximum bytes storable inline in a fast symlink (i_block[0..14] = 60 bytes).
 pub const FAST_SYMLINK_MAX: usize = 60;
 
-// ---- Superblock ----
-
 #[derive(Debug, Copy, Clone)]
 pub struct Superblock {
     pub inodes_count: u32,
@@ -67,11 +65,8 @@ impl Superblock {
         if sb.magic != EXT2_MAGIC {
             return Err(Ext2Error::InvalidSuperblock);
         }
-        // Reject degenerate geometry before any divisor reaches block_group()/
-        // local_index() (types.rs divides inode numbers by inodes_per_group) or
-        // groups_count() (divides blocks_count by blocks_per_group). A malformed
-        // image with a zero divisor would otherwise fault on the first inode
-        // lookup.
+        // Reject degenerate geometry: a zero divisor reaching block_group(),
+        // local_index() or groups_count() faults on the first inode lookup.
         if sb.inodes_per_group == 0 || sb.blocks_per_group == 0 || sb.inodes_count == 0 {
             return Err(Ext2Error::InvalidSuperblock);
         }
@@ -109,8 +104,6 @@ impl Superblock {
     }
 }
 
-// ---- Block Group Descriptor ----
-
 #[derive(Debug, Copy, Clone)]
 pub struct GroupDesc {
     pub block_bitmap: BlockNum,
@@ -142,8 +135,6 @@ impl GroupDesc {
         put_le16(data, 16, self.used_dirs_count);
     }
 }
-
-// ---- Inode ----
 
 #[derive(Debug, Copy, Clone)]
 pub struct Inode {
@@ -228,8 +219,6 @@ impl Inode {
     }
 }
 
-// ---- Directory Entry (borrowed) ----
-
 #[derive(Debug, Copy, Clone)]
 pub struct DirEntry<'a> {
     pub inode: InodeNum,
@@ -240,7 +229,6 @@ pub struct DirEntry<'a> {
 /// Minimum size of a directory entry record (header only, no name).
 pub const DIR_ENTRY_HEADER_SIZE: usize = 8;
 
-/// Compute the on-disk record size for a directory entry with the given name length.
 pub fn dir_entry_size(name_len: usize) -> usize {
     (DIR_ENTRY_HEADER_SIZE + name_len + 3) & !3
 }
@@ -263,8 +251,6 @@ pub fn write_dir_entry(
     let name_end = DIR_ENTRY_HEADER_SIZE + name.len();
     data[DIR_ENTRY_HEADER_SIZE..name_end].copy_from_slice(name);
 }
-
-// ---- Helpers for path splitting ----
 
 pub fn split_parent(path: &[u8]) -> Option<(&[u8], &[u8])> {
     if path.is_empty() || path[0] != b'/' {
@@ -296,8 +282,6 @@ pub fn split_parent(path: &[u8]) -> Option<(&[u8], &[u8])> {
     }
     Some((parent, name))
 }
-
-// ---- Little-endian byte helpers ----
 
 fn le16(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([data[offset], data[offset + 1]])

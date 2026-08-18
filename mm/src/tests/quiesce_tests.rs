@@ -1,7 +1,7 @@
 //! TLB-quiesce epoch and frame-quarantine tests.
 //!
-//! The interesting cases are all timing: the window a frame is protected for is
-//! measured from the unmap, not from whenever it happens to be freed.
+//! The protection window is measured from the unmap, not from whenever the
+//! frame happens to be freed.
 
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
@@ -33,11 +33,9 @@ pub fn test_quiesce_epoch_advances() -> TestResult {
     TestResult::Pass
 }
 
-/// A deferral in epoch `D` is discharged only at `D + 2`. A frame freed
-/// anywhere in that window must be quarantined — including one freed an epoch
-/// *after* the unmap, the ordinary case for anything refcounted. A "deferred
-/// this epoch?" flag reads false there and releases the frame while a peer
-/// still resolves its old address.
+/// A deferral in epoch `D` is discharged only at `D + 2`. A "deferred this
+/// epoch?" flag reads false for a frame freed an epoch after its unmap — the
+/// ordinary refcounted case — and releases it under a stale peer TLB.
 pub fn test_quarantine_spans_two_epochs_after_a_deferred_unmap() -> TestResult {
     quiesce::note_deferred_unmap();
     let (deferred_at, _, stamp) = quiesce::stats();
@@ -74,9 +72,8 @@ pub fn test_quarantine_spans_two_epochs_after_a_deferred_unmap() -> TestResult {
     TestResult::Pass
 }
 
-/// Rotation runs from a timer interrupt, so it must be O(1). A rotation that
-/// spliced would hold the allocator's cli-lock for O(blocks x free-list length)
-/// inside an interrupt handler.
+/// Rotation runs from a timer interrupt: a splicing rotation would hold the
+/// allocator's cli-lock for O(blocks x free-list length) inside that handler.
 pub fn test_quarantine_rotate_does_not_splice() -> TestResult {
     let before = page_alloc::quarantine_frames();
     page_alloc::quarantine_rotate();

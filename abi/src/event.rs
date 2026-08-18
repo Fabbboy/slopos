@@ -1,8 +1,8 @@
 //! Typed kernel event substrate.
 //!
-//! [`KernelEvent`] is the single typed vocabulary for waking blocked tasks: each
-//! variant names a resource and carries its slot id. The backing wait queues
-//! live in the kernel's trusted core; the slot spaces are defined here.
+//! [`KernelEvent`] is the single typed vocabulary for waking blocked tasks. The
+//! backing wait queues live in the kernel's trusted core; the slot spaces are
+//! defined here.
 
 pub const MAX_PIPES: usize = 64;
 

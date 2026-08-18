@@ -1,19 +1,9 @@
-//! I²C-HID touchpad subsystem.
+//! I²C-HID touchpad subsystem: ACPI discovery, HID-over-I²C transport, report
+//! parsing and gesture generation, wired up by [`init`] from a boot step.
 //!
-//! Ties together ACPI discovery (`slopos_acpi::aml`), the I²C controller
-//! ([`crate::i2c`]), the HID-over-I²C transport ([`i2c_hid`]), the report
-//! parser ([`report`]), and the gesture engine ([`gesture`]). [`init`] is
-//! called once from a boot step; it discovers the touchpad, brings it up,
-//! and feeds pointer events to the compositor.
-//!
-//! Input is interrupt-driven when the device's GpioInt can be wired through
-//! the PCH pinctrl controller ([`crate::pinctrl`]): a kthread parks on an
-//! IRQ-armed waker and drains reports only when the device signals. It falls
-//! back to a descheduling polling thread when the GPIO interrupt can't be
-//! wired — no GpioInt, unsupported pad/SoC, or `tp.poll`.
-//!
-//! Everything is failure-tolerant: with no I²C-HID touchpad present,
-//! discovery returns nothing and the subsystem stays dormant.
+//! Input is interrupt-driven when the device's GpioInt can be wired through the
+//! PCH pinctrl controller ([`crate::pinctrl`]); otherwise a polling thread drains
+//! reports.
 
 pub mod gesture;
 pub mod i2c_hid;
@@ -53,9 +43,7 @@ struct TouchpadRuntime {
 static TOUCHPAD: OnceLock<TouchpadRuntime> = OnceLock::new();
 
 /// Discover and bring up the I²C-HID touchpad, then start polling.
-/// `rsdp_phys` is the ACPI RSDP physical address; `width`/`height` are the
-/// framebuffer dimensions for cursor bounds; `debug` enables verbose
-/// bring-up tracing (`tp.debug=on`).
+/// `width`/`height` bound the cursor; `debug` (`tp.debug=on`) traces bring-up.
 pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bool) {
     let Some(tables) = AcpiTables::from_phys(rsdp_phys) else {
         return;
@@ -98,9 +86,8 @@ pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bo
     };
     let format = report::parse_report_descriptor(rdesc.as_slice());
 
-    // The device boots in mouse-compatibility mode (relative reports). If
-    // it exposes the Input Mode selector, switch it to multitouch so the
-    // absolute digitizer reports the gesture engine consumes start flowing.
+    // The device boots in mouse-compatibility mode (relative reports); `0x03`
+    // selects multitouch so the absolute digitizer reports start flowing.
     if let Some(rid) = format.input_mode_report_id {
         match hid.set_feature_report(rid, &[0x03]) {
             Ok(()) => {
@@ -137,9 +124,6 @@ pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bo
     };
     TOUCHPAD.call_once(move || rt);
 
-    // Prefer interrupt-driven input (the device's GpioInt wired through the
-    // PCH pinctrl controller); fall back to polling if the GPIO interrupt
-    // can't be wired (no GpioInt, unsupported pad/SoC, or `tp.poll`).
     if try_interrupt_mode(&found, force_poll) {
         return;
     }
@@ -149,10 +133,9 @@ pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bo
     }
 }
 
-/// IO-APIC line the Intel PCH GPIO controller (`INTC1055`) funnels pad
-/// interrupts onto on Alder Lake-P. Architectural for this PCH; the `_CRS`
-/// that would name it (`SGIR`) is in an OperationRegion the narrow AML reader
-/// can't resolve (see [`crate::pinctrl`]).
+/// IO-APIC line the Intel PCH GPIO controller (`INTC1055`) funnels pad interrupts
+/// onto on Alder Lake-P; the `_CRS` that would name it sits in an OperationRegion
+/// the narrow AML reader can't resolve.
 const GPIO_DEFAULT_GSI: u32 = 14;
 
 /// IRQ-armed waker: the GPIO ISR signals it, the drain thread parks on it.
@@ -192,7 +175,7 @@ impl TouchpadWaker {
 
 static TOUCHPAD_WAKER: TouchpadWaker = TouchpadWaker::new();
 
-/// Attempt to bring up interrupt-driven input. Returns `true` if engaged.
+/// Returns `true` if interrupt-driven input was engaged.
 fn try_interrupt_mode(found: &AcpiI2cHid, force_poll: bool) -> bool {
     if force_poll {
         return false;
@@ -200,9 +183,6 @@ fn try_interrupt_mode(found: &AcpiI2cHid, force_poll: bool) -> bool {
     let Some(line) = found.gpio_int_pin else {
         return false;
     };
-    // Configure the touchpad's GpioInt pad in the PCH pinctrl controller. The
-    // controller's MMIO base is an architectural SoC constant validated against
-    // the silicon inside `init_for_pad` (see `crate::pinctrl`).
     let Some(pin) = pinctrl::init_for_pad(line, found.gpio_int_edge, found.gpio_int_active_low)
     else {
         klog_warn!(
@@ -235,9 +215,8 @@ fn try_interrupt_mode(found: &AcpiI2cHid, force_poll: bool) -> bool {
     true
 }
 
-/// Program the IO-APIC route for the GPIO controller's cascade GSI and
-/// register the demux ISR. Leaks the line+handle (kernel-lifetime
-/// registration). Returns `false` on any failure.
+/// Route the cascade GSI and register the demux ISR. Leaks the line and handle
+/// (kernel-lifetime registration); returns `false` on any failure.
 fn register_cascade(gsi: u32, edge: bool, active_low: bool) -> bool {
     use crate::ioapic::regs::{
         IOAPIC_FLAG_DELIVERY_FIXED, IOAPIC_FLAG_DEST_PHYSICAL, IOAPIC_FLAG_MASK,
@@ -278,17 +257,15 @@ fn register_cascade(gsi: u32, edge: bool, active_low: bool) -> bool {
         Ok(h) => h,
         Err(_) => return false,
     };
-    // Order matters for the borrow checker: forget the handle (ending its
-    // borrow of `line`) before forgetting the line.
+    // Forget the handle before the line: it borrows `line`.
     core::mem::forget(handle);
     core::mem::forget(line);
     crate::ioapic::unmask_gsi(gsi);
     true
 }
 
-/// Interrupt drain thread: park until the GPIO ISR signals, read every
-/// pending input report (which de-asserts the device's DRDY line), then
-/// re-enable the pad interrupt.
+/// Interrupt drain thread: parks until the GPIO ISR signals, then reads every
+/// pending report — draining them is what de-asserts the device's DRDY line.
 fn irq_thread(token: KernelIoToken<'static>) {
     let mut buf = [0u8; 256];
     let mut first_report = true;
@@ -325,9 +302,8 @@ fn irq_thread(token: KernelIoToken<'static>) {
         }
         pinctrl::pad_irq_unmask();
     }
-    // Leave the pad masked: `mem::forget` on the IRQ handle keeps the line
-    // configured, so a late GPIO edge would otherwise wake a thread that is
-    // gone and leave the interrupt asserted with nobody to drain it.
+    // Leave the pad masked: the forgotten IRQ handle keeps the line configured, so
+    // a late edge would assert an interrupt with nobody left to drain it.
     pinctrl::pad_irq_mask();
     TOUCHPAD_WAKER.stop().note_exited();
 }
@@ -339,8 +315,8 @@ pub fn set_bounds(width: i32, height: i32) {
     }
 }
 
-/// Bounded budget for per-poll diagnostic lines so a persistent read error
-/// can't flood the kernel log ring buffer (which would corrupt a `cat`).
+/// Budget for per-poll diagnostic lines so a persistent read error can't flood
+/// the kernel log ring.
 static POLL_LOG_BUDGET: AtomicU32 = AtomicU32::new(24);
 
 fn poll_log_ok() -> bool {
@@ -351,16 +327,10 @@ fn poll_log_ok() -> bool {
         .is_ok()
 }
 
-/// The polling thread: read one input report, decode it, run the gesture
-/// engine, sleep, repeat.
 fn poll_thread(token: KernelIoToken<'static>) {
     let mut buf = [0u8; 256];
-    // `tp.debug` diagnostics: one-shot dumps of the first report and first
-    // tipped frame, plus a periodic stats heartbeat. Together they pin which
-    // stage is dead: the device produces nothing (`empty` climbs, `data`
-    // stays 0), reports arrive but never carry contacts (`data` climbs,
-    // `tipped` stays 0 — e.g. stuck in mouse-compat mode), or frames flow
-    // and the fault is downstream in the gesture/compositor path.
+    // `tp.debug` counters separate the failure stages: `data` stuck at 0 means the
+    // device produces nothing, `tipped` stuck at 0 means mouse-compat mode.
     let mut first_report = true;
     let mut first_tip = true;
     let (mut n_empty, mut n_data, mut n_err, mut n_tipped) = (0u64, 0u64, 0u64, 0u64);
@@ -407,8 +377,7 @@ fn poll_thread(token: KernelIoToken<'static>) {
                 }
             }
             polls += 1;
-            // Own cap, independent of the shared error budget, so a burst of
-            // read-error lines can't starve the stats heartbeat.
+            // Own cap, so a burst of read-error lines can't starve the heartbeat.
             if rt.debug && polls % 512 == 0 && polls <= 512 * 24 {
                 klog_info!(
                     "touchpad: poll stats: empty={} data={} err={} tipped={}",
@@ -419,15 +388,11 @@ fn poll_thread(token: KernelIoToken<'static>) {
                 );
             }
         }
-        // Deschedule (timer-armed wake) between polls instead of busy-waiting
-        // on the HPET — a non-blocking spin loop pins a core and floods the
-        // scheduler with churn. Interim until the device's GpioInt is wired
-        // and this becomes an interrupt-driven `Deadline::Indefinite` wait.
+        // Deschedule between polls: a spin loop would pin a core.
         yield_with_deadline(&token, Deadline::AtMs(POLL_MS));
     }
 }
 
-/// Map an ACPI I²C controller index (`I2Cn`) to the PCI-claimed bus.
 /// Intel client PCHs place I²C 0–3 at device `0x15` and 4–5 at `0x19`.
 fn controller_bus(index: u8) -> Option<KArc<I2cBus>> {
     let (device, function) = if index < 4 {
@@ -438,9 +403,8 @@ fn controller_bus(index: u8) -> Option<KArc<I2cBus>> {
     i2c::bus_by_bdf(0, device, function)
 }
 
-/// Logical extent of the touch surface. The descriptor also carries the
-/// relative mouse collection (small signed range); take the largest X/Y
-/// maximum so the absolute digitizer's extent wins.
+/// Logical extent of the touch surface. The descriptor also carries the relative
+/// mouse collection, so the largest X/Y maximum is the absolute digitizer's.
 fn pad_logical_max(format: &ReportFormat) -> (i32, i32) {
     let x = format
         .matches(PAGE_GENERIC_DESKTOP, USAGE_X)
@@ -539,12 +503,8 @@ fn timestamp_ms() -> u64 {
     hpet::nanoseconds(hpet::read_counter()) / 1_000_000
 }
 
-// --- AML evaluator test ------------------------------------------------------
-//
-// A touchpad's GpioInt pin is patched into its resource buffer by `_INI` via a
-// method chain (`pin = (enc & 0xFFFF) + PADTABLE[group][col]`). This exercises
-// that exact shape: method call, `And`/`Add` with targets, and a two-level
-// `Package` index.
+// A touchpad's GpioInt pin is patched in by `_INI` as `pin = (enc & 0xFFFF) +
+// PADTABLE[group][col]`; this exercises that shape.
 
 /// AML host for the evaluator test: no `SystemMemory` fields are read, so this
 /// never gets called.
@@ -589,15 +549,9 @@ pub fn test_aml_method_package_eval() -> slopos_testing::TestResult {
 
 slopos_testing::stest!(name = test_aml_method_package_eval, suite = touchpad);
 
-// A method body whose *first* statement is a Type2 op writing its Target —
-// ASL `Local0 = (Arg0 & 0xFF0000) >> 0x10`, which iasl folds into a bare
-// `ShiftRight(And(..), .., Local0)` — must execute and reach its `Return`, not
-// stop at a leading non-`Store`/control-flow opcode.
-//
-// This is the Intel GPIO pin computation `GNUM(enc) = GNMB(enc) +
-// GINF(GGRP(enc), col)`, where `GGRP` leads with that `ShiftRight`; if it
-// returns 0 the package index collapses to the wrong row. The bytes mirror the
-// real `GGRP`/`GNMB`/`GINF`/`GNUM`.
+// A method body whose *first* statement is a Type2 op writing its Target
+// (`ShiftRight(And(..), .., Local0)`) must execute and reach its `Return`.
+// This is the Intel GPIO `GGRP`; returning 0 picks the wrong package row.
 #[doc(hidden)]
 pub fn test_aml_target_op_statement() -> slopos_testing::TestResult {
     // Name(GPCL, Package(2){ Package(2){0xAA,0x11}, Package(2){0xBB,0xA0} })
@@ -608,7 +562,6 @@ pub fn test_aml_target_op_statement() -> slopos_testing::TestResult {
     // Method(GNUM,1) { Local0=GNMB(Arg0); Local1=GGRP(Arg0);
     //                  Return(GINF(Local1, One) + Local0) }
     // enc=0x00010005 → GGRP=1, GNMB=5 → GNUM = GPCL[1][1] + 5 = 160 + 5 = 165.
-    // (Pre-fix: GGRP=0 → GPCL[0][1]+5 = 0x11+5 = 22.)
     #[rustfmt::skip]
     let aml = [
         // Name(GPCL, Package{ {0xAA,0x11}, {0xBB,0xA0} })
@@ -639,7 +592,6 @@ pub fn test_aml_target_op_statement() -> slopos_testing::TestResult {
     {
         return slopos_testing::TestResult::Fail;
     }
-    // GNUM: the same resolved through a nested call → GpioInt pin.
     match slopos_acpi::aml::eval_method_u64_for_test(&aml, &ZeroHost, b"GNUM", &[0x0001_0005]) {
         Some(165) => slopos_testing::TestResult::Pass,
         _ => slopos_testing::TestResult::Fail,
