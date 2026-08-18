@@ -178,13 +178,11 @@ pub proof fn tcp_zc_pin_in_bounds(q0: SendQ, trace: Seq<SendStep>, i: int)
             <= sendq_run(q0, trace).segs[i].pin_len,
 {
     sendq_inv_on_every_trace(q0, trace);
-    // Instantiate the invariant's `forall` at this index.
     assert(seg_in_bounds(sendq_run(q0, trace).segs[i]));
 }
 
-/// (INV-TCPZC-HELD-UNTIL-ACK, retransmit half) A (re)transmit never drops a
-/// segment from the queue: the pin a retransmit re-reads is still live and
-/// unchanged. Reclaim is the same (the refcount moves; the queue does not).
+/// (INV-TCPZC-HELD-UNTIL-ACK, retransmit half) Neither a (re)transmit nor a
+/// driver reclaim drops a segment, so the pin a retransmit re-reads is live.
 pub proof fn transmit_keeps_pins(q: SendQ, idx: nat)
     ensures
         sendq_step(q, SendStep::Transmit { idx }).segs == q.segs,
@@ -192,26 +190,21 @@ pub proof fn transmit_keeps_pins(q: SendQ, idx: nat)
 {
 }
 
-/// (INV-TCPZC-HELD-UNTIL-ACK, free half) An ACK drops the head segment only when
-/// it is fully cumulatively covered (`seq + len <= snd_una'`); an un-acked
-/// segment is never freed by ACK. So a pin is released only after its bytes are
-/// ACKed (or by teardown) — no free before ACK / mid-retransmit-window.
+/// (INV-TCPZC-HELD-UNTIL-ACK, free half) An ACK drops the head segment only
+/// when it is fully cumulatively covered, so a pin is released only after its
+/// bytes are ACKed or by teardown — never mid-retransmit-window.
 pub proof fn ack_frees_only_covered(q: SendQ, up_to: nat)
     requires
         q.segs.len() > 0,
-        // The head is NOT yet cumulatively covered after this ACK...
         q.segs[0].seq + q.segs[0].len > max_nat(q.snd_una, up_to),
     ensures
-        // ...so the ACK does not drop it: the pin stays live.
         sendq_step(q, SendStep::Ack { up_to }).segs == q.segs,
 {
 }
 
-/// Load-bearing non-vacuity witness (the `ring_bufpool.rs` idiom): a queue that
-/// admits a segment whose read window runs past its pin violates the invariant —
-/// i.e. INV-TCPZC-PIN-IN-BOUNDS genuinely forbids an out-of-bounds DMA read, it
-/// is not vacuously true. (`sendq_step`'s `Send` guard is exactly what stops such
-/// a segment from ever entering a reachable queue.)
+/// Non-vacuity witness: a segment whose read window runs past its pin violates
+/// the invariant, so INV-TCPZC-PIN-IN-BOUNDS genuinely forbids an out-of-bounds
+/// DMA read. `sendq_step`'s `Send` guard is what keeps such a segment out.
 pub proof fn witness_oob_segment_breaks_inv()
     ensures
         !sendq_inv(SendQ {

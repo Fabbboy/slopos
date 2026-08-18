@@ -317,8 +317,6 @@ pub fn tiocgwinsz(fd: RawFd) -> SyscallResult<UserWinsize> {
     demux(result).map(|_| ws)
 }
 
-/// Set the terminal window size (TIOCSWINSZ ioctl).
-///
 /// The kernel raises SIGWINCH to the slave foreground process group when the
 /// row/col dimensions change.
 #[inline(always)]
@@ -334,9 +332,7 @@ pub fn tiocswinsz(fd: RawFd, ws: &UserWinsize) -> SyscallResult<()> {
     demux(result).map(|_| ())
 }
 
-/// Set a file descriptor to non-blocking mode via fcntl.
-///
-/// Works on any FD type (pipes, sockets, files).
+/// Works on any fd type (pipes, sockets, files).
 #[inline(always)]
 pub fn set_fd_nonblocking(fd: RawFd) -> SyscallResult<()> {
     use super::error::SyscallError;
@@ -347,8 +343,6 @@ pub fn set_fd_nonblocking(fd: RawFd) -> SyscallResult<()> {
     Ok(())
 }
 
-/// Mark a file descriptor close-on-exec via fcntl.
-///
 /// Spawned children never inherit a `FD_CLOEXEC` descriptor (spawn is
 /// fork+exec in one step), and `exec` strips it from forked children.
 #[inline(always)]

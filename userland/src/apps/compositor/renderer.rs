@@ -988,9 +988,8 @@ fn shadow_bounds(window: &UserWindowInfo) -> DamageRect {
     }
 }
 
-/// The opaque content area of a window (below the title bar). Composited by
-/// overwrite, so it is the window's occluder box: everything strictly below it
-/// in z-order is hidden here.
+/// The opaque content area of a window, below the title bar.  Composited by
+/// overwrite, so it is the window's occluder box.
 fn content_box(window: &UserWindowInfo) -> DamageRect {
     let ew = window.effective_width() as i32;
     let eh = window.effective_height() as i32;
@@ -1002,10 +1001,10 @@ fn content_box(window: &UserWindowInfo) -> DamageRect {
     }
 }
 
-/// The full window frame: title bar (above `window.y`) plus content area. Used
-/// to bound where a window's content and decorations may paint. The title bar
-/// is deliberately NOT treated as opaque (its rounded corners let the backdrop
-/// show through), so only [`content_box`] is subtracted during occlusion.
+/// The full window frame: title bar (above `window.y`) plus content area, and
+/// the bound on where content and decorations may paint.  The title bar is
+/// deliberately not opaque — its rounded corners let the backdrop through — so
+/// only [`content_box`] is subtracted during occlusion.
 fn frame_box(window: &UserWindowInfo) -> DamageRect {
     let ew = window.effective_width() as i32;
     let eh = window.effective_height() as i32;

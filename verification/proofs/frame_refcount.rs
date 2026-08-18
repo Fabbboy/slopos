@@ -330,7 +330,6 @@ pub proof fn broken_drop_ordering_violates_invariant()
             (slot_inv(s) && s.rc == 1) ==> #[trigger] slot_inv(drop_reset(s))
                 && slot_inv(drop_free(drop_reset(s))),
 {
-    // A live slot holding its last reference — the instant before `Drop`.
     let live = Slot { typed: true, rc: 1, payload_live: true, on_free_list: false, releases: 0 };
     assert(slot_inv(live));
     let broken = broken_drop_free(live);

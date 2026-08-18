@@ -507,31 +507,19 @@ fn queries_honour_their_ifindex_filter() -> bool {
 
 /// The socket query resolves a *live* TCP connection's real state.
 ///
-/// This pins the two-phase collector's second half. Phase one records a
-/// placeholder state under the socket-table lock; phase two resolves the real
-/// one through `with_pcb` with that lock released. A phase two that silently
-/// resolved nothing would look exactly like "no TCP connections" — no error, no
-/// empty output, every row simply sitting at its placeholder. So the assertion
-/// is not "a row appeared" but "the row for *our* connection says ESTABLISHED",
-/// which is a value only phase two can produce.
+/// Pins the two-phase collector's second half: phase one records a placeholder
+/// state under the socket-table lock, phase two resolves the real one with that
+/// lock released. A phase two resolving nothing looks exactly like "no TCP
+/// connections", so the assertion is that the row for *our* connection says
+/// ESTABLISHED — a value only phase two can produce.
 ///
-/// Ownership is a separate case, because a bound socket is enough to prove it
-/// and a bound socket needs no network.
+/// TCP-DNS to a public resolver, because a loopback connection never leaves
+/// `SYN_SENT`, so the only TCP connection this machine can complete goes out
+/// over `eth0`. Port 53 over TCP is mandatory by RFC 7766.
 ///
-/// **TCP-DNS to a public resolver**, because a loopback connection never leaves
-/// `SYN_SENT` — the SYN reaches the stack and no SYN-ACK returns — so the only
-/// TCP connection this machine can currently complete is one that goes out over
-/// `eth0`. Port 53 over TCP is mandatory by RFC 7766, the anycast addresses
-/// below have been stable for over a decade, and SLIRP forwards them without
-/// special-casing.
-///
-/// **`8.8.8.8` is tried last, and the order is load-bearing.** Another test in
-/// this suite connects to that address directly; two tests contending for one
-/// external endpoint inside a single boot fails whichever of them loses, which
-/// presents as intermittency rather than as contention. Several addresses are
-/// tried because reaching *a* resolver is the precondition, not reaching one
-/// particular operator. The assertion is unchanged by which one answers: it is
-/// made against the peer that did.
+/// `8.8.8.8` is tried last, and the order is load-bearing: another test in this
+/// suite connects to that address directly, and two tests contending for one
+/// external endpoint in a single boot presents as intermittency.
 fn socket_query_resolves_a_live_tcp_state() -> bool {
     use std::io::Write as _;
     use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
@@ -558,8 +546,8 @@ fn socket_query_resolves_a_live_tcp_state() -> bool {
         return false;
     };
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    // A byte on the wire so the connection is unambiguously established rather
-    // than still completing its handshake.
+    // A byte on the wire, so the connection is established rather than still
+    // completing its handshake.
     let _ = stream.write_all(&[0x00, 0x00]);
 
     let q = match fetch_sockets() {
@@ -570,11 +558,10 @@ fn socket_query_resolves_a_live_tcp_state() -> bool {
         }
     };
 
-    // Our connection by its exact four-tuple, not "any ESTABLISHED row": every
-    // other process's rows are in this answer too, and one of theirs standing in
-    // for ours would pass a test of nothing. Ports are host byte order in this
-    // struct, unlike `SockAddrIn` — 53 read big-endian would be 13568, so this
-    // lookup is also where a byte-order slip surfaces.
+    // Matched on the exact four-tuple, not "any ESTABLISHED row": every other
+    // process's rows are in this answer too. Ports are host byte order in this
+    // struct, unlike `SockAddrIn` — 53 read big-endian would be 13568 — so a
+    // byte-order slip surfaces here too.
     let ours = q
         .iter()
         .find(|row| row.remote_addr == peer && row.remote_port == 53);
@@ -623,15 +610,9 @@ fn socket_query_resolves_a_live_tcp_state() -> bool {
         return false;
     }
 
-    // `/bin/ss` is the reason the query exists, and the connection is open
-    // right now, so this is where it can be shown rendering a resolved TCP
-    // state. It costs no network of its own — the connection above is the
-    // one being reported on — and it closes the last gap between "the kernel
-    // holds the right value" and "the tool prints it".
-    //
-    // `ESTAB` rather than the state number: a renderer that mapped the wrong
-    // constant would still print *a* state, and the assertion has to be on
-    // the text a person reads.
+    // Matched on `ESTAB` rather than the state number: a renderer that mapped
+    // the wrong constant would still print *a* state, so the assertion has to
+    // be on the text a person reads.
     let mut rendered = false;
     for words in [
         ["ss", "-t"].as_slice(),

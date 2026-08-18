@@ -29,18 +29,11 @@ pub fn get_time_ms() -> u64 {
     Sys::get_time_ms()
 }
 
-/// Query the monotonic clock with nanosecond precision.
-///
-/// Returns a [`Timespec`] with seconds and nanoseconds since boot,
-/// or `None` if the syscall failed.
 #[inline(always)]
 pub fn clock_gettime(ts: &mut Timespec) -> i64 {
     unsafe { syscall2(SYSCALL_CLOCK_GETTIME, CLOCK_MONOTONIC, ts as *mut _ as u64) as i64 }
 }
 
-/// Read the monotonic clock and return total nanoseconds since boot.
-///
-/// Convenience wrapper that avoids callers having to build a [`Timespec`].
 #[inline(always)]
 pub fn clock_gettime_ns() -> u64 {
     let mut ts = Timespec {
@@ -65,16 +58,14 @@ pub fn get_current_cpu() -> u32 {
 }
 
 /// Pin `target` (0 = the calling task) to the CPUs in `affinity`, a bitmask
-/// where bit `n` permits CPU `n`. Pass `1 << cpu` to pin to a single CPU.
-/// The placement takes effect at the next reschedule; returns 0 on success
-/// or a negative errno.
+/// where bit `n` permits CPU `n`. The placement takes effect at the next
+/// reschedule; returns 0 on success or a negative errno.
 #[inline(always)]
 pub fn set_cpu_affinity(target: u32, affinity: u32) -> i64 {
     unsafe { syscall2(SYSCALL_SET_CPU_AFFINITY, target as u64, affinity as u64) as i64 }
 }
 
-/// Fill a buffer with cryptographically secure random bytes.
-/// Returns the number of bytes written.
+/// Fills `buf` with cryptographically secure random bytes; returns the count.
 #[inline(always)]
 pub fn getrandom(buf: &mut [u8]) -> isize {
     unsafe {
