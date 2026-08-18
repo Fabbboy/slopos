@@ -1,18 +1,13 @@
-//! Pre-write snapshot of every display register the repoint will touch.
-//!
-//! Before the first plane write, the active pipe's plane-group registers are
-//! captured so [`restore`] can rewrite them — `PLANE_SURF` last — to put the
-//! firmware framebuffer back if the repoint is declined or the watchdog rolls it
-//! back. Capture is read-only; restore is the only writer here and never touches
-//! `PLANE_COLOR_CTL` (firmware color management is preserved).
+//! Pre-write snapshot of every display register the repoint will touch, so
+//! [`restore`] can put the firmware framebuffer back when a repoint is declined
+//! or the watchdog rolls it back.
 
 use slopos_mm::mmio::MmioRegion;
 
 use crate::xe_logic::regs::{self, Pipe};
 
 /// Saved copy of the active pipe's plane-group registers — every register the
-/// repoint is allowed to write — taken before the first write so the firmware
-/// framebuffer can be put back verbatim.
+/// repoint is allowed to write.
 #[derive(Clone, Copy, Debug)]
 pub struct DisplaySnapshot {
     pub pipe: Pipe,
@@ -26,8 +21,7 @@ pub struct DisplaySnapshot {
     pub plane_surf: u32,
 }
 
-/// Read back the active pipe's plane-group registers into a [`DisplaySnapshot`].
-/// Read-only: captures the firmware state before any write.
+/// Capture the firmware's plane-group register state before any write.
 pub fn capture(mmio: &MmioRegion, pipe: Pipe) -> DisplaySnapshot {
     DisplaySnapshot {
         pipe,
@@ -44,14 +38,11 @@ pub fn capture(mmio: &MmioRegion, pipe: Pipe) -> DisplaySnapshot {
 
 /// Rewrite the snapshot's saved registers to restore the firmware framebuffer.
 ///
-/// Writes every captured plane-group register back to the snapshot's pipe with
-/// `PLANE_SURF` written LAST, so the double-buffered plane group re-arms the
-/// firmware surface atomically. `PLANE_COLOR_CTL` is never written — the
-/// firmware's color management is left exactly as found — and no
-/// pipe/transcoder/DDI/PLL/power-well register is touched.
+/// `PLANE_SURF` goes LAST, so the double-buffered plane group re-arms the
+/// firmware surface atomically. `PLANE_COLOR_CTL` and every
+/// pipe/transcoder/DDI/PLL/power-well register are left as found.
 pub fn restore(mmio: &MmioRegion, snap: &DisplaySnapshot) {
     let pipe = snap.pipe;
-    // Non-arming group registers first; they latch on the trailing PLANE_SURF.
     mmio.write::<u32>(regs::plane_ctl(pipe), snap.plane_ctl);
     mmio.write::<u32>(regs::plane_stride(pipe), snap.plane_stride);
     mmio.write::<u32>(regs::plane_pos(pipe), snap.plane_pos);
@@ -59,6 +50,5 @@ pub fn restore(mmio: &MmioRegion, snap: &DisplaySnapshot) {
     mmio.write::<u32>(regs::plane_offset(pipe), snap.plane_offset);
     mmio.write::<u32>(regs::plane_aux_dist(pipe), snap.plane_aux_dist);
     mmio.write::<u32>(regs::plane_aux_offset(pipe), snap.plane_aux_offset);
-    // PLANE_SURF LAST: arms the double-buffered group atomically.
     mmio.write::<u32>(regs::plane_surf(pipe), snap.plane_surf);
 }

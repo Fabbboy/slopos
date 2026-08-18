@@ -1,24 +1,6 @@
-//! Regression tests for the per-CPU exception SafeStack **data** stack.
-//!
-//! These pin the invariants behind the fix for the "exception handler writes
-//! its `format_args!` locals onto the interrupted task's data stack →
-//! supervisor #PF → recursive panic" crash:
-//!
-//! 1. `__safestack_pointer_address` selects the data-stack slot from the
-//!    running `RSP` — task/kernel context resolves the per-task slot,
-//!    IST/exception context resolves the per-CPU `ist_unsafe_sp`.
-//! 2. Each online CPU's `ist_unsafe_sp` is primed into a dedicated,
-//!    guard-paged exception data-stack region DISJOINT from the per-task
-//!    `USTACK` region — so an exception handler can never land on a task's
-//!    data stack.
-//!
-//! They run on a normal kernel (task) stack, so they cannot drive the IST
-//! branch directly; the comprehensive suite (every kernel/COW page fault
-//! runs instrumented handler code through the new resolver, and a flipped
-//! range-check polarity would crash every task prologue on boot) covers the
-//! live path. What these lock down is the data-structure contract a
-//! regression would most plausibly break: priming, region placement, and
-//! disjointness.
+//! The per-CPU exception SafeStack **data** stack: every online CPU's
+//! `ist_unsafe_sp` is primed into a guard-paged region that stays disjoint from
+//! the per-task `USTACK` region, so a handler never lands on a task's data stack.
 
 use slopos_mm::memory_layout_defs::{
     EXC_DSTACK_REGION_BASE, EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_END,
@@ -28,9 +10,8 @@ use slopos_testing::{TestResult, assert_test};
 
 use crate::ist_stacks::{exc_dstack_bounds_current_cpu, exc_dstack_top_current_cpu};
 
-/// `ist_unsafe_sp` is primed to the top of the current CPU's exception data
-/// stack — never zero (the uninitialised value the naked resolver would hand
-/// a SafeStack prologue as a slot pointing at address 0).
+/// Never zero: the naked resolver would hand a SafeStack prologue a slot
+/// pointing at address 0.
 pub fn test_exc_dstack_primed() -> TestResult {
     let sp = slopos_arch::pcr::local_ist_unsafe_sp();
     let (guard_start, usable_base, top) = exc_dstack_bounds_current_cpu();
@@ -55,10 +36,8 @@ pub fn test_exc_dstack_primed() -> TestResult {
     TestResult::Pass
 }
 
-/// The exception data-stack region is DISJOINT from the per-task `USTACK`
-/// region and from the IST *safe*-stack region — i.e. an exception handler's
-/// data stack can never alias a task's data stack (the root of the original
-/// crash) nor the IST safe stack it runs on.
+/// Disjoint from the per-task `USTACK` region and from the IST *safe*-stack
+/// region, so a handler's data stack can alias neither.
 pub fn test_exc_dstack_region_disjoint() -> TestResult {
     let (guard_start, _usable_base, top) = exc_dstack_bounds_current_cpu();
 

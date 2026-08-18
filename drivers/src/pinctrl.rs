@@ -1,54 +1,38 @@
-//! Minimal Intel PCH GPIO/pinctrl interrupt path.
+//! Minimal Intel PCH GPIO/pinctrl interrupt path: enough of the community/pad
+//! register model to service the I²C-HID touchpad's GpioInt on Tiger Lake-LP
+//! (ACPI `INTC1055`, shared with Alder Lake-P), whose pad sits in community 1.
 //!
-//! Enough of the Intel community/pad register model to enable and service one
-//! GPIO interrupt: the I²C-HID touchpad's GpioInt. Targets the Tiger Lake-LP
-//! community layout (ACPI `INTC1055`, shared by Alder Lake-P); the touchpad pad
-//! is in community 1.
-//!
-//! The community register windows sit at `SBREG_BAR + community_offset`.
-//! Neither value is discoverable at runtime: the P2SB device exposing
-//! `SBREG_BAR` is firmware-hidden, and the `_CRS` that computes the windows
-//! reads it from an `OperationRegion` the AML reader can't resolve. Both are
-//! SoC constants, confirmed against the silicon by [`init_for_pad`] (PADBAR +
-//! pad-config sanity) — a wrong constant fails validation and the caller polls
-//! instead of touching an arbitrary window.
-//!
-//! PIO-only; MMIO via [`MmioRegion`] (`drivers` forbids `unsafe`). The register
-//! model (PADBAR-relative pad config, per-group `GPI_IS`/`GPI_IE`) is uniform
-//! across Intel PCH GPIO; only the pin ranges and offsets are SoC-specific.
+//! The community windows sit at `SBREG_BAR + community_offset`, neither value
+//! discoverable at runtime: the P2SB device exposing `SBREG_BAR` is
+//! firmware-hidden, and the `_CRS` computing the windows reads an
+//! `OperationRegion` the AML reader cannot resolve. Both are SoC constants
+//! confirmed against silicon by [`init_for_pad`]; a wrong one fails validation
+//! and the caller falls back to polling.
 
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_ostd::sync::OnceLock;
 
-// --- Intel pad register model ------------------------------------------------
-
-/// `PADBAR` (community base + 0x0c) holds the offset from the community base
-/// to its pad-configuration register block.
+/// Community base + 0x0c: offset from that base to the pad-config register block.
 const PADBAR: usize = 0x00c;
-/// Per-pad register stride: PADCFG0..3 = 4 dwords = 16 bytes.
+/// PADCFG0..3 = 4 dwords = 16 bytes per pad.
 const PAD_NREGS: usize = 4;
 
-/// `GPI_IS` (interrupt status) / `GPI_IE` (interrupt enable) base offsets for
-/// the Tiger Lake-LP register variant; one 32-bit register per pad group.
+/// Interrupt status / enable bases for the Tiger Lake-LP register variant; one
+/// 32-bit register per pad group.
 const TGL_GPI_IS: usize = 0x100;
 const TGL_GPI_IE: usize = 0x120;
 
-// PADCFG0 bits.
 const PADCFG0_RXEVCFG_MASK: u32 = 3 << 25;
 const PADCFG0_RXEVCFG_EDGE: u32 = 1 << 25; // (level = 0)
 const PADCFG0_RXINV: u32 = 1 << 23;
 const PADCFG0_GPIROUTIOXAPIC: u32 = 1 << 20;
 const PADCFG0_GPIORXDIS: u32 = 1 << 9;
 
-// --- Tiger Lake-LP SoC layout ------------------------------------------------
-//
-// PCH sideband base + community register-window offsets, architectural
-// constants of the ADL-P / TGL-LP PCH. Communities (0,0,66)(1,67,170)
+// Architectural TGL-LP / ADL-P PCH constants: communities (0,0,66)(1,67,170)
 // (2,171,259)(3,260,276) at `SBREG_BAR + {0x6e0000,0x6d0000,0x6a0000,0x690000}`.
-// Only community 1 — the touchpad pad `ISH_GP_4` (pin 116) — is modelled. The
-// `gpio_base` field is the gpiochip line for `pin_lo`, the numbering ACPI
-// GpioInt pins use.
+// Only community 1 — the touchpad pad `ISH_GP_4` (pin 116) — is modelled, and
+// `gpio_base` is the gpiochip line for `pin_lo`, the numbering ACPI GpioInt uses.
 
 const SBREG_BAR: u32 = 0xfd00_0000;
 const COMMUNITY1_OFFSET: u32 = 0x006d_0000;
@@ -95,16 +79,15 @@ static COMMUNITY1_GPPS: &[Gpp] = &[
     },
 ];
 
-/// A pad's location within community 1: pad index (for PADCFG addressing) and
-/// its `GPI_IS`/`GPI_IE` register + bit.
+/// Pad index for PADCFG addressing, plus the `GPI_IS`/`GPI_IE` register and bit.
 struct PadLoc {
     padno: usize,
     reg_num: u8,
     gpp_offset: u32,
 }
 
-/// Map an ACPI GpioInt pin number (a gpiochip line) to the pinctrl pin index.
-/// Returns `None` for lines outside community 1. (Line 177 → pin 116.)
+/// ACPI GpioInt pin (a gpiochip line) to pinctrl pin index; `None` outside
+/// community 1. Line 177 → pin 116.
 fn pin_for_crs_gpio(line: u16) -> Option<u16> {
     for g in COMMUNITY1_GPPS {
         let span = g.pin_hi - g.pin_lo;
@@ -115,7 +98,6 @@ fn pin_for_crs_gpio(line: u16) -> Option<u16> {
     None
 }
 
-/// Resolve a community-1 pinctrl pin to its pad/register location.
 fn resolve_pad(pin: u16) -> Option<PadLoc> {
     for g in COMMUNITY1_GPPS {
         if pin >= g.pin_lo && pin <= g.pin_hi {
@@ -129,8 +111,6 @@ fn resolve_pad(pin: u16) -> Option<PadLoc> {
     None
 }
 
-// --- Runtime (single touchpad pad) -------------------------------------------
-
 struct Pinctrl {
     mmio: MmioRegion,
     padcfg0_off: usize,
@@ -141,17 +121,11 @@ struct Pinctrl {
 
 static PINCTRL: OnceLock<Pinctrl> = OnceLock::new();
 
-/// Bring up the touchpad's GpioInt pad and program it as an IO-APIC-routed
-/// interrupt, left **masked** (enable later with [`pad_irq_unmask`] once the
-/// cascade handler is registered).
-///
-/// `crs_gpio_line` is the GpioInt pin number from the device's `_CRS`;
-/// `edge`/`active_low` its mode. Maps community 1 (`SBREG_BAR +
-/// COMMUNITY1_OFFSET`) and **validates** it against the silicon — a sane
-/// PADBAR and a non-floating pad-config read — before touching it. Returns
-/// the resolved pinctrl pin (for logging), or `None` if the pad isn't in the
-/// supported community or the window doesn't validate, so the caller falls
-/// back to polling.
+/// Program the touchpad's GpioInt pad as an IO-APIC-routed interrupt, left
+/// **masked** until [`pad_irq_unmask`] once the cascade handler is registered.
+/// `crs_gpio_line` is the pin from the device's `_CRS`. Returns `None` — caller
+/// polls instead — when the pad is outside the supported community or the mapped
+/// window fails validation.
 pub fn init_for_pad(crs_gpio_line: u16, edge: bool, active_low: bool) -> Option<u16> {
     let pin = pin_for_crs_gpio(crs_gpio_line)?;
     let pad = resolve_pad(pin)?;
@@ -159,10 +133,8 @@ pub fn init_for_pad(crs_gpio_line: u16, edge: bool, active_low: bool) -> Option<
     let base = SBREG_BAR + COMMUNITY1_OFFSET;
     let mmio = MmioRegion::map(PhysAddr::new(base as u64), COMMUNITY_LEN)?;
 
-    // Validate this is really a GPIO community: PADBAR is a small in-window
-    // offset to the pad-config block, and the touchpad pad's PADCFG0 is a
-    // configured (non-floating) value. A wrong base reads back 0xffffffff /
-    // garbage and fails here → caller polls.
+    // A real GPIO community has a small in-window PADBAR and a configured,
+    // non-floating PADCFG0; a wrong base reads back 0xffffffff or garbage.
     let padbar = mmio.read::<u32>(PADBAR) as usize;
     if padbar < 0x10 || padbar >= COMMUNITY_LEN {
         return None;
@@ -176,8 +148,7 @@ pub fn init_for_pad(crs_gpio_line: u16, edge: bool, active_low: bool) -> Option<
     let ie_off = TGL_GPI_IE + pad.reg_num as usize * 4;
     let bit = 1u32 << pad.gpp_offset;
 
-    // Program PADCFG0: trigger/polarity from the GpioInt, route to IO-APIC,
-    // enable the input buffer. Idempotent.
+    // Idempotent: trigger/polarity from the GpioInt, IO-APIC routing, RX enabled.
     let mut cfg = mmio.read::<u32>(padcfg0_off);
     cfg &= !PADCFG0_RXEVCFG_MASK;
     if edge {
@@ -207,9 +178,8 @@ pub fn init_for_pad(crs_gpio_line: u16, edge: bool, active_low: bool) -> Option<
     Some(pin)
 }
 
-/// `PADCFG0` as last read/written, for bring-up diagnostics (a firmware-routed
-/// touchpad pad has `GPIROUTIOXAPIC` (bit 20) set; an all-ones/zero value means
-/// the SoC base/offset/`nregs` are wrong).
+/// Bring-up diagnostic: a firmware-routed touchpad pad has `GPIROUTIOXAPIC`
+/// (bit 20) set, while all-ones or zero means the SoC constants are wrong.
 pub fn padcfg0_snapshot() -> Option<u32> {
     let st = PINCTRL.get()?;
     Some(st.mmio.read::<u32>(st.padcfg0_off))
@@ -224,7 +194,6 @@ pub fn pad_irq_unmask() {
     }
 }
 
-/// Disable the pad interrupt.
 pub fn pad_irq_mask() {
     if let Some(st) = PINCTRL.get() {
         let ie = st.mmio.read::<u32>(st.ie_off) & !st.bit;
@@ -232,10 +201,10 @@ pub fn pad_irq_mask() {
     }
 }
 
-/// IRQ-context service: if the pad's interrupt is pending+enabled, mask it
-/// and acknowledge the status. The mask holds until the drain thread reads the
-/// report (so a still-asserted level line can't re-storm) and re-enables it.
-/// Returns `true` if our pad fired; the caller wakes the drain thread and EOIs.
+/// IRQ context: masks and acknowledges a pending+enabled pad interrupt, and
+/// returns `true` so the caller wakes the drain thread and EOIs. The mask holds
+/// until that thread reads the report, so a still-asserted level line cannot
+/// re-storm.
 pub fn service_pending() -> bool {
     let Some(st) = PINCTRL.get() else {
         return false;
@@ -249,8 +218,6 @@ pub fn service_pending() -> bool {
     st.mmio.write::<u32>(st.is_off, st.bit); // write-1-to-clear
     true
 }
-
-// --- Pure-logic tests (kernel stest phase) -----------------------------------
 
 #[doc(hidden)]
 pub fn test_pin_for_crs_gpio_touchpad() -> slopos_testing::TestResult {

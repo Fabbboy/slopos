@@ -1,15 +1,11 @@
-//! Active-pipe discovery and scanline sampling.
-//!
-//! Pure read-only helpers over the pipe registers: pick the pipe the firmware is
-//! actually scanning, and sample its scanline counter so the watchdog can prove
-//! the panel kept scanning across a repoint. Neither function writes a register.
+//! Active-pipe discovery and scanline sampling. Read-only helpers over the pipe
+//! registers; neither function writes.
 
 use slopos_mm::mmio::MmioRegion;
 
 use crate::xe_logic::regs::{self, Pipe};
 
-/// The first enabled pipe driving live output, or `None` if every pipe is
-/// disabled. Reads only.
+/// The first enabled pipe driving live output, or `None` if every pipe is off.
 pub fn find_active(mmio: &MmioRegion) -> Option<Pipe> {
     for pipe in Pipe::ALL {
         if mmio.read::<u32>(regs::pipe_conf(pipe)) & regs::PIPECONF_ENABLE != 0 {
@@ -19,26 +15,20 @@ pub fn find_active(mmio: &MmioRegion) -> Option<Pipe> {
     None
 }
 
-/// Current scanline counter (`PIPEDSL`) for `pipe`. Reads only.
+/// Current scanline counter (`PIPEDSL`) for `pipe`.
 pub fn scanline(mmio: &MmioRegion, pipe: Pipe) -> u32 {
     mmio.read::<u32>(regs::pipe_dsl(pipe))
 }
 
 /// Block until the pipe completes a vertical blank — the point at which an armed
-/// `PLANE_SURF` update latches into the active scanout configuration.
+/// `PLANE_SURF` update latches — by polling `PIPEDSL` for a high→low wrap in 1 ms
+/// steps, holding no lock. Bounded by `VBLANK_TIMEOUT_MS` so a stalled pipe
+/// returns rather than hanging the probe.
 ///
-/// Polls `PIPEDSL` (read-only) for the scanline counter to wrap high→low, the
-/// unambiguous per-frame vblank marker, in 1 ms steps holding no lock. Bounded by
-/// `VBLANK_TIMEOUT_MS` (one 60 Hz frame plus margin) so a stalled pipe returns
-/// rather than hanging the probe.
-///
-/// This is the flip-completion primitive: issuing a second plane-group flip
-/// before the previous one has latched races the vblank, and on Gen12 leaves the
-/// plane reading the linear surface with the X-tile (512-byte) `PLANE_STRIDE`
-/// unit instead of the linear (64-byte) one — an 8x vertical replication. A lone
-/// flip to a surface latches cleanly; it is two flips inside one frame that fail.
-/// Callers that flip twice in succession (a repoint then a present flip) must
-/// wait here between them so each flip latches first.
+/// Two plane-group flips inside one frame race the vblank: on Gen12 the plane
+/// then reads a linear surface with the X-tile (512-byte) `PLANE_STRIDE` unit
+/// instead of the linear (64-byte) one, an 8x vertical replication. Callers that
+/// flip twice in succession must wait here between them.
 pub fn wait_for_vblank(mmio: &MmioRegion, pipe: Pipe) {
     const VBLANK_TIMEOUT_MS: u32 = 25;
     let mut prev = scanline(mmio, pipe);
@@ -47,7 +37,6 @@ pub fn wait_for_vblank(mmio: &MmioRegion, pipe: Pipe) {
         crate::hpet::delay_ms(1);
         let cur = scanline(mmio, pipe);
         if cur < prev {
-            // The counter wrapped to the top of a new frame: a vblank elapsed.
             return;
         }
         prev = cur;

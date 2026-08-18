@@ -1,64 +1,21 @@
-//! `BootCtx<'brand, K>` — branded, kind-marked capability token gating
-//! boot-time-only kernel mutators.
+//! `BootCtx<'brand, K>` — capability token gating boot-time-only kernel
+//! singleton mutators (`gdt_init`, `gdt_set_ist`, `idt_set_ist`,
+//! `syscall_msr_init`, `init_scheduler`, …); calling those after
+//! `enter_scheduler` is always a bug.
 //!
-//! Functions like `gdt_init`, `gdt_set_kernel_rsp0`, `gdt_set_ist`,
-//! `idt_set_ist`, `syscall_msr_init`, `init_scheduler`, and
-//! `init_task_manager` mutate kernel-singleton state in ways that only
-//! make sense during boot or inside a hermetic test scope. After
-//! `enter_scheduler`, calling them is always a bug.
+//! The mint-by-token methods are kind-gated, so an AP-derived
+//! `BootCtx<'_, ApInit>` cannot synthesise a `BspToken<'_>` — the AP race
+//! window is closed at compile time.
 //!
-//! `BootCtx<'brand, K>` is the capability token that grants permission
-//! to call them. Mutators take `&mut BootCtx<'brand, K: CpuInitKind>`:
-//! production code outside the boot path cannot synthesise one (the
-//! constructor is `pub(crate)`), and the type parameters tie it to a
-//! specific init phase.
-//!
-//! ## Brand `'brand`
-//!
-//! The phantom lifetime brand is minted by [`slopos_ostd::sync::run_bsp_init`]
-//! (BSP) or [`slopos_ostd::sync::run_ap_init`] (AP). It is invariant
-//! and unnameable outside the HRTB closure that mints the token, so a
-//! `BootCtx<'b, BspInit>` cannot leak out of the `run_bsp_init` scope
-//! and tests cannot synthesise one with a forged brand.
-//!
-//! ## Kind `K`
-//!
-//! Three sealed marker types — [`BspInit`], [`ApInit`], [`TestInit`] —
-//! distinguish the originating init scope. The mint-by-token methods
-//! ([`BootCtx::bsp_token`], [`BootCtx::ap_token`]) are kind-gated; an
-//! AP-derived `BootCtx<'_, ApInit>` therefore *cannot* synthesise a
-//! `BspToken<'_>`, closing the AP race window at compile time.
-//! `TestInit` deliberately has no token-mint methods — tests reach
-//! OSTD `register_*` hooks via the feature-gated
-//! `run_bsp_init_for_test` pathway, not through `BootCtx`.
-//!
-//! ## Design — mint, not slot
-//!
-//! Earlier draft used `SpinLock<Option<BootCtx>>` slots. That breaks the
-//! nested-scope use case: while boot is running its init steps, boot
-//! owns a `&mut BootCtx`. A test fixture inside `boot_step_run_tests_fn`
-//! tries to `take_for_test` and finds the slot empty (boot has it),
-//! panicking spuriously.
-//!
-//! New design: `take_for_boot` / `take_for_test` / `take_for_ap` *mint*
-//! a fresh `BootCtx` token each time. The capability is a permission
-//! slip, not a unique resource — multiple tokens may exist concurrently
-//! as long as their borrowers don't actually contend on the underlying
-//! singletons (which the existing per-mutator locking handles).
-//!
-//! Nested-scope detection moves to a dedicated `TEST_SCOPE_ACTIVE`
-//! atomic: `take_for_test` panics if it sees the flag already set.
-//! That preserves the "one test scope at a time" invariant without
-//! conflating it with boot-phase state.
+//! `take_for_*` mint a fresh token per call rather than moving one out of a
+//! slot, so a test fixture running inside a boot step can hold one while
+//! boot holds its own; "one test scope at a time" is carried instead by the
+//! `TEST_SCOPE_ACTIVE` flag.
 
 use core::marker::{PhantomData, PhantomPinned};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_ostd::sync::{ApToken, BspToken};
-
-// =============================================================================
-// Kind markers + sealed traits
-// =============================================================================
 
 mod kind_seal {
     pub trait Sealed {}
@@ -78,53 +35,41 @@ pub struct BspInit;
 pub struct ApInit;
 
 /// Test-init kind marker. `BootCtx<'_, TestInit>` is minted by
-/// [`take_for_test`] for `KernelTestScope`. Authorises CPU-mutator
-/// access (so test fixtures can drive `gdt_set_ist` / `idt_set_ist`
-/// / `init_scheduler` etc.) but **not** OSTD `register_*` hooks —
-/// tests reach those via [`slopos_ostd::sync::run_bsp_init_for_test`].
+/// [`take_for_test`] and authorises CPU mutators but **not** OSTD
+/// `register_*` hooks — tests reach those via
+/// [`slopos_ostd::sync::run_bsp_init_for_test`].
 pub struct TestInit;
 
-/// Sealed marker trait implemented by [`BspInit`], [`ApInit`], and
-/// [`TestInit`]. External crates cannot extend `BootKind` because
-/// `kind_seal::Sealed` is module-private.
+/// Marker trait for boot-init kinds. Sealed: `kind_seal::Sealed` is
+/// module-private, so external crates cannot add a kind.
 pub trait BootKind: kind_seal::Sealed {}
 impl BootKind for BspInit {}
 impl BootKind for ApInit {}
 impl BootKind for TestInit {}
 
-/// Sealed sub-trait identifying kinds whose `BootCtx` authorises
-/// per-CPU mutators (`gdt_set_ist`, `idt_set_ist`, `init_scheduler`,
-/// etc.). All three current kinds qualify — BSP-init and AP-init
-/// both initialise per-CPU state, and test fixtures need the same
-/// access to drive boot-state snapshots.
+/// Kinds whose `BootCtx` authorises per-CPU mutators (`gdt_set_ist`,
+/// `idt_set_ist`, `init_scheduler`, …).
 pub trait CpuInitKind: BootKind {}
 impl CpuInitKind for BspInit {}
 impl CpuInitKind for ApInit {}
 impl CpuInitKind for TestInit {}
 
-// =============================================================================
-// BootCtx<'brand, K>
-// =============================================================================
-
 /// Capability token authorising mutation of boot-time-only kernel
 /// singletons.
 ///
-/// `'brand` is the invariant phantom lifetime threaded by the originating
-/// HRTB closure ([`slopos_ostd::sync::run_bsp_init`] or
-/// [`slopos_ostd::sync::run_ap_init`]); `K` is the kind marker
-/// identifying the init scope. Construction is `pub(crate)`: only this
-/// crate's `take_for_*` functions can mint one.
+/// `'brand` is invariant and minted by the originating HRTB closure
+/// ([`slopos_ostd::sync::run_bsp_init`] or [`slopos_ostd::sync::run_ap_init`]),
+/// so it is unnameable outside that scope and cannot be forged; `K` names
+/// the init scope. Construction is `pub(crate)`: only this crate's
+/// `take_for_*` functions can mint one.
 pub struct BootCtx<'brand, K: BootKind> {
     _brand: PhantomData<fn(&'brand ()) -> &'brand ()>,
     _kind: PhantomData<K>,
     _consume: PhantomData<PhantomPinned>,
-    /// Stashed BSP-init witness for the `BspInit` kind. Holds a Copy ZST
-    /// of the same brand the BootCtx is parameterised over, so
-    /// `bsp_token` can hand back an owned token without `unsafe`.
-    /// `None` for non-`BspInit` kinds; unreachable through the public
-    /// API because `bsp_token` is only defined on `BootCtx<'_, BspInit>`,
-    /// and `take_for_boot` is the only path that constructs a `BspInit`
-    /// BootCtx (always `Some`).
+    /// BSP-init witness of the same brand, so `bsp_token` can hand back an
+    /// owned token without `unsafe`. `None` for non-`BspInit` kinds;
+    /// `take_for_boot` is the only constructor of a `BspInit` BootCtx and
+    /// always stores `Some`.
     _token: Option<BspToken<'brand>>,
 }
 
@@ -140,63 +85,43 @@ impl<'brand, K: BootKind> BootCtx<'brand, K> {
 }
 
 impl<'brand> BootCtx<'brand, BspInit> {
-    /// Reconstruct a borrowed `BspToken<'brand>` from this BSP-init
-    /// context. Pure type-level helper — `BspToken` is a ZST sealed
-    /// type, and our brand `'brand` was minted by the originating
-    /// `run_bsp_init` HRTB closure (the only mint pathway), so the
-    /// brand-shared `BspToken<'brand>` is the same capability that
-    /// minted us. Boot-step fns whose signature is fixed by the
-    /// `boot_init!` linker-section macro (no room for a separate
-    /// `&BspToken` parameter) use this accessor to call OSTD
-    /// `register_*` hooks.
+    /// Reconstruct a borrowed `BspToken<'brand>`: the brand was minted by
+    /// the originating `run_bsp_init` closure, so this is the same
+    /// capability. Boot-step fns whose signature is fixed by the
+    /// `boot_init!` linker-section macro have no room for a separate
+    /// `&BspToken` parameter and reach OSTD `register_*` hooks through here.
     #[inline]
     pub fn bsp_token(&self) -> BspToken<'brand> {
-        // BootCtx<'_, BspInit> always stores `Some(token)` (set by
-        // `take_for_boot`). Unwrap is unreachable in correct code —
-        // the `BspInit` type-parameter is the structural witness that
-        // we went through the BSP mint path.
         self._token
             .expect("BootCtx<'_, BspInit> constructed without a BspToken")
     }
 }
 
-// Note: there is intentionally no `BootCtx<'b, ApInit>::ap_token()`
-// accessor — the AP entry path always holds its own `&ApToken<'b>`
-// from the enclosing `run_ap_init` closure alongside the `BootCtx`,
-// and threading both into AP-init fn signatures is cleaner than
-// reconstructing the cpu_id-bearing token from kind-marker state.
+// No `BootCtx<'b, ApInit>::ap_token()`: the AP entry path already holds its
+// own `&ApToken<'b>` from the enclosing `run_ap_init` closure.
 
-// =============================================================================
-// Mint / consume pathways
-// =============================================================================
-
-/// Set by `take_for_test`, cleared by `return_after_test`. A second
-/// `take_for_test` while the flag is set panics — that's a nested
-/// `KernelTestScope::enter`.
+/// Set by `take_for_test`, cleared by `return_after_test`; a second
+/// `take_for_test` while it is set panics on the nested `KernelTestScope`.
 static TEST_SCOPE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Mint a `BootCtx<'brand, BspInit>` for the BSP boot path. Called
-/// once at the start of `kernel_main_impl` inside the
-/// [`slopos_ostd::sync::run_bsp_init`] HRTB closure, threading the
-/// minted `&BspToken<'brand>` through to OSTD `register_*` hooks
-/// and downstream boot steps.
+/// Mint the BSP boot path's `BootCtx`. Called once at the start of
+/// `kernel_main_impl`, inside the [`slopos_ostd::sync::run_bsp_init`]
+/// HRTB closure.
 #[inline]
 pub fn take_for_boot<'brand>(token: &BspToken<'brand>) -> BootCtx<'brand, BspInit> {
     BootCtx::new_unchecked(Some(*token))
 }
 
-/// Consume the `BootCtx` returned by `take_for_boot`. The token drops
-/// on return. Conventional naming preserved.
+/// Consume the `BootCtx` returned by `take_for_boot`; the token drops on
+/// return.
 #[inline]
 pub fn return_after_boot<'brand>(_ctx: BootCtx<'brand, BspInit>) {
     // No shared state to release.
 }
 
-/// Mint a `BootCtx<'static, TestInit>` for a `KernelTestScope`. Panics
-/// if a previous test scope is still alive (`TEST_SCOPE_ACTIVE` flag
-/// set). The brand is `'static` because tests do not need to mint
-/// tokens; `TestInit` has no `*_token()` mint method, so the brand
-/// cannot escape the type-level capability gate.
+/// Mint a `KernelTestScope`'s `BootCtx`. Panics if a previous test scope is
+/// still alive. The brand is `'static` because `TestInit` has no
+/// `*_token()` mint method, so it cannot escape the capability gate.
 pub fn take_for_test() -> BootCtx<'static, TestInit> {
     if TEST_SCOPE_ACTIVE.swap(true, Ordering::AcqRel) {
         panic!("BootCtx::take_for_test: nested KernelTestScope");
@@ -204,16 +129,15 @@ pub fn take_for_test() -> BootCtx<'static, TestInit> {
     BootCtx::new_unchecked(None)
 }
 
-/// Consume the `BootCtx` returned by `take_for_test`. Clears the
-/// `TEST_SCOPE_ACTIVE` flag so subsequent test scopes can enter.
+/// Consume the `BootCtx` returned by `take_for_test`, clearing
+/// `TEST_SCOPE_ACTIVE` so the next test scope can enter.
 pub fn return_after_test(_ctx: BootCtx<'static, TestInit>) {
     TEST_SCOPE_ACTIVE.store(false, Ordering::Release);
 }
 
-/// Mint a `BootCtx<'brand, ApInit>` for an AP boot path. Each AP
-/// calls this once during `ap_late_entry`, inside the
-/// [`slopos_ostd::sync::run_ap_init`] HRTB closure, threading the
-/// minted `&ApToken<'brand>` to AP-only init paths.
+/// Mint an AP boot path's `BootCtx`. Called once per AP during
+/// `ap_late_entry`, inside the [`slopos_ostd::sync::run_ap_init`] HRTB
+/// closure.
 #[inline]
 pub fn take_for_ap<'brand>(_token: &ApToken<'brand>) -> BootCtx<'brand, ApInit> {
     BootCtx::new_unchecked(None)
@@ -225,13 +149,9 @@ pub fn return_after_ap<'brand>(_cpu_id: usize, _ctx: BootCtx<'brand, ApInit>) {
     // No shared state to release.
 }
 
-/// Force-clear the `TEST_SCOPE_ACTIVE` flag from a panic-recovery
-/// cleanup callback, for the case where the scope's own `Drop` did not
-/// reach the flag.
-///
-/// A single atomic store to a `'static` flag; sound from any context.
-/// Intended caller is `panic_recovery`'s registered cleanup chain on
-/// the test-running CPU.
+/// Force-clear `TEST_SCOPE_ACTIVE` when a panic kept the scope's own `Drop`
+/// from reaching it. Intended caller is `panic_recovery`'s registered
+/// cleanup chain on the test-running CPU.
 pub fn clear_test_scope_after_panic() {
     TEST_SCOPE_ACTIVE.store(false, Ordering::Release);
 }

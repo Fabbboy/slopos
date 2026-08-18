@@ -17,7 +17,7 @@ use slopos_net::types::{DevIndex, Ipv4Addr};
 use slopos_net::{iface, iface_ctl};
 
 /// The errno each control-plane failure reports, as `SYSCALL_NET_IFACE_CTL`'s
-/// contract specifies. Written once so no operation can spell one differently.
+/// contract specifies.
 fn iface_errno(err: IfaceError) -> Errno {
     match err {
         IfaceError::NoSuchIface => Errno::ENODEV,
@@ -29,7 +29,6 @@ fn iface_errno(err: IfaceError) -> Errno {
     }
 }
 
-/// Resolve an interface index to the device behind it.
 fn device_for(ifindex: u32) -> Result<DevIndex, Errno> {
     iface::get(ifindex).map(|i| i.dev).ok_or(Errno::ENODEV)
 }
@@ -52,11 +51,9 @@ define_syscall!(syscall_net_iface_ctl
     requires(net_admin)
     -> Result<(), Errno>
 {
-    // The two global operations address the stack rather than an interface, so
-    // they are answered before anything tries to resolve an index. Requiring
-    // the sentinel rather than ignoring the index is what keeps
-    // `ip link set eth0 <global op>` from reading as a per-interface command
-    // that quietly moved the master switch.
+    // The global operations address the stack, not an interface: requiring the
+    // sentinel index keeps `ip link set eth0 <global op>` from reading as a
+    // per-interface command that quietly moved the master switch.
     match op {
         NET_IFOP_SET_ENABLED => {
             if ifindex != NET_IFINDEX_GLOBAL {
@@ -69,9 +66,8 @@ define_syscall!(syscall_net_iface_ctl
             if ifindex != NET_IFINDEX_GLOBAL {
                 return Err(Errno::EINVAL);
             }
-            // Synchronous on purpose: a caller asking for a re-check wants the
-            // answer its next `net_query` returns to reflect this call, not the
-            // next timer tick.
+            // Synchronous on purpose: the caller's next `net_query` must
+            // reflect this call, not the next timer tick.
             slopos_net::connectivity::recheck();
             return Ok(());
         }
@@ -82,9 +78,8 @@ define_syscall!(syscall_net_iface_ctl
             }
             return Ok(());
         }
-        // Stop and release are the same operation: a client that gives up its
-        // lease without telling the server leaves the address unusable to
-        // everybody else until it times out, so the RELEASE is not optional.
+        // Stop and release are the same operation: giving up a lease without
+        // telling the server leaves the address unusable until it times out.
         NET_IFOP_DHCP_STOP | NET_IFOP_DHCP_RELEASE => {
             let dev = device_for(ifindex)?;
             if !slopos_net::dhcp::is_running(dev) {
@@ -115,10 +110,9 @@ define_syscall!(syscall_net_iface_ctl
         }
         NET_IFOP_FLUSH_NEIGH => {
             let dev = device_for(ifindex)?;
-            // The cache hands the queued packets back rather than dropping them
-            // itself, because `PacketBuf::drop` takes the packet pool's lock and
-            // freeing them inside would nest the pool under the cache. Dropping
-            // the vector here is the free, with no network lock held.
+            // The cache hands the queued packets back rather than freeing them:
+            // `PacketBuf::drop` takes the pool lock, which must not nest under
+            // the cache's. Dropping the vector here is the free.
             drop(NEIGHBOR_CACHE.flush_device(dev));
             Ok(())
         }
@@ -132,8 +126,8 @@ define_syscall!(syscall_net_iface_ctl
         NET_IFOP_FLUSH_ADDRS => {
             let dev = device_for(ifindex)?;
             // Addresses first, then the routes derived from them: a connected
-            // route outliving its address would forward onto a prefix the
-            // interface no longer answers for.
+            // route outliving its address forwards onto a prefix the interface
+            // no longer answers for.
             iface::retain_addrs(ifindex, |_| false).map_err(iface_errno)?;
             route::remove_device_routes(dev);
             Ok(())
@@ -142,12 +136,9 @@ define_syscall!(syscall_net_iface_ctl
     }
 });
 
-// Add or remove one interface address.
-//
-// Takes exactly one struct and checks `len` against its size, which is why the
-// address, route and resolver mutators are three syscalls rather than one
-// multiplexed one: each has a single unambiguous shape, so no handler ever
-// decides how to reinterpret user memory from an op code.
+// Add or remove one interface address. One struct per syscall with `len`
+// checked against its size, so no handler reinterprets user memory from an op
+// code.
 define_syscall!(syscall_net_addr_ctl
     (ctx, op: u32, ptr: u64, len: u64)
     requires(net_admin)
@@ -173,18 +164,16 @@ define_syscall!(syscall_net_addr_ctl
                 slopos_abi::net::NET_ADDR_SCOPE_HOST => AddrScope::Host,
                 _ => return Err(Errno::EINVAL),
             };
-            // Always `Static`: an address a caller asked for outranks a lease,
-            // and admin-down keeps Static addresses while dropping DHCP ones.
-            // Recording the caller's own origin byte would let userland forge a
-            // DHCP address that the next admin-down would silently delete.
+            // Always `Static`: admin-down keeps Static addresses and drops DHCP
+            // ones, so taking the caller's origin byte would let userland forge
+            // an address the next admin-down silently deletes.
             iface::add_addr(
                 req.ifindex,
                 IfaceAddr::permanent(addr, req.prefix_len, scope, AddrOrigin::Static),
             )
             .map_err(iface_errno)?;
-            // A new address implies the prefix it sits on is directly reachable;
-            // without this the address is configured and nothing routes to its
-            // own subnet.
+            // A new address implies its prefix is directly reachable; without
+            // this nothing routes to the interface's own subnet.
             let dev = device_for(req.ifindex)?;
             let prefix = addr.masked(req.prefix_len);
             route::add(route::RouteEntry {
@@ -198,9 +187,8 @@ define_syscall!(syscall_net_addr_ctl
         }
         NET_ADDROP_DEL => {
             iface::del_addr(req.ifindex, addr, req.prefix_len).map_err(iface_errno)?;
-            // The connected route goes with it, for the reason
-            // `NET_IFOP_FLUSH_ADDRS` gives: a route onto a prefix the interface
-            // no longer answers for is a black hole.
+            // The connected route goes with it: a route onto a prefix the
+            // interface no longer answers for is a black hole.
             route::remove(addr.masked(req.prefix_len), req.prefix_len);
             Ok(())
         }
@@ -208,7 +196,6 @@ define_syscall!(syscall_net_addr_ctl
     }
 });
 
-// Add or remove one route.
 define_syscall!(syscall_net_route_ctl
     (ctx, op: u32, ptr: u64, len: u64)
     requires(net_admin)
@@ -231,7 +218,7 @@ define_syscall!(syscall_net_route_ctl
             let dev = device_for(req.ifindex)?;
             // The prefix is normalised rather than trusted: `10.0.2.15/24` names
             // the same route as `10.0.2.0/24`, and storing the un-masked form
-            // would make the delete of one fail to find the other.
+            // would make a delete of one fail to find the other.
             let entry = route::RouteEntry {
                 prefix: prefix.masked(req.prefix_len),
                 prefix_len: req.prefix_len,
@@ -252,11 +239,8 @@ define_syscall!(syscall_net_route_ctl
     }
 });
 
-// Pin the resolver configuration, or hand it back to DHCP.
-//
-// `n_servers == 0` clears the static override rather than configuring zero
-// nameservers, so `ip dns set` with no argument is the documented way back to
-// lease-supplied servers.
+// Pin the resolver configuration, or hand it back to DHCP: `n_servers == 0`
+// clears the static override rather than configuring zero nameservers.
 define_syscall!(syscall_net_resolver_set
     (ctx, ptr: u64, len: u64)
     requires(net_admin)
@@ -282,8 +266,7 @@ define_syscall!(syscall_net_resolver_set
     for (slot, raw) in servers.iter_mut().zip(req.servers.iter()).take(count) {
         *slot = Ipv4Addr(*raw);
     }
-    // A nameserver of 0.0.0.0 is never reachable; accepting one would leave the
-    // stack pointed at an address it can only time out against.
+    // A nameserver of 0.0.0.0 is never reachable, only timed out against.
     if servers[..count].iter().any(|s| s.is_unspecified()) {
         return Err(Errno::EINVAL);
     }

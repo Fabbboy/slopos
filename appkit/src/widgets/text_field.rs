@@ -62,8 +62,6 @@ impl TextFieldWidget {
         self.ensure_cursor_visible();
     }
 
-    // --- Character helpers ---
-
     fn char_len(&self) -> usize {
         self.text.chars().count()
     }
@@ -77,12 +75,10 @@ impl TextFieldWidget {
             .unwrap_or(self.text.len())
     }
 
-    /// Substring as String from char index range [start..end).
+    /// Char-index range `[start..end)`, not byte offsets.
     fn char_substring(&self, start: usize, end: usize) -> String {
         self.text.chars().skip(start).take(end - start).collect()
     }
-
-    // --- Cursor positioning ---
 
     /// Pixel x-offset of the cursor at char index `idx` relative to text start.
     fn char_x_offset(&self, idx: usize) -> i32 {
@@ -90,19 +86,19 @@ impl TextFieldWidget {
         crate::text::string_width(&prefix)
     }
 
-    /// Adjust scroll_offset so the cursor is within the visible content area.
     fn ensure_cursor_visible(&mut self) {
-        let padding_h = 8; // field_padding_h from StyleSheet::dark()
+        // TODO(tech-debt): hardcoded copy of StyleSheet::field_padding_h — thread
+        // the style through to this path instead.
+        let padding_h = 8;
         let content_width = self.rect().width - padding_h * 2;
         if content_width <= 0 {
             return;
         }
         let cx = self.char_x_offset(self.cursor);
-        // Cursor is left of visible area.
         if cx - self.scroll_offset < 0 {
             self.scroll_offset = cx;
         }
-        // Cursor is right of visible area (leave 2px for cursor bar).
+        // The 2px keeps the cursor bar itself on screen.
         if cx - self.scroll_offset > content_width - 2 {
             self.scroll_offset = cx - content_width + 2;
         }
@@ -116,7 +112,6 @@ impl TextFieldWidget {
         if local_x <= 0 {
             return 0;
         }
-        // Walk characters to find the closest boundary.
         let mut prev_x = 0i32;
         for i in 1..=len {
             let cx = self.char_x_offset(i);
@@ -129,8 +124,6 @@ impl TextFieldWidget {
         len
     }
 
-    // --- Selection helpers ---
-
     /// Returns ordered (start, end) of the selection, or None.
     fn selection_range(&self) -> Option<(usize, usize)> {
         self.selection_anchor.map(|anchor| {
@@ -140,7 +133,7 @@ impl TextFieldWidget {
         })
     }
 
-    /// Delete selected text, move cursor to start of selection.
+    /// Deletes the selection and leaves the cursor at its start.
     fn delete_selection(&mut self) {
         if let Some((start, end)) = self.selection_range() {
             let byte_start = self.char_to_byte(start);
@@ -151,7 +144,6 @@ impl TextFieldWidget {
         }
     }
 
-    /// Return the selected substring, if any.
     fn selected_text(&self) -> Option<String> {
         self.selection_range()
             .map(|(start, end)| self.char_substring(start, end))
@@ -176,13 +168,11 @@ impl TextFieldWidget {
         if self.read_only {
             return;
         }
-        // Delete selection first.
         self.delete_selection();
 
         let insert_chars: Vec<char> = s.chars().collect();
         let mut count = insert_chars.len();
 
-        // Enforce max_length.
         if let Some(max) = self.max_length {
             let current = self.char_len();
             if current >= max {
@@ -198,8 +188,6 @@ impl TextFieldWidget {
         self.blink_on = true;
         self.ensure_cursor_visible();
     }
-
-    // --- Content area rect (for clipping) ---
 
     fn content_rect(&self, style: &crate::style::StyleSheet) -> Rect {
         let ph = style.field_padding_h;
@@ -244,7 +232,6 @@ impl Widget for TextFieldWidget {
         let ph = style.field_padding_h;
         let pv = style.field_padding_v;
 
-        // 1. Background
         ctx.fill_rounded_rect(
             self.rect().x,
             self.rect().y,
@@ -254,7 +241,6 @@ impl Widget for TextFieldWidget {
             style.bg_secondary,
         );
 
-        // 2. Border
         let border_color = if self.focused {
             style.border_focused
         } else {
@@ -269,23 +255,19 @@ impl Widget for TextFieldWidget {
             border_color,
         );
 
-        // Content area for clipping.
         let content = self.content_rect(style);
         let text_y = self.rect().y + pv;
         let text_x = self.rect().x + ph - self.scroll_offset;
 
         ctx.with_clip(content, |ctx| {
-            // 3. Selection highlight
             if let Some((start, end)) = self.selection_range() {
                 let sel_x = text_x + self.char_x_offset(start);
                 let sel_end_x = text_x + self.char_x_offset(end);
                 let sel_w = sel_end_x - sel_x;
-                // Semi-transparent accent for selection background.
                 let sel_color = slopos_abi::draw::Color32::new(0, 122, 255, 100);
                 ctx.fill_rect_blended(sel_x, text_y, sel_w, ctx.text_height(), sel_color);
             }
 
-            // 4. Text or placeholder
             if self.text.is_empty() && !self.focused {
                 ctx.draw_text_transparent(
                     text_x,
@@ -297,7 +279,6 @@ impl Widget for TextFieldWidget {
                 ctx.draw_text_transparent(text_x, text_y, &self.text, ctx.style.text_primary);
             }
 
-            // 5. Cursor
             if self.focused && self.blink_on {
                 let cursor_x = text_x + self.char_x_offset(self.cursor);
                 ctx.fill_rect(
@@ -310,7 +291,6 @@ impl Widget for TextFieldWidget {
             }
         });
 
-        // 6. Focus ring
         if self.focused {
             ctx.draw_focus_ring(self.rect());
         }
@@ -331,7 +311,6 @@ impl Widget for TextFieldWidget {
                 if self.read_only {
                     return EventResponse::Consumed;
                 }
-                // Filter out control characters.
                 if character.is_control() {
                     return EventResponse::Ignored;
                 }
@@ -365,7 +344,8 @@ impl Widget for TextFieldWidget {
             }
 
             WidgetEvent::PointerMove { x, .. } => {
-                // Drag-select: extend selection to pointer position.
+                // Drag-select: a move only reaches here while the pointer is
+                // captured from PointerDown.
                 let idx = self.x_to_char_index(*x);
                 if self.selection_anchor.is_none() {
                     self.selection_anchor = Some(self.cursor);
@@ -410,7 +390,6 @@ impl Widget for TextFieldWidget {
 impl TextFieldWidget {
     fn handle_key_down(&mut self, key: &Key, modifiers: &Modifiers) -> EventResponse {
         match key {
-            // Ctrl+A: select all
             Key::Char('a') if modifiers.ctrl => {
                 self.selection_anchor = Some(0);
                 self.cursor = self.char_len();

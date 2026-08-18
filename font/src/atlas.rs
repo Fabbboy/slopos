@@ -1,9 +1,4 @@
 //! Pre-rasterized fixed-width glyph atlas for fast terminal/console rendering.
-//!
-//! Contains coverage bitmaps for the shared glyph set (ASCII 32-126, the
-//! Latin-1 supplement, and a few extras — see [`crate::glyph_slot`]) at a
-//! fixed cell size. Each pixel has a coverage value 0-255 for anti-aliased
-//! rendering.
 
 use slopos_ostd::KVec;
 
@@ -14,19 +9,15 @@ use crate::{FontRenderer, FontSource};
 
 use crate::{ASCII_FIRST, ASCII_LAST, GLYPH_COUNT, glyph_slot, slot_codepoint};
 
-/// Pre-rasterized fixed-width glyph atlas.
-///
-/// Every glyph-set codepoint (see [`crate::glyph_slot`]) is rasterized into a
-/// cell of uniform width and height. Each pixel is stored as a coverage byte
-/// (0-255) suitable for anti-aliased blending.
+/// Pre-rasterized fixed-width glyph atlas: every glyph-set codepoint (see
+/// [`crate::glyph_slot`]) gets a uniform cell, one coverage byte per pixel.
 pub struct GlyphAtlas {
     cell_w: u16,
     cell_h: u16,
     /// Flat coverage data: [`GLYPH_COUNT`] glyphs × cell_w × cell_h bytes.
     data: KVec<u8>,
-    /// Replacement glyph for codepoints outside the glyph set.
+    /// Rendered for codepoints outside the glyph set.
     replacement: KVec<u8>,
-    /// Where the font data came from.
     source: FontSource,
 }
 
@@ -43,14 +34,11 @@ impl GlyphAtlas {
         let ascender = libm::ceilf(hhea.ascender as f32 * scale) as i32;
         let descender = libm::floorf(hhea.descender as f32 * scale) as i32;
         let line_gap = libm::roundf(hhea.line_gap as f32 * scale) as i32;
-        // Cell height includes ascender, descender, and half of line_gap
-        // for inter-line padding.
         let cell_h = (ascender - descender + line_gap / 2) as u16;
 
-        // Cell width = max ceil'd advance across all ASCII printable chars.
-        // Deliberately ASCII-only so extending the glyph set never changes the
-        // cell geometry (the terminal grid is sized from it); wider extended
-        // glyphs are centered and clipped into the same cell.
+        // Deliberately ASCII-only: extending the glyph set must not move the
+        // cell geometry the terminal grid is sized from. Wider extended glyphs
+        // are centered and clipped into the same cell.
         let mut max_advance: u16 = 0;
         for cp in ASCII_FIRST..=ASCII_LAST {
             if let Some(gid) = renderer.font.glyph_index(cp) {
@@ -77,7 +65,6 @@ impl GlyphAtlas {
             let cell = &mut data[idx * stride..(idx + 1) * stride];
 
             if let Some(rg) = renderer.rasterize_glyph(cp, size_px, scale, ascender) {
-                // Center glyph horizontally in cell.
                 let glyph_advance = rg.advance as i32;
                 let x_center = (cell_w as i32 - glyph_advance) / 2;
                 let gx_start = x_center + rg.bearing_x as i32;
@@ -128,7 +115,6 @@ impl GlyphAtlas {
         })
     }
 
-    /// Create a new atlas with an explicit source tag.
     pub fn new_with_source(font_data: &[u8], size_px: u16, source: FontSource) -> Option<Self> {
         let mut atlas = Self::new(font_data, size_px)?;
         atlas.source = source;
@@ -161,7 +147,6 @@ impl GlyphAtlas {
         })
     }
 
-    /// Returns the source from which this atlas's font was loaded.
     pub fn source(&self) -> FontSource {
         self.source
     }
@@ -181,7 +166,8 @@ impl GlyphAtlas {
         (&self.data, &self.replacement)
     }
 
-    /// Get coverage data for a codepoint (cell_w × cell_h bytes).
+    /// Coverage for a codepoint (cell_w × cell_h bytes); the replacement glyph
+    /// when the codepoint is outside the glyph set.
     #[inline]
     pub fn get_coverage(&self, codepoint: u32) -> &[u8] {
         if let Some(idx) = glyph_slot(codepoint) {
@@ -192,14 +178,9 @@ impl GlyphAtlas {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Drawing helpers (Canvas-based)
-    // -----------------------------------------------------------------------
-
-    /// Draw a single character at (x, y). Blends fg/bg directly using
-    /// coverage — never reads back from the framebuffer (safe for MMIO).
-    /// When `bg` is transparent (`bg.0 == 0`), uncovered pixels are left
-    /// untouched and edge pixels blend against opaque black.
+    /// Draw a single character at (x, y). Never reads back from the target, so
+    /// it is safe over MMIO. A transparent `bg` (`bg.0 == 0`) leaves uncovered
+    /// pixels untouched and blends edge pixels against opaque black.
     pub fn draw_char<T: Canvas>(
         &self,
         target: &mut T,
@@ -216,9 +197,8 @@ impl GlyphAtlas {
         let fmt = target.pixel_format();
         let fg_px = fmt.encode(fg);
         let bg_px = fmt.encode(bg);
-        // For anti-aliased edge blending when no explicit bg is given,
-        // use opaque black (the typical cleared-screen colour) to avoid
-        // dark fringe from blending against transparent-black (alpha=0).
+        // Opaque black, not transparent black: blending edges against alpha=0
+        // leaves a dark fringe.
         let blend_bg = if has_bg { bg } else { Color32::BLACK };
 
         let buf_w = target.width() as i32;
@@ -315,8 +295,7 @@ impl GlyphAtlas {
         damage
     }
 
-    /// Draw a UTF-8 string, decoding characters (a multi-byte character is one
-    /// glyph cell, not one cell per byte).
+    /// Draw a UTF-8 string; a multi-byte character occupies one glyph cell.
     pub fn draw_str<T: Canvas>(
         &self,
         target: &mut T,
@@ -370,7 +349,6 @@ impl GlyphAtlas {
         damage
     }
 
-    /// Draw a single character, clipped to a rectangle.
     pub fn draw_char_clipped<T: Canvas>(
         &self,
         target: &mut T,
@@ -419,7 +397,6 @@ impl GlyphAtlas {
         }
     }
 
-    /// Draw a UTF-8 string, clipped (character-decoded, like [`Self::draw_str`]).
     pub fn draw_str_clipped<T: Canvas>(
         &self,
         target: &mut T,
@@ -499,16 +476,11 @@ impl GlyphAtlas {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Blending helpers
-// ---------------------------------------------------------------------------
-
 /// `(num + 128) / 255`, without a divide.
 ///
-/// Exact over the whole range a channel blend can produce: `a + inv == 255`
-/// and both components are `u8`, so `num <= 255 * 255`. The kernel builds at
-/// opt-level 0, where each `/ 255` is a real `divl` executed three times per
-/// pixel — 25 M of them for one 4K full-screen repaint.
+/// Exact for `num <= 255 * 255`, the whole range a channel blend can produce
+/// (`a + inv == 255`, both components `u8`). The kernel builds at opt-level 0,
+/// where each `/ 255` is a real `divl` on the per-pixel path.
 #[inline]
 fn blend_div255(num: u32) -> u32 {
     let x = num + 128;
@@ -527,8 +499,7 @@ pub fn blend_color32(cov: u8, fg: Color32, bg: Color32) -> Color32 {
     Color32::new(r as u8, g as u8, b as u8, al as u8)
 }
 
-/// Blend fg and bg raw u32 (0x00RRGGBB) values by coverage.
-/// Used by the vconsole which operates on raw pixel values.
+/// Blend fg and bg raw `0x00RRGGBB` values by coverage (0-255).
 #[inline]
 pub fn blend_coverage_u32(cov: u8, fg: u32, bg: u32) -> u32 {
     if cov == 255 {
@@ -545,16 +516,6 @@ pub fn blend_coverage_u32(cov: u8, fg: u32, bg: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
-// ---------------------------------------------------------------------------
-// Global atlas (kernel use)
-// ---------------------------------------------------------------------------
-//
-// Protected by RCU: readers acquire an AtlasGuard which embeds an
-// RcuReadGuard, preventing preemption (and thus quiescent states) for
-// the duration of the borrow.  Writers call replace_global() which
-// atomically swaps the pointer; the caller is responsible for deferring
-// the free via call_rcu().
-
 #[cfg(feature = "kernel")]
 mod global_atlas {
     use super::*;
@@ -562,20 +523,13 @@ mod global_atlas {
     use slopos_ostd::KBox;
     use slopos_ostd::sync::{RcuCell, RcuCellGuard};
 
-    /// Self-owning RCU-protected borrow of the global glyph atlas.
-    ///
-    /// Backed by [`RcuCellGuard`], which holds an
-    /// [`slopos_ostd::sync::RcuReadGuard`] for the borrow's lifetime
-    /// and derefs to [`GlyphAtlas`] for ergonomic rendering calls.
+    /// RCU-protected borrow of the global glyph atlas.
     pub type AtlasGuard = RcuCellGuard<GlyphAtlas>;
 
     static GLOBAL_ATLAS: RcuCell<GlyphAtlas> = RcuCell::empty();
 
-    /// Monotonic generation counter incremented on every `replace_global`.
-    ///
-    /// Used by `notify_font_changed` for ABA-safe comparison instead of
-    /// raw pointer identity.  A recycled heap address can never produce
-    /// the same generation.
+    /// Monotonic counter bumped by every `replace_global`; compared instead of
+    /// pointer identity, which a recycled heap address would make ABA-unsafe.
     static ATLAS_GENERATION: AtomicU64 = AtomicU64::new(0);
 
     static FONT_CHANGE_CALLBACK: slopos_ostd::sync::SpinLock<Option<fn()>> =
@@ -598,11 +552,7 @@ mod global_atlas {
         }
     }
 
-    /// Return the current atlas generation (monotonic, ABA-safe).
-    ///
-    /// Callers can snapshot this value, release a lock, perform
-    /// allocations, then re-check to detect whether the atlas was
-    /// replaced in the interim.
+    /// Snapshot and re-check to detect a replacement across a lock drop.
     #[inline]
     pub fn atlas_generation() -> u64 {
         ATLAS_GENERATION.load(Ordering::Acquire)
@@ -644,10 +594,7 @@ mod global_atlas {
         }
     }
 
-    /// Atomically replace the global atlas, deferring the displaced
-    /// box's drop until the next RCU grace period via [`RcuCell::replace`].
-    ///
-    /// Returns `true` on success, `false` if the new-box allocation
+    /// Atomically replace the global atlas; `false` if allocating the new box
     /// failed.
     pub fn replace_global(new_atlas: GlyphAtlas) -> bool {
         let new_box = match KBox::try_new(new_atlas) {
@@ -659,13 +606,8 @@ mod global_atlas {
         true
     }
 
-    /// Acquire the global glyph atlas under an RCU read lock.
-    ///
-    /// The returned [`AtlasGuard`] owns an
-    /// [`slopos_ostd::sync::RcuReadGuard`], so the RCU read-side
-    /// critical section is held for exactly as long as the guard is
-    /// alive.  Drop promptly after rendering to minimise the critical
-    /// section length.
+    /// Acquire the global glyph atlas. The RCU read-side critical section lasts
+    /// exactly as long as the returned guard, so drop it promptly.
     pub fn global() -> Option<AtlasGuard> {
         GLOBAL_ATLAS.load()
     }
@@ -795,7 +737,6 @@ mod tests {
                 cov.iter().any(|&b| b != 0),
                 "{c} should have nonzero coverage"
             );
-            // And it is the glyph's own cell, not the replacement diamond.
             assert_ne!(
                 cov,
                 atlas.get_coverage(0x4E2D),

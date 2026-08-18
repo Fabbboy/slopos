@@ -1,12 +1,5 @@
-//! Split from test_ldisc.rs: test_session_fg.rs
-
 use super::fixtures::*;
 
-// ===========================================================================
-// Job Control Correctness regression tests
-// ===========================================================================
-
-/// SIGTTOU constant is defined and has correct POSIX value (22).
 pub fn test_sigttou_constant() -> TestResult {
     if SIGTTOU != 22 {
         klog_info!("TTY_TEST: BUG - SIGTTOU should be 22, got {}", SIGTTOU);
@@ -15,13 +8,10 @@ pub fn test_sigttou_constant() -> TestResult {
     TestResult::Pass
 }
 
-/// check_write with TOSTOP and background caller returns BackgroundWrite.
-/// This verifies the session-level check_write logic directly.
 pub fn test_check_write_tostop_blocks_background() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
-    scope.attach_to(&mut s); // session=10, fg_pgrp=10
-    // Background process (pgid=99), TOSTOP enabled.
+    scope.attach_to(&mut s);
     match s.check_write(99, 10, true) {
         ForegroundCheck::BackgroundWrite => TestResult::Pass,
         other => {
@@ -34,12 +24,10 @@ pub fn test_check_write_tostop_blocks_background() -> TestResult {
     }
 }
 
-/// check_write without TOSTOP always allows writes (even from background).
 pub fn test_check_write_no_tostop_allows_background() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
     scope.attach_to(&mut s);
-    // Background process (pgid=99), TOSTOP not set.
     match s.check_write(99, 10, false) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
@@ -52,12 +40,10 @@ pub fn test_check_write_no_tostop_allows_background() -> TestResult {
     }
 }
 
-/// check_write with TOSTOP allows foreground process.
 pub fn test_check_write_tostop_allows_foreground() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
-    scope.attach_to(&mut s); // fg_pgrp=10
-    // Foreground process (pgid=10), TOSTOP enabled — should still be allowed.
+    scope.attach_to(&mut s);
     match s.check_write(10, 10, true) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
@@ -70,12 +56,10 @@ pub fn test_check_write_tostop_allows_foreground() -> TestResult {
     }
 }
 
-/// check_read rejects cross-session reads (DeniedCrossSession).
 pub fn test_check_read_cross_session_rejected() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
-    scope.attach_to(&mut s); // session=10, fg_pgrp=10
-    // Caller from a different session (sid=99) — should be rejected.
+    scope.attach_to(&mut s);
     match s.check_read(10, 99) {
         ForegroundCheck::DeniedCrossSession => TestResult::Pass,
         other => {
@@ -88,7 +72,6 @@ pub fn test_check_read_cross_session_rejected() -> TestResult {
     }
 }
 
-/// check_read still allows same-session foreground reads.
 pub fn test_check_read_same_session_foreground() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
@@ -105,12 +88,10 @@ pub fn test_check_read_same_session_foreground() -> TestResult {
     }
 }
 
-/// check_read still allows kernel tasks (pgid=0, sid=0).
 pub fn test_check_read_kernel_task_allowed() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
     scope.attach_to(&mut s);
-    // Kernel task with pgid=0, sid=0 — should be allowed.
     match s.check_read(0, 0) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
@@ -123,13 +104,10 @@ pub fn test_check_read_kernel_task_allowed() -> TestResult {
     }
 }
 
-/// TTY write succeeds for foreground process even with TOSTOP.
+/// The harness runs as task_id 0, which skips the foreground check, so the
+/// write succeeds under TOSTOP; `check_write` is tested directly above.
 pub fn test_tty_write_foreground_with_tostop() -> TestResult {
     tty::table::tty_table_init();
-    // This test verifies write() returns Ok even when TOSTOP is set,
-    // because in the test harness task_id=0 (kernel), which skips the
-    // foreground check.  The session-level check_write tests above
-    // verify the logic directly.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut t = saved;
     t.c_lflag |= LocalFlags::TOSTOP;
@@ -150,11 +128,6 @@ pub fn test_tty_write_foreground_with_tostop() -> TestResult {
         }
     }
 }
-// ===========================================================================
-// Strict Session Gates & Foreground Outcomes
-// ===========================================================================
-
-/// No session attached — check_read returns BootstrapAllowed.
 pub fn test_bootstrap_allowed_no_session_read() -> TestResult {
     let s = TtySession::new();
     match s.check_read(42, 42) {
@@ -169,11 +142,10 @@ pub fn test_bootstrap_allowed_no_session_read() -> TestResult {
     }
 }
 
-/// Session attached but no fg_pgrp — check_read returns BootstrapAllowed.
 pub fn test_bootstrap_allowed_no_fg_pgrp() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
-    // Live session attached, but no foreground group set.
+    // Live session, empty foreground group.
     s.attach(scope.session_weak(), KWeak::new());
     match s.check_read(42, 10) {
         ForegroundCheck::BootstrapAllowed => TestResult::Pass,
@@ -187,12 +159,10 @@ pub fn test_bootstrap_allowed_no_fg_pgrp() -> TestResult {
     }
 }
 
-/// Cross-session read — DeniedCrossSession.
 pub fn test_denied_cross_session_read() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
-    scope.attach_to(&mut s); // session=10, fg_pgrp=10
-    // Caller from different session (sid=99).
+    scope.attach_to(&mut s);
     match s.check_read(10, 99) {
         ForegroundCheck::DeniedCrossSession => TestResult::Pass,
         other => {
@@ -205,12 +175,11 @@ pub fn test_denied_cross_session_read() -> TestResult {
     }
 }
 
-/// Cross-session write with TOSTOP — DeniedCrossSession (not BackgroundWrite).
+/// Cross-session denial outranks the TOSTOP background check.
 pub fn test_denied_cross_session_write_tostop() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
     scope.attach_to(&mut s);
-    // Cross-session (sid=99) + TOSTOP: cross-session takes priority.
     match s.check_write(10, 99, true) {
         ForegroundCheck::DeniedCrossSession => TestResult::Pass,
         other => {
@@ -223,12 +192,10 @@ pub fn test_denied_cross_session_write_tostop() -> TestResult {
     }
 }
 
-/// Cross-session write without TOSTOP — still DeniedCrossSession.
 pub fn test_cross_session_write_no_tostop_still_denied() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
     scope.attach_to(&mut s);
-    // Cross-session (sid=99), no TOSTOP: still denied.
     match s.check_write(10, 99, false) {
         ForegroundCheck::DeniedCrossSession => TestResult::Pass,
         other => {
@@ -241,12 +208,11 @@ pub fn test_cross_session_write_no_tostop_still_denied() -> TestResult {
     }
 }
 
-/// Kernel task (sid=0) is exempted from cross-session denial on read.
+/// A kernel task (pgid 0, sid 0) is exempt from cross-session denial.
 pub fn test_kernel_task_exempted_cross_session_read() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
     scope.attach_to(&mut s);
-    // Kernel task: pgid=0, sid=0 — should be Allowed, not DeniedCrossSession.
     match s.check_read(0, 0) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
@@ -259,12 +225,10 @@ pub fn test_kernel_task_exempted_cross_session_read() -> TestResult {
     }
 }
 
-/// Kernel task (sid=0) is exempted from cross-session denial on write.
 pub fn test_kernel_task_exempted_cross_session_write() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
     scope.attach_to(&mut s);
-    // Kernel task: pgid=0, sid=0, TOSTOP=true — should be Allowed.
     match s.check_write(0, 0, true) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
@@ -277,12 +241,11 @@ pub fn test_kernel_task_exempted_cross_session_write() -> TestResult {
     }
 }
 
-/// Same-session background read — BackgroundRead (not DeniedCrossSession).
+/// Same session, background pgid: the SIGTTIN path, not cross-session denial.
 pub fn test_same_session_background_read_sigttin() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
-    scope.attach_to(&mut s); // session=10, fg_pgrp=10
-    // Same session (sid=10) but background (pgid=99) — SIGTTIN path.
+    scope.attach_to(&mut s);
     match s.check_read(99, 10) {
         ForegroundCheck::BackgroundRead => TestResult::Pass,
         other => {
@@ -295,13 +258,9 @@ pub fn test_same_session_background_read_sigttin() -> TestResult {
     }
 }
 
-/// A same-session background read surfaces as WouldBlock to a NON-BLOCKING
-/// probe (the slop-ring re-probe path) — the op must stay armed and
-/// self-heal once the foreground handoff lands, never complete with EIO.
-/// Regression test for the "ping after curl ignores Ctrl-C" bug: a freshly
-/// spawned foreground job whose first fd-0 OP_READ probed before the
-/// terminal handoff received -EIO and permanently disabled its stdin/signal
-/// branch.
+/// A non-blocking probe must see WouldBlock, so the op stays armed and
+/// self-heals once the foreground handoff lands: EIO here permanently disables
+/// a freshly spawned job's stdin/signal branch.
 pub fn test_background_read_nonblock_parks_as_wouldblock() -> TestResult {
     match tty::io::background_read_surface(true) {
         TtyError::WouldBlock => TestResult::Pass,
@@ -315,8 +274,7 @@ pub fn test_background_read_nonblock_parks_as_wouldblock() -> TestResult {
     }
 }
 
-/// A same-session background read keeps the POSIX BackgroundRead surface
-/// (SIGTTIN delivery) for BLOCKING readers.
+/// A blocking reader keeps the POSIX BackgroundRead surface (SIGTTIN delivery).
 pub fn test_background_read_blocking_keeps_sigttin_surface() -> TestResult {
     match tty::io::background_read_surface(false) {
         TtyError::BackgroundRead => TestResult::Pass,
@@ -330,12 +288,10 @@ pub fn test_background_read_blocking_keeps_sigttin_surface() -> TestResult {
     }
 }
 
-/// Same-session background write with TOSTOP — BackgroundWrite.
 pub fn test_same_session_background_write_sigttou() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
     scope.attach_to(&mut s);
-    // Same session (sid=10), background (pgid=99), TOSTOP=true — SIGTTOU path.
     match s.check_write(99, 10, true) {
         ForegroundCheck::BackgroundWrite => TestResult::Pass,
         other => {
@@ -348,8 +304,7 @@ pub fn test_same_session_background_write_sigttou() -> TestResult {
     }
 }
 
-/// check_write with no session returns Allowed (not BootstrapAllowed).
-/// The write path uses a simpler model: no session = Allowed, not BootstrapAllowed.
+/// The write path has no bootstrap tier: no session is plain `Allowed`.
 pub fn test_check_write_no_session_allowed() -> TestResult {
     let s = TtySession::new();
     match s.check_write(42, 42, true) {
@@ -364,10 +319,8 @@ pub fn test_check_write_no_session_allowed() -> TestResult {
     }
 }
 
-/// TtyError::CrossSessionDenied is a distinct error variant.
 pub fn test_cross_session_denied_error_variant() -> TestResult {
     let err = TtyError::CrossSessionDenied;
-    // Verify it is distinguishable from other error variants.
     if err == TtyError::BackgroundRead
         || err == TtyError::BackgroundWrite
         || err == TtyError::PermissionDenied
@@ -377,24 +330,15 @@ pub fn test_cross_session_denied_error_variant() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Job Control & Controlling TTY Hardening
-// ===========================================================================
-
-/// set_fg_pgrp_checked on the per-TTY API denies non-existent pgrp.
-///
-/// With a session attached (sid=600), attempting to set a foreground pgrp that
-/// resolves to no living task (pgid=99999) should fail — the wrapper cannot
-/// pin a group handle for it.
+/// pgid 99999 resolves to no living task, so the wrapper cannot pin a group
+/// handle for it.
 pub fn test_set_fg_pgrp_checked_nonexistent_pgrp() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(600, 600);
     tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
 
-    // pgid 99999 doesn't exist in any session — should be denied.
     let result = tty::set_foreground_pgrp_checked(TtyIndex(0), 99999, 600);
 
-    // Clean up.
     tty::detach_session(TtyIndex(0));
     let _ = tty::set_foreground_pgrp(TtyIndex(0), 0);
 
@@ -410,17 +354,15 @@ pub fn test_set_fg_pgrp_checked_nonexistent_pgrp() -> TestResult {
     }
 }
 
-/// set_fg_pgrp_checked still allows clearing (pgid == 0).
+/// pgid 0 clears the foreground group and is always allowed.
 pub fn test_set_fg_pgrp_checked_clear_allowed() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(600, 600);
     tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
 
-    // pgid == 0 should always be allowed (clears foreground group).
     let result = tty::set_foreground_pgrp_checked(TtyIndex(0), 0, 600);
     let pgid = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(u32::MAX);
 
-    // Clean up.
     tty::detach_session(TtyIndex(0));
 
     if result.is_err() {
@@ -440,14 +382,11 @@ pub fn test_set_fg_pgrp_checked_clear_allowed() -> TestResult {
     TestResult::Pass
 }
 
-/// set_fg_pgrp_checked skips session validation when no session attached.
-///
-/// With no controlling session the checked setter installs any caller's group
-/// (pre-session path), even when the caller's sid does not match.
+/// With no controlling session the checked setter installs any caller's group,
+/// mismatched sid included — the pre-session path.
 pub fn test_set_fg_pgrp_checked_no_session_skips_validation() -> TestResult {
     let scope = SessionScope::new(50, 50);
     let mut s = TtySession::new();
-    // No session attached — a mismatched caller sid must still be allowed.
     if !s.set_fg_pgrp_checked(scope.pgrp_weak(), 99) {
         klog_info!("TTY_TEST: BUG - no-session path should allow any pgid");
         return TestResult::Fail;
@@ -462,22 +401,17 @@ pub fn test_set_fg_pgrp_checked_no_session_skips_validation() -> TestResult {
     TestResult::Pass
 }
 
-/// detach_controlling_terminal (non-leader) returns Ok(false).
-///
-/// When a non-session-leader calls TIOCNOTTY, the TTY session state is
-/// unchanged — only the caller's controlling_tty is cleared (by the ioctl handler).
+/// A non-leader TIOCNOTTY leaves the TTY session state alone; only the
+/// caller's own controlling_tty is cleared, by the ioctl handler.
 pub fn test_detach_ctty_non_leader() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(600, 600);
     tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
 
-    // Non-leader: caller_is_session_leader = false.
     let result = tty::detach_controlling_terminal(TtyIndex(0), 600, false);
 
-    // Session should still be intact.
     let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
 
-    // Clean up.
     tty::detach_session(TtyIndex(0));
 
     match result {
@@ -500,19 +434,15 @@ pub fn test_detach_ctty_non_leader() -> TestResult {
     TestResult::Pass
 }
 
-/// detach_controlling_terminal (session leader) detaches session.
-///
-/// When the session leader issues TIOCNOTTY, the TTY's session state is
-/// fully cleared and SIGHUP+SIGCONT would be sent to the foreground pgrp.
+/// A leader TIOCNOTTY clears the TTY's session state entirely; SIGHUP+SIGCONT
+/// would go to the foreground pgrp.
 pub fn test_detach_ctty_session_leader() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(600, 600);
     tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
 
-    // Session leader: caller_is_session_leader = true.
     let result = tty::detach_controlling_terminal(TtyIndex(0), 600, true);
 
-    // Session should be fully detached.
     let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(u32::MAX);
 
     match result {
@@ -535,21 +465,16 @@ pub fn test_detach_ctty_session_leader() -> TestResult {
     TestResult::Pass
 }
 
-/// detach_controlling_terminal denies cross-session detach.
-///
-/// A session leader from a different session cannot detach someone else's TTY.
+/// A session leader from another session cannot detach someone else's TTY.
 pub fn test_detach_ctty_cross_session_denied() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(600, 600);
     tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
 
-    // Different session leader trying to detach.
     let result = tty::detach_controlling_terminal(TtyIndex(0), 999, true);
 
-    // Session should still be intact.
     let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
 
-    // Clean up.
     tty::detach_session(TtyIndex(0));
 
     match result {
@@ -572,7 +497,6 @@ pub fn test_detach_ctty_cross_session_denied() -> TestResult {
     TestResult::Pass
 }
 
-/// TIOCNOTTY constant has the correct value.
 pub fn test_tiocnotty_constant() -> TestResult {
     use slopos_abi::syscall::TIOCNOTTY;
     if TIOCNOTTY != 0x5422 {
@@ -584,13 +508,8 @@ pub fn test_tiocnotty_constant() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// /dev/tty Controlling Terminal Device
-// ===========================================================================
-
-/// A second open of the same console index clones the one backing; its
-/// strong count is the live open count — the mechanism `/dev/tty` relies
-/// on (a second FD referencing the caller's controlling terminal).
+/// A second open clones the one backing; its strong count is the live open
+/// count — the mechanism `/dev/tty` relies on.
 pub fn test_second_open_bumps_backing_strong_count() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -621,9 +540,7 @@ pub fn test_second_open_bumps_backing_strong_count() -> TestResult {
     TestResult::Pass
 }
 
-/// While an extra open of the console is held, read/write/termios
-/// operations work identically on the same TTY index — a `/dev/tty` FD is
-/// indistinguishable from one opened on the device path.
+/// A `/dev/tty` FD is indistinguishable from one opened on the device path.
 pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);

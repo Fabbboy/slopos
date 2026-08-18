@@ -1,10 +1,9 @@
-//! TTY job control — session management, foreground process group,
-//! controlling terminal acquire/release/detach, and SIGTTIN/SIGTTOU
-//! enforcement.
+//! TTY job control: sessions, foreground process group, controlling-terminal
+//! acquire/release/detach, SIGTTIN/SIGTTOU enforcement.
 //!
-//! Session and foreground-group links are resolved to weak handles
-//! ([`KWeak`]) **before** the per-TTY lock is taken: the resolvers acquire the
-//! task-manager lock, which must never nest under a TTY slot lock.
+//! Session and foreground-group links resolve to [`KWeak`] handles **before**
+//! the per-TTY lock is taken: the resolvers acquire the task-manager lock, which
+//! must never nest under a TTY slot lock.
 
 use slopos_abi::signal::{SIGCONT, SIGHUP};
 
@@ -19,11 +18,6 @@ use slopos_ostd::sync::BUS;
 use slopos_ostd::task::ProcessGroup;
 use slopos_ostd::{KArc, KWeak};
 
-// ---------------------------------------------------------------------------
-// Foreground process group
-// ---------------------------------------------------------------------------
-
-/// Get the foreground process group for a specific TTY.
 #[must_use]
 pub fn get_foreground_pgrp(idx: TtyIndex) -> Result<u32, TtyError> {
     let slot = idx.0 as usize;
@@ -37,9 +31,7 @@ pub fn get_foreground_pgrp(idx: TtyIndex) -> Result<u32, TtyError> {
     }
 }
 
-/// Set the foreground process group for a specific TTY.
-///
-/// Wakes blocked readers so they re-evaluate foreground status and receive
+/// Wakes blocked readers so they re-evaluate foreground status and take
 /// `SIGTTIN` if they are now in the background.
 #[must_use]
 pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
@@ -47,7 +39,7 @@ pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
-    // Resolve the group handle off-lock (empty weak clears the foreground).
+    // An empty weak clears the foreground group.
     let fg = if pgid == 0 {
         KWeak::new()
     } else {
@@ -70,13 +62,8 @@ pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
     Ok(())
 }
 
-/// Set foreground pgrp with session validation (POSIX TIOCSPGRP semantics).
-///
-/// Only processes in the same session as the TTY's controlling session may
-/// change the foreground pgrp, and the target group must have living members
-/// in that session.
-///
-/// Returns `Ok(())` on success, `Err(PermissionDenied)` on validation failure.
+/// POSIX `TIOCSPGRP`: only the TTY's controlling session may change the
+/// foreground group, and the target group must have living members in it.
 pub fn set_foreground_pgrp_checked(
     idx: TtyIndex,
     pgid: u32,
@@ -87,8 +74,7 @@ pub fn set_foreground_pgrp_checked(
         return Err(TtyError::InvalidIndex);
     }
 
-    // Resolve the target group off-lock. Clearing (pgid == 0) is always
-    // allowed; a named group with no living members cannot be foregrounded.
+    // Clearing is always allowed; a named group with no living members is not.
     let fg = if pgid == 0 {
         KWeak::new()
     } else {
@@ -119,11 +105,6 @@ pub fn set_foreground_pgrp_checked(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Session management API
-// ---------------------------------------------------------------------------
-
-/// Get the session ID for a specific TTY.
 #[must_use]
 pub fn get_session_id(idx: TtyIndex) -> Result<u32, TtyError> {
     let slot = idx.0 as usize;
@@ -137,16 +118,12 @@ pub fn get_session_id(idx: TtyIndex) -> Result<u32, TtyError> {
     }
 }
 
-/// Attach a session to a TTY.
-///
-/// The session leader (`leader_pid`) becomes the controlling process.
-/// `leader_pgid` is set as the initial foreground process group.
+/// The leader becomes the controlling process, its group the initial foreground.
 pub fn attach_session(idx: TtyIndex, leader_pid: u32, leader_pgid: u32) {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return;
     }
-    // Resolve both handles off-lock before taking the TTY slot lock.
     let session = session_handle(leader_pid).unwrap_or_else(KWeak::new);
     let fg = pgrp_handle(leader_pgid).unwrap_or_else(KWeak::new);
     let mut guard = TTY_SLOTS[slot].lock();
@@ -155,9 +132,8 @@ pub fn attach_session(idx: TtyIndex, leader_pid: u32, leader_pgid: u32) {
     }
 }
 
-/// Make the caller's session the controlling session of a TTY. The caller's
-/// foreground group is passed as a weak handle; the session is derived from it
-/// (a group pins its session).
+/// Makes the caller's session controlling. The session is derived from the
+/// passed foreground group, which pins it.
 pub fn acquire_controlling_terminal(
     idx: TtyIndex,
     fg: KWeak<ProcessGroup>,
@@ -167,7 +143,6 @@ pub fn acquire_controlling_terminal(
         return Err(TtyError::InvalidIndex);
     }
 
-    // The acquiring session is the one that owns the caller's foreground group.
     let group = fg.upgrade();
     let acquiring_sid = group.as_ref().map_or(0, |pg| pg.session_id());
     let session = group
@@ -197,10 +172,7 @@ pub fn acquire_controlling_terminal(
     Ok(())
 }
 
-/// Detach the controlling session from a TTY.
-///
-/// Clears session and foreground pgrp.
-/// Compositor focus (`focused_task_id`) is NOT cleared.
+/// Clears session and foreground pgrp; compositor focus is left alone.
 pub fn detach_session(idx: TtyIndex) {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -233,20 +205,9 @@ pub fn release_controlling_terminal(idx: TtyIndex, session_id: u32) -> Result<bo
     Ok(true)
 }
 
-/// Detach the calling process from its controlling terminal
-/// (TIOCNOTTY semantics).
-///
-/// If the caller is the session leader, the entire session loses the
-/// controlling terminal — the foreground process group receives SIGHUP +
-/// SIGCONT (matching POSIX hangup behavior).  The session is detached from
-/// the TTY, and `clear_session_controlling_tty` clears every task in the
-/// session that still refers to this TTY.
-///
-/// If the caller is NOT the session leader, only the caller's own
-/// `controlling_tty` is cleared (the TTY session state is unaffected).
-///
-/// Returns `Ok(true)` if the caller was the session leader and signals
-/// were sent, `Ok(false)` if only the caller was detached.
+/// `TIOCNOTTY`. From the session leader the whole session loses the terminal and
+/// the foreground group takes SIGHUP + SIGCONT, per POSIX hangup behaviour;
+/// otherwise only the caller detaches. `Ok(true)` means the leader path ran.
 pub fn detach_controlling_terminal(
     idx: TtyIndex,
     caller_sid: u32,
@@ -258,14 +219,12 @@ pub fn detach_controlling_terminal(
     }
 
     if !caller_is_session_leader {
-        // Non-leader: only the caller's controlling_tty field is cleared
-        // (done by the ioctl handler).  TTY session state is unchanged.
+        // The ioctl handler clears the caller's own `controlling_tty`.
         return Ok(false);
     }
 
-    // Session leader: detach the session from the TTY and signal the
-    // foreground process group. Pinning the group over the off-lock signal
-    // keeps its identity stable (no reused-pid window).
+    // Pinning the group across the off-lock signal keeps its identity stable,
+    // closing the reused-pid window.
     let (fg_pgrp, session_id) = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
@@ -273,7 +232,6 @@ pub fn detach_controlling_terminal(
             None => return Err(TtyError::NotAllocated),
         };
 
-        // Only the controlling session may detach.
         let tty_sid = tty.session.session_id();
         if tty_sid != 0 && tty_sid != caller_sid {
             return Err(TtyError::PermissionDenied);
@@ -285,7 +243,7 @@ pub fn detach_controlling_terminal(
         (pgrp, sid)
     };
 
-    // Signal delivery OUTSIDE the lock to avoid deadlock.
+    // Signal delivery stays outside the lock.
     if session_id != 0 {
         let _ = clear_session_controlling_tty(session_id, idx);
     }

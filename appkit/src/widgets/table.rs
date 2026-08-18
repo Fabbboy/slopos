@@ -12,10 +12,9 @@ use crate::traits::{
 
 use slopos_abi::draw::Color32;
 
-/// Horizontal padding inside a table cell.
 const CELL_PADDING: i32 = 4;
 
-/// Multi-column table with fixed row height, virtual scrolling, and keyboard navigation.
+/// Fixed row height; only the visible row range is painted.
 pub struct TableWidget {
     core: WidgetCore,
     columns: Vec<TableColumn>,
@@ -87,7 +86,6 @@ impl TableWidget {
         (self.total_content_height() - self.body_height()).max(0)
     }
 
-    /// Resolve column pixel widths from the TableColumnWidth specs.
     fn resolve_col_widths(&mut self, available: i32) {
         let mut fixed_total = 0i32;
         let mut flex_total = 0u16;
@@ -117,7 +115,6 @@ impl TableWidget {
         }
     }
 
-    /// Ensure the selected row is visible by adjusting scroll_offset.
     fn scroll_to_selected(&mut self) {
         if let Some(sel) = self.selected {
             let item_top = sel as i32 * self.row_height;
@@ -134,12 +131,12 @@ impl TableWidget {
         }
     }
 
-    /// Return the column x-offset (relative to rect.x) for a given column index.
+    /// Column x-offset relative to `rect.x`.
     fn col_x_offset(&self, col_idx: usize) -> i32 {
         self.col_widths[..col_idx].iter().sum()
     }
 
-    /// Determine which column index a given x coordinate (window-space) falls in.
+    /// Column containing window-space `x`.
     fn column_at_x(&self, x: i32) -> Option<usize> {
         let rel_x = x - self.layout_rect().x;
         let mut acc = 0;
@@ -152,7 +149,6 @@ impl TableWidget {
         None
     }
 
-    /// Visible row range for virtual scrolling.
     fn visible_range(&self) -> (usize, usize) {
         if self.row_height <= 0 {
             return (0, 0);
@@ -164,7 +160,7 @@ impl TableWidget {
         (start, end)
     }
 
-    /// Number of rows visible in the body area (for PageUp/PageDown).
+    /// Rows visible in the body, which is the PageUp/PageDown step.
     fn page_size(&self) -> usize {
         if self.row_height <= 0 {
             return 1;
@@ -255,7 +251,6 @@ impl Widget for TableWidget {
         let style = ctx.style;
         let rect = self.layout_rect();
 
-        // --- Header row ---
         ctx.fill_rect(
             rect.x,
             rect.y,
@@ -268,7 +263,6 @@ impl Widget for TableWidget {
         let mut hx = rect.x;
         for (i, col) in self.columns.iter().enumerate() {
             let cw = self.col_widths.get(i).copied().unwrap_or(0);
-            // Build label with sort indicator.
             let label = match col.sort_indicator {
                 Some(SortIndicator::Ascending) => {
                     let mut s = col.label.clone();
@@ -286,7 +280,6 @@ impl Widget for TableWidget {
             hx += cw;
         }
 
-        // Divider line below header.
         ctx.fill_rect(
             rect.x,
             rect.y + self.header_height - 1,
@@ -295,7 +288,6 @@ impl Widget for TableWidget {
             style.border_divider,
         );
 
-        // --- Body rows (virtualized) ---
         let body_rect = Rect::new(
             rect.x,
             rect.y + self.header_height,
@@ -309,7 +301,6 @@ impl Widget for TableWidget {
                 let y =
                     rect.y + self.header_height + i as i32 * self.row_height - self.scroll_offset;
 
-                // Row background: selected, even, or odd.
                 let bg = if self.selected == Some(i) {
                     Color32::new(
                         style.bg_accent.red(),
@@ -322,7 +313,7 @@ impl Widget for TableWidget {
                 } else if i % 2 == 0 {
                     style.bg_primary
                 } else {
-                    // Slightly lighter for odd rows.
+                    // Zebra striping: odd rows sit slightly lighter.
                     Color32::rgb(
                         style.bg_primary.red().saturating_add(5),
                         style.bg_primary.green().saturating_add(5),
@@ -336,7 +327,6 @@ impl Widget for TableWidget {
                     ctx.fill_rect(rect.x, y, rect.width, self.row_height, bg);
                 }
 
-                // Hover highlight overlay (subtle, on top of bg).
                 if self.hovered_row == Some(i) && self.selected != Some(i) {
                     ctx.fill_rect_blended(
                         rect.x,
@@ -347,14 +337,12 @@ impl Widget for TableWidget {
                     );
                 }
 
-                // Paint cell widgets.
                 for cell in &self.rows[i] {
                     cell.paint(ctx);
                 }
             }
         });
 
-        // --- Scrollbar ---
         let total_h = self.total_content_height();
         let body_h = self.body_height();
         if total_h > body_h {
@@ -365,10 +353,8 @@ impl Widget for TableWidget {
             let track_y = rect.y + self.header_height;
             let track_h = body_h;
 
-            // Track background.
             ctx.fill_rect(track_x, track_y, sb_width, track_h, style.bg_secondary);
 
-            // Thumb.
             let max_off = self.max_scroll_offset();
             let thumb_size = if max_off > 0 && total_h > 0 {
                 ((body_h as i64 * track_h as i64) / total_h as i64) as i32
@@ -394,7 +380,6 @@ impl Widget for TableWidget {
             );
         }
 
-        // Focus ring.
         if self.focused {
             ctx.draw_focus_ring(rect);
         }
@@ -627,8 +612,7 @@ impl Widget for TableWidget {
 }
 
 impl TableWidget {
-    /// Position every cell for the current rect, column widths and scroll
-    /// offset. The single place a cell's rect is decided.
+    /// The single place a cell's rect is decided.
     fn place_cells(&mut self) {
         let rect = self.layout_rect();
         for (row_idx, row) in self.rows.iter_mut().enumerate() {

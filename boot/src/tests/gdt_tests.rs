@@ -459,23 +459,19 @@ pub fn test_syscall_msr_double_init() -> TestResult {
     let star_before = cpu::read_msr(Msr::STAR);
     let lstar_before = cpu::read_msr(Msr::LSTAR);
 
-    // Reinitialize SYSCALL MSRs — this test runs post-boot inside the
-    // KTAP harness; the BSP brand has already minted and dropped, so
-    // re-enter the BSP-init scope via `run_bsp_init_for_test` to obtain
-    // a `&BspToken<'_>` to pass as the `CpuInitWitness`.
+    // The BSP brand has already minted and dropped by the time the harness
+    // runs, so a fresh BSP-init scope is needed for the `CpuInitWitness`.
     slopos_ostd::sync::run_bsp_init_for_test(|t| syscall_msr_init(t));
 
     let efer_after = cpu::read_msr(Msr::EFER);
     let star_after = cpu::read_msr(Msr::STAR);
     let lstar_after = cpu::read_msr(Msr::LSTAR);
 
-    // Critical bits should be preserved
     if (efer_before & EFER_SCE) != (efer_after & EFER_SCE) {
         klog_info!("GDT_TEST: BUG - EFER.SCE changed after syscall_msr_init");
         return TestResult::Fail;
     }
 
-    // STAR should be unchanged (same selector layout)
     if star_before != star_after {
         klog_info!(
             "GDT_TEST: WARNING - STAR changed: 0x{:x} -> 0x{:x}",
@@ -484,36 +480,28 @@ pub fn test_syscall_msr_double_init() -> TestResult {
         );
     }
 
-    // LSTAR should point to same handler (or equivalent)
     if lstar_before != lstar_after {
         klog_info!(
             "GDT_TEST: WARNING - LSTAR changed: 0x{:x} -> 0x{:x}",
             lstar_before,
             lstar_after
         );
-        // Not necessarily a bug if pointing to same function
     }
 
     TestResult::Pass
 }
 
-// =============================================================================
-// BUG HUNTING TESTS - Actual verification of values
-// =============================================================================
-
-/// Test: Verify GDT entry order matches selector values
-/// BUG FINDER: If order is wrong, SYSRET will load wrong segments
+/// SYSRET derives the user selectors from the GDT order, so a reordered table
+/// loads the wrong segments on return.
 pub fn test_gdt_entry_order_matches_selectors() -> TestResult {
     let (_limit, base) = read_gdtr();
 
-    // Read actual GDT entries
-    // Selector 0x08 = index 1, 0x10 = index 2, 0x18 = index 3, 0x20 = index 4
-    let entry1 = ts_gdt::read_entry(base, 1); // Should be kernel code
-    let entry2 = ts_gdt::read_entry(base, 2); // Should be kernel data
-    let entry3 = ts_gdt::read_entry(base, 3); // Should be user data (0x1B with RPL=3)
-    let entry4 = ts_gdt::read_entry(base, 4); // Should be user code (0x23 with RPL=3)
+    // Selectors 0x08/0x10/0x18/0x20 are indices 1-4; DPL is bits [46:45].
+    let entry1 = ts_gdt::read_entry(base, 1);
+    let entry2 = ts_gdt::read_entry(base, 2);
+    let entry3 = ts_gdt::read_entry(base, 3);
+    let entry4 = ts_gdt::read_entry(base, 4);
 
-    // Check kernel code segment (0x08) has DPL=0
     let entry1_dpl = (entry1 >> 45) & 0x3;
     if entry1_dpl != 0 {
         klog_info!(
@@ -523,7 +511,6 @@ pub fn test_gdt_entry_order_matches_selectors() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Check kernel data segment (0x10) has DPL=0
     let entry2_dpl = (entry2 >> 45) & 0x3;
     if entry2_dpl != 0 {
         klog_info!(
@@ -533,7 +520,6 @@ pub fn test_gdt_entry_order_matches_selectors() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Check user data segment (0x18, used as 0x1B) has DPL=3
     let entry3_dpl = (entry3 >> 45) & 0x3;
     if entry3_dpl != 3 {
         klog_info!(
@@ -543,7 +529,6 @@ pub fn test_gdt_entry_order_matches_selectors() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Check user code segment (0x20, used as 0x23) has DPL=3
     let entry4_dpl = (entry4 >> 45) & 0x3;
     if entry4_dpl != 3 {
         klog_info!(
@@ -553,7 +538,7 @@ pub fn test_gdt_entry_order_matches_selectors() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Check that code segments have executable bit set (bit 43)
+    // Bit 43 is the executable bit.
     let entry1_exec = (entry1 >> 43) & 1;
     let entry4_exec = (entry4 >> 43) & 1;
     if entry1_exec != 1 {
@@ -565,7 +550,6 @@ pub fn test_gdt_entry_order_matches_selectors() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Check that data segments are NOT executable
     let entry2_exec = (entry2 >> 43) & 1;
     let entry3_exec = (entry3 >> 43) & 1;
     if entry2_exec != 0 {
@@ -580,27 +564,17 @@ pub fn test_gdt_entry_order_matches_selectors() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Verify STAR MSR SYSRET selector calculation is correct
-/// BUG FINDER: SYSRET uses STAR[63:48]+16 for CS and STAR[63:48]+8 for SS
-/// If wrong, user mode will have wrong selectors after SYSRET
+/// In 64-bit mode SYSRET builds CS from `STAR[63:48] + 16` and SS from
+/// `STAR[63:48] + 8`, both with RPL forced to 3.
 pub fn test_star_sysret_selector_calculation() -> TestResult {
     let star = cpu::read_msr(Msr::STAR);
     let sysret_base = ((star >> 48) & 0xFFFF) as u16;
 
-    // SYSRET in 64-bit mode:
-    // CS = sysret_base + 16 (with RPL forced to 3)
-    // SS = sysret_base + 8 (with RPL forced to 3)
-
     let expected_user_cs = sysret_base + 16;
     let expected_user_ss = sysret_base + 8;
 
-    // User CS should be 0x20 (index 4) + RPL 3 = 0x23
-    // User SS should be 0x18 (index 3) + RPL 3 = 0x1B
-
-    // So sysret_base should be 0x20 - 16 = 0x10? No wait...
-    // Actually: CS = base + 16, so for CS=0x23, base = 0x23 - 16 = 0x13
-    // And SS = base + 8 = 0x13 + 8 = 0x1B - correct!
-
+    // User code is index 4 and user data index 3, so with RPL 3 the selectors
+    // land on 0x23 and 0x1B.
     if expected_user_cs != 0x23 {
         klog_info!(
             "GDT_TEST: BUG - SYSRET will set CS to 0x{:x}, expected 0x23",
@@ -620,25 +594,21 @@ pub fn test_star_sysret_selector_calculation() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Verify TSS RSP0 is actually in kernel space and stack-aligned
-/// BUG FINDER: If RSP0 is wrong, kernel will crash on first interrupt
 pub fn test_tss_rsp0_value_valid() -> TestResult {
-    // Read TR to get TSS selector
     let tr = read_tr();
     if tr == 0 {
         klog_info!("GDT_TEST: BUG - No TSS loaded");
         return TestResult::Fail;
     }
 
-    // Get TSS base from GDT
     let (_limit, gdt_base) = read_gdtr();
     let tss_index = (tr >> 3) as usize;
 
-    // TSS descriptor is double-wide; helper folds the two-u64 read.
+    // The TSS descriptor is double-wide; the helper folds the two-u64 read.
     let (tss_base, _limit) = ts_gdt::read_tss_descriptor(gdt_base, tss_index);
 
-    // Read RSP0 from TSS (offset 4 in TSS64). TSS RSP0 is at an
-    // 8-bytes-but-not-8-aligned offset, so use the byte-array helper.
+    // RSP0 sits at TSS64 offset 4 — eight bytes, but not 8-aligned, hence the
+    // byte-array helper.
     let rsp0 = u64::from_le_bytes(ts_gdt::read_bytes_at::<8>(tss_base + 4));
 
     if rsp0 == 0 {
@@ -646,7 +616,6 @@ pub fn test_tss_rsp0_value_valid() -> TestResult {
         return TestResult::Fail;
     }
 
-    // RSP0 must be in kernel space
     if rsp0 < 0xFFFF_8000_0000_0000 {
         klog_info!(
             "GDT_TEST: BUG - TSS.RSP0 0x{:x} is not in kernel space!",
@@ -655,20 +624,16 @@ pub fn test_tss_rsp0_value_valid() -> TestResult {
         return TestResult::Fail;
     }
 
-    // RSP0 should be 16-byte aligned (for proper stack alignment)
     if (rsp0 & 0xF) != 0 {
         klog_info!(
             "GDT_TEST: WARNING - TSS.RSP0 0x{:x} is not 16-byte aligned",
             rsp0
         );
-        // Not returning -1 as this might be intentional
     }
 
     TestResult::Pass
 }
 
-/// Test: Check if IST stacks are in kernel space and have guard pages
-/// BUG FINDER: IST stacks without guard pages = silent stack overflow corruption
 pub fn test_ist_stacks_have_guard_pages() -> TestResult {
     let tr = read_tr();
     if tr == 0 {
@@ -679,8 +644,8 @@ pub fn test_ist_stacks_have_guard_pages() -> TestResult {
     let tss_index = (tr >> 3) as usize;
     let (tss_base, _limit) = ts_gdt::read_tss_descriptor(gdt_base, tss_index);
 
-    // IST entries are at offset 36 in TSS64 (after RSP0-2 and reserved)
-    // Each IST is 8 bytes, IST1-IST7
+    // IST1-IST7 are seven 8-byte entries at TSS64 offset 36, after RSP0-2 and
+    // the reserved word.
     let ist_base = tss_base + 36;
 
     let mut issues = 0u32;
@@ -688,11 +653,9 @@ pub fn test_ist_stacks_have_guard_pages() -> TestResult {
         let ist_ptr = u64::from_le_bytes(ts_gdt::read_bytes_at::<8>(ist_base + i * 8));
 
         if ist_ptr == 0 {
-            // IST not configured - that's fine for unused slots
             continue;
         }
 
-        // IST should be in kernel space
         if ist_ptr < 0xFFFF_8000_0000_0000 {
             klog_info!(
                 "GDT_TEST: BUG - IST{} at 0x{:x} is not in kernel space!",
@@ -702,7 +665,7 @@ pub fn test_ist_stacks_have_guard_pages() -> TestResult {
             issues += 1;
         }
 
-        // Check that IST isn't pointing to same location as RSP0 (common bug)
+        // An IST sharing RSP0's address gives the vector no isolation at all.
         let rsp0 = u64::from_le_bytes(ts_gdt::read_bytes_at::<8>(tss_base + 4));
         if ist_ptr == rsp0 {
             klog_info!(
@@ -719,22 +682,18 @@ pub fn test_ist_stacks_have_guard_pages() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Verify LSTAR points to valid code (not data section)
-/// BUG FINDER: LSTAR pointing to data = crash on first syscall
+/// A heuristic: no function prologue starts with NUL padding or INT3 filler,
+/// so either pattern means LSTAR is pointing at something that is not code.
 pub fn test_lstar_points_to_executable_code() -> TestResult {
     let lstar = cpu::read_msr(Msr::LSTAR);
 
-    // Read first few bytes at LSTAR to check it looks like code
-    // A function should NOT start with 0x00 bytes (NUL padding)
     let first_bytes = ts_gdt::read_bytes_at::<4>(lstar);
 
-    // Check for obvious bad patterns
     if first_bytes == [0, 0, 0, 0] {
         klog_info!("GDT_TEST: BUG - LSTAR points to zeros (likely uninitialized/data)");
         return TestResult::Fail;
     }
 
-    // Check for INT3 padding (0xCC) - would indicate wrong location
     if first_bytes == [0xCC, 0xCC, 0xCC, 0xCC] {
         klog_info!("GDT_TEST: BUG - LSTAR points to INT3 padding");
         return TestResult::Fail;

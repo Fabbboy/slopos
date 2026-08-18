@@ -8,10 +8,7 @@ use super::paint::PaintContext;
 use super::style::StyleSheet;
 use super::traits::{FocusPolicy, MeasureCtx, Widget, WidgetCore, measure_widget, place_widget};
 
-// ---------------------------------------------------------------------------
-// Test helper: a widget with a fixed measure size (no font dependency).
-// ---------------------------------------------------------------------------
-
+/// Fixed measure size, so layout tests need no font.
 struct FixedSizeWidget {
     core: WidgetCore,
     size: Size,
@@ -115,10 +112,6 @@ impl Widget for ProbeButton {
     }
 }
 
-// ---------------------------------------------------------------------------
-// BoxConstraints tests
-// ---------------------------------------------------------------------------
-
 fn test_tight_constraints() {
     let c = BoxConstraints::tight(Size::new(100, 50));
     assert!(c.is_tight());
@@ -126,7 +119,6 @@ fn test_tight_constraints() {
     assert_eq!(c.max_width, 100);
     assert_eq!(c.min_height, 50);
     assert_eq!(c.max_height, 50);
-    // Clamping anything to tight returns the exact size.
     assert_eq!(c.constrain(Size::new(200, 200)), Size::new(100, 50));
     assert_eq!(c.constrain(Size::new(10, 5)), Size::new(100, 50));
 }
@@ -138,9 +130,7 @@ fn test_loose_constraints() {
     assert_eq!(c.max_width, 300);
     assert_eq!(c.min_height, 0);
     assert_eq!(c.max_height, 200);
-    // Within range: unchanged.
     assert_eq!(c.constrain(Size::new(150, 100)), Size::new(150, 100));
-    // Zero stays zero.
     assert_eq!(c.constrain(Size::ZERO), Size::ZERO);
 }
 
@@ -151,11 +141,8 @@ fn test_constrain_clamps() {
         min_height: 30,
         max_height: 100,
     };
-    // Below min.
     assert_eq!(c.constrain(Size::new(10, 5)), Size::new(50, 30));
-    // Above max.
     assert_eq!(c.constrain(Size::new(999, 999)), Size::new(200, 100));
-    // In range.
     assert_eq!(c.constrain(Size::new(100, 60)), Size::new(100, 60));
 }
 
@@ -168,7 +155,6 @@ fn test_deflate() {
     };
     let insets = EdgeInsets::all(10);
     let d = c.deflate(insets);
-    // horizontal = 20, vertical = 20
     assert_eq!(d.min_width, 80);
     assert_eq!(d.max_width, 380);
     assert_eq!(d.min_height, 30);
@@ -183,24 +169,17 @@ fn test_unbounded() {
     assert_eq!(c.max_height, MAX_EXTENT);
     assert!(!c.is_width_bounded());
     assert!(!c.is_height_bounded());
-    // Any realistic size passes through.
     assert_eq!(c.constrain(Size::new(9999, 9999)), Size::new(9999, 9999));
 }
 
-// ---------------------------------------------------------------------------
-// Rect tests
-// ---------------------------------------------------------------------------
-
 fn test_rect_contains() {
     let r = Rect::new(10, 20, 100, 50);
-    // Inside.
     assert!(r.contains(10, 20));
     assert!(r.contains(50, 40));
     assert!(r.contains(109, 69));
-    // On boundary (exclusive upper).
+    // The upper edges are exclusive.
     assert!(!r.contains(110, 20));
     assert!(!r.contains(10, 70));
-    // Outside.
     assert!(!r.contains(9, 20));
     assert!(!r.contains(10, 19));
     assert!(!r.contains(200, 200));
@@ -217,14 +196,10 @@ fn test_rect_no_intersect() {
     let a = Rect::new(0, 0, 50, 50);
     let b = Rect::new(100, 100, 50, 50);
     assert!(a.intersect(&b).is_none());
-    // Adjacent (touching edge, not overlapping).
+    // Touching edges are not an overlap.
     let c = Rect::new(50, 0, 50, 50);
     assert!(a.intersect(&c).is_none());
 }
-
-// ---------------------------------------------------------------------------
-// Layout tests (using FixedSizeWidget to avoid font dependency)
-// ---------------------------------------------------------------------------
 
 fn make_measure_ctx(style: &StyleSheet) -> MeasureCtx<'_> {
     MeasureCtx { style }
@@ -241,8 +216,6 @@ fn test_vstack_measure() {
     let spacing = 5;
     let mut vstack = VStackWidget::new(children, spacing, CrossAxisAlignment::Start);
     let size = vstack.measure(BoxConstraints::UNBOUNDED, &mut ctx);
-    // Width = max(80, 60, 100) = 100
-    // Height = 20 + 5 + 30 + 5 + 10 = 70
     assert_eq!(size, Size::new(100, 70));
 }
 
@@ -256,8 +229,6 @@ fn test_hstack_measure() {
     let spacing = 10;
     let mut hstack = HStackWidget::new(children, spacing, CrossAxisAlignment::Start);
     let size = hstack.measure(BoxConstraints::UNBOUNDED, &mut ctx);
-    // Width = 40 + 10 + 60 = 110
-    // Height = max(20, 30) = 30
     assert_eq!(size, Size::new(110, 30));
 }
 
@@ -268,8 +239,6 @@ fn test_padding_measure() {
     let insets = EdgeInsets::new(5, 10, 15, 20);
     let mut padding = PaddingWidget::new(insets, child);
     let size = padding.measure(BoxConstraints::UNBOUNDED, &mut ctx);
-    // Width = 50 + 20 + 10 = 80
-    // Height = 30 + 5 + 15 = 50
     assert_eq!(size, Size::new(80, 50));
 }
 
@@ -280,10 +249,6 @@ fn test_spacer_measure() {
     let size = spacer.measure(BoxConstraints::UNBOUNDED, &mut ctx);
     assert_eq!(size, Size::new(16, 16));
 }
-
-// ---------------------------------------------------------------------------
-// Focus tests
-// ---------------------------------------------------------------------------
 
 fn test_focus_next() {
     let a = FixedSizeWidget::focusable(10, 10);
@@ -297,11 +262,9 @@ fn test_focus_next() {
     let mut fm = FocusManager::new();
     fm.rebuild_tab_chain(&vstack);
 
-    // First tab: focuses first widget.
     fm.move_focus_next();
     assert_eq!(fm.focused(), Some(id_a));
 
-    // Second tab: focuses second widget.
     fm.move_focus_next();
     assert_eq!(fm.focused(), Some(id_b));
 }
@@ -317,7 +280,7 @@ fn test_focus_prev() {
     let mut fm = FocusManager::new();
     fm.rebuild_tab_chain(&vstack);
 
-    // Shift+Tab with no focus: goes to last widget.
+    // With nothing focused, Shift+Tab lands on the last widget.
     fm.move_focus_prev();
     assert_eq!(fm.focused(), Some(id_c));
 }
@@ -333,14 +296,11 @@ fn test_focus_wrap() {
     let mut fm = FocusManager::new();
     fm.rebuild_tab_chain(&vstack);
 
-    // Focus last widget.
     fm.set_focused(Some(id_b));
 
-    // Tab from last wraps to first.
     fm.move_focus_next();
     assert_eq!(fm.focused(), Some(id_a));
 
-    // Shift+Tab from first wraps to last.
     fm.move_focus_prev();
     assert_eq!(fm.focused(), Some(id_b));
 }
@@ -358,35 +318,23 @@ fn test_focus_scope() {
     let mut fm = FocusManager::new();
     fm.rebuild_tab_chain(&vstack);
 
-    // Focus widget A.
     fm.set_focused(Some(id_a));
     assert_eq!(fm.focused(), Some(id_a));
 
-    // Push a scope containing only B and C.
     fm.push_scope(vec![id_b, id_c]);
-    // Push scope focuses the first widget in the scope.
+    // A pushed scope focuses its first widget.
     assert_eq!(fm.focused(), Some(id_b));
 
-    // Tab within scope: B -> C.
     fm.move_focus_next();
     assert_eq!(fm.focused(), Some(id_c));
 
-    // Tab wraps within scope: C -> B (not A).
+    // Wraps inside the scope rather than escaping to A.
     fm.move_focus_next();
     assert_eq!(fm.focused(), Some(id_b));
 
-    // Pop scope restores focus to A.
     fm.pop_scope();
     assert_eq!(fm.focused(), Some(id_a));
 }
-
-// ---------------------------------------------------------------------------
-// Keymap tests moved to `slopos-keymap-core` (the single home of layout logic);
-// run them with `cargo test -p slopos-keymap-core`.
-
-// ---------------------------------------------------------------------------
-// Hit test
-// ---------------------------------------------------------------------------
 
 fn test_hit_test_leaf() {
     let mut w = FixedSizeWidget::new(100, 50);
@@ -401,16 +349,11 @@ fn test_hit_test_leaf() {
 fn test_hit_test_miss() {
     let mut w = FixedSizeWidget::new(100, 50);
     place_widget(&mut w, Rect::new(10, 20, 100, 50));
-    // Point outside widget.
     let result = hit_test(&w, 0, 0);
     assert!(result.is_none());
     let result2 = hit_test(&w, 200, 200);
     assert!(result2.is_none());
 }
-
-// ---------------------------------------------------------------------------
-// Additional edge-case tests
-// ---------------------------------------------------------------------------
 
 fn test_edge_insets_symmetric() {
     let insets = EdgeInsets::symmetric(10, 5);
@@ -446,13 +389,6 @@ fn test_deflate_unbounded() {
     assert_eq!(d.min_width, 0);
     assert_eq!(d.min_height, 0);
 }
-
-// ---------------------------------------------------------------------------
-// Table context menu / popup tests
-//
-// These cover the paths that were compiled but unreachable: a secondary click
-// on a table row, its keyboard equivalent, and the popup that renders the menu.
-// ---------------------------------------------------------------------------
 
 use super::node::{ContextMenuAt, TableColumn, TableColumnWidth};
 use super::widgets::popup::PopupWidget;
@@ -499,8 +435,6 @@ fn press(x: i32, y: i32, button: super::event::PointerButton) -> WidgetEvent {
     WidgetEvent::PointerDown { x, y, button }
 }
 
-/// The regression this whole change exists for: a right-click on a row used to
-/// be indistinguishable from a left-click, so no context request was emitted.
 fn test_table_right_click_emits_context_menu() {
     let mut table = context_table(None);
     let mut sink = MessageSink::new();
@@ -545,8 +479,7 @@ fn test_table_left_click_emits_no_context_menu() {
     assert_eq!(sink.drain_typed::<usize>(), vec![1]);
 }
 
-/// Sorting is a primary-button action; a secondary click on the header names
-/// no row and must not open a menu.
+/// A secondary click on the header names no row, so it has nothing to open.
 fn test_table_right_click_header_is_inert() {
     let mut table = context_table(None);
     let mut sink = MessageSink::new();
@@ -617,15 +550,14 @@ fn popup_at(x: i32, y: i32, w: i32, h: i32) -> PopupWidget {
     popup
 }
 
-/// A popup with room to open places its child exactly at the anchor.
 fn test_popup_places_child_at_anchor() {
     let popup = popup_at(30, 40, 60, 50);
     let child = popup.children()[0].layout_rect();
     assert_eq!((child.x, child.y), (30, 40));
 }
 
-/// Near the right/bottom edge the child flips back over the anchor rather than
-/// being clipped, so it never covers the pointer that opened it.
+/// Near the right or bottom edge the child flips back over the anchor rather
+/// than being clipped, so it never covers the pointer that opened it.
 fn test_popup_flips_at_edges() {
     let popup = popup_at(190, 195, 60, 50);
     let child = popup.children()[0].layout_rect();
@@ -678,8 +610,7 @@ fn test_popup_escape_dismisses() {
     assert_eq!(sink.drain_typed::<String>().len(), 1);
 }
 
-/// A popup is modal over its parent: it must not leak events the child
-/// ignored back down to the tree underneath.
+/// A popup is modal: events its child ignored must not reach the tree below.
 fn test_popup_swallows_unhandled_events() {
     let mut popup = popup_at(30, 40, 60, 50);
     let mut sink = MessageSink::new();
@@ -693,14 +624,6 @@ fn test_popup_swallows_unhandled_events() {
     );
     assert!(resp.is_consumed());
 }
-
-// ---------------------------------------------------------------------------
-// Dialog layout / routing
-//
-// The dialog used to discover its children's sizes by laying them out at
-// `i32::MAX` and reading the rect back. Every sum then wrapped: a card that
-// measured 62px tall, an action row at y = -2^31, and both buttons off-screen.
-// ---------------------------------------------------------------------------
 
 use super::widgets::dialog::DialogWidget;
 
@@ -725,7 +648,6 @@ fn dialog_in(window: Size) -> DialogWidget {
 }
 
 /// Every child must land inside the card, which must itself be on-screen.
-/// This is the assertion the shipped bug failed on all three counts.
 fn test_dialog_places_children_inside_card() {
     let window = Size::new(640, 444);
     let dialog = dialog_in(window);
@@ -757,7 +679,6 @@ fn test_dialog_places_children_inside_card() {
 }
 
 /// The card must be tall enough to hold the title, the body and the buttons.
-/// The wrapped arithmetic produced 62px for content that needs far more.
 fn test_dialog_card_height_covers_content() {
     let dialog = dialog_in(Size::new(640, 444));
     let card = dialog.card_rect();
@@ -765,7 +686,6 @@ fn test_dialog_card_height_covers_content() {
     assert!(card.height >= 40 + 30, "card too short: {card:?}");
 }
 
-/// A dialog centers itself, so its card must not start at the window origin.
 fn test_dialog_card_is_centered() {
     let window = Size::new(640, 444);
     let dialog = dialog_in(window);
@@ -774,8 +694,7 @@ fn test_dialog_card_is_centered() {
     assert_eq!(card.y, (window.height - card.height) / 2);
 }
 
-/// Clicking one action must not fire the others. The old event path handed the
-/// press to every action in order, so "Cancel" emitted "Kill" first.
+/// Clicking one action must not fire the others.
 fn test_dialog_click_routes_to_action_under_pointer() {
     let mut dialog = dialog_in(Size::new(640, 444));
     let second = dialog.children()[1].layout_rect();
@@ -790,7 +709,6 @@ fn test_dialog_click_routes_to_action_under_pointer() {
     assert_eq!(sink.drain_typed::<String>(), vec![String::from("cancel")]);
 }
 
-/// A click on the backdrop dismisses; a click on the card does not.
 fn test_dialog_backdrop_click_dismisses() {
     let mut dialog = dialog_in(Size::new(640, 444));
     let mut sink = MessageSink::new();
@@ -803,8 +721,7 @@ fn test_dialog_backdrop_click_dismisses() {
     assert_eq!(sink.drain_typed::<String>(), vec![String::from("dismiss")]);
 }
 
-/// A dialog is modal: a press inside the card that hits no action must be
-/// swallowed rather than fall through to the tree it covers.
+/// A press inside the card that hits no action is swallowed, not passed down.
 fn test_dialog_is_modal_over_its_parent() {
     let mut dialog = dialog_in(Size::new(640, 444));
     let card = dialog.card_rect();
@@ -829,9 +746,8 @@ fn key(named: super::event::NamedKey, shift: bool) -> WidgetEvent {
     }
 }
 
-/// Enter with nothing selected must not fire an action. The first action in a
-/// confirm dialog is the destructive one, so a stray Enter would carry out the
-/// very thing the dialog exists to ask about.
+/// The first action of a confirm dialog is the destructive one, so a stray
+/// Enter must not reach it.
 fn test_dialog_enter_without_selection_fires_nothing() {
     let mut dialog = dialog_in(Size::new(640, 444));
     let mut sink = MessageSink::new();
@@ -878,10 +794,6 @@ fn test_dialog_escape_dismisses() {
     assert_eq!(sink.drain_typed::<String>(), vec![String::from("dismiss")]);
 }
 
-// ---------------------------------------------------------------------------
-// Constraint arithmetic
-// ---------------------------------------------------------------------------
-
 /// The reason `MAX_EXTENT` is finite: a container adds padding to whatever a
 /// child reports, and `i32::MAX + 1` is negative.
 fn test_unbounded_extent_survives_padding_arithmetic() {
@@ -902,8 +814,8 @@ fn test_deflate_preserves_unboundedness() {
     assert_eq!(d.max_width, MAX_EXTENT);
 }
 
-/// `measure_widget` records the size so a parent never has to invent a rect to
-/// find it out — the habit that produced the dialog bug.
+/// `measure_widget` records the size, so a parent never has to invent a rect to
+/// find it out.
 fn test_measure_widget_records_size() {
     let style = StyleSheet::dark();
     let mut ctx = MeasureCtx { style: &style };
@@ -938,10 +850,6 @@ fn test_zstack_layers_share_the_full_rect() {
         assert_eq!(child.layout_rect(), Rect::new(0, 0, 200, 100));
     }
 }
-
-// ---------------------------------------------------------------------------
-// Public test runner (for boot-time invocation)
-// ---------------------------------------------------------------------------
 
 /// Every appkit unit test, for a host `cargo test` run and for the
 /// `/bin/appkit_test` userland binary that reports them over KTAP.

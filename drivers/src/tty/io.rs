@@ -868,14 +868,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
     Ok(pos)
 }
 
-// ---------------------------------------------------------------------------
-// Data availability queries
-// ---------------------------------------------------------------------------
-
-/// Check if a TTY has cooked data available for reading.
-///
-/// Properly captures and delivers deferred signals from
-/// `drain_hw_input_locked()` instead of silently discarding them.
+/// Check whether a TTY has cooked data available for reading.
 pub fn has_data(idx: TtyIndex) -> bool {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -895,10 +888,7 @@ pub fn has_data(idx: TtyIndex) -> bool {
     result
 }
 
-/// Get the number of bytes available for reading from a TTY.
-///
-/// Used by the FIONREAD / TIOCINQ ioctl.  Drains pending hardware input
-/// first to ensure the count is up-to-date.
+/// Bytes available for reading (FIONREAD / TIOCINQ); drains hardware input first.
 #[must_use]
 pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
     let slot = idx.0 as usize;
@@ -919,29 +909,19 @@ pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
     Ok(count)
 }
 
-/// Get the number of bytes queued for output on a TTY.
-///
-/// Used by the `TIOCOUTQ` ioctl.  Returns the sum of:
-///   1. Echo the line discipline has staged but not yet handed to the output
-///      boundary — queued for a driver, and not yet at one.
-///   2. The per-TTY inflight byte counter (`TTY_OUTPUT_INFLIGHT`) — the
-///      exact number of processed bytes currently between ldisc output
-///      and hardware driver completion.
-///   3. Driver-level pending output (for async/interrupt-driven drivers).
+/// Bytes queued for output (`TIOCOUTQ`): ldisc-staged echo, the per-TTY
+/// inflight counter, and driver-level pending output.
 #[must_use]
 pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
-    // Staged and in-flight are read in one critical section: a byte moves from
-    // one to the other under this lock, so sampling them apart could miss it in
-    // both counts and under-report the queue depth.
+    // One critical section: a byte moves from staged to inflight under this
+    // lock, so sampling them apart could miss it in both counts.
     let (staged, inflight, driver_pending) = {
         let guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_ref() {
-            // use output_pending_bytes() for finer-grained
-            // queue depth reporting (defaults to 0/1 for bool-only drivers).
             (
                 tty.ldisc.echo_staged(),
                 TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) as usize,
@@ -954,17 +934,7 @@ pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
     Ok(staged + inflight + driver_pending)
 }
 
-// ---------------------------------------------------------------------------
-// Idle callback
-// ---------------------------------------------------------------------------
-
 /// Idle-loop callback: drain hardware input and wake blocked readers.
-///
-/// now iterates all active TTYs instead of only TTY 0.  Each
-/// per-TTY lock is acquired and released individually.
-///
-/// Properly captures and delivers deferred signals from
-/// `drain_hw_input_locked()` instead of silently discarding them.
 fn input_available_cb() -> c_int {
     let mut any_data = false;
     let mut bits = super::table::active_slots_bitmap();

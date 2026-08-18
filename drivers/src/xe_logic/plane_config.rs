@@ -1,14 +1,10 @@
 //! Decode/encode of the primary display plane's live configuration: the
-//! `PLANE_CTL` control word, `PLANE_SIZE`, `PLANE_POS`, and the linear
-//! `PLANE_STRIDE` unit. Pure bit math over plain data — no MMIO, no I/O.
+//! `PLANE_CTL` control word, `PLANE_SIZE`, `PLANE_POS` and the linear
+//! `PLANE_STRIDE` unit.
 //!
-//! SlopOS boots through Limine/UEFI GOP, which hands the firmware framebuffer to
-//! a *linear* plane, whereas a full modesetting driver leaves the same plane
-//! Y-tiled and render-compressed. The driver therefore has to read back whatever
-//! the firmware left and re-point the plane at a linear SlopOS framebuffer, so these
-//! routines split cleanly into "decode the live state" and "encode the linear
-//! repoint target". The hardware-sequencing half supplies the register reads and
-//! writes; everything here is trivially testable.
+//! Firmware may leave the plane Y-tiled and render-compressed, while SlopOS
+//! scans out of a linear framebuffer, so the driver reads back whatever it finds
+//! and re-points the plane — hence the decode / encode-repoint split here.
 
 use slopos_abi::PixelFormat;
 
@@ -19,15 +15,12 @@ use super::regs::{
     PLANE_CTL_YUV_RANGE_CORRECTION_DISABLE, reg_field_get, reg_field_set,
 };
 
-/// Linear surfaces express `PLANE_STRIDE` as a count of 64-byte units. Tiled
-/// surfaces use a different unit (X-tile 512 B, Y-tile 128 B), so this constant
-/// and the helpers built on it are deliberately scoped to the linear path the
-/// driver writes.
+/// Linear surfaces count `PLANE_STRIDE` in 64-byte units; tiled surfaces use a
+/// different unit (X-tile 512 B, Y-tile 128 B), so this is linear-only.
 pub const LINEAR_STRIDE_UNIT_BYTES: u32 = 64;
 
-// Pixel-format and tiling field *values* derived straight from the placed
-// register constants, so the only source of truth is the register map. They are
-// `const` items (not literals) so they can serve double duty as match patterns.
+// Derived from the placed register constants so the register map stays the only
+// source of truth, and `const` rather than literals so they work as match patterns.
 const FORMAT_FIELD_RGB8888: u32 = reg_field_get(PLANE_CTL_FORMAT_MASK, PLANE_CTL_FORMAT_XRGB8888);
 const TILING_FIELD_LINEAR: u32 = reg_field_get(PLANE_CTL_TILING_MASK, PLANE_CTL_TILING_LINEAR);
 const TILING_FIELD_X: u32 = reg_field_get(PLANE_CTL_TILING_MASK, PLANE_CTL_TILING_X);
@@ -46,7 +39,6 @@ pub enum Tiling {
 }
 
 impl Tiling {
-    /// Classify the extracted 3-bit tiling field.
     pub const fn from_field(field: u32) -> Self {
         match field {
             TILING_FIELD_LINEAR => Self::Linear,
@@ -57,8 +49,8 @@ impl Tiling {
         }
     }
 
-    /// The 3-bit tiling field value. `Unknown` is not a writable layout, so it
-    /// falls back to linear (the only layout the repoint path ever programs).
+    /// `Unknown` is not a writable layout, so it falls back to linear — the only
+    /// layout the repoint path ever programs.
     pub const fn to_field(self) -> u32 {
         match self {
             Self::Linear => TILING_FIELD_LINEAR,
@@ -73,15 +65,14 @@ impl Tiling {
 /// Channel order selected by `PLANE_CTL` bit 20.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorOrder {
-    /// Bit clear: BGRX in memory — the byte order of a little-endian ARGB/XRGB
-    /// framebuffer (bytes B, G, R, X). This is the firmware default.
+    /// Bit clear: BGRX in memory, the byte order of a little-endian ARGB/XRGB
+    /// framebuffer, and the firmware default.
     Bgrx,
     /// Bit set: RGBX in memory.
     Rgbx,
 }
 
 impl ColorOrder {
-    /// Read the color-order field out of a full `PLANE_CTL` value.
     pub const fn from_ctl(plane_ctl: u32) -> Self {
         if plane_ctl & PLANE_CTL_COLOR_ORDER_RGBX != 0 {
             Self::Rgbx
@@ -90,7 +81,7 @@ impl ColorOrder {
         }
     }
 
-    /// The `PLANE_CTL` bit contributed by this color order (zero for BGRX).
+    /// Zero for BGRX.
     pub const fn ctl_bit(self) -> u32 {
         match self {
             Self::Rgbx => PLANE_CTL_COLOR_ORDER_RGBX,

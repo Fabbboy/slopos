@@ -39,15 +39,12 @@ fn rc_i64_to_u64(rc: i64) -> Result<u64, Errno> {
     }
 }
 
-/// Socket fd lookup result: either a unix socket handle or a raw IP socket index.
+/// Socket fd lookup result: an AF_UNIX handle or a raw AF_INET pool index.
 enum SocketFd {
-    /// AF_UNIX socket — contains a [`SocketHandle`].
     Unix(SocketHandle),
-    /// AF_INET socket — contains the raw socket pool index.
     Inet(u32),
 }
 
-/// Retrieve the socket handle for `fd`, distinguishing AF_UNIX from AF_INET.
 fn socket_fd_for(table: FdTable, fd: i32) -> Result<SocketFd, Errno> {
     let Some((handle, ops)) = slopos_fs::fileio::fileio_get_handle_and_ops(table, fd) else {
         return Err(Errno::ENOTSOCK);
@@ -102,8 +99,7 @@ define_syscall!(syscall_socket
     let _icmp_datagram = sock_type == SOCK_DGRAM && protocol == IPPROTO_ICMP;
 
     // Both halves of the owner come from the syscall context, never from
-    // userland: `net_query` gates owner disclosure by comparing against it, so a
-    // caller able to name its own owner could name someone else's.
+    // userland: `net_query` gates owner disclosure by comparing against it.
     let owner = socket::SocketOwner {
         process: Some(process_id),
         task_id,
@@ -189,9 +185,8 @@ define_syscall!(syscall_accept
         SocketFd::Unix(sh) => {
             let accepted_handle =
                 unix_socket::unix_accept(sh).map_err(errno_from_neg)?;
-            // The accepting process pays, at accept: a connection is
-            // remote-triggered, so charging the listener's principal would
-            // let a peer exhaust that principal's entire budget.
+            // The accepting process pays: a connection is remote-triggered, so
+            // charging the listener would let a peer exhaust its whole budget.
             let backing =
                 unix_socket_file_ops::unix_socket_backing(accepted_handle, process_id.account())
                     .ok_or(Errno::ENFILE)?;
@@ -576,10 +571,6 @@ define_syscall!(syscall_resolve
     Ok(())
 });
 
-// ---------------------------------------------------------------------------
-// sendmsg / recvmsg — fd passing via SCM_RIGHTS
-// ---------------------------------------------------------------------------
-
 define_syscall!(syscall_sendmsg
     (ctx, fd: Fd, msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>, _flags: u32)
     requires(let process_id: process_id)
@@ -602,9 +593,8 @@ define_syscall!(syscall_sendmsg
         copy_bytes_from_user(user_data, &mut scratch[..data_len]).map_err(|_| Errno::EFAULT)?;
     }
 
-    // Owned aliases of the fds being passed. Each shares the sender's
-    // open-file description (offset, flags, backing) per POSIX fd-passing
-    // semantics; on any error return the vec drops, closing them.
+    // Owned aliases of the fds being passed, each sharing the sender's open-file
+    // description per POSIX fd-passing semantics; on error the vec drops them.
     let mut files: slopos_ostd::KVec<slopos_fs::FileRef> =
         slopos_ostd::KVec::with_capacity(SCM_MAX_FDS).map_err(|_| Errno::ENOMEM)?;
 
@@ -684,9 +674,9 @@ fn recvmsg_writeback_cmsg(
     for (j, file) in received.drain(..).enumerate() {
         let new_fd = slopos_fs::fileio_install_file_ref(table, file);
         if new_fd < 0 {
-            // The failed install dropped its alias; ending the drain drops
-            // the rest. Roll back the fds installed so far (a partial
-            // install with no surviving cmsg writeback would orphan them).
+            // The failed install dropped its alias and ending the drain drops
+            // the rest; a partial install with no cmsg writeback would orphan
+            // the fds already made, so roll those back.
             for &fd in fd_nums.iter().take(j) {
                 let _ = slopos_fs::fileio::file_close_fd(table, fd);
             }
@@ -695,10 +685,9 @@ fn recvmsg_writeback_cmsg(
         fd_nums[j] = new_fd;
     }
 
-    // From here the fds are installed in the caller's table. If any copy
-    // back to user memory faults, close every installed fd before
-    // returning the error — otherwise the caller never learns the fd
-    // numbers and the fds are orphaned (fd-table-exhaustion DoS).
+    // The fds are installed in the caller's table from here: a faulting copy
+    // back must close them, or the caller never learns their numbers and they
+    // are orphaned (fd-table-exhaustion DoS).
     let writeback = || -> Result<(), Errno> {
         let cmsg = CmsgHdr {
             cmsg_len: needed as u32,
@@ -781,11 +770,9 @@ define_syscall!(syscall_recvmsg
     recvmsg_impl(process_id, fd, msg_ptr)
 });
 
-// `getsockname` / `getpeername` need to materialise a `SockAddrUn`
-// (110 bytes) on the unix branch; splitting the branches into
-// `#[inline(never)]` helpers keeps the dispatch closure's stack frame
-// out of the union of both branches' locals (which together would
-// blow the 2 KiB stack-frame gate).
+// `getsockname` / `getpeername` materialise a 110-byte `SockAddrUn` on the unix
+// branch; the `#[inline(never)]` split keeps the dispatch frame out of the union
+// of both branches' locals, which together blow the 2 KiB stack gate.
 #[inline(never)]
 fn write_unix_sockaddr(
     addr_un: &SockAddrUn,

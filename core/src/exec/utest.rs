@@ -1,12 +1,8 @@
 //! Userland-test runner.
 //!
-//! Lives in `slopos-core` because it needs the spawn API, the per-task
-//! `TestReportRing`, and the `task_wait_for`/pending-drain helpers — all of
-//! which are core-internal. The companion [`utest!`](crate::utest) macro
-//! emits a `TestDesc` whose `run` thunk dispatches into [`run_thunk`]. The
-//! macro lives in this crate too so `slopos-testing` does not need to depend
-//! on `slopos-core` (which would cycle: core already deps testing for the
-//! `stest!` macros).
+//! Lives in `slopos-core` for the spawn API, the per-task `TestReportRing` and
+//! the wait helpers. The companion [`utest!`](crate::utest) macro lives here
+//! too, so `slopos-testing` need not depend on `slopos-core` and cycle.
 
 use slopos_abi::task::{
     INVALID_TASK_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TaskExitReason, TaskPriority,
@@ -20,15 +16,11 @@ use slopos_sched::scheduler::{sleep_current_task_ms, task_wait_for};
 use slopos_sched::task::{task_consume_zombie, task_find_by_id, task_peek_exit_info};
 use slopos_sched::test_reports::TestReport;
 
-/// Per-utest entry point installed in every `TestDesc::run` produced by the
-/// [`utest!`](crate::utest) macro. Spawns the binary, waits for it to
-/// terminate, drains its `SYSCALL_TEST_REPORT` ring via the
-/// lifetime-independent pending-drain cache, emits one indented KTAP subtest line
-/// per report, then rolls up to a parent outcome.
-///
-/// Wrapped in `catch_panic!` so a kernel-side panic inside spawn / wait /
-/// drain does not crash the harness — it is reported as a `Panic` outcome
-/// for the parent utest, the next test still runs.
+/// Per-utest entry point installed in every `TestDesc::run`. Spawns the binary,
+/// waits for it to terminate, drains its `SYSCALL_TEST_REPORT` ring into one
+/// indented KTAP subtest line per report, then rolls up to a parent outcome.
+/// `catch_panic!` turns a kernel-side panic along that path into a `Panic`
+/// outcome for the parent utest rather than a dead harness.
 pub fn run_thunk(desc: &'static TestDesc) -> TestResult {
     let bin = match desc.bin {
         Some(b) => b,
@@ -38,10 +30,9 @@ pub fn run_thunk(desc: &'static TestDesc) -> TestResult {
         }
     };
 
-    // Build argv as &[&[u8]] from the static &[&'static str].
     let argv_bytes: [&[u8]; 8] = [b"", b"", b"", b"", b"", b"", b"", b""];
-    // Bound argv to 8 to keep the stack frame bounded; the macro's literal
-    // form caps callers at the same number through compile-time matching.
+    // argv is bounded to 8 to keep the frame under the stack gate; the macro
+    // caps callers at the same number.
     let mut argv_storage = argv_bytes;
     let argv_len = desc.argv.len().min(argv_storage.len());
     for i in 0..argv_len {
@@ -79,9 +70,9 @@ fn exit_reason_str(reason: TaskExitReason) -> &'static str {
 }
 
 fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
-    // Pull init's pid/tid out of the current task so a spawned utest resolves
-    // its stdio clone-actions against init's console fds and gets a real
-    // `parent_task_id` (so `notify_parent_of_child_exit` can deliver SIGCHLD).
+    // Init's pid/tid: the spawned utest resolves its stdio clone-actions
+    // against init's console fds, and needs a real `parent_task_id` for
+    // `notify_parent_of_child_exit` to deliver SIGCHLD.
     let (parent_table, parent_tid) = match slopos_sched::task_struct::Current::get() {
         Some(cur) => (
             cur.task()
@@ -95,8 +86,7 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
 
     klog_info!("UTEST: starting '{}'", bin);
 
-    // Inherit the harness's stdio so the test binary's KTAP output reaches
-    // the serial console.
+    // Inherit the harness's stdio so the test's KTAP output reaches serial.
     let stdio = [
         FdAction::Clone {
             src_fd: 0,
@@ -133,19 +123,16 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         }
     };
 
-    // Hold an owning handle on the child for the whole wait. That is what
-    // keeps its report ring readable after it exits: the ring lives on the
-    // Task, and this reference is what stops the slot being recycled out from
-    // under the read.
+    // An owning handle held across the whole wait: the report ring lives on the
+    // Task, and this is what stops the slot being recycled under the read.
     let Some(child) = task_find_by_id(pid) else {
         klog_info!("UTEST: '{}' pid={} vanished before the wait", bin, pid);
         return TestResult::Fail;
     };
 
-    // `task_wait_for` has been observed returning before the target has run
-    // at all, so the exit cell — not the wait's return — is the ground truth.
-    // The poll covers that, and terminates on the cell being set or on the
-    // cap; 5000 ms is a safety bound, not an expected duration.
+    // TODO(tech-debt): `task_wait_for` can return before the target has run at
+    // all, so the exit cell is polled as the ground truth — make the wait
+    // edge-accurate and drop the poll.
     if !child.exit_info_is_set() {
         let _ = task_wait_for(pid);
     }
@@ -166,16 +153,12 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         polled_ms = polled_ms.saturating_add(POLL_STEP_MS);
     }
 
-    // Snapshot exit info from the Task's durable `exit_info` cell before
-    // draining reports — the snapshot transitions the slot from Zombie to
-    // Terminated (or peeks if some other path already reaped), which is
-    // needed before the slot can be tier-2 reused.
+    // Snapshot exit info before draining reports: it transitions the slot from
+    // Zombie to Terminated, which must happen before the slot can be reused.
     let exit_info = task_consume_zombie(pid).or_else(|| task_peek_exit_info(pid));
 
     let maybe_ring = child.take_test_reports();
     if maybe_ring.is_none() {
-        // The binary crashed before its first `SYSCALL_TEST_REPORT`, so it
-        // never lazy-allocated the ring and there are no subtest results.
         klog_info!(
             "UTEST: '{}' pid={} produced no reports — binary crashed before reporting?",
             bin,
@@ -184,8 +167,8 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         return TestResult::Fail;
     }
 
-    // Move the entries out of the heap-resident ring so we can release the
-    // ring's KBox before the (potentially many) per-subtest klog emissions.
+    // Move the entries out so the ring's KBox is released before the
+    // per-subtest klog emissions.
     let report_vec: KVec<TestReport> = match maybe_ring {
         Some(mut ring) => ring.drain().unwrap_or_else(|_| KVec::new()),
         None => KVec::new(),
@@ -217,25 +200,12 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
     roll_up(bin, sub_failed, report_vec.len(), exit_info)
 }
 
-/// Decide the parent verdict from the subtest verdicts and how the binary
-/// exited.
-///
-/// Split out of `dispatch` to keep that function's stack frame under the 2 KiB
-/// gate; the klog calls here each materialise their own argument buffer.
-///
-///   any Fail subtest reported → Fail
-///   anything but a clean exit → Fail, reports or not.
-///
-/// The second rule is the load-bearing one. Userland is built
-/// `panic-strategy = abort`, so a panicking case kills the binary where it
-/// stands and the cases that already reported must not vouch for the ones
-/// that never ran. A signal death arrives as `Normal` with the signal in the
-/// exit code, so the code — not the reason — is what distinguishes it.
-///
-/// This costs `test_harness::run`'s convention of returning the failure count
-/// as the exit code: a binary that reports its own failures now has to exit 0
-/// and let the subtest verdicts speak. That is the safer direction, because
-/// the old rule ignored a non-zero exit whenever any report had arrived.
+/// Decide the parent verdict: any failed subtest, or anything but a clean exit,
+/// is a `Fail`. Userland is built `panic-strategy = abort`, so cases that
+/// already reported must not vouch for ones that never ran; a signal death
+/// arrives as `Normal` with the signal in the exit code, so the code — not the
+/// reason — is what distinguishes it. Split out of `dispatch` to keep that
+/// frame under the 2 KiB gate.
 #[inline(never)]
 fn roll_up(
     bin: &str,

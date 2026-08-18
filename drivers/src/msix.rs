@@ -1,12 +1,8 @@
 //! MSI-X (Extended Message Signaled Interrupts) support for PCI devices.
 //!
-//! MSI-X extends MSI with a per-entry table stored in BAR memory, supporting
-//! up to 2048 vectors per device with individual per-vector masking.  The table
-//! is accessed via MMIO rather than configuration space registers, making MSI-X
-//! the preferred interrupt mechanism for high-performance devices like VirtIO
-//! multi-queue networking.
-//!
-//! ## Usage
+//! MSI-X extends MSI with a per-entry table stored in BAR memory, supporting up
+//! to 2048 vectors per device with individual per-vector masking.  Register
+//! layout follows PCI Local Bus Spec §6.8.2.
 //!
 //! ```ignore
 //! use slopos_core::irq::{msi_alloc_vector, msi_register_handler};
@@ -19,23 +15,6 @@
 //! msix::msix_configure(&table, 0, vector, apic_id).unwrap();
 //! msix::msix_enable(bus, dev, func, &cap);
 //! ```
-//!
-//! ## Register layout reference (PCI Local Bus Spec §6.8.2)
-//!
-//! ```text
-//! Config space (capability header):
-//! Offset  Size  Field
-//! +0x00   8     Cap ID (0x11) | Next Pointer
-//! +0x02   16    Message Control (table size, function mask, enable)
-//! +0x04   32    Table Offset / BIR
-//! +0x08   32    PBA Offset / BIR
-//!
-//! BAR memory (MSI-X table, 16 bytes per entry):
-//! +0x00   32    Message Address (lower)
-//! +0x04   32    Message Address (upper)
-//! +0x08   32    Message Data
-//! +0x0C   32    Vector Control (bit 0 = mask)
-//! ```
 
 use crate::msi_common;
 use crate::pci::{PciDeviceInfo, pci_config_read16, pci_config_read32, pci_config_write16};
@@ -44,69 +23,32 @@ use slopos_abi::addr::PhysAddr;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_ostd::klog_info;
 
-// =============================================================================
-// MSI-X Message Control register bits (offset +2 from capability base)
-// =============================================================================
-
-/// MSI-X enable bit (bit 15 of Message Control).
 const MSIX_CTRL_ENABLE: u16 = 1 << 15;
 
-/// Function mask bit (bit 14 of Message Control).
 /// When set, all table entries are masked regardless of per-vector mask bits.
 const MSIX_CTRL_FUNCTION_MASK: u16 = 1 << 14;
 
-/// Table size mask (bits 10:0 of Message Control).
 /// Encoded as N-1: 0 means 1 entry, 2047 means 2048 entries.
 const MSIX_CTRL_TABLE_SIZE_MASK: u16 = 0x7FF;
-
-// =============================================================================
-// Register offsets (relative to capability base)
-// =============================================================================
 
 const MSIX_REG_CONTROL: u16 = 0x02;
 const MSIX_REG_TABLE_OFFSET: u16 = 0x04;
 const MSIX_REG_PBA_OFFSET: u16 = 0x08;
 
-// =============================================================================
-// Table/PBA BIR and offset extraction
-// =============================================================================
-
-/// BAR Indicator Register mask (bits 2:0 of Table/PBA Offset register).
 const MSIX_BIR_MASK: u32 = 0x7;
-
-/// Offset mask (bits 31:3 of Table/PBA Offset register), DWORD-aligned.
 const MSIX_OFFSET_MASK: u32 = !0x7;
 
-// =============================================================================
-// MSI-X table entry layout (16 bytes per entry, MMIO)
-// =============================================================================
-
-/// Byte offset of Message Address (lower 32 bits) within a table entry.
 const MSIX_ENTRY_ADDR_LO: usize = 0x00;
-
-/// Byte offset of Message Address (upper 32 bits) within a table entry.
 const MSIX_ENTRY_ADDR_HI: usize = 0x04;
-
-/// Byte offset of Message Data within a table entry.
 const MSIX_ENTRY_DATA: usize = 0x08;
-
-/// Byte offset of Vector Control within a table entry.
 const MSIX_ENTRY_VECTOR_CTRL: usize = 0x0C;
-
-/// Size of a single MSI-X table entry in bytes.
 const MSIX_ENTRY_SIZE: usize = 16;
-
-/// Vector Control: mask bit (bit 0).  When set, the entry is masked.
 const MSIX_ENTRY_CTRL_MASK: u32 = 1;
-
-// =============================================================================
-// Public types
-// =============================================================================
 
 /// Parsed MSI-X capability information from PCI configuration space.
 ///
-/// This captures the static capability metadata.  The actual MSI-X table
-/// lives in BAR memory and must be mapped separately via [`msix_map_table`].
+/// The MSI-X table lives in BAR memory and must be mapped separately via
+/// [`msix_map_table`].
 #[derive(Debug, Clone, Copy)]
 pub struct MsixCapability {
     /// Byte offset of the MSI-X capability in PCI config space.
@@ -141,18 +83,11 @@ impl MsixCapability {
 
 /// Mapped MSI-X table and Pending Bit Array.
 ///
-/// Created by [`msix_map_table`].  Holds the MMIO regions for the MSI-X
-/// table and PBA, and the table size for bounds checking.
-///
 /// The table is read/written via MMIO — not through PCI configuration space.
-/// Each entry is 16 bytes: `{ addr_lo, addr_hi, data, vector_control }`.
 #[derive(Debug, Clone)]
 pub struct MsixTable {
-    /// Mapped MSI-X table region.
     table: MmioRegion,
-    /// Mapped Pending Bit Array region.
     pba: MmioRegion,
-    /// Number of entries in the table (1–2048).
     table_size: u16,
 }
 

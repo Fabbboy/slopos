@@ -1,21 +1,10 @@
-// =============================================================================
-// Socket ABI types
-// =============================================================================
-
-/// Address family: Unix domain sockets.
 pub const AF_UNIX: u16 = 1;
-
-/// Address family: IPv4 Internet protocols.
 pub const AF_INET: u16 = 2;
 
-/// Socket type: byte-stream (TCP).
 pub const SOCK_STREAM: u16 = 1;
-/// Socket type: datagram (UDP).
 pub const SOCK_DGRAM: u16 = 2;
-/// Socket type: raw (ICMP).
 pub const SOCK_RAW: u16 = 3;
 
-/// IP protocol: ICMP.
 pub const IPPROTO_ICMP: u16 = 1;
 
 /// IPv4 socket address — mirrors POSIX `sockaddr_in` layout.
@@ -36,41 +25,23 @@ const _: () = assert!(
 );
 
 /// Initial kernel socket slab capacity, and the width of the fallback
-/// wait-queue arrays.
-///
-/// **Not** the maximum: the slab grows to [`MAX_SOCKET_SLOTS`]. The two were
-/// conflated once, which is how AF_INET sockets 0 and 64 ended up sharing a
-/// wait queue.
+/// wait-queue arrays. Not the maximum — the slab grows to
+/// [`MAX_SOCKET_SLOTS`].
 pub const MAX_SOCKETS: usize = 64;
 
-/// Hard maximum kernel socket slab capacity.
-///
-/// The width of the pinned per-socket wait-queue spine, so a slab index maps
-/// to its own queue with no folding. Must equal `SlabSocketTable::MAX_CAPACITY`.
+/// Hard maximum kernel socket slab capacity, and the width of the pinned
+/// per-socket wait-queue spine, so a slab index maps to its own queue with no
+/// folding. Must equal `SlabSocketTable::MAX_CAPACITY`.
 pub const MAX_SOCKET_SLOTS: usize = 1024;
 
-/// Socket descriptor index indicating "no socket".
 pub const INVALID_SOCKET_IDX: u32 = u32::MAX;
 
-// =============================================================================
-// Network management ABI
-// =============================================================================
-//
-// The contract behind `net_query`, the four `net_*_ctl` mutators, and
-// `net_monitor`. Two rules hold across every struct below, and both are
-// load-bearing rather than stylistic:
-//
-// **No implicit padding.** Every gap between fields is a named `_padN`, so
-// `#[derive(Default)]` writes every byte of `size_of` and the byte-wise
-// copy-out to user space has nothing uninitialised to disclose. Kernel-side
-// producers must therefore start from `Default::default()` and assign fields,
-// never build a field-wise struct literal — a literal over a struct with an
-// implicit hole is exactly the shape that leaks.
-//
-// **Layout is asserted, not assumed.** Each struct carries `size_of`,
-// `align_of` and per-field `offset_of!` assertions. Kernel and userland
-// compile against this one file, so those assertions *are* the layout test:
-// a field reordered by accident fails the build on both sides at once.
+// Two rules hold across every struct below. No implicit padding: every gap is a
+// named `_padN`, so `#[derive(Default)]` writes every byte of `size_of` and the
+// copy-out to user space has nothing uninitialised to disclose — a kernel-side
+// producer must therefore start from `Default::default()` rather than a struct
+// literal. Layout is asserted, not assumed: kernel and userland compile against
+// this one file, so the `offset_of!` assertions *are* the layout test.
 
 /// Bytes in an interface name, including the NUL pad. Matches Linux's
 /// `IFNAMSIZ` so a name that is legal there is legal here.
@@ -78,35 +49,26 @@ pub const NET_IFNAMSIZ: usize = 16;
 
 /// Not an interface. `Iface` indices start at 1.
 pub const NET_IFINDEX_NONE: u32 = 0;
-/// Addresses the stack as a whole rather than one interface — the target of
-/// the master-switch and connectivity-recheck operations.
+/// Addresses the stack as a whole rather than one interface.
 pub const NET_IFINDEX_GLOBAL: u32 = u32::MAX;
 
 /// Upper bound on simultaneously registered interfaces, matching the device
 /// registry's slot count.
 pub const NET_MAX_IFACES: usize = 8;
-/// Upper bound on addresses assigned to one interface.
 pub const NET_MAX_ADDRS_PER_IFACE: usize = 4;
-/// Upper bound on configured resolver addresses.
 pub const NET_MAX_RESOLVERS: usize = 3;
-
-// -- Interface kind ----------------------------------------------------------
 
 /// Zeroed record; not a kind any interface reports.
 pub const NET_IFKIND_UNSPEC: u8 = 0;
 pub const NET_IFKIND_LOOPBACK: u8 = 1;
 pub const NET_IFKIND_ETHERNET: u8 = 2;
-/// Reserved. Nothing in this ABI produces or consumes it; the value exists so
-/// a later kernel can add 802.11 without renumbering what ships today.
+/// Reserved, so a later kernel can add 802.11 without renumbering what ships
+/// today.
 pub const NET_IFKIND_WIRELESS: u8 = 3;
 
-// -- Operational state -------------------------------------------------------
-//
-// Values follow IANA `ifOperStatus` (RFC 2863), which is what `ip link` and
-// `/sys/class/net/*/operstate` report. Note that the three concepts are
-// genuinely distinct and a UI that collapses them will be wrong: `admin_up` is
-// intent, `carrier` is the physical link, and the operational state below is
-// what the two combine to.
+// Values follow IANA `ifOperStatus` (RFC 2863). The three concepts are distinct
+// and a UI that collapses them will be wrong: `admin_up` is intent, `carrier` is
+// the physical link, and the operational state is what the two combine to.
 
 pub const NET_OPER_UNKNOWN: u8 = 0;
 pub const NET_OPER_NOTPRESENT: u8 = 1;
@@ -116,11 +78,9 @@ pub const NET_OPER_TESTING: u8 = 4;
 pub const NET_OPER_DORMANT: u8 = 5;
 pub const NET_OPER_UP: u8 = 6;
 
-// -- Interface flags ---------------------------------------------------------
-//
-// The low bits follow the Linux x86-64 `IFF_*` numeric assignments, which are
-// interface facts and carry no copyright. The SlopOS-private bits sit high
-// enough that they can never collide with an assignment made upstream later.
+// The low bits follow the Linux x86-64 `IFF_*` numeric assignments; the
+// SlopOS-private bits sit high enough that an upstream assignment can never
+// collide with them.
 
 pub const IFF_UP: u32 = 1 << 0;
 pub const IFF_BROADCAST: u32 = 1 << 1;
@@ -138,8 +98,6 @@ pub const IFF_SLOP_CARRIER_ASSUMED: u32 = 1 << 26;
 /// A DHCP client is running on this interface.
 pub const IFF_SLOP_DHCP: u32 = 1 << 27;
 
-// -- Address origin and scope ------------------------------------------------
-
 pub const NET_ADDR_ORIGIN_STATIC: u8 = 0;
 pub const NET_ADDR_ORIGIN_DHCP: u8 = 1;
 pub const NET_ADDR_ORIGIN_LINKLOCAL: u8 = 2;
@@ -151,30 +109,22 @@ pub const NET_ADDR_SCOPE_HOST: u8 = 2;
 /// A lifetime that never expires.
 pub const NET_LFT_FOREVER: u32 = u32::MAX;
 
-// -- Route origin ------------------------------------------------------------
-
 /// Derived from an address's prefix — the connected route.
 pub const NET_ROUTE_ORIGIN_KERNEL: u8 = 0;
 pub const NET_ROUTE_ORIGIN_STATIC: u8 = 1;
 pub const NET_ROUTE_ORIGIN_DHCP: u8 = 2;
 
-// -- Neighbour state ---------------------------------------------------------
-//
-// The four states the neighbour cache actually implements. There is no
-// DELAY/PROBE/PERMANENT here because there is none in the cache, and reporting
-// a state the kernel cannot enter would be a lie a tool would render.
+// The four states the neighbour cache actually implements: no DELAY/PROBE/
+// PERMANENT, because reporting a state the kernel cannot enter would be a lie a
+// tool would render.
 
 pub const NET_NEIGH_INCOMPLETE: u8 = 0;
 pub const NET_NEIGH_REACHABLE: u8 = 1;
 pub const NET_NEIGH_STALE: u8 = 2;
 pub const NET_NEIGH_FAILED: u8 = 3;
 
-// -- Socket state ------------------------------------------------------------
-//
 // The connection states RFC 793 names, plus one for a socket that has no
 // connection to have a state about. `UserSockInfo::state` holds one of these.
-// A datagram socket is `UNCONN` rather than `CLOSED`: "closed" says something
-// ended, and nothing did.
 
 pub const NET_SOCK_CLOSED: u8 = 0;
 pub const NET_SOCK_LISTEN: u8 = 1;
@@ -187,29 +137,24 @@ pub const NET_SOCK_CLOSE_WAIT: u8 = 7;
 pub const NET_SOCK_CLOSING: u8 = 8;
 pub const NET_SOCK_LAST_ACK: u8 = 9;
 pub const NET_SOCK_TIME_WAIT: u8 = 10;
-/// A socket with no connection state — a bound or unbound datagram socket.
+/// A socket with no connection state — a bound or unbound datagram socket, for
+/// which "closed" would say something ended when nothing did.
 pub const NET_SOCK_UNCONN: u8 = 11;
 
-// -- Connectivity ------------------------------------------------------------
-//
 // The value space matches NetworkManager's `NMConnectivityState` so a port of
 // an existing indicator maps one-to-one.
 
 pub const NET_CONN_UNKNOWN: u8 = 0;
 pub const NET_CONN_NONE: u8 = 1;
-/// Reserved, and **never produced by the kernel**. Deciding that a network is
-/// behind a captive portal requires an HTTP request and a body comparison; the
-/// kernel has no HTTP client and will not grow one to light an icon. The value
-/// is defined so the space matches NetworkManager's and so a future userland
-/// connectivity daemon can set it.
+/// Reserved, and never produced by the kernel: deciding a network is behind a
+/// captive portal needs an HTTP request. Defined so the value space matches
+/// NetworkManager's and a userland connectivity daemon can set it.
 pub const NET_CONN_PORTAL: u8 = 2;
 pub const NET_CONN_LIMITED: u8 = 3;
 /// SlopOS extension: an address is configured but there is no default route,
 /// so nothing off-link is reachable.
 pub const NET_CONN_LOCAL: u8 = 4;
 pub const NET_CONN_FULL: u8 = 5;
-
-// -- DHCP client state -------------------------------------------------------
 
 pub const NET_DHCP_DISABLED: u8 = 0;
 pub const NET_DHCP_INIT: u8 = 1;
@@ -226,10 +171,6 @@ pub const NET_DHCP_REASON_NAK: u8 = 2;
 pub const NET_DHCP_REASON_DECLINED: u8 = 3;
 pub const NET_DHCP_REASON_NO_CARRIER: u8 = 4;
 
-// =============================================================================
-// `net_query` — what to enumerate
-// =============================================================================
-
 pub const NET_Q_IFACES: u32 = 1;
 pub const NET_Q_ADDRS: u32 = 2;
 pub const NET_Q_ROUTES: u32 = 3;
@@ -242,19 +183,14 @@ pub const NET_Q_DHCP: u32 = 8;
 /// Header written at the start of every `net_query` buffer, followed by
 /// `record_count` records of `record_size` bytes each.
 ///
-/// `record_size` is the forward-compatibility lever: a newer kernel may grow a
-/// record, and a client that strides by the kernel's value keeps reading the
-/// prefix it understands. That is why there is no version field and no TLV
-/// encoding — the stride is the contract.
-///
-/// `seq` is the global event sequence this snapshot is consistent with. A
-/// client that opened a `net_monitor` fd **before** issuing the query can
-/// discard drained events whose `seq <= hdr.seq` and apply the rest, which
-/// gives a gap-free transition from snapshot to stream without the kernel
-/// replaying anything into a fixed-size ring.
-///
-/// Truncation is visible here rather than in the return value: `total_count`
-/// is what exists and `record_count` is what fit.
+/// `record_size` is the forward-compatibility lever, which is why there is no
+/// version field and no TLV encoding: a client that strides by the kernel's
+/// value keeps reading the prefix it understands. `seq` is the global event
+/// sequence this snapshot is consistent with, so a client that opened a
+/// `net_monitor` fd beforehand can discard drained events with
+/// `seq <= hdr.seq` and get a gap-free handoff. Truncation shows here rather
+/// than in the return value: `total_count` is what exists, `record_count` what
+/// fit.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct UserNetQueryHdr {
@@ -278,8 +214,7 @@ const _: () = assert!(core::mem::offset_of!(UserNetQueryHdr, what) == 20);
 /// is a single query.
 ///
 /// Consumers must key on `ifindex`, never on `name`: indices are never reused,
-/// but names are — a re-probed NIC becomes `eth0` again, which is what a person
-/// expects and what a cache keyed on the string would get wrong.
+/// but names are — a re-probed NIC becomes `eth0` again.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct UserIface {
@@ -399,36 +334,19 @@ const _: () = assert!(core::mem::offset_of!(UserNeigh, state) == 14);
 const _: () = assert!(core::mem::offset_of!(UserNeigh, confirmed_ms_ago) == 16);
 const _: () = assert!(core::mem::offset_of!(UserNeigh, queued_pkts) == 20);
 
-/// One socket, as `ss` renders it.
+/// One socket, as `ss` renders it. Ports are **host** byte order, unlike
+/// [`SockAddrIn`], because every consumer formats them for a human rather than
+/// putting them on a wire.
 ///
-/// Ports here are **host** byte order, unlike [`SockAddrIn`], because every
-/// consumer of this struct formats them for a human rather than putting them on
-/// a wire.
-///
-/// **Rows are universal; the owner is redacted.** `NET_Q_SOCKETS` returns every
-/// socket to every caller — addresses, ports, state and queue depths — because
-/// that is what makes it answerable at all: no diagnostic tool is ever the
-/// process that opened the socket it was asked about, so a query restricted to
-/// the caller's own sockets would return an empty table to every tool that ever
-/// runs it. This matches `/proc/net/tcp`, which is mode 0444.
-///
-/// What is restricted is the socket→process **attribution**, which is
-/// `/proc/net/tcp`'s uid column and Linux's `ss -p`: `owner_pid` holds the pid
-/// `getpid` would return in the owning task — the one `kill` and `waitpid`
-/// accept — for rows the caller's address space owns, and for every row to a
-/// caller holding `NET_ADMIN`. Otherwise it holds [`INVALID_PROCESS_ID`].
-///
-/// Disclosure is decided per address space and reported per task, which is why
-/// a caller can be shown a pid that is not the one `getpid` gave it: a sibling
-/// task sharing its address space also shares the descriptor that names the
-/// socket, so there is nothing to withhold from it.
-///
-/// [`INVALID_PROCESS_ID`] therefore means *either* "no process owns this" *or*
-/// "not disclosed to you", and the two are deliberately indistinguishable: a
-/// reader that could tell them apart would learn that a socket has an owner it
-/// may not name, which is a smaller version of the thing being withheld. A
-/// renderer must print nothing for the sentinel rather than guessing which case
-/// it is.
+/// Rows are universal; the owner is redacted. Every caller sees every socket —
+/// a diagnostic tool is never the process that opened the socket it was asked
+/// about, so a self-only query would answer every tool with an empty table —
+/// matching `/proc/net/tcp`'s mode 0444. What is restricted is the
+/// socket→process attribution: `owner_pid` holds the pid `getpid` returns in
+/// the owning task for rows the caller's address space owns, and every row to a
+/// caller holding `NET_ADMIN`; otherwise [`INVALID_PROCESS_ID`]. That sentinel
+/// means either "no process owns this" or "not disclosed to you", deliberately
+/// indistinguishable, so a renderer must print nothing for it rather than guess.
 ///
 /// [`INVALID_PROCESS_ID`]: crate::task::INVALID_PROCESS_ID
 #[repr(C)]
@@ -553,10 +471,6 @@ const _: () = assert!(core::mem::offset_of!(UserDhcpStatus, lease_remaining_s) =
 const _: () = assert!(core::mem::offset_of!(UserDhcpStatus, t1_remaining_s) == 16);
 const _: () = assert!(core::mem::offset_of!(UserDhcpStatus, t2_remaining_s) == 20);
 
-// =============================================================================
-// `net_monitor` — the event stream
-// =============================================================================
-
 pub const NET_EV_IFACE_ADDED: u16 = 1;
 pub const NET_EV_IFACE_REMOVED: u16 = 2;
 pub const NET_EV_IFACE_CHANGED: u16 = 3;
@@ -568,9 +482,8 @@ pub const NET_EV_RESOLVER: u16 = 8;
 pub const NET_EV_CONNECTIVITY: u16 = 9;
 pub const NET_EV_DHCP: u16 = 10;
 pub const NET_EV_GLOBAL_ENABLE: u16 = 11;
-/// Records were dropped. Delivered regardless of the subscription mask,
-/// exactly once per overflow episode, and ordered *before* the records that
-/// followed the drop.
+/// Records were dropped. Delivered regardless of the subscription mask, once
+/// per overflow episode, ordered *before* the records that followed the drop.
 pub const NET_EV_OVERFLOW: u16 = 12;
 pub const NET_EV_NEIGH_CHANGED: u16 = 13;
 
@@ -583,8 +496,7 @@ pub const NET_MON_DHCP: u32 = 1 << 5;
 pub const NET_MON_GLOBAL: u32 = 1 << 6;
 /// Neighbour churn. Off by default: ARP is the only high-rate source in the
 /// stack, and subscribing to it keeps a bounded ring in permanent overflow,
-/// which would mask the interface events a subscriber actually opened the fd
-/// for.
+/// masking the events a subscriber actually opened the fd for.
 pub const NET_MON_NEIGH: u32 = 1 << 7;
 
 /// Everything except [`NET_MON_NEIGH`].
@@ -598,11 +510,10 @@ pub const NET_MON_DEFAULT: u32 = NET_MON_IFACE
 
 /// One record read from a `net_monitor` fd.
 ///
-/// The payload is a fixed 16 bytes rather than a per-kind union, so **adding an
-/// event kind never changes the record size**. `read()` stays a pure stride, an
-/// older client skips a kind it does not know without losing framing, and
-/// nobody has to write a parser. The typed accessors below decode each kind
-/// from those bytes in safe code, so kernel and userland share one decoder.
+/// The payload is a fixed 16 bytes rather than a per-kind union, so adding an
+/// event kind never changes the record size: `read()` stays a pure stride and
+/// an older client skips a kind it does not know without losing framing. The
+/// typed accessors below are the one decoder kernel and userland share.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct NetEvent {
@@ -699,8 +610,8 @@ const fn p_ipv4(p: &[u8; 16], at: usize) -> [u8; 4] {
 }
 
 impl NetEvent {
-    /// Encode one record. The single construction point, so a producer cannot
-    /// disagree with the accessors below about payload layout.
+    /// The single construction point, so a producer cannot disagree with the
+    /// accessors below about payload layout.
     #[inline]
     pub const fn new(seq: u64, kind: u16, ifindex: u32, payload: [u8; 16]) -> Self {
         Self {
@@ -871,16 +782,11 @@ impl NetEvent {
     }
 }
 
-// =============================================================================
-// Mutation requests
-// =============================================================================
-//
 // Each mutating syscall takes exactly one of these, checked against
-// `size_of::<T>()` at the boundary. That is why there are three narrow
-// syscalls rather than one `net_config(op, ptr, len)`: a single pointer whose
-// meaning depends on an op code needs a hand-rolled per-op length table and a
-// `match` that decides how to reinterpret user memory, which is the ioctl
-// shape this tree has avoided everywhere but the TTY.
+// `size_of::<T>()` at the boundary. That is why there are three narrow syscalls
+// rather than one `net_config(op, ptr, len)`: a single pointer whose meaning
+// depends on an op code needs a per-op length table and a `match` deciding how
+// to reinterpret user memory — the ioctl shape this tree avoids.
 
 /// `net_iface_ctl` operations. All of their operands fit in the two scalar
 /// arguments, so this family touches no user memory at all.
@@ -970,15 +876,10 @@ const _: () = assert!(core::mem::offset_of!(UserResolverReq, source) == 13);
 const _: () = assert!(core::mem::offset_of!(UserResolverReq, timeout_ms) == 16);
 const _: () = assert!(core::mem::offset_of!(UserResolverReq, attempts) == 20);
 
-// -- No implicit tail padding ------------------------------------------------
-//
 // The per-field `offset_of!` assertions above pin where every field starts;
-// these pin that the struct ends where its last field ends. Together they say
-// there is no hole anywhere in the layout, which is what lets a kernel-side
-// producer rely on `Default::default()` having written every byte that will be
-// copied to user space. `abi` is `forbid(unsafe_code)`, so this cannot be
-// checked by reading the bytes back — but it does not need to be, because the
-// property is a compile-time fact about the layout.
+// these pin that each struct ends where its last field ends. Together: no hole
+// anywhere in the layout, which is what lets a kernel-side producer rely on
+// `Default::default()` having written every byte that reaches user space.
 
 const _: () = assert!(
     core::mem::size_of::<UserNetQueryHdr>()
@@ -1037,10 +938,9 @@ const _: () = assert!(
 mod tests {
     use super::*;
 
-    /// Every payload encoder must be the exact inverse of its accessor.
-    /// Encoder and decoder are the kernel's and userland's only agreement about
-    /// what those 16 bytes mean, so a drift between them is a silent
-    /// mis-render rather than a compile error — which is what these pin.
+    // Encoder and accessor are kernel and userland's only agreement about what
+    // the 16 payload bytes mean, so drift between them is a silent mis-render
+    // rather than a compile error. These pin every pair.
     #[test]
     fn iface_payload_round_trips() {
         let p = NetEvent::iface_payload(
@@ -1190,8 +1090,6 @@ mod tests {
         assert_eq!(bytes.len(), NET_EVENT_LEN);
     }
 
-    /// The default subscription must not include neighbour churn: a bounded
-    /// ring subscribed to ARP is a ring in permanent overflow.
     #[test]
     fn default_monitor_mask_excludes_neigh() {
         assert_eq!(NET_MON_DEFAULT & NET_MON_NEIGH, 0);

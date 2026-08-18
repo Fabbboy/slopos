@@ -14,10 +14,8 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
     rgba(r, g, b, 0xFF)
 }
 
-/// Pixel format for shared memory buffers.
-///
-/// These values match the Wayland wl_shm format constants.
-/// This is the canonical definition used by both kernel and userland.
+/// Pixel format for shared-memory buffers; values match the Wayland `wl_shm`
+/// format constants.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PixelFormat {
@@ -43,7 +41,6 @@ pub enum PixelFormat {
 }
 
 impl PixelFormat {
-    /// Convert from u32 representation
     #[inline]
     pub fn from_u32(val: u32) -> Option<Self> {
         match val {
@@ -57,7 +54,6 @@ impl PixelFormat {
         }
     }
 
-    /// Get bytes per pixel for this format
     #[inline]
     pub fn bytes_per_pixel(self) -> u8 {
         match self {
@@ -66,13 +62,11 @@ impl PixelFormat {
         }
     }
 
-    /// Check if format has an alpha channel
     #[inline]
     pub fn has_alpha(self) -> bool {
         matches!(self, Self::Argb8888 | Self::Rgba8888 | Self::Bgra8888)
     }
 
-    /// Check if format uses BGR byte order (vs RGB)
     #[inline]
     pub fn is_bgr_order(self) -> bool {
         matches!(self, Self::Argb8888 | Self::Xrgb8888 | Self::Bgra8888)
@@ -97,10 +91,8 @@ impl PixelFormat {
         })
     }
 
-    /// Decode a raw encoded pixel value back to `Color32` (0xAARRGGBB).
-    ///
-    /// This is the inverse of `encode()`. For 3-byte formats without alpha,
-    /// the returned alpha is 0xFF (fully opaque).
+    /// Inverse of `encode`, to `Color32` (0xAARRGGBB). Formats carrying no alpha
+    /// decode as fully opaque.
     #[inline]
     pub fn decode(self, raw: u32) -> Color32 {
         match self {
@@ -135,9 +127,7 @@ impl PixelFormat {
         }
     }
 
-    /// Get a bitmap of all supported formats
-    ///
-    /// Returns a u32 where bit N is set if format with value N is supported.
+    /// Bit N is set when the format with discriminant N is supported.
     #[inline]
     pub fn supported_formats_bitmap() -> u32 {
         (1 << Self::Argb8888 as u32)

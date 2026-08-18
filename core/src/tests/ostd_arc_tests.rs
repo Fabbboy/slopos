@@ -1,12 +1,5 @@
 //! Kernel-side tests for the OSTD `KArc` / `KWeak` reference-counting
-//! primitives (the strong/weak surface added for the resource-lifetime
-//! redesign).
-//!
-//! Exercises:
-//!   - `KWeak::upgrade` returns `None` after the last strong `KArc` drops
-//!   - `KArc::downgrade` / `KWeak::upgrade` round-trip while strong-alive
-//!   - `KArc::try_new_cyclic` wires the self-referential weak back-link
-//!   - `KArc::weak_count` accuracy as weak handles come and go
+//! primitives.
 
 use slopos_ostd::sync::RcuArcSlot;
 use slopos_ostd::{KArc, KWeak};
@@ -20,13 +13,11 @@ pub fn test_kweak_upgrade_after_last_strong_drop_is_none() -> TestResult {
     };
     let weak = KArc::downgrade(&strong);
 
-    // While the strong reference lives, upgrade succeeds.
     assert_test!(
         weak.upgrade().is_some(),
         "upgrade should succeed while strong-alive"
     );
 
-    // Drop the last strong reference; the weak can no longer upgrade.
     drop(strong);
     assert_test!(
         weak.upgrade().is_none(),
@@ -50,7 +41,6 @@ pub fn test_kweak_downgrade_upgrade_round_trip() -> TestResult {
         return TestResult::Fail;
     };
     assert_test!(*upgraded == 1234, "round-tripped value mismatch");
-    // The upgrade produced a second strong reference.
     assert_test!(
         KArc::strong_count(&strong) == 2,
         "strong_count should be 2 with one upgrade outstanding"
@@ -63,8 +53,7 @@ pub fn test_kweak_downgrade_upgrade_round_trip() -> TestResult {
     TestResult::Pass
 }
 
-/// A small self-referential node: it holds a `KWeak` back at itself,
-/// established at construction via `try_new_cyclic`.
+/// A node holding a `KWeak` back at itself, established by `try_new_cyclic`.
 struct CyclicNode {
     payload: u32,
     self_link: KWeak<CyclicNode>,
@@ -79,7 +68,6 @@ pub fn test_karc_try_new_cyclic_wires_weak_self_link() -> TestResult {
         Err(_) => return TestResult::Fail,
     };
 
-    // The stored weak link upgrades back to the very same allocation.
     let Some(via_weak) = node.self_link.upgrade() else {
         return TestResult::Fail;
     };
@@ -88,15 +76,12 @@ pub fn test_karc_try_new_cyclic_wires_weak_self_link() -> TestResult {
         KArc::strong_count(&node) == 2,
         "upgrading the self-link yields a second strong ref"
     );
-    // The weak self-link is counted in weak_count.
     assert_test!(
         KArc::weak_count(&node) >= 1,
         "weak_count must reflect the stored self-link"
     );
     drop(via_weak);
 
-    // Dropping the only strong handle drops the node despite the weak
-    // self-link (the weak does not keep it alive).
     let observer = KArc::downgrade(&node);
     drop(node);
     assert_test!(
@@ -111,7 +96,6 @@ pub fn test_karc_weak_count_accuracy() -> TestResult {
         Ok(a) => a,
         Err(_) => return TestResult::Fail,
     };
-    // A lone strong KArc reports 0 outstanding weaks.
     assert_test!(
         KArc::weak_count(&strong) == 0,
         "fresh KArc should have weak_count 0"
@@ -156,8 +140,8 @@ pub fn test_karc_strong_count_saturates() -> TestResult {
         KArc::strong_count(&strong) == KArc::<u8>::max_refcount_for_test(),
         "drop must not undo strong-count saturation"
     );
-    // The deliberately saturated allocation is immortal by design. Letting
-    // this final handle go confirms Drop takes the saturation path.
+    // A saturated allocation is immortal by design; releasing the last handle
+    // confirms Drop takes the saturation path.
     drop(strong);
     TestResult::Pass
 }
@@ -166,10 +150,8 @@ pub fn test_karc_strong_count_saturates() -> TestResult {
 /// mints stay valid after the slot has been published over.
 ///
 /// Kernel-side because both halves open an RCU read-side section, and
-/// `rcu_read_lock` takes a `PreemptGuard` whose gs-relative increment faults
-/// without a PCR — so the host suite (`slopos-ostd/tests/rcu_arc_slot.rs`)
-/// can only reach the exclusive paths. This is the test that covers the
-/// published path a `setpgid` racing a `kill(-pgid)` actually takes.
+/// `rcu_read_lock`'s gs-relative increment faults without a PCR, so the host
+/// suite can only reach the exclusive paths.
 pub fn test_rcu_arc_slot_load_mints_one_reference() -> TestResult {
     let slot: RcuArcSlot<u64> = RcuArcSlot::empty();
     assert_test!(slot.load().is_none(), "an empty slot loads nothing");
@@ -201,9 +183,8 @@ pub fn test_rcu_arc_slot_load_mints_one_reference() -> TestResult {
         "both loads name the same allocation"
     );
 
-    // Publish over the slot. The displaced reference is released only after a
-    // grace period, and the handles already minted are independent of it —
-    // which is the property a borrow-lending cell could not offer.
+    // Publish over the slot: the displaced reference is released only after a
+    // grace period, and the already-minted handles are independent of it.
     let Ok(replacement) = KArc::try_new(0x1234_u64) else {
         return TestResult::Fail;
     };
@@ -215,14 +196,9 @@ pub fn test_rcu_arc_slot_load_mints_one_reference() -> TestResult {
 
     drop(first);
     drop(second);
-    // The slot's own reference is still parked for the grace period, so the
-    // allocation must not be gone yet; what this pins down is that the reader
-    // handles were released rather than leaked.
     slot.store(None);
-    // `call_rcu` only queues. Drive the drain, but poll for the effect: an idle
-    // CPU drains concurrently, and one that has already detached the chain
-    // leaves nothing for a manual call to find while the invocation is still in
-    // flight.
+    // `call_rcu` only queues, and an idle CPU may drain concurrently, so poll
+    // for the effect rather than assuming one manual drain observes it.
     assert_test!(
         crate::tests::rcu_cb_tests::drain_until(|| observer.upgrade().is_none()),
         "every reference the slot handed out was released exactly once"

@@ -1,86 +1,42 @@
-//! Task ABI types shared between kernel and userland.
-//!
-//! This module contains **only** the types, constants, and enums that form the
-//! stable interface between kernel subsystems. Kernel-internal implementation
-//! details (Task struct, register contexts, FPU state, scheduler linkage) live
+//! Task ABI types shared between kernel and userland. Kernel-internal detail
+//! (the `Task` struct, register contexts, FPU state, scheduler linkage) lives
 //! in `slopos_sched::task_struct`.
 
-// --- Task Configuration ---
-
-/// Maximum number of concurrently live tasks.
-///
-/// Aligned with the kernel-stack VA region cap
-/// (`mm::memory_layout_defs::KSTACK_MAX_SLOTS`): every live task
-/// requires a KSTACK slot, so the task pool cannot usefully exceed
-/// that number. Growing beyond this requires expanding the KSTACK VA
-/// window.
-///
-/// The kernel's task pool (`core/scheduler/task/task_table.rs`) is
-/// heap-backed and grows lazily — this constant is the upper bound,
-/// not the initial resident set. Idle systems hold only a handful of
-/// KBoxes regardless of this value.
+/// Maximum number of concurrently live tasks. Capped by the kernel-stack VA
+/// region (`mm::memory_layout_defs::KSTACK_MAX_SLOTS`), since every live task
+/// needs a KSTACK slot. An upper bound, not a resident set: the task pool is
+/// heap-backed and grows lazily.
 pub const MAX_TASKS: usize = 8192;
-/// Task kernel-mode stack size.
-///
-/// 32 KiB usable, backed by a 64 KiB slot (4 KiB guard + 32 KiB usable
-/// + 28 KiB reserve).  The guard page turns kernel-stack overflow into
-/// a deterministic page fault instead of silently corrupting adjacent
-/// memory.
-pub const TASK_STACK_SIZE: u64 = 0x8000; // 32 KiB
-pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000; // 32 KiB
+/// Task kernel-mode stack: 32 KiB usable in a 64 KiB slot (4 KiB guard + 32 KiB
+/// usable + 28 KiB reserve). The guard page turns kernel-stack overflow into a
+/// deterministic page fault instead of silent corruption of adjacent memory.
+pub const TASK_STACK_SIZE: u64 = 0x8000;
+pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000;
 
-/// SafeStack-sanitizer data stack size — 16 KiB.
-///
-/// LLVM's SafeStack pass moves address-taken locals and dynamic allocas
-/// onto this stack at every instrumented function prologue. The
-/// zero-`unsafe`-keyword refactors push more kernel-side primitives behind
-/// `&mut`-passing safe helpers (`with_mut`, `for_each`, `frame_for_phys`,
-/// `hhdm_*_bytes`, …); LLVM lowers each `&mut local` to an address-take
-/// and the local migrates to the data stack. Cumulative depth on
-/// long syscall paths (fork → COW → exec → load_segment_pages → …)
-/// approaches the prior 8 KiB ceiling on slow TCG/CI hosts where dev
-/// builds can't inline these helpers — the watchdog catches it as a
-/// kernel-mode write past the mapped region. 16 KiB matches Linux's
-/// x86_64 `THREAD_SIZE` and gives 2× headroom; the 8192-task ceiling
-/// costs 128 MiB at peak (vs. 64 MiB at 8 KiB, vs. 256 MiB if we
-/// sized identically to the safe kernel stack).
-pub const TASK_UNSAFE_STACK_SIZE: u64 = 0x4000; // 16 KiB
+/// SafeStack-sanitizer data stack. LLVM's SafeStack pass moves every
+/// address-taken local onto it, and the `&mut`-passing safe-helper style here
+/// produces many, so deep syscall paths approached the prior 8 KiB ceiling on
+/// slow TCG hosts. 16 KiB matches Linux's x86_64 `THREAD_SIZE`; at the
+/// 8192-task ceiling it costs 128 MiB at peak.
+pub const TASK_UNSAFE_STACK_SIZE: u64 = 0x4000;
 
 pub const TASK_NAME_MAX_LEN: usize = 32;
 pub const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
 pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 
-/// Maximum number of concurrently live processes.
-///
-/// Three fixed tables are sized by this — the process registry in
-/// `slopos_ostd::process`, the address-space table in `slopos_mm`, and the
-/// descriptor tables in `slopos_fs` — and they key on each other's slot
-/// indices, so the bound has to be one number rather than three that happen
-/// to agree. It lives here for the reason [`INVALID_PROCESS_ID`] does: `abi`
-/// is the only crate all three can see.
+/// Maximum number of concurrently live processes. Three fixed tables are sized
+/// by this — the process registry, the address-space table and the descriptor
+/// tables — and they key on each other's slot indices, so the bound has to be
+/// one number rather than three that happen to agree.
 pub const MAX_PROCESSES: usize = 256;
 
-// --- TaskStatus ---
-
-/// Type-safe task status with explicit state-machine semantics.
-///
-/// The pre-Phase-5 `WillBlock` variant — introduced as the
-/// intermediate step in a `Running → WillBlock → Blocked` race-close
-/// protocol — was deleted: the wait-queue protocol now CAS
-/// `Running → Blocked` directly under the queue's SpinLock, and the
-/// lock-pair against `wake_*` provides the same race-close guarantee
-/// at lower complexity.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskStatus {
-    /// Task slot is not in use.
     #[default]
     Invalid = 0,
-    /// Task is ready to run, waiting in a run queue.
     Ready = 1,
-    /// Task is currently executing on a CPU.
     Running = 2,
-    /// Task is blocked waiting for some event.
     Blocked = 3,
     /// Task has terminated and is reapable. Slot is eligible for tier-2
     /// reuse once `ref_count == 0`.
@@ -126,17 +82,8 @@ impl TaskStatus {
     }
 }
 
-// --- BlockReason ---
-
-/// Reason why a task is in the Blocked state.
-///
-/// The pre-Phase-1 `WaitingOnTask` variant — paired with the now-deleted
-/// per-task `waiting_on: AtomicU32` field — was retired when
-/// `task_wait_for` migrated to the per-task `waiters: WaitQueue` +
-/// durable `exit_info` cell. Phase 5 finished the cleanup by removing
-/// the `waiting_on` field; the `BlockReason` discriminant for
-/// `WaitingOnTask` is gone, and value `1` is reserved for future
-/// reuse.
+/// Reason why a task is in the Blocked state. Discriminant `1` is retired and
+/// reserved.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BlockReason {
@@ -173,31 +120,17 @@ impl BlockReason {
     }
 }
 
-// --- TaskPriority ---
-
-/// Scheduler priority class. Lower numeric value = higher priority,
-/// matching the order used by `dequeue_highest_priority`. The repr value
-/// is the index into the per-CPU `ready_queues` array; adding a variant
+/// Scheduler priority class. Lower numeric value = higher priority. The repr
+/// value is the index into the per-CPU `ready_queues` array, so adding a variant
 /// requires bumping `NUM_PRIORITY_LEVELS` in the scheduler.
-///
-/// `KernelIo` was inserted between `High` and `Normal` in the Phase-1
-/// scheduler refactor. It is reserved for kernel I/O kthreads (NAPI,
-/// net-timer, deferred-driver-work) that **must run on their sleep
-/// deadlines regardless of user-task load**. User-space cannot select
-/// it — the syscall boundary in `core/src/syscall/process_handlers.rs`
-/// rejects it with `EINVAL`. `slopos_ostd::task::spawn_kernel_io` is
-/// the only sanctioned spawn surface; it requires a `KernelIoToken`
-/// witness for every `yield_with_deadline` call so starvation
-/// avoidance becomes a compile-time property.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskPriority {
     /// Latency-critical work: compositor, RT kernel paths.
     High = 0,
-    /// Kernel I/O kthreads (NAPI, net-timer, …). Above any user task;
-    /// reserved for paths whose progress is required for correctness
-    /// (delivering packets, draining TX rings, firing TCP retransmit
-    /// timers). Never selectable from user space.
+    /// Kernel I/O kthreads (NAPI, net-timer, …). Above any user task, for paths
+    /// whose progress is required for correctness. Never selectable from user
+    /// space; `slopos_ostd::task::spawn_kernel_io` is the only spawn surface.
     KernelIo = 1,
     /// Default class for ordinary user tasks and kernel threads.
     #[default]
@@ -209,9 +142,8 @@ pub enum TaskPriority {
 }
 
 impl TaskPriority {
-    /// Total decoder: out-of-range values coerce to `Normal`. Used for
-    /// trusted kernel-internal reads (e.g. unmarshalling a `u8` field
-    /// that the kernel itself wrote).
+    /// Total decoder: out-of-range values coerce to `Normal`. For trusted
+    /// kernel-internal reads of a `u8` the kernel itself wrote.
     #[inline]
     pub const fn from_u8(value: u8) -> Self {
         match value {
@@ -224,9 +156,8 @@ impl TaskPriority {
         }
     }
 
-    /// Strict decoder: returns `None` on out-of-range. Use at the
-    /// syscall boundary to reject untrusted input instead of silently
-    /// coercing it.
+    /// Strict decoder for the syscall boundary: rejects untrusted input rather
+    /// than silently coercing it.
     #[inline]
     pub const fn try_from_u8(value: u8) -> Option<Self> {
         match value {
@@ -250,84 +181,65 @@ impl TaskPriority {
     }
 }
 
-// --- Task Flags ---
-
 pub const TASK_FLAG_USER_MODE: u16 = 0x01;
 pub const TASK_FLAG_KERNEL_MODE: u16 = 0x02;
 pub const TASK_FLAG_NO_PREEMPT: u16 = 0x04;
 pub const TASK_FLAG_SYSTEM: u16 = 0x08;
 pub const TASK_FLAG_COMPOSITOR: u16 = 0x10;
 pub const TASK_FLAG_DISPLAY_EXCLUSIVE: u16 = 0x20;
-/// Place the spawned task into its own process group (`pgid = task_id`)
-/// instead of inheriting the parent's pgid.  Eliminates the SMP race
-/// between spawn and the parent's `setpgid` + `tcsetpgrp` calls.
+/// Place the spawned task into its own process group (`pgid = task_id`) instead
+/// of inheriting the parent's, closing the SMP race between spawn and the
+/// parent's `setpgid` + `tcsetpgrp` calls.
 pub const TASK_FLAG_NEW_PGRP: u16 = 0x80;
-/// Make the spawned task's process group the foreground group of its
-/// inherited controlling terminal *before* the task becomes schedulable.
-/// Without this, a freshly spawned job has a window in which it already
-/// runs but is still a background process: its first terminal read loses
-/// the race against the parent's `tcsetpgrp` and fails the foreground
-/// check.  The kernel performs the handoff atomically with the
-/// Ready-publish, so the child observes itself as foreground from its
-/// first instruction.  Only honoured when the child's session matches the
-/// terminal's controlling session.
+/// Make the spawned task's process group the foreground group of its inherited
+/// controlling terminal *before* the task becomes schedulable; otherwise the
+/// child's first terminal read can lose the race against the parent's
+/// `tcsetpgrp` and fail the foreground check. Only honoured when the child's
+/// session matches the terminal's controlling session.
 pub const TASK_FLAG_FOREGROUND: u16 = 0x100;
 
 /// May mutate network configuration: interface admin state, addresses, routes,
 /// the resolver, the DHCP client, and the master networking switch. Reading
-/// that state needs nothing — `net_query` and `net_monitor` are unprivileged,
-/// because a status indicator should not have to be trusted to render one.
+/// that state needs nothing — `net_query` and `net_monitor` are unprivileged.
 ///
 /// Conferred on exactly one program, `/bin/ip`. That does not restrict *who*
 /// may reconfigure the network, since any task can spawn any path; it restricts
 /// *how*, to one argument grammar with one set of validation.
 pub const TASK_FLAG_NET_ADMIN: u16 = 0x200;
 
-/// May reconfigure the console: the keyboard layout and the console font.
+/// May reconfigure the console: the keyboard layout and the console font. The
+/// layout is one global table feeding every TTY and the compositor's input path
+/// — Linux's `KDSKBENT`, gated there on `CAP_SYS_TTY_CONFIG`. Reading it needs
+/// nothing.
 ///
-/// The kernel keyboard layout is one global table feeding every TTY and the
-/// compositor's input path — Linux's `KDSKBENT`, not X's per-client XKB state,
-/// and Linux gates that on `CAP_SYS_TTY_CONFIG`. Reading the active layout
-/// needs nothing.
-///
-/// Conferred on `/bin/keymap`. `TASK_FLAG_SYSTEM` implies it, so init keeps
-/// applying the persisted layout at boot without holding this bit.
+/// Conferred on `/bin/keymap`; `TASK_FLAG_SYSTEM` implies it.
 pub const TASK_FLAG_CONSOLE_ADMIN: u16 = 0x400;
 
 /// May enumerate every task, including kernel threads and more privileged
 /// tasks.
 ///
 /// Without it, `process_list` reports only the tasks the caller could already
-/// signal — the relation `slopos_core::syscall::signal::signal_dominates`
-/// applies to `kill`. Visibility and actionability then answer to one
-/// predicate, so an id the kernel refuses to act on is also an id it never
-/// handed out. Linux gates the same question on `hidepid`, FreeBSD on
-/// `security.bsd.see_other_uids`, Fuchsia on `ZX_RIGHT_ENUMERATE`.
+/// signal (`slopos_core::syscall::signal::signal_dominates`), so visibility and
+/// actionability answer to one predicate and an id the kernel refuses to act on
+/// is one it never handed out.
 ///
-/// Conferred on `/bin/sysmon`. `TASK_FLAG_SYSTEM` implies it, matching how
-/// `CONSOLE_ADMIN` treats init.
+/// Conferred on `/bin/sysmon`; `TASK_FLAG_SYSTEM` implies it.
 pub const TASK_FLAG_PROC_ADMIN: u16 = 0x800;
 
-// --- Spawn-flag classification ---
-//
-// `task.flags` is the entirety of SlopOS's privilege model — `is_compositor`,
-// `is_display_exclusive` and `is_console_admin` are three reads of this word.
-// The four masks below partition it, so "may a caller set this bit?" is
-// answered once, here, for every bit, rather than at each spawn site.
+// `task.flags` is the entirety of SlopOS's privilege model. The four masks below
+// partition it, so "may a caller set this bit?" is answered once, here, for
+// every bit, rather than at each spawn site.
 
-/// Flag bits a `spawn_path` caller may set for its own child.
-///
-/// `NEW_PGRP` only mints a group inside the parent's own session, and
-/// `FOREGROUND` is re-validated against the terminal's controlling session
-/// before it is honoured.  Neither hands the child authority the parent did
-/// not already hold, which is what makes them the only two bits that belong
-/// to the caller.
+/// Flag bits a `spawn_path` caller may set for its own child. `NEW_PGRP` only
+/// mints a group inside the parent's own session and `FOREGROUND` is
+/// re-validated against the terminal's controlling session, so neither hands the
+/// child authority the parent did not already hold.
 pub const SPAWN_USER_SETTABLE: u16 = TASK_FLAG_NEW_PGRP | TASK_FLAG_FOREGROUND;
 
-/// Flag bits that name a privilege.  A spawn request carrying any of these is
-/// refused with `EPERM`: they are conferred by the kernel from the
-/// program-identity table in `slopos_core::exec::grants`, keyed on the binary
-/// being loaded, and are never accepted from user space.
+/// Flag bits that name a privilege. A spawn request carrying any of these is
+/// refused with `EPERM`: the kernel confers them from the program-identity table
+/// in `slopos_core::exec::grants`, keyed on the binary being loaded, and never
+/// accepts them from user space.
 ///
 /// `NO_PREEMPT` is here despite having no path that grants it — the timer tick
 /// and the deferred post-IRQ reschedule both return early for a task carrying
@@ -340,29 +252,21 @@ pub const SPAWN_PRIVILEGED: u16 = TASK_FLAG_NO_PREEMPT
     | TASK_FLAG_CONSOLE_ADMIN
     | TASK_FLAG_PROC_ADMIN;
 
-/// The two ring bits.  They describe where the task executes, not what it may
-/// do, which is why they are classified apart from the privileges.
-///
-/// `USER_MODE` is forced on by `spawn_program_with_attrs` regardless, so a
-/// caller that sets it is redundant rather than wrong and is accepted.
-/// `KERNEL_MODE` is refused with `EINVAL` at the syscall boundary: `task_build`
-/// already rejects the USER|KERNEL combination, but it reports the refusal as
-/// `None`, which the exec layer can only surface as `NoMem` — an out-of-memory
-/// diagnosis for a mode-flag mistake.
+/// The two ring bits. They describe where the task executes, not what it may do,
+/// which is why they are classified apart from the privileges. `USER_MODE` is
+/// forced on regardless, so a caller that sets it is redundant rather than
+/// wrong; `KERNEL_MODE` is refused with `EINVAL` here because `task_build`'s own
+/// refusal reaches the exec layer only as `NoMem`.
 pub const SPAWN_MODE_BITS: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_KERNEL_MODE;
 
-/// Undefined flag bits.  Written as a literal on purpose: deriving it from the
-/// complement of the other three would make the partition assert below
-/// unfailable, which is the only reason that assert exists.
+/// Undefined flag bits, all failing closed with `EINVAL`. Written as a literal
+/// on purpose: deriving it from the complement of the other three would make the
+/// partition assert below unfailable, which is the only reason that assert
+/// exists.
 ///
-/// `0x0040` is the retired `TASK_FLAG_FPU_INITIALIZED` and must not be reused —
-/// a binary built against the old header may still set it.  `0x1000..=0x8000`
-/// have never been defined.  All of them fail closed with `EINVAL` so the ABI
-/// can grow a bit without a deployed caller having already assigned it a
-/// different meaning.
-///
-/// Adding a `TASK_FLAG_*` means clearing its bit here *and* adding it to
-/// exactly one of the three masks above.  The asserts fail until both are done.
+/// `0x0040` is the retired `TASK_FLAG_FPU_INITIALIZED` and must not be reused.
+/// Adding a `TASK_FLAG_*` means clearing its bit here *and* adding it to exactly
+/// one of the three masks above; the asserts fail until both are done.
 pub const SPAWN_RESERVED: u16 = 0xF040;
 
 // The four classes partition the 16-bit flag word: every bit is in exactly one.
@@ -381,9 +285,6 @@ const _: () = assert!(
 // requesting task: one non-preemptible spinner pinned per CPU wedges the machine.
 const _: () = assert!((SPAWN_USER_SETTABLE & TASK_FLAG_NO_PREEMPT) == 0);
 
-// --- Task Exit/Fault Reason ---
-
-/// Reason for task termination.
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskExitReason {
@@ -396,15 +297,14 @@ pub enum TaskExitReason {
 
 impl TaskExitReason {
     /// Widen to the storage type of the `AtomicU16` this lives in on
-    /// `TaskInner`. Mirrors `SchedPlacement::as_u8`/`from_u8`.
+    /// `TaskInner`.
     #[inline]
     pub const fn as_u16(self) -> u16 {
         self as u16
     }
 
-    /// Narrow back, saturating an unrecognised encoding to `None`. Total
-    /// rather than fallible: the only writer is the kernel itself, and a
-    /// diagnostic field is not worth an `Option` at every read site.
+    /// Narrow back, saturating an unrecognised encoding to `None`. Total rather
+    /// than fallible: the only writer is the kernel itself.
     #[inline]
     pub const fn from_u16(raw: u16) -> Self {
         match raw {
@@ -416,7 +316,6 @@ impl TaskExitReason {
     }
 }
 
-/// Specific fault that caused task termination.
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TaskFaultReason {
@@ -426,14 +325,11 @@ pub enum TaskFaultReason {
     UserGp = 2,
     UserUd = 3,
     UserDeviceNa = 4,
-    /// A demand fault that could not be serviced because memory ran out,
-    /// after reclaim was asked and could not free enough.
-    ///
-    /// Distinct from [`UserPage`](Self::UserPage), which is a wild pointer.
-    /// Both kill the task, but only this one means the machine was short of
-    /// memory rather than the program being wrong — and `waitpid` cannot tell
-    /// them apart if they share a reason. Reported as `SIGBUS`, matching the
-    /// signal a mapping that cannot be backed raises elsewhere.
+    /// A demand fault that could not be serviced because memory ran out after
+    /// reclaim was asked. Distinct from [`UserPage`](Self::UserPage), a wild
+    /// pointer: both kill the task, but `waitpid` cannot tell "the machine was
+    /// short of memory" from "the program was wrong" if they share a reason.
+    /// Reported as `SIGBUS`.
     UserOom = 5,
 }
 
@@ -458,8 +354,6 @@ impl TaskFaultReason {
     }
 }
 
-// --- TaskExitRecord ---
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TaskExitRecord {
@@ -470,7 +364,6 @@ pub struct TaskExitRecord {
 }
 
 impl TaskExitRecord {
-    /// Create an empty exit record.
     pub const fn empty() -> Self {
         Self {
             task_id: INVALID_TASK_ID,

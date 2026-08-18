@@ -15,10 +15,9 @@ use crate::syscall::result::SyscallResult;
 pub fn syscall_handle(user_ctx: &UserContext) {
     let sysno = user_ctx.rax();
 
-    // The task running this syscall is this CPU's current, by definition of how
-    // we got here. The guard is taken once for the whole exit path: the restart
-    // decision and the signal delivery below both need the task, and the
-    // delivery runs on the no-handler arm too.
+    // The guard is taken once for the whole exit path: the restart decision and
+    // the signal delivery below both need the task, and delivery runs on the
+    // no-handler arm too.
     let Some(current) = slopos_sched::task_struct::Current::get() else {
         return;
     };
@@ -27,9 +26,8 @@ pub fn syscall_handle(user_ctx: &UserContext) {
         return;
     }
 
-    // Clobber rax with a safe negative sentinel so that a handler
-    // that forgets to write a return value does not leak stale
-    // register contents to userland.
+    // Clobber rax with a safe negative sentinel: a handler that forgets to
+    // write a return value must not leak stale register contents to userland.
     user_ctx.set_rax(slopos_abi::syscall::ERRNO_EINVAL as u64);
 
     let entry = syscall_lookup(sysno);
@@ -41,56 +39,35 @@ pub fn syscall_handle(user_ctx: &UserContext) {
             let result = func(&ctx);
             ctx.write_result(result);
 
-            // ERESTARTSYS signal-restart logic: when a blocking
-            // syscall (typically a TTY read) is interrupted by a
-            // signal, the handler returns `Err(Errno::ERESTARTSYS)`
-            // which `ctx.write_result` translated to the
-            // `ERRNO_ERESTARTSYS` sentinel in `rax`. This block
-            // decides whether to transparently restart or convert to
-            // `EINTR`, based on the pending signal's `SA_RESTART`
-            // flag. Runs before `deliver_pending_signal` so the
-            // signal frame captures the correct state.
+            // Restart or convert to `EINTR`, from the pending signal's
+            // `SA_RESTART`. Runs before `deliver_pending_signal` so the signal
+            // frame captures the correct state.
             handle_erestartsys(task, user_ctx, sysno);
 
-            // Safety net: ERESTARTSYS must NEVER leak to userland.
             debug_assert_erestartsys_not_leaked(user_ctx);
         }
         None => {
             if entry.is_none() {
                 klog_info!("SYSCALL: Unknown syscall {} -> ENOSYS", sysno);
             }
-            // Reserved table slot with no handler — return ENOSYS.
             user_ctx.set_rax(slopos_abi::syscall::ENOSYS_RETURN);
         }
     }
 
-    // Deliver pending signals on every syscall exit path, not just
-    // when a handler ran. Linux checks TIF_SIGPENDING unconditionally
-    // on return to userspace.
+    // Signals are delivered on every syscall exit path, not just when a handler
+    // ran, as Linux checks TIF_SIGPENDING unconditionally on return to user.
     crate::syscall::signal::deliver_pending_signal(&current, user_ctx);
 }
 
-// ---------------------------------------------------------------------------
-// ERESTARTSYS restart handling
-// ---------------------------------------------------------------------------
-
-/// The x86_64 `syscall` instruction is 2 bytes (`0F 05`). After
-/// `syscall`, RCX holds the return address; the kernel saves it as
-/// `frame.rip`. Rewinding by 2 bytes points back at the `syscall`
-/// instruction itself, enabling transparent re-execution.
+/// The x86_64 `syscall` instruction is 2 bytes (`0F 05`), so rewinding
+/// `frame.rip` by that points back at it for transparent re-execution.
 const SYSCALL_INSN_SIZE: u64 = 2;
 
-/// Inspect the syscall return value and, if it is `ERESTARTSYS`,
-/// decide whether to transparently restart the syscall or convert to
-/// `EINTR`.
 /// Syscalls that carry a caller-supplied timeout.
 ///
-/// `ERESTARTSYS` restarts from argument zero — the rewind below reloads `rax`
-/// with the syscall number and steps `rip` back onto the `syscall`
-/// instruction — so a restart re-arms the *original* timeout. Under signal
-/// pressure that livelocks: each delivery restarts a fresh full-length wait.
-/// These must report `EINTR` and let userland re-derive the remainder, or
-/// carry an absolute deadline in their own loop.
+/// A restart re-arms the *original* timeout, which under signal pressure
+/// livelocks: each delivery starts a fresh full-length wait. These must report
+/// `EINTR` and let userland re-derive the remainder.
 const TIMEOUT_BEARING: &[u64] = &[
     slopos_abi::syscall::SYSCALL_SLEEP_MS,
     slopos_abi::syscall::SYSCALL_POLL,
@@ -145,9 +122,7 @@ fn handle_erestartsys(task_ref: &Task, user_ctx: &UserContext, sysno: u64) {
     }
 }
 
-/// Safety net: assert that `ERESTARTSYS` never leaks to userland. In
-/// debug builds this would panic; release silently converts to
-/// `EINTR` as a last resort.
+/// Last resort: `ERESTARTSYS` must never reach userland, so convert it.
 fn debug_assert_erestartsys_not_leaked(user_ctx: &UserContext) {
     let rax = user_ctx.rax();
     if rax == ERRNO_ERESTARTSYS {
@@ -155,23 +130,14 @@ fn debug_assert_erestartsys_not_leaked(user_ctx: &UserContext) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test-only re-entry point
-// ---------------------------------------------------------------------------
-
-/// Invoke a handler directly with a caller-built `UserContext`.
-/// Mirrors the dispatch path: snapshots argument registers into the
-/// `SyscallContext`, runs the handler, and writes the result back to
-/// the user-mode frame. Used by `core/src/syscall/tests.rs` to drive
-/// handlers without going through the full ISR entry.
+/// Invoke a handler directly with a caller-built `UserContext`, mirroring the
+/// dispatch path. Used by `core/src/syscall/tests.rs` to drive handlers without
+/// going through the full ISR entry.
 pub fn dispatch_handler(
     handler: crate::syscall::common::SyscallHandler,
     task: &slopos_sched::task::TaskRef,
     frame: &mut UserContext,
 ) -> SyscallResult {
-    // Test entry point: the fixture parks the BSP on a bootstrap stub, so
-    // `Current::get()` yields nothing and the caller supplies the task as the
-    // registry guard it already holds.
     let ctx = SyscallContext::from_task_ref(task, frame);
     let result = handler(&ctx);
     ctx.write_result(result);

@@ -1,11 +1,6 @@
-//! Fault-injection tests for the task-scoped panic-recovery contract.
-//!
-//! A caught panic must run `Drop` cleanups during the unwind, restore the
-//! recovery depth, leave held locks reacquirable, and surface the panic
-//! reason through [`OopsInfo`]. The oops ledger's counting/limit arithmetic
-//! is pinned here as well; the escalation path itself (limit-crossing panic
-//! becomes fatal) halts the machine, so it is covered by the
-//! `panic.oops_limit=1 panic.recover_smoke=on` boot-log check instead.
+//! Fault injection for the task-scoped panic-recovery contract. The escalation
+//! path (a limit-crossing panic turning fatal) halts the machine, so it is
+//! covered by the `panic.oops_limit=1 panic.recover_smoke=on` boot-log check.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_ostd::lock_class;
@@ -26,9 +21,6 @@ impl Drop for UnwindCanary {
     }
 }
 
-/// A panic inside `run_recoverable` is caught, runs `Drop` during the
-/// unwind (releasing the held lock), restores the recovery depth, and
-/// reports the panic reason.
 pub fn test_run_recoverable_cleanup() -> TestResult {
     CANARY_DROPPED.store(false, Ordering::SeqCst);
     let depth_before = panic_recovery::recovery_depth();
@@ -58,8 +50,7 @@ pub fn test_run_recoverable_cleanup() -> TestResult {
         panic_recovery::recovery_depth() == depth_before,
         "recovery depth not restored after catch"
     );
-    // The lock guard's Drop ran during the unwind, so the lock must be
-    // free again.
+    // Re-locking proves the guard's Drop ran during the unwind.
     {
         let counter = RECOVERY_LOCK.lock();
         assert_test!(*counter == 1, "locked increment lost across recovery");
@@ -67,8 +58,6 @@ pub fn test_run_recoverable_cleanup() -> TestResult {
     TestResult::Pass
 }
 
-/// Ledger arithmetic: `0` disables the limit, the boundary count reports
-/// limit-reached, and the hermetic restore returns the exact snapshot.
 pub fn test_oops_ledger_accessors() -> TestResult {
     let (count0, limit0) = (panic_recovery::oops_count(), panic_recovery::oops_limit());
 

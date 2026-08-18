@@ -1,13 +1,6 @@
-//! Coverage for the per-CPU IST, exception and emergency stack mappings.
-//!
-//! A hole in any of these regions is not a fault the machine can report: the
-//! CPU takes its first #PF or #DF onto an unmapped IST stack, double-faults
-//! onto the unmapped double-fault stack, and triple-faults. So the mappings
-//! are checked here rather than discovered at fault time.
-//!
-//! These walk every CPU that owns a Processor Control Region — the set that
-//! was bootstrapped — and pin both halves of the layout: every usable page
-//! resolves, and every guard page does not.
+//! Per-CPU IST, exception and emergency stack mappings. A hole in one is not a
+//! fault the machine can report: the CPU faults onto an unmapped IST stack and
+//! triple-faults, so the mappings are checked here rather than at fault time.
 
 use slopos_abi::addr::VirtAddr;
 use slopos_arch::get_cpu_count;
@@ -23,8 +16,8 @@ use crate::ist_stacks::{
     exc_dstack_bounds_for_cpu, stack_bounds_for_cpu,
 };
 
-/// Walks one guard-paged stack region: `[guard_start, usable_base)` must be
-/// unmapped, and the `usable_pages` pages from `usable_base` must all resolve.
+/// `[guard_start, usable_base)` must be unmapped; the `usable_pages` pages above
+/// it must all resolve.
 fn check_guarded_region(
     cpu_id: usize,
     what: &str,
@@ -60,8 +53,6 @@ fn check_guarded_region(
     TestResult::Pass
 }
 
-/// Every bootstrapped CPU owns six mapped IST stacks, each under its own
-/// unmapped guard page.
 pub fn test_ist_stacks_mapped_on_every_cpu() -> TestResult {
     let cpu_count = get_cpu_count();
     assert_test!(cpu_count >= 1, "no CPU reported a control region");
@@ -85,8 +76,7 @@ pub fn test_ist_stacks_mapped_on_every_cpu() -> TestResult {
     TestResult::Pass
 }
 
-/// Every bootstrapped CPU owns a mapped exception SafeStack data stack — the
-/// stack an instrumented exception handler writes its address-taken locals to.
+/// The stack an instrumented exception handler writes address-taken locals to.
 pub fn test_exception_data_stacks_mapped_on_every_cpu() -> TestResult {
     for cpu_id in 0..get_cpu_count() {
         let (guard_start, usable_base, _top) = exc_dstack_bounds_for_cpu(cpu_id);
@@ -104,9 +94,7 @@ pub fn test_exception_data_stacks_mapped_on_every_cpu() -> TestResult {
     TestResult::Pass
 }
 
-/// Every bootstrapped CPU owns a mapped emergency SAFE and DATA stack pair —
-/// the stacks the fatal-fault trampoline switches to before any panic
-/// formatting runs.
+/// The stacks the fatal-fault trampoline switches to before any panic formatting.
 pub fn test_emergency_stacks_mapped_on_every_cpu() -> TestResult {
     for cpu_id in 0..get_cpu_count() {
         let (safe_guard, safe_base, _safe_top) = emergency_safe_bounds_for_cpu(cpu_id);

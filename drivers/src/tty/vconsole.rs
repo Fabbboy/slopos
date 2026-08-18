@@ -1,15 +1,9 @@
 //! VConsole - framebuffer-backed virtual console text renderer.
 //!
-//! Manages cursor position, cell buffer, and direct framebuffer rendering
-//! for TTY 1 (the virtual console). When no framebuffer is registered
-//! (early boot or headless), output falls back to serial mirroring.
-//!
-//! VT100/ANSI terminal emulation — each output byte passes through
-//! `VtParser`; typed `VtAction` variants drive cursor movement, erase, scroll,
-//! and SGR color/attribute rendering.
-//!
-//! Unicode codepoint cells (u32), UTF-8 decode, 256-color/truecolor
-//! SGR, bracketed paste, DECAWM, DECCKM, DECOM, double-width CJK handling.
+//! Manages cursor position, cell buffer, VT100/ANSI emulation (each byte
+//! passes through `VtParser`) and direct framebuffer rendering for TTY 1.
+//! When no framebuffer is registered (early boot or headless), output falls
+//! back to serial mirroring.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_ostd::lock_class;
@@ -35,10 +29,6 @@ const SCROLLBACK_LINES: usize = 200;
 /// Continuation marker for the right half of a double-width character.
 const CONTINUATION_CODEPOINT: u32 = 0xFFFF_FFFF;
 
-// ---------------------------------------------------------------------------
-// ANSI color tables (standard 8 + bright 8)
-// ---------------------------------------------------------------------------
-
 const ANSI_COLORS: [u32; 8] = [
     0x00000000, // Black
     0x00AA0000, // Red
@@ -60,10 +50,6 @@ const ANSI_BRIGHT_COLORS: [u32; 8] = [
     0x0055FFFF, // Bright Cyan
     0x00FFFFFF, // Bright White
 ];
-
-// ---------------------------------------------------------------------------
-// Per-cell and cursor attribute types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
 pub(crate) struct CellAttributes {
@@ -108,9 +94,8 @@ impl CellGrid {
         }
     }
 
-    /// Size the grid in place. Production sizing allocates outside the
-    /// console lock and hands the buffer over via [`Self::adopt`]; the test
-    /// fixtures build a grid directly.
+    /// Size the grid in place. Production sizing allocates outside the console
+    /// lock and hands the buffer over via [`Self::adopt`].
     #[cfg(feature = "test-hooks")]
     pub(crate) fn allocate(&mut self, rows: usize, cols: usize) {
         let total = rows.saturating_mul(cols);
@@ -184,9 +169,9 @@ impl CellGrid {
     }
 }
 
-/// Grid dimensions for a framebuffer of `width` x `height` pixels at the
-/// given cell size. Depends on nothing behind the console lock, so a caller
-/// can size and allocate the grids before taking it.
+/// Grid dimensions for a `width` x `height` framebuffer at the given cell size.
+/// Depends on nothing behind the console lock, so a caller can size and
+/// allocate the grids before taking it.
 fn grid_dims(width: u32, height: u32, cell_w: i32, cell_h: i32) -> (u16, u16) {
     let cols = (width / (cell_w.max(1) as u32)).max(1) as usize;
     let rows = (height / (cell_h.max(1) as u32)).max(1) as usize;
@@ -250,10 +235,6 @@ impl CursorAttributes {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 256-color → RGB mapping
-// ---------------------------------------------------------------------------
-
 fn color256_to_rgb(idx: u8) -> u32 {
     match idx {
         0..=7 => ANSI_COLORS[idx as usize],
@@ -274,17 +255,11 @@ fn color256_to_rgb(idx: u8) -> u32 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Framebuffer info
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy)]
 pub(crate) struct VConsoleFbInfo {
-    /// Kernel virtual address of the framebuffer's first byte. Stored as
-    /// an integer (rather than `*mut u8`) so the type is `Send`/`Sync`
-    /// without a hand-rolled marker; access goes through `fb_blit` /
-    /// `fb_put_pixel` file-local helpers that consolidate the bounds-
-    /// checked MMIO writes.
+    /// Kernel virtual address of the framebuffer's first byte. An integer
+    /// rather than `*mut u8` so the type is `Send`/`Sync` without a marker;
+    /// access goes through the `fb_blit` / `fb_put_pixel` helpers.
     pub(crate) base: u64,
     pub(crate) pitch: u32,
     pub(crate) width: u32,
@@ -292,12 +267,8 @@ pub(crate) struct VConsoleFbInfo {
     pub(crate) bytes_per_pixel: u8,
 }
 
-// ---------------------------------------------------------------------------
-// Scrollback ring buffer (heap-allocated, owned via Box)
-// ---------------------------------------------------------------------------
-
-/// Flat ring buffer of `SCROLLBACK_LINES` rows.  Allocated once on the heap
-/// via `ScrollbackBuf::new()` so `VConsoleState` stores only a pointer.
+/// Flat ring buffer of `SCROLLBACK_LINES` rows, heap-allocated once so
+/// `VConsoleState` stores only a pointer.
 struct ScrollbackBuf {
     buf: KVec<Cell>,
     cols: usize,
@@ -383,10 +354,6 @@ impl ScrollbackBuf {
     }
 }
 
-// ---------------------------------------------------------------------------
-// VConsole state
-// ---------------------------------------------------------------------------
-
 #[derive(slopos_ostd::SlotFields)]
 pub(crate) struct VConsoleState {
     pub(crate) cursor_row: u16,
@@ -415,23 +382,17 @@ pub(crate) struct VConsoleState {
     shadow_pitch: usize,
     /// Bitmask of rows modified since last flush. Bit N = row N is dirty.
     dirty_rows: u128,
-    /// A full-screen repaint is owed. Run by [`run_pending_repaint`] with
-    /// the console lock released between row bands, so the repaint never
-    /// becomes one long interrupts-off section.
+    /// A full-screen repaint is owed; run by [`run_pending_repaint`].
     repaint_pending: bool,
-    /// Bumped whenever the grid geometry or the active screen changes.
-    /// A banded repaint that observes a different epoch abandons itself —
-    /// whatever moved the grid requested its own repaint.
+    /// Bumped whenever the grid geometry or the active screen changes; a
+    /// banded repaint that observes a different epoch abandons itself.
     layout_epoch: u32,
 }
 
 /// Framebuffer ownership flag (Linux DRM/KMS master model).
 ///
-/// When true, the compositor owns the hardware framebuffer.  The vconsole
-/// continues rendering to its shadow buffer (maintaining terminal state)
-/// but `flush_dirty()` becomes a no-op — no pixels reach the display.
-/// On compositor death the flag is cleared and `flush_dirty()` resumes,
-/// restoring the kernel console.
+/// While set, the vconsole keeps rendering to its shadow buffer but
+/// `flush_dirty()` is a no-op, so no pixels reach the display.
 static COMPOSITOR_OWNS_FB: AtomicBool = AtomicBool::new(false);
 
 static SERIAL_MIRROR_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -467,12 +428,9 @@ impl VConsoleState {
         }
     }
 
-    /// In-place [`Init`] recipe equivalent to [`Self::new`]. Used by
-    /// `KBox::try_init(VConsoleState::init_default())` so runtime
-    /// callers (test fixtures) avoid the ~3 KiB stack frame
-    /// `KBox::try_new(VConsoleState::new())` would otherwise produce
-    /// while the rvalue funnels through `Box::try_new_in`.
-    #[allow(dead_code)] // production build uses the const `Self::new` for the static lock; this serves the test fixtures.
+    /// In-place [`Init`] recipe equivalent to [`Self::new`], so a runtime
+    /// caller avoids the ~3 KiB stack frame `KBox::try_new` would produce.
+    #[allow(dead_code)] // the static lock uses the const `Self::new`; this serves the test fixtures.
     pub(crate) fn init_default() -> impl Init<Self, AllocError> {
         init_struct_with(
             |slot: slopos_ostd::mm::init::SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
@@ -506,10 +464,6 @@ impl VConsoleState {
         )
     }
 
-    // -----------------------------------------------------------------------
-    // VT-parser-driven byte processing
-    // -----------------------------------------------------------------------
-
     pub(crate) fn process_byte(&mut self, b: u8) {
         let action = self.parser.advance(b);
         self.execute_action(action);
@@ -539,10 +493,6 @@ impl VConsoleState {
             VtAction::Nop => {}
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Action handlers
-    // -----------------------------------------------------------------------
 
     fn print_codepoint(&mut self, cp: u32) {
         let row = self.cursor_row as usize;
@@ -1153,10 +1103,6 @@ impl VConsoleState {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Dirty tracking
-    // -----------------------------------------------------------------------
-
     #[inline(always)]
     fn mark_row_dirty(&mut self, row: u16) {
         if (row as u32) < 128 {
@@ -1177,10 +1123,6 @@ impl VConsoleState {
             self.mark_rows_dirty(0, self.rows.saturating_sub(1));
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
 
     fn check_wrap_and_scroll(&mut self) {
         if self.cursor_col >= self.cols {
@@ -1221,11 +1163,8 @@ impl VConsoleState {
     /// Paint one text row's pixel band in `color`, returning whether it
     /// happened.
     ///
-    /// A blank cell is background everywhere — the space glyph has no
-    /// coverage, so `blend_coverage_u32` returns `bg` for each of its
-    /// pixels. Writing the colour straight in is the same image without
-    /// the per-pixel atlas lookup and blend, which is what a full-screen
-    /// `ESC[2J` pays 4 M times over.
+    /// The space glyph has no coverage, so writing the colour straight in is
+    /// the same image without the per-pixel atlas lookup and blend.
     fn fill_shadow_row(&mut self, row: usize, color: u32) -> bool {
         let pitch = self.shadow_pitch;
         let width = (self.cols as usize).saturating_mul(self.cell_w as usize);
@@ -1256,10 +1195,6 @@ impl VConsoleState {
             self.render_cell(row as u16, c as u16);
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Simple byte-level output (used by integration tests)
-    // -----------------------------------------------------------------------
 
     #[cfg_attr(
         not(feature = "test-hooks"),
@@ -1316,15 +1251,9 @@ impl VConsoleState {
         self.check_wrap_and_scroll();
     }
 
-    // -----------------------------------------------------------------------
-    // Scroll / render primitives
-    // -----------------------------------------------------------------------
-
-    /// Scroll the active region up by `n` lines in one shift.
-    ///
-    /// The shadow memmove spans the whole scroll region — 19 MB at 4K —
-    /// regardless of `n`, so scrolling N lines one at a time costs N times
-    /// what one N-line scroll does, all of it with interrupts disabled.
+    /// Scroll the active region up by `n` lines in one shift: the shadow
+    /// memmove spans the whole scroll region regardless of `n`, so N one-line
+    /// scrolls cost N times what one N-line scroll does, interrupts off.
     pub(crate) fn scroll_up_lines(&mut self, n: usize) {
         let cols = self.cols as usize;
         let sr_top = self.scroll_top as usize;
@@ -1378,7 +1307,6 @@ impl VConsoleState {
 
     /// Render screen rows `[start, end)` from whatever is on screen: the
     /// scrollback view for the rows history occupies, the live grid below.
-    ///
     /// The split is recomputed per band because the view can move while the
     /// console lock is released between bands.
     fn repaint_band(&mut self, start: u16, end: u16) {
@@ -1467,14 +1395,11 @@ impl VConsoleState {
         }
     }
 
-    /// Whether `atlas`'s cell geometry is the one the grid was laid out
-    /// for.
+    /// Whether `atlas`'s cell geometry is the one the grid was laid out for.
     ///
     /// `atlas::replace_global` swaps the atlas without holding the console
-    /// lock, so a glyph's coverage buffer can be sized for a cell this
-    /// state has not adopted yet — the row slices below would then read
-    /// past its end. `notify_font_changed` repaints once it has, so
-    /// skipping the glyph costs nothing.
+    /// lock, so a glyph's coverage buffer can be sized for a cell this state
+    /// has not adopted yet, and the row slices below would read past its end.
     #[inline]
     fn atlas_matches_grid(&self, atlas: &atlas::AtlasGuard) -> bool {
         atlas.cell_width() == self.cell_w && atlas.cell_height() == self.cell_h
@@ -1595,8 +1520,8 @@ impl VConsoleState {
         if self.dirty_rows == 0 {
             return;
         }
-        // Compositor owns the framebuffer — keep dirty bits so they can be
-        // flushed on compositor_release_fb(), but don't touch the hardware.
+        // Compositor owns the framebuffer: keep the dirty bits for
+        // `compositor_release_fb()` rather than clearing them.
         if COMPOSITOR_OWNS_FB.load(Ordering::Acquire) || slopos_ostd::fblog::is_active() {
             return;
         }
@@ -1681,29 +1606,20 @@ impl VConsoleState {
     }
 }
 
-/// Copy `src.len()` bytes from `src` into the framebuffer mapping at
-/// `base + byte_offset`. Caller must ensure `byte_offset + src.len()` is
-/// inside the framebuffer (the caller in `flush_dirty_rows` validates
-/// against the shadow buffer's length, which mirrors framebuffer dims).
+/// Copy `src.len()` bytes into the framebuffer mapping at `base + byte_offset`.
+/// Caller must ensure `byte_offset + src.len()` is inside the framebuffer.
 #[inline]
 fn fb_blit(base: u64, byte_offset: usize, src: &[u8]) {
-    // Bounds: `flush_dirty_rows` pre-checks `byte_offset + src.len()
-    // <= shadow_size` where `shadow_size = pitch * height` mirrors
-    // the framebuffer extent. The framebuffer mapping outlives the
-    // kernel for the duration of boot.
     slopos_ostd::boot::handoff::framebuffer::fb_blit_bytes(base, byte_offset, src);
 }
 
 /// Write a single pixel at `base + offset` using the given pixel format.
-/// `offset` is the byte offset already computed from `(x, y, pitch, bpp)`
-/// and bounds-checked by the caller (`put_pixel`'s width/height gate).
+/// `offset` is bounds-checked by the caller (`put_pixel`'s width/height gate).
 #[inline]
 fn fb_put_pixel(base: u64, offset: usize, bytes_per_pixel: u8, color: u32) {
     use slopos_ostd::boot::handoff::framebuffer::{
         fb_ptr_add, fb_write_u8_at, fb_write_u16_at, fb_write_u32_unaligned,
     };
-    // Bounds: `put_pixel` gates on `x < width && y < height` and
-    // computes `offset = y*pitch + x*bpp`, staying within the FB.
     let p = fb_ptr_add(base as *mut u8, offset);
     match bytes_per_pixel {
         4 => {
@@ -1739,21 +1655,16 @@ const REPAINT_BAND_ROWS: u16 = 4;
 /// Run an owed full-screen repaint, releasing the console lock between row
 /// bands.
 ///
-/// Callers that reach the console through the TTY layer must invoke this
-/// with `TTY_WRITE_LOCKS` released. That lock serialises byte streams; a
-/// repaint emits no bytes, and holding it here would mask interrupts for
-/// the whole screen no matter how finely the console lock is banded.
-///
-/// `VCONSOLE_STATE` is an IRQ-disabling lock and a full-screen glyph
-/// rasterisation is 8.3 M pixels at 4K, so doing it under one hold masks
-/// interrupts for hundreds of milliseconds. Banding bounds that to a few
+/// Callers reaching the console through the TTY layer must invoke this with
+/// `TTY_WRITE_LOCKS` released: a repaint emits no bytes, and holding it here
+/// would mask interrupts for the whole screen however finely the console lock
+/// is banded. `VCONSOLE_STATE` is IRQ-disabling and a full-screen glyph
+/// rasterisation is 8.3 M pixels at 4K, so banding bounds one hold to a few
 /// rows' worth of work.
 ///
-/// Concurrent output is not lost: a row written before the band reaches it
-/// is rendered with its new content, and one written after the band has
-/// passed paints itself and marks itself dirty. A repaint that outlives the
-/// geometry it started on abandons itself — whatever moved the grid asked
-/// for its own repaint.
+/// Concurrent output is not lost: a row written before the band reaches it is
+/// rendered with its new content, one written after paints and marks itself
+/// dirty. A repaint that outlives the geometry it started on abandons itself.
 pub fn run_pending_repaint() {
     let epoch = {
         let mut state = VCONSOLE_STATE.lock();
@@ -1789,11 +1700,9 @@ pub fn register_framebuffer(
 
     atlas::register_font_change_callback(notify_font_changed);
 
-    // Every allocation happens before the SpinLock is taken — allocating
-    // with interrupts disabled trips UB checks in the global allocator, and
-    // the buddy allocator's reuse path can wait on a cross-CPU TLB drain.
-    // Cell geometry and grid extents need only the atlas and the
-    // framebuffer, neither of which is behind the console lock.
+    // Every allocation happens before the SpinLock is taken: allocating with
+    // interrupts disabled trips UB checks in the global allocator, and the
+    // buddy allocator's reuse path can wait on a cross-CPU TLB drain.
     let (cell_w, cell_h) = atlas::global().map_or((8, 16), |a| (a.cell_width(), a.cell_height()));
     let (rows, cols) = grid_dims(width, height, cell_w, cell_h);
     let grid_len = (rows as usize).saturating_mul(cols as usize);
@@ -1847,18 +1756,10 @@ pub fn write(data: &[u8]) {
 
     let mut state = VCONSOLE_STATE.lock();
     if state.fb.is_none() {
-        // No framebuffer (headless boot or test mode under -nographic).
-        // We deliberately do NOT fall back to direct serial writes here:
-        //   * The TTY driver layer (`tty::driver::write_driver_unlocked`)
-        //     already mirrors output to COM1 via `serial::serial_locked_write_bytes`
-        //     when `serial_mirror_enabled()` is true, and that path is
-        //     atomic w.r.t. the klog ticket lock.
-        //   * Falling back here would emit the same bytes a SECOND time
-        //     (duplicating every TTY write on the wire) and would do so
-        //     lock-free (`serial_putc_com1` takes no klog lock), corrupting
-        //     concurrent klog output on the way to the host serial console.
-        // Callers who specifically want serial output without a framebuffer
-        // should toggle `set_serial_mirror(true)` and route via the TTY API.
+        // No framebuffer (headless boot or -nographic), and deliberately no
+        // serial fallback: `tty::driver::write_driver_unlocked` already mirrors
+        // to COM1 under the klog ticket lock, so emitting here would duplicate
+        // every TTY write and do it lock-free, corrupting concurrent klog.
         return;
     }
 
@@ -2000,12 +1901,9 @@ pub fn scroll_view_down(lines: usize) {
     run_pending_repaint();
 }
 
-/// Transfer framebuffer ownership to the compositor (Linux `DRM_IOCTL_SET_MASTER` equivalent).
-///
-/// The vconsole continues rendering to its shadow buffer so terminal state
-/// is preserved, but stops copying to the hardware framebuffer.  This
-/// eliminates the race between vconsole text rendering and compositor
-/// damage-based presentation.
+/// Transfer framebuffer ownership to the compositor (Linux `DRM_IOCTL_SET_MASTER`
+/// equivalent). The vconsole keeps rendering to its shadow buffer, preserving
+/// terminal state, but stops copying to the hardware framebuffer.
 pub fn compositor_acquire_fb() {
     COMPOSITOR_OWNS_FB.store(true, Ordering::Release);
 }
