@@ -18,14 +18,9 @@ use vstd::prelude::*;
 
 verus! {
 
-// ===========================================================================
-// Abstract send-queue state.
-// ===========================================================================
-
 /// One in-flight zero-copy segment: its sequence range `[seq, seq + len)` and
-/// the pinned-page read window `[pin_base, pin_base + len)` within a pin of
-/// `pin_len` bytes (mirrors `SendChunk::Zerocopy { base_off, len, .. }` /
-/// `ZcSource { byte_start, len, .. }` in net/src/tcp/buffer.rs).
+/// the pinned-page read window within a pin of `pin_len` bytes. Mirrors
+/// `SendChunk::Zerocopy` / `ZcSource` in net/src/tcp/buffer.rs.
 pub struct SegState {
     pub seq: nat,
     pub len: nat,
@@ -49,19 +44,15 @@ pub open spec fn sendq_inv(q: SendQ) -> bool {
     forall|i: int| 0 <= i < q.segs.len() ==> #[trigger] seg_in_bounds(q.segs[i])
 }
 
-// ===========================================================================
-// Transitions.
-// ===========================================================================
-
 pub enum SendStep {
     /// Enqueue a new zero-copy segment (`tcp::enqueue_zerocopy`).
     Send { seq: nat, len: nat, pin_base: nat, pin_len: nat },
-    /// (Re)transmit segment `idx` — DMA / re-DMA from its pin. No state change:
-    /// the read window and the queue are untouched, so a retransmit re-reads the
-    /// same live pin (`poll_transmit` -> `segment_source` -> the leaf).
+    /// (Re)transmit segment `idx` — DMA / re-DMA from its pin (`poll_transmit`
+    /// -> `segment_source`). No state change, so a retransmit re-reads the same
+    /// live pin.
     Transmit { idx: nat },
-    /// Driver reclaims one in-flight TX descriptor of segment `idx`. No queue
-    /// change (the pin is held until cumulative ACK; only the refcount moves).
+    /// Driver reclaims one in-flight TX descriptor of segment `idx`. Only the
+    /// refcount moves; the pin is held until cumulative ACK.
     Reclaim { idx: nat },
     /// Cumulative ACK up to `up_to`: advance `snd_una` and GC the head segment
     /// if it is now fully covered (`process_ack`'s head-first chunk drop).
@@ -70,7 +61,6 @@ pub enum SendStep {
     Teardown,
 }
 
-/// `max(a, b)`.
 pub open spec fn max_nat(a: nat, b: nat) -> nat {
     if a >= b {
         a
@@ -82,9 +72,8 @@ pub open spec fn max_nat(a: nat, b: nat) -> nat {
 pub open spec fn sendq_step(q: SendQ, t: SendStep) -> SendQ {
     match t {
         SendStep::Send { seq, len, pin_base, pin_len } => {
-            // Only a window that fits its pin ever enters the queue — exactly the
-            // `off + len <= pin.len` bound `io_runs_at` / `copy_out_frames`
-            // enforce at the source. An ill-formed send is a no-op (rejected).
+            // Mirrors the `off + len <= pin.len` bound `io_runs_at` /
+            // `copy_out_frames` enforce at the source.
             if pin_base + len <= pin_len {
                 SendQ {
                     segs: q.segs.push(SegState { seq, len, pin_base, pin_len }),
@@ -118,8 +107,6 @@ pub proof fn sendq_step_preserves(q: SendQ, t: SendStep)
     match t {
         SendStep::Send { seq, len, pin_base, pin_len } => {
             if pin_base + len <= pin_len {
-                // Every old segment is unchanged; the appended one is in-bounds
-                // by the guard. Discharge the quantifier per index.
                 assert(forall|i: int| 0 <= i < q2.segs.len() ==> #[trigger]
                     seg_in_bounds(q2.segs[i])) by {
                     assert(forall|i: int| 0 <= i < q.segs.len() ==> q2.segs[i] == q.segs[i]);
@@ -130,8 +117,6 @@ pub proof fn sendq_step_preserves(q: SendQ, t: SendStep)
         SendStep::Transmit { idx: _ } => {},
         SendStep::Reclaim { idx: _ } => {},
         SendStep::Ack { up_to } => {
-            // Dropping the head (or nothing) only removes segments; the survivors
-            // keep their (in-bounds) windows.
             assert(forall|i: int| 0 <= i < q2.segs.len() ==> #[trigger]
                 seg_in_bounds(q2.segs[i])) by {
                 if q.segs.len() > 0 && q.segs[0].seq + q.segs[0].len <= max_nat(q.snd_una, up_to) {
@@ -143,10 +128,6 @@ pub proof fn sendq_step_preserves(q: SendQ, t: SendStep)
         SendStep::Teardown => {},
     }
 }
-
-// ===========================================================================
-// Whole-trace induction (mirrors vmcursor.rs / ring_bufpool.rs).
-// ===========================================================================
 
 pub open spec fn sendq_init(q: SendQ) -> bool {
     q.segs.len() == 0
@@ -170,8 +151,7 @@ pub open spec fn sendq_run(q: SendQ, trace: Seq<SendStep>) -> SendQ
     }
 }
 
-/// Every reachable send-queue state keeps the invariant — the inductive
-/// whole-execution guarantee.
+/// Every reachable send-queue state keeps the invariant.
 pub proof fn sendq_inv_on_every_trace(q0: SendQ, trace: Seq<SendStep>)
     requires
         sendq_init(q0),
@@ -187,14 +167,8 @@ pub proof fn sendq_inv_on_every_trace(q0: SendQ, trace: Seq<SendStep>)
     }
 }
 
-// ===========================================================================
-// Headline corollaries.
-// ===========================================================================
-
 /// (INV-TCPZC-PIN-IN-BOUNDS) In every reachable state, every in-flight
-/// zero-copy segment's read window is inside its pin — so every transmit,
-/// retransmit re-DMA, and copy fallback reads only the segment's own pinned
-/// bytes (never out of bounds).
+/// zero-copy segment's read window is inside its pin.
 pub proof fn tcp_zc_pin_in_bounds(q0: SendQ, trace: Seq<SendStep>, i: int)
     requires
         sendq_init(q0),

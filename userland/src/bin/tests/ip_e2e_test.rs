@@ -377,8 +377,8 @@ fn queries_and_monitor_are_unprivileged() -> bool {
 }
 
 /// A mutating `net_iface_ctl` issued directly from here is `EPERM` even holding
-/// `TASK_FLAG_SYSTEM`. The control is [`monitor_fd_wakes_a_blocked_poll`],
-/// which performs the same operation through `/bin/ip` and has it succeed.
+/// `TASK_FLAG_SYSTEM`. The control is the case below, which performs the same
+/// operation through `/bin/ip` and has it succeed.
 fn direct_mutation_is_eperm_despite_system() -> bool {
     let Ok((_, rows)) = read_ifaces() else {
         eprintln!("ip_e2e_test: net_query(IFACES) failed");
@@ -407,7 +407,6 @@ fn direct_mutation_is_eperm_despite_system() -> bool {
         }
     }
 
-    // The refusal changed nothing.
     let Ok((_, after)) = read_ifaces() else {
         return false;
     };
@@ -424,13 +423,10 @@ fn direct_mutation_is_eperm_despite_system() -> bool {
     }
 }
 
-/// A query scoped to one interface answers about that interface only.
-///
 /// Every `NET_Q_*` takes an ifindex, and accepting it while enumerating
 /// everything anyway is worse than rejecting it: the caller gets a plausible
-/// answer to a different question and `ip link show dev eth0` looks like it
-/// worked. The assertion belongs here rather than in the renderer, which passes
-/// the index straight through and cannot tell.
+/// answer to a different question. The renderer passes the index straight
+/// through and cannot tell, so the assertion belongs here.
 fn queries_honour_their_ifindex_filter() -> bool {
     let Ok((_, rows)) = read_ifaces() else {
         eprintln!("ip_e2e_test: net_query(IFACES) failed");
@@ -446,7 +442,6 @@ fn queries_honour_their_ifindex_filter() -> bool {
         return false;
     }
 
-    // Scoped to loopback: exactly one row, and it is loopback.
     let mut buf = std::vec![0u8; HDR + total as usize * IFACE_SIZE];
     if let Err(err) = net_query(NET_Q_IFACES, lo.ifindex, &mut buf) {
         eprintln!("ip_e2e_test: scoped IFACES query failed: {}", err.errno());
@@ -467,8 +462,6 @@ fn queries_honour_their_ifindex_filter() -> bool {
         return false;
     }
 
-    // Routes scoped the same way: fewer than the whole table, since eth0 has
-    // its own.
     let all_routes = match count_for(NET_Q_ROUTES, NET_IFINDEX_NONE) {
         Ok(n) => n,
         Err(err) => {
@@ -490,9 +483,8 @@ fn queries_honour_their_ifindex_filter() -> bool {
         return false;
     }
 
-    // An interface that does not exist yields nothing, not everything — the
-    // direction a filter fails in when it is written as "match, or fall
-    // through".
+    // Nothing, not everything — the direction a filter fails in when it is
+    // written as "match, or fall through".
     let ghost = 0xDEAD_BEEFu32;
     for (what, name) in [(NET_Q_IFACES, "IFACES"), (NET_Q_ROUTES, "ROUTES")] {
         match count_for(what, ghost) {

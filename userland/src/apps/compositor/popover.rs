@@ -68,20 +68,15 @@ const PANEL_GAP_Y: i32 = SPACE_2;
 const SWITCH_W: i32 = 10 * U;
 const SWITCH_H: i32 = 5 * U;
 
-/// One line of text, asked rather than assumed.
-///
-/// No floor of its own: [`gfx::cell_height`] already answers its own fallback
-/// when no atlas is loaded, and a second floor here would be a claim that the
-/// first can fail.
+/// One line of text. No floor of its own: [`gfx::cell_height`] already answers
+/// its own fallback when no atlas is loaded.
 fn line_h() -> i32 {
     gfx::cell_height()
 }
 
-/// Where every element sits, computed once.
-///
-/// One function rather than a `header_h`/`row_h`/`footer_h` trio: those are
-/// three partial views of one layout, and they leave the rule's position to two
-/// expressions that have to agree by hand.
+/// Where every element sits, computed once: a `header_h`/`row_h`/`footer_h`
+/// trio would leave the rule's position to two expressions that must agree by
+/// hand.
 struct Layout {
     height: i32,
     title_y: i32,
@@ -102,8 +97,8 @@ fn layout(model: &NetPanelModel) -> Layout {
 
     let title_y = PANEL_PAD;
     let status_y = title_y + lh;
-    // Centred on the title's line, not on the two-line header: the switch acts
-    // on the panel, and the title is the panel's own line.
+    // Centred on the title's line, not the two-line header: the switch acts on
+    // the panel, and the title is the panel's own line.
     let switch_y = title_y + ((lh - SWITCH_H) / 2).max(0);
     let header_end = title_y + 2 * lh;
 
@@ -141,11 +136,9 @@ fn layout(model: &NetPanelModel) -> Layout {
     }
 }
 
-/// Fit `s` into `max_w`, truncating with [`TRUNCATION`] if it does not.
-///
-/// Always writes into `out` and returns a borrow of `out` alone, so the result
-/// aliases exactly one buffer — which is what lets a caller compose into one
-/// `String` field and fit into another without borrowing the same one twice.
+/// Fit `s` into `max_w`, truncating with [`TRUNCATION`] if it does not. The
+/// result borrows `out` alone, so a caller can compose into one `String` field
+/// and fit into another without borrowing the same one twice.
 fn fit<'a>(out: &'a mut String, s: &str, max_w: i32) -> &'a str {
     out.clear();
     if gfx::font::string_width(s) <= max_w {
@@ -166,10 +159,8 @@ fn fit<'a>(out: &'a mut String, s: &str, max_w: i32) -> &'a str {
     out.as_str()
 }
 
-/// The dot's colour for each row state.
-///
-/// Every one clears 3:1 against the panel, the WCAG floor for informational
-/// non-text — the states that mean something is wrong most of all.
+/// The dot's colour for each row state; every one clears 3:1 against the panel,
+/// the WCAG floor for informational non-text.
 fn dot_colour(state: IfaceState) -> slopos_abi::draw::Color32 {
     match state {
         IfaceState::Off => TEXT_SECONDARY,
@@ -179,26 +170,18 @@ fn dot_colour(state: IfaceState) -> slopos_abi::draw::Color32 {
     }
 }
 
-/// How long a requested switch change may stay unconfirmed.
-///
-/// The control shows what was asked for immediately and settles when the
-/// kernel's own event agrees — the shape a NetworkManager client uses over
-/// D-Bus, and viable here only because the monitor fd demonstrably wakes a
-/// blocked reader. The deadline is what stops a lost completion from wedging
-/// the control in a busy state forever: at expiry it reverts to whatever the
-/// kernel actually says, which may be the old value.
+/// How long a requested switch change may stay unconfirmed. The control shows
+/// what was asked for immediately and settles when the kernel's own event
+/// agrees; at expiry it reverts to whatever the kernel actually says, so a lost
+/// completion cannot wedge the control in a busy state forever.
 const SWITCH_SETTLE_MS: u128 = 10_000;
 
-/// How long to wait for the kernel to agree before asking again.
-///
-/// `ip net on|off` is idempotent, so re-issuing is safe, and re-issuing is what
-/// makes the control converge rather than sit in a busy state waiting out
-/// [`SWITCH_SETTLE_MS`]. Two presses spawn two children and nothing orders
-/// their execution, so the pair can land in the wrong order and leave the
-/// kernel in the state the user asked for *first*.
+/// How long to wait for the kernel to agree before asking again. `ip net on|off`
+/// is idempotent, and re-issuing is what makes the control converge: two presses
+/// spawn two children whose execution nothing orders, so the pair can land in
+/// the wrong order and leave the kernel in the state asked for *first*.
 const SWITCH_RETRY_MS: u128 = 750;
 
-/// Popover state: which item owns it, and where it was put.
 pub struct Popover {
     open: Option<StatusKind>,
     rect: Rect,
@@ -206,8 +189,8 @@ pub struct Popover {
     prev_rect: Rect,
     /// What the switch was last asked for, while the kernel has yet to agree.
     pending: Option<bool>,
-    /// The switch changed appearance without the panel moving, so the panel
-    /// needs a repaint that the rect comparison alone would not ask for.
+    /// The switch changed appearance without the panel moving, which the rect
+    /// comparison alone would not ask a repaint for.
     switch_dirty: bool,
     /// When the target was last changed, for [`SWITCH_SETTLE_MS`].
     pending_since: Option<Instant>,
@@ -215,8 +198,7 @@ pub struct Popover {
     issued_at: Option<Instant>,
     /// Composition buffer for a line being built.
     line: String,
-    /// Output buffer for [`fit`]. Separate from `line` so a composed string can
-    /// be fitted without borrowing one buffer twice.
+    /// Output buffer for [`fit`], separate from `line`.
     fitted: String,
     /// The item the panel was anchored under, kept so a resize re-anchors to
     /// the same place instead of to a synthesised rect one pixel off.

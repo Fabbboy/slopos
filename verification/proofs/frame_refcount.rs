@@ -290,29 +290,14 @@ pub proof fn broken_clone_violates_invariant()
     assert(!slot_inv(revived));
     assert(slot_inv(torn) && !slot_inv(broken_clone(torn)));
     assert(exists|s: Slot| #![trigger broken_clone(s)] slot_inv(s) && !slot_inv(broken_clone(s)));
-    // The fixed clone preserves the invariant on every state.
     assert forall|s: Slot| slot_inv(s) implies #[trigger] slot_inv(step(s, Step::CloneConditional)) by {
         step_preserves(s, Step::CloneConditional);
     }
 }
 
-// ---------------------------------------------------------------------------
-// The teardown ORDERING is load-bearing: free-before-reset breaks (I4).
-// ---------------------------------------------------------------------------
-//
-// `Frame::drop`'s teardown is three distinct writes other CPUs can interleave
-// with — drop the payload, reset the slot to UNUSED, return the page to the
-// allocator. The `DropFinal` step models them atomically *because the fix
-// orders the slot reset before the page free*: the only sub-step a peer can
-// observe (the page appearing on the free list) happens after the slot is
-// already UNUSED. The two specs below expose that ordering as its sub-steps
-// and prove the fix is not cosmetic — the pre-fix free-before-reset ordering
-// reaches a state the invariant forbids.
-
-/// FIXED ordering, sub-step 1: payload dropped and slot published UNUSED.
-/// The page is NOT yet on the free list (it is still owned by the dropper),
-/// so no `from_unused` for this paddr can fire here. Fires on the final
-/// drop (rc just hit 0).
+/// FIXED ordering, sub-step 1: payload dropped and slot published UNUSED. The
+/// page is not yet on the free list — still owned by the dropper — so no
+/// `from_unused` for this paddr can fire here.
 pub open spec fn drop_reset(s: Slot) -> Slot {
     Slot { typed: false, rc: 0, payload_live: false, on_free_list: false, releases: 0 }
 }
@@ -323,31 +308,24 @@ pub open spec fn drop_free(s: Slot) -> Slot {
     Slot { on_free_list: true, releases: (s.releases + 1) as nat, ..s }
 }
 
-/// BROKEN ordering (rejected): returning the page to the allocator FIRST —
-/// `on_free_list` becomes true while the slot is still non-UNUSED (the reset
-/// happens afterward). `payload_live` is already false (`drop_in_place` ran).
-/// This is the window in which a concurrent `from_unused` would be handed a
-/// paddr whose slot is not yet claimable.
+/// BROKEN ordering (rejected): the page goes back to the allocator while the
+/// slot is still non-UNUSED — the window in which a concurrent `from_unused`
+/// would be handed a paddr whose slot is not yet claimable.
 pub open spec fn broken_drop_free(s: Slot) -> Slot {
     Slot { rc: 0, payload_live: false, on_free_list: true, releases: (s.releases + 1) as nat, ..s }
 }
 
 /// Witness that the teardown ordering is load-bearing. From a live,
-/// singly-referenced slot, the pre-fix free-before-reset ordering reaches an
-/// intermediate that violates `slot_inv` (a page on the free list whose slot
-/// is still TYPED — (I4) — which is exactly the state where a concurrent
-/// `from_unused` on the recycled paddr fails its CAS → `StateMismatch` →
-/// `PathCorrupt`). The fixed reset-before-free ordering keeps every
-/// sub-state invariant. So soundness of the `from_unused` CAS genuinely
-/// depends on resetting the slot before freeing the page.
+/// singly-referenced slot the free-before-reset ordering reaches an
+/// intermediate violating (I4) — a page on the free list whose slot is still
+/// TYPED, exactly the state in which a concurrent `from_unused` on the
+/// recycled paddr fails its CAS → `StateMismatch` → `PathCorrupt`. The fixed
+/// reset-before-free ordering keeps every sub-state invariant.
 pub proof fn broken_drop_ordering_violates_invariant()
     ensures
-        // The broken ordering takes a valid last-ref state to an
-        // invariant-violating intermediate...
         exists|s: Slot|
             #![trigger broken_drop_free(s)]
             slot_inv(s) && s.rc == 1 && !slot_inv(broken_drop_free(s)),
-        // ...while the fixed ordering keeps both sub-steps invariant.
         forall|s: Slot|
             (slot_inv(s) && s.rc == 1) ==> #[trigger] slot_inv(drop_reset(s))
                 && slot_inv(drop_free(drop_reset(s))),
@@ -355,7 +333,6 @@ pub proof fn broken_drop_ordering_violates_invariant()
     // A live slot holding its last reference — the instant before `Drop`.
     let live = Slot { typed: true, rc: 1, payload_live: true, on_free_list: false, releases: 0 };
     assert(slot_inv(live));
-    // Broken: the page hits the free list while the slot is still TYPED.
     let broken = broken_drop_free(live);
     assert(broken.on_free_list && broken.typed);
     // on_free_list yet typed — violates the (I4) conjunct of slot_inv.
@@ -364,8 +341,6 @@ pub proof fn broken_drop_ordering_violates_invariant()
     assert(exists|s: Slot|
         #![trigger broken_drop_free(s)]
         slot_inv(s) && s.rc == 1 && !slot_inv(broken_drop_free(s)));
-    // The fixed ordering: reset publishes a clean UNUSED slot, then the free
-    // flips on_free_list with the slot already non-TYPED — both invariant.
     assert forall|s: Slot| (slot_inv(s) && s.rc == 1) implies #[trigger] slot_inv(drop_reset(s))
         && slot_inv(drop_free(drop_reset(s))) by {
         let reset = drop_reset(s);
