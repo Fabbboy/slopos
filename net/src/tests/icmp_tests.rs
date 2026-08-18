@@ -115,10 +115,8 @@ fn test_icmp_ping_gateway_e2e() -> TestResult {
         return fail!("send_echo_request failed: {:?}", e);
     }
 
-    // No socket is bound for this identifier, so the gateway's reply will hit
-    // the unmatched-reply branch in icmp::handle_rx and be silently dropped.
-    // One sleep+poll round is enough to exercise that path; reply receipt is
-    // covered by test_icmp_socket_sendto_recvfrom_e2e.
+    // No socket is bound for this identifier: the reply exercises the
+    // unmatched-reply drop branch in icmp::handle_rx.
     slopos_kernel_services::driver_runtime::sleep_current_task_ms(100);
     if let Some(d) = crate::net_driver_service::net_driver() {
         (d.virtnet_force_napi_poll)();
@@ -222,20 +220,13 @@ fn test_icmp_socket_sendto_recvfrom_e2e() -> TestResult {
     fail!("no ICMP echo reply received from 10.0.2.2 after 3s")
 }
 
-/// Verify the NAPI burst drains the virtio used-ring on explicit
-/// invocation and feeds the result through the ICMP demux.
+/// Verify the NAPI burst drains the virtio used-ring on explicit invocation and
+/// feeds the result through the ICMP demux.
 ///
-/// The kernel-test phase runs synchronously in the BSP's boot init
-/// context, before `enter_scheduler(0)` makes BSP a real
-/// scheduled task. `sleep_current_task_ms` therefore busy-polls
-/// (`sched/src/sleep.rs:365`) rather than actually descheduling the
-/// caller, so a kernel-test cannot exercise the "kthread runs while
-/// caller sleeps" production path. The production assertion lives
-/// in the userland `curl_e2e_test` which runs from `/sbin/init`'s
-/// real task context. Here we instead verify the explicit
-/// synchronous drain path — `(NetDriverServices::virtnet_force_napi_poll)()`
-/// — that the kernel-test phase relies on, so a regression in the
-/// burst body itself fails this gate.
+/// Kernel tests run in the BSP boot init context before `enter_scheduler(0)`, so
+/// `sleep_current_task_ms` busy-polls instead of descheduling; the IRQ-driven
+/// kthread path is unreachable here and is asserted by the userland
+/// `curl_e2e_test` instead.
 fn test_icmp_napi_scheduling_e2e() -> TestResult {
     socket::socket_reset_all();
     restore_boot_routes();
@@ -277,9 +268,6 @@ fn test_icmp_napi_scheduling_e2e() -> TestResult {
     let sent = socket::socket_sendto(sock, &icmp_buf, GATEWAY_IP, 0);
     assert_test!(sent > 0, "sendto failed");
 
-    // The kernel-test phase needs to drain the ring explicitly; the
-    // production code path uses the IRQ-driven `napi_thread_entry`
-    // and never reaches this test surface.
     for attempt in 0..30u32 {
         (driver.virtnet_force_napi_poll)();
         slopos_kernel_services::driver_runtime::sleep_current_task_ms(100);

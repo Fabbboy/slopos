@@ -109,7 +109,6 @@ fn insert_slot(store: &mut RegionStoreInner, index: u32) -> Result<(), ()> {
     let cap = store.count as usize;
     let idx = (index as usize).min(cap);
     if cap > 0 && idx < cap {
-        // shift `[idx, count)` one slot to the right.
         store.regions.copy_within(idx..cap, idx + 1);
     }
     store.count += 1;
@@ -135,7 +134,6 @@ fn try_merge_with_neighbors(store: &mut RegionStoreInner, index: u32) {
     }
     let i = index as usize;
 
-    // Merge with previous.
     if index > 0 {
         let prev_end = store.regions[i - 1].phys_base + store.regions[i - 1].length;
         let merge = prev_end == store.regions[i].phys_base && {
@@ -155,7 +153,7 @@ fn try_merge_with_neighbors(store: &mut RegionStoreInner, index: u32) {
         }
     }
 
-    // Merge with next (re-read count after possible previous merge).
+    // Re-read: the merge above may have dropped a slot.
     let count = store.count;
     if (index + 1) < count {
         let i = index as usize;
@@ -467,23 +465,21 @@ pub fn mm_region_highest_usable_frame() -> u64 {
     })
 }
 
-/// `true` for device MMIO apertures (framebuffer, Local APIC, …): regions
-/// that alias a physical address but are not RAM. They never become a
-/// managed [`Frame<M>`](slopos_ostd::mm::Frame), and such a BAR can sit
-/// high in the 64-bit address space, so they must not extend a RAM bound.
+/// `true` for device MMIO apertures (framebuffer, Local APIC, …): they alias
+/// a physical address but are not RAM, never become a managed
+/// [`Frame<M>`](slopos_ostd::mm::Frame), and can sit arbitrarily high in the
+/// 64-bit address space, so they must not extend a RAM bound.
 fn region_is_device_mmio(region: &MmRegion) -> bool {
     region.flags & MM_RESERVATION_FLAG_MMIO != 0
         || matches!(region.type_, MmReservationType::Framebuffer)
 }
 
-/// Highest frame index backed by RAM: every region the kernel may wrap as a
-/// [`Frame<M>`](slopos_ostd::mm::Frame) — usable memory, the kernel image,
-/// ACPI reclaimable/NVS, and bootloader-allocated page tables. Device MMIO
-/// is excluded (see [`region_is_device_mmio`]).
+/// Highest frame index backed by RAM — usable memory, the kernel image, ACPI
+/// reclaimable/NVS and bootloader-allocated page tables; device MMIO excluded
+/// (see [`region_is_device_mmio`]).
 ///
-/// Bounds the dense, frame-indexed `META_SLOTS` array (one slot per frame in
-/// `0..=highest`). A high MMIO aperture would stretch the array across the
-/// intervening hole, costing gibibytes of metadata for untracked memory.
+/// Bounds the dense, frame-indexed `META_SLOTS` array, so a high MMIO aperture
+/// counted here would cost gibibytes of metadata across the intervening hole.
 pub fn mm_region_highest_ram_frame() -> u64 {
     with_store(|store| {
         let mut highest = 0u64;

@@ -1,10 +1,7 @@
 //! C-ABI-style `kmalloc` / `kfree` / `kzalloc` / `HeapStats` surface.
 //!
-//! Routes directly through [`super::KERNEL_SLAB`] (not through the
-//! `#[global_allocator]`) so the `mm` crate stays
-//! `#![forbid(unsafe_code)]` — calling `alloc::alloc::*` would
-//! require an `unsafe` block here. Pointers in/out; safe-Rust slab
-//! dispatch underneath.
+//! Routes through [`super::KERNEL_SLAB`] rather than the
+//! `#[global_allocator]`, so the `mm` crate stays `#![forbid(unsafe_code)]`.
 
 use core::ffi::c_int;
 use core::ffi::c_void;
@@ -16,18 +13,13 @@ use slopos_ostd::util::ptr_buf;
 
 pub use super::stats::HeapStats;
 
-/// Largest single `kmalloc` request (1 MiB). Allocations larger than
-/// this fail (return null).
+/// Largest single `kmalloc` request; larger requests return null.
 pub use super::MAX_ALLOC_SIZE;
 
 /// Allocate `size` bytes of kernel heap memory, zeroed.
 ///
-/// Returns null on `size == 0`, `size > MAX_ALLOC_SIZE`, or
-/// allocation failure. The bytes returned are always zero-initialised
-/// — callers that received recycled `(i & 0xFF)`-pattern bytes from
-/// previous owners decoded them as control-flow data on freed objects
-/// (the canonical `0xdfdedddcdbdad9d8`-shape wild-RIP bug), so the
-/// safe public surface scrubs unconditionally.
+/// Returns null on `size == 0`, `size > MAX_ALLOC_SIZE`, or allocation
+/// failure.
 pub fn kmalloc(size: usize) -> *mut c_void {
     if size == 0 || size > MAX_ALLOC_SIZE {
         return core::ptr::null_mut();

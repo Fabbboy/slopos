@@ -14,10 +14,6 @@ fn errno_i64(errno: u64) -> i64 {
     errno as i64
 }
 
-// NOTE: test_udp_t1_receive_queue_push_pop_overflow removed —
-// UdpReceiveQueue/UdpDatagram/UDP_RX_QUEUE_SIZE types were deleted
-// from the socket module in a prior commit, leaving this test broken.
-
 pub fn test_udp_t2_dispatch_delivery_and_unbound_drop() -> TestResult {
     reset();
 

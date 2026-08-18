@@ -1,10 +1,5 @@
 use super::fixtures::*;
 
-// ===========================================================================
-// TtySession tests
-// ===========================================================================
-
-/// New TtySession has zero values.
 pub fn test_session_new_empty() -> TestResult {
     let s = TtySession::new();
     if s.session_id() != 0 || s.fg_pgrp_id() != 0 || s.focused_task_id != 0 {
@@ -14,7 +9,6 @@ pub fn test_session_new_empty() -> TestResult {
     TestResult::Pass
 }
 
-/// Attaching a session sets session_id and fg_pgrp.
 pub fn test_session_attach() -> TestResult {
     let scope = SessionScope::new(100, 100);
     let mut s = TtySession::new();
@@ -30,7 +24,6 @@ pub fn test_session_attach() -> TestResult {
     TestResult::Pass
 }
 
-/// Detaching a session resets session_id and fg_pgrp.
 pub fn test_session_detach() -> TestResult {
     let scope = SessionScope::new(200, 200);
     let mut s = TtySession::new();
@@ -47,7 +40,6 @@ pub fn test_session_detach() -> TestResult {
     TestResult::Pass
 }
 
-/// Foreground reader gets Allowed.
 pub fn test_session_check_read_foreground() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
@@ -64,7 +56,6 @@ pub fn test_session_check_read_foreground() -> TestResult {
     }
 }
 
-/// Background reader gets BackgroundRead.
 pub fn test_session_check_read_background() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
@@ -81,7 +72,6 @@ pub fn test_session_check_read_background() -> TestResult {
     }
 }
 
-/// No session attached — check_read returns BootstrapAllowed (permissive).
 pub fn test_session_check_read_no_session() -> TestResult {
     let s = TtySession::new();
     match s.check_read(42, 42) {
@@ -96,7 +86,6 @@ pub fn test_session_check_read_no_session() -> TestResult {
     }
 }
 
-/// Kernel task (pgid=0) gets Allowed even if not in foreground group.
 pub fn test_session_check_read_kernel_task() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
@@ -113,12 +102,10 @@ pub fn test_session_check_read_kernel_task() -> TestResult {
     }
 }
 
-/// check_write without TOSTOP always returns Allowed.
 pub fn test_session_check_write_no_tostop() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
     scope.attach_to(&mut s);
-    // Background process, but TOSTOP is false.
     match s.check_write(99, 10, false) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
@@ -131,7 +118,6 @@ pub fn test_session_check_write_no_tostop() -> TestResult {
     }
 }
 
-/// check_write with TOSTOP and background caller returns BackgroundWrite.
 pub fn test_session_check_write_tostop_background() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
@@ -148,7 +134,6 @@ pub fn test_session_check_write_tostop_background() -> TestResult {
     }
 }
 
-/// check_read replaces task_has_access — foreground task allowed.
 pub fn test_session_check_read_replaces_task_has_access_foreground() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
@@ -165,7 +150,6 @@ pub fn test_session_check_read_replaces_task_has_access_foreground() -> TestResu
     }
 }
 
-/// check_read replaces task_has_access — background task gets BackgroundRead.
 pub fn test_session_check_read_replaces_task_has_access_background() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
@@ -183,7 +167,6 @@ pub fn test_session_check_read_replaces_task_has_access_background() -> TestResu
     }
 }
 
-/// check_read replaces task_has_access — permissive when no session.
 pub fn test_session_check_read_replaces_task_has_access_permissive() -> TestResult {
     let s = TtySession::new();
     match s.check_read(999, 0) {
@@ -198,7 +181,6 @@ pub fn test_session_check_read_replaces_task_has_access_permissive() -> TestResu
     }
 }
 
-/// set_fg_pgrp_checked: allowed when caller is in the same session.
 pub fn test_session_set_fg_pgrp_checked_allowed() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
@@ -215,7 +197,6 @@ pub fn test_session_set_fg_pgrp_checked_allowed() -> TestResult {
     TestResult::Pass
 }
 
-/// set_fg_pgrp_checked: denied when caller is in a different session.
 pub fn test_session_set_fg_pgrp_checked_denied() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
@@ -232,7 +213,6 @@ pub fn test_session_set_fg_pgrp_checked_denied() -> TestResult {
     TestResult::Pass
 }
 
-/// set_fg_pgrp_checked: allowed when no session is attached (permissive).
 pub fn test_session_set_fg_pgrp_checked_no_session() -> TestResult {
     let scope = SessionScope::new(50, 50);
     let mut s = TtySession::new();
@@ -247,7 +227,6 @@ pub fn test_session_set_fg_pgrp_checked_no_session() -> TestResult {
     TestResult::Pass
 }
 
-/// Per-TTY API: get_session_id returns 0 when no session is attached.
 pub fn test_tty_get_session_id_default() -> TestResult {
     tty::table::tty_table_init();
     let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
@@ -261,13 +240,11 @@ pub fn test_tty_get_session_id_default() -> TestResult {
     TestResult::Pass
 }
 
-/// Per-TTY API: install session + get_session_id round-trip.
 pub fn test_tty_attach_session() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(300, 300);
     tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
     let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
-    // Clean up.
     tty::detach_session(TtyIndex(0));
     if sid != 300 {
         klog_info!(
@@ -279,7 +256,6 @@ pub fn test_tty_attach_session() -> TestResult {
     TestResult::Pass
 }
 
-/// Per-TTY API: detach_session resets session_id to 0.
 pub fn test_tty_detach_session() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(400, 400);
@@ -296,15 +272,12 @@ pub fn test_tty_detach_session() -> TestResult {
     TestResult::Pass
 }
 
-/// Per-TTY API: detach_session_by_id only detaches matching session.
 pub fn test_tty_detach_session_by_id() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(500, 500);
     tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
-    // Detach with wrong ID — should be a no-op.
     tty::detach_session_by_id(999);
     let sid_after_wrong = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
-    // Detach with correct ID.
     tty::detach_session_by_id(500);
     let sid_after_correct = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     if sid_after_wrong != 500 {
@@ -324,26 +297,19 @@ pub fn test_tty_detach_session_by_id() -> TestResult {
     TestResult::Pass
 }
 
-/// Per-TTY API: set_foreground_pgrp_checked with session validation.
-///
-/// The outer API validates that the target pgrp has living members in the
-/// session.  For the "same-session allows" case we use pgid=0 (clear
-/// foreground group) which bypasses pgrp existence.  The cross-session case
-/// uses a synthetic pgid that has no live task, which is also correctly denied.
+/// The outer API also requires the target pgrp to have living members, so the
+/// same-session case passes pgid 0 (clear) to bypass that existence check.
 pub fn test_tty_set_fg_pgrp_checked() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(600, 600);
     tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
 
-    // Same session, pgid=0 (clear) — should succeed.
     let ok = tty::set_foreground_pgrp_checked(TtyIndex(0), 0, 600);
     let pgid = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(u32::MAX);
 
-    // Different session — should fail (pgrp 800 has no live members).
     let denied = tty::set_foreground_pgrp_checked(TtyIndex(0), 800, 999);
     let pgid_after = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(u32::MAX);
 
-    // Clean up.
     tty::detach_session(TtyIndex(0));
     let _ = tty::set_foreground_pgrp(TtyIndex(0), 0);
 

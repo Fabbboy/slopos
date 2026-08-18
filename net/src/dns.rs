@@ -1,9 +1,7 @@
 //! DNS client: wire protocol, cache, and resolver.
 //!
-//! Implements a minimal DNS stub resolver for A-record lookups over UDP.
-//! The resolver lives in-kernel (matching the DHCP client pattern) with a
-//! synchronous `dns_resolve()` entry point called from the `SYSCALL_RESOLVE`
-//! handler.
+//! A minimal in-kernel stub resolver for A-record lookups over UDP, with
+//! `dns_resolve()` as the synchronous `SYSCALL_RESOLVE` entry point.
 
 use core::sync::atomic::{AtomicU16, Ordering};
 use slopos_ostd::lock_class;
@@ -11,51 +9,35 @@ use slopos_ostd::lock_class;
 use slopos_ostd::klog_debug;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
-// =============================================================================
-// Constants
-// =============================================================================
-
-/// Standard DNS UDP port.
 pub const DNS_PORT: u16 = 53;
 /// Maximum DNS name length (RFC 1035).
 const DNS_NAME_MAX: usize = 253;
 /// Maximum label length (RFC 1035).
 const DNS_LABEL_MAX: usize = 63;
-/// DNS header length.
 const DNS_HEADER_LEN: usize = 12;
-/// Maximum standard DNS UDP response size.
 const DNS_MAX_RESPONSE: usize = 512;
-/// Maximum CNAME hops before giving up.
 const MAX_CNAME_HOPS: usize = 8;
-/// Maximum compression pointer follows (loop detection).
+/// Compression-pointer follow budget, for loop detection.
 const MAX_POINTER_FOLLOWS: usize = 16;
-/// DNS resolve timeout per attempt (ms).
+/// Resolve timeout per attempt.
 const DNS_TIMEOUT_MS: u32 = 3000;
-/// Number of resolve attempts.
+/// Number of resolve attempts, not retries beyond the first.
 const DNS_MAX_RETRIES: usize = 3;
-/// DNS cache size.
 const DNS_CACHE_SIZE: usize = 16;
 
-/// Monotonically increasing query ID.
 static QUERY_ID: AtomicU16 = AtomicU16::new(0x4242);
-
-// =============================================================================
-// Types
-// =============================================================================
 
 /// Errors returned by [`dns_resolve`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsResolveError {
     /// No DNS server configured (DHCP not completed or no driver).
     NoDnsServer,
-    /// The hostname could not be encoded into a valid DNS query.
     InvalidHostname,
-    /// All resolution attempts timed out waiting for a response.
+    /// Every attempt timed out waiting for a response.
     Timeout,
-    /// All resolution attempts failed to transmit the query packet.
+    /// Every attempt failed to transmit the query packet.
     TransmitFailed,
-    /// A DNS response was received but could not be parsed or contained
-    /// no answer records.
+    /// A response arrived but could not be parsed, or held no answer records.
     ParseFailed,
 }
 
@@ -127,25 +109,18 @@ impl DnsHeader {
     }
 }
 
-/// Successful DNS resolution result.
 #[derive(Clone, Copy)]
 pub struct DnsResponse {
     pub addr: [u8; 4],
     pub ttl: u32,
 }
 
-// =============================================================================
-// DNS name encoding
-// =============================================================================
-
-/// Encode a hostname into DNS wire format (length-prefixed labels).
-///
-/// `"example.com"` → `[7, e,x,a,m,p,l,e, 3, c,o,m, 0]`
+/// Encode a hostname into DNS wire format (length-prefixed labels):
+/// `"example.com"` → `[7, e,x,a,m,p,l,e, 3, c,o,m, 0]`.
 ///
 /// Returns the number of bytes written, or `None` on invalid input.
 pub fn dns_encode_name(hostname: &[u8], buf: &mut [u8]) -> Option<usize> {
     if hostname.is_empty() {
-        // Root label
         if buf.is_empty() {
             return None;
         }
@@ -153,12 +128,10 @@ pub fn dns_encode_name(hostname: &[u8], buf: &mut [u8]) -> Option<usize> {
         return Some(1);
     }
 
-    // Validate total length
     if hostname.len() > DNS_NAME_MAX {
         return None;
     }
 
-    // Strip trailing dot if present
     let hostname = if hostname.last() == Some(&b'.') {
         &hostname[..hostname.len() - 1]
     } else {
@@ -179,7 +152,7 @@ pub fn dns_encode_name(hostname: &[u8], buf: &mut [u8]) -> Option<usize> {
         if label.is_empty() || label.len() > DNS_LABEL_MAX {
             return None;
         }
-        // Need space for length byte + label + at least the trailing zero
+        // Length byte + label + room for the trailing zero.
         if out_pos + 1 + label.len() >= buf.len() {
             return None;
         }
@@ -189,7 +162,6 @@ pub fn dns_encode_name(hostname: &[u8], buf: &mut [u8]) -> Option<usize> {
         out_pos += label.len();
     }
 
-    // Trailing root label
     if out_pos >= buf.len() {
         return None;
     }
@@ -199,19 +171,12 @@ pub fn dns_encode_name(hostname: &[u8], buf: &mut [u8]) -> Option<usize> {
     Some(out_pos)
 }
 
-// =============================================================================
-// DNS query construction
-// =============================================================================
-
-/// Build a DNS query packet for the given hostname and query type.
-///
-/// Returns the total packet length, or `None` on error.
+/// Build a DNS query packet, returning its total length or `None` on error.
 pub fn dns_build_query(id: u16, hostname: &[u8], qtype: DnsType, buf: &mut [u8]) -> Option<usize> {
     if buf.len() < DNS_HEADER_LEN + 4 {
         return None;
     }
 
-    // Header: QR=0, OPCODE=0, RD=1
     let header = DnsHeader {
         id,
         flags: 0x0100, // RD = 1
@@ -222,7 +187,6 @@ pub fn dns_build_query(id: u16, hostname: &[u8], qtype: DnsType, buf: &mut [u8])
     };
     header.to_bytes(&mut buf[..DNS_HEADER_LEN]);
 
-    // Question section: encoded name
     let name_len = dns_encode_name(hostname, &mut buf[DNS_HEADER_LEN..])?;
     let q_start = DNS_HEADER_LEN + name_len;
 
@@ -230,22 +194,16 @@ pub fn dns_build_query(id: u16, hostname: &[u8], qtype: DnsType, buf: &mut [u8])
         return None;
     }
 
-    // QTYPE
     buf[q_start..q_start + 2].copy_from_slice(&(qtype as u16).to_be_bytes());
-    // QCLASS = IN
     buf[q_start + 2..q_start + 4].copy_from_slice(&(DnsClass::IN as u16).to_be_bytes());
 
     Some(q_start + 4)
 }
 
-// =============================================================================
-// DNS name decoding (with compression pointer support)
-// =============================================================================
-
-/// Decode a DNS name from wire format with compression pointer support.
+/// Decode a DNS name from wire format, following compression pointers.
 ///
-/// Returns `(decoded_name_len, wire_bytes_consumed)` or `None` on error.
-/// The decoded name is written as a dotted string (e.g., `example.com`).
+/// Writes a dotted string (`example.com`) into `out` and returns
+/// `(decoded_name_len, wire_bytes_consumed)`, or `None` on error.
 pub fn dns_decode_name(packet: &[u8], offset: usize, out: &mut [u8]) -> Option<(usize, usize)> {
     let mut pos = offset;
     let mut out_pos = 0usize;
@@ -261,7 +219,6 @@ pub fn dns_decode_name(packet: &[u8], offset: usize, out: &mut [u8]) -> Option<(
         let len_or_ptr = packet[pos];
 
         if len_or_ptr == 0 {
-            // Root label — end of name
             if !jumped {
                 wire_consumed = pos + 1 - offset;
             }
@@ -282,7 +239,7 @@ pub fn dns_decode_name(packet: &[u8], offset: usize, out: &mut [u8]) -> Option<(
             }
             pointer_count += 1;
             if pointer_count > MAX_POINTER_FOLLOWS {
-                return None; // Loop detection
+                return None;
             }
             pos = ptr_offset;
             jumped = true;
@@ -303,7 +260,6 @@ pub fn dns_decode_name(packet: &[u8], offset: usize, out: &mut [u8]) -> Option<(
             return None;
         }
 
-        // Add dot separator between labels
         if out_pos > 0 {
             if out_pos >= out.len() {
                 return None;
@@ -321,15 +277,11 @@ pub fn dns_decode_name(packet: &[u8], offset: usize, out: &mut [u8]) -> Option<(
     }
 
     if !jumped {
-        // wire_consumed already set in the loop
+        // TODO(tech-debt): dead branch — `wire_consumed` is already final here.
     }
 
     Some((out_pos, wire_consumed))
 }
-
-// =============================================================================
-// DNS response parsing
-// =============================================================================
 
 /// Parse a DNS response packet and extract the first A record.
 ///
@@ -337,31 +289,27 @@ pub fn dns_decode_name(packet: &[u8], offset: usize, out: &mut [u8]) -> Option<(
 pub fn dns_parse_response(packet: &[u8], expected_id: u16) -> Option<DnsResponse> {
     let header = DnsHeader::from_bytes(packet)?;
 
-    // Validate response
     if !header.qr() {
-        return None; // Not a response
+        return None;
     }
     if header.id != expected_id {
-        return None; // ID mismatch
+        return None;
     }
     let rcode = header.rcode();
     if rcode != DnsRcode::NoError as u8 {
-        return None; // Error response
+        return None;
     }
 
-    // Skip question section
     let mut pos = DNS_HEADER_LEN;
     for _ in 0..header.qdcount {
-        // Skip QNAME
         pos = skip_dns_name(packet, pos)?;
-        // Skip QTYPE + QCLASS
+        // QTYPE + QCLASS.
         if pos + 4 > packet.len() {
             return None;
         }
         pos += 4;
     }
 
-    // Parse answer section, chasing CNAMEs
     let mut a_addr: Option<([u8; 4], u32)> = None;
     let mut _cname_hops = 0usize;
 
@@ -370,11 +318,9 @@ pub fn dns_parse_response(packet: &[u8], expected_id: u16) -> Option<DnsResponse
             break;
         }
 
-        // Skip RR name
         let name_end = skip_dns_name(packet, pos)?;
         pos = name_end;
 
-        // Read TYPE, CLASS, TTL, RDLENGTH
         if pos + 10 > packet.len() {
             return None;
         }
@@ -406,15 +352,13 @@ pub fn dns_parse_response(packet: &[u8], expected_id: u16) -> Option<DnsResponse
                 &packet[pos..pos + 4]
             );
             a_addr = Some((addr, ttl));
-            // Don't break — continue to find the best answer
+            // No break: a later answer may be the better one.
         } else if rr_type == DnsType::CNAME as u16 {
             _cname_hops += 1;
             if _cname_hops > MAX_CNAME_HOPS {
                 return None;
             }
-            // CNAME: the A record should follow for the canonical name.
-            // We continue parsing answers — the A record for the CNAME
-            // target typically appears later in the answer section.
+            // The A record for the CNAME target follows later in this section.
         }
 
         pos += rdlength;
@@ -435,7 +379,7 @@ fn skip_dns_name(packet: &[u8], mut pos: usize) -> Option<usize> {
             return Some(pos + 1);
         }
         if (b & 0xC0) == 0xC0 {
-            // Compression pointer — 2 bytes, doesn't recurse for skipping
+            // Compression pointer: 2 bytes, and skipping need not follow it.
             if pos + 1 >= packet.len() {
                 return None;
             }
@@ -453,21 +397,15 @@ fn skip_dns_name(packet: &[u8], mut pos: usize) -> Option<usize> {
     }
 }
 
-// =============================================================================
-// DNS cache
-// =============================================================================
-
 #[derive(Clone, Copy)]
 struct DnsCacheEntry {
-    /// FNV-1a hash of the hostname for fast comparison.
+    /// FNV-1a hash of the hostname.
     hostname_hash: u32,
-    /// Resolved IPv4 address.
     addr: [u8; 4],
-    /// Absolute expiry time in ms (from `clock::uptime_ms()`).
+    /// Absolute expiry on the `clock::uptime_ms()` timeline.
     expiry_ms: u64,
-    /// Last-used timestamp for LRU eviction.
+    /// Drives LRU eviction.
     last_used_ms: u64,
-    /// Whether this entry is occupied.
     valid: bool,
 }
 
@@ -504,7 +442,6 @@ impl DnsCache {
                     entry.last_used_ms = now;
                     return Some(entry.addr);
                 } else {
-                    // TTL expired
                     entry.valid = false;
                     return None;
                 }
@@ -516,10 +453,9 @@ impl DnsCache {
     fn insert(&mut self, hostname: &[u8], addr: [u8; 4], ttl_secs: u32) {
         let hash = fnv1a_hash(hostname);
         let now = slopos_kernel_services::clock::uptime_ms();
-        // Minimum TTL of 60s to avoid thrashing
+        // Floor of 60 s: a shorter TTL thrashes the cache.
         let ttl_ms = (ttl_secs.max(60) as u64) * 1000;
 
-        // Check if already cached — update in place
         for entry in self.entries.iter_mut() {
             if entry.valid && entry.hostname_hash == hash {
                 entry.addr = addr;
@@ -529,7 +465,6 @@ impl DnsCache {
             }
         }
 
-        // Find a free slot
         for entry in self.entries.iter_mut() {
             if !entry.valid {
                 *entry = DnsCacheEntry {
@@ -543,7 +478,6 @@ impl DnsCache {
             }
         }
 
-        // Evict LRU entry
         let mut lru_idx = 0usize;
         let mut lru_time = u64::MAX;
         for (i, entry) in self.entries.iter().enumerate() {
@@ -568,11 +502,10 @@ impl DnsCache {
     }
 }
 
-/// FNV-1a hash for hostname cache keys.
 fn fnv1a_hash(data: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c_9dc5;
     for &byte in data {
-        // Case-insensitive: lowercase ASCII letters
+        // DNS names are case-insensitive; fold ASCII upper to lower.
         let b = if byte >= b'A' && byte <= b'Z' {
             byte | 0x20
         } else {
@@ -589,44 +522,32 @@ static DNS_CACHE: SpinLock<DnsCache> = SpinLock::new(
     lock_class!("DNS_CACHE", LOCK_LEVEL_REGISTRY),
 );
 
-/// Look up a hostname in the DNS cache.
 pub fn dns_cache_lookup(hostname: &[u8]) -> Option<[u8; 4]> {
     DNS_CACHE.lock().lookup(hostname)
 }
 
-/// Insert a resolved address into the DNS cache.
 pub fn dns_cache_insert(hostname: &[u8], addr: [u8; 4], ttl_secs: u32) {
     DNS_CACHE.lock().insert(hostname, addr, ttl_secs);
 }
 
-/// Flush the entire DNS cache.
 pub fn dns_cache_flush() {
     DNS_CACHE.lock().flush();
 }
 
-// =============================================================================
-// Resolver
-// =============================================================================
-
 /// I/O-free DNS resolver state machine.
 ///
-/// `DnsResolver` owns the retry/timeout/parse orchestration that used to be
-/// welded into [`dns_resolve`] alongside the transport calls.  A driver pumps
-/// it: each [`step`](DnsResolver::step) reports the outcome of the previous
-/// action ([`DnsOutcome`]) and gets back the next action ([`DnsStep`]).  This
-/// makes the bug-prone parts — retry counting, error precedence, response
-/// parsing, ID matching — testable by feeding canned reply bytes, with no
-/// transport, NAPI kthread, scheduler, or clock involved.
+/// A driver pumps it: each [`step`](DnsResolver::step) reports the outcome of
+/// the previous action ([`DnsOutcome`]) and gets back the next ([`DnsStep`]),
+/// so retry counting, error precedence and parsing are testable from canned
+/// reply bytes with no transport, scheduler or clock involved.
 pub struct DnsResolver {
     /// Query rounds still allowed (including the one currently outstanding).
     attempts_remaining: usize,
-    /// DNS transaction ID of the outstanding query.
     cur_id: u16,
     /// Most recent transient failure, returned if all attempts are exhausted.
     last_error: DnsResolveError,
     /// Pre-built query packet; only the 2-byte ID changes between attempts.
     query_buf: slopos_ostd::KVec<u8>,
-    /// Length of the valid query in `query_buf`.
     query_len: usize,
 }
 
@@ -635,31 +556,28 @@ pub struct DnsResolver {
 pub enum DnsOutcome<'a> {
     /// No prior attempt — kick off the first query.
     Start,
-    /// The query could not be transmitted.
     TransmitFailed,
-    /// No reply arrived within the timeout.
     Timeout,
-    /// A reply was received; these are its bytes.
     Reply(&'a [u8]),
 }
 
 /// The next action the driver should take on behalf of a [`DnsResolver`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsStep {
-    /// Transmit the current query (see [`DnsResolver::query_bytes`]) and wait up
-    /// to `timeout_ms` for a reply, then call `step` again with the outcome.
+    /// Transmit [`DnsResolver::query_bytes`], wait up to `timeout_ms` for a
+    /// reply, then call `step` again with the outcome.
     Query { timeout_ms: u32 },
-    /// Resolution succeeded.  The driver should cache `(addr, ttl)`.
+    /// The driver should cache `(addr, ttl)`.
     Resolved { addr: [u8; 4], ttl: u32 },
     /// Resolution failed permanently.
     Failed(DnsResolveError),
 }
 
 impl DnsResolver {
-    /// Build a resolver for `hostname`, allocating and encoding the first
-    /// query.  Returns [`DnsResolveError::InvalidHostname`] if the name cannot
-    /// be encoded, or [`DnsResolveError::NoDnsServer`] on allocation failure
-    /// (matching the legacy error mapping).
+    /// Build a resolver for `hostname`, allocating and encoding the first query.
+    ///
+    /// [`DnsResolveError::InvalidHostname`] if the name cannot be encoded;
+    /// [`DnsResolveError::NoDnsServer`] on allocation failure.
     pub fn new(hostname: &[u8]) -> Result<Self, DnsResolveError> {
         let mut query_buf =
             slopos_ostd::KVec::<u8>::zeroed(512).map_err(|_| DnsResolveError::NoDnsServer)?;
@@ -685,7 +603,6 @@ impl DnsResolver {
         self.cur_id
     }
 
-    /// Patch a fresh transaction ID into the pre-built query for a retry.
     fn refresh_id(&mut self) {
         self.cur_id = QUERY_ID.fetch_add(1, Ordering::Relaxed);
         self.query_buf.as_mut()[0..2].copy_from_slice(&self.cur_id.to_be_bytes());
@@ -713,7 +630,6 @@ impl DnsResolver {
             DnsOutcome::TransmitFailed => self.last_error = DnsResolveError::TransmitFailed,
         }
 
-        // The outstanding attempt concluded without success.
         self.attempts_remaining -= 1;
         if self.attempts_remaining == 0 {
             return DnsStep::Failed(self.last_error);
@@ -727,25 +643,13 @@ impl DnsResolver {
 
 /// Resolve a hostname to an IPv4 address using the kernel's DNS client.
 ///
-/// The retry/timeout/parse/cache orchestration lives in the I/O-free
-/// [`DnsResolver`]; this function is the thin transport driver that pumps it
-/// against the live NIC service.
-///
-/// 1. Short-circuits IP literals and cache hits.
-/// 2. Sends the resolver's query to the DHCP-provided DNS server.
-/// 3. Waits for a response with timeout, feeding outcomes back to the resolver.
-/// 4. Caches and returns the first successful answer.
-///
-/// Returns a structured [`DnsResolveError`] so callers can distinguish
-/// transient issues (timeout, transmit failure) from permanent ones (invalid
-/// hostname, no server).
+/// The thin transport driver that pumps the I/O-free [`DnsResolver`] against
+/// the live NIC service; IP literals and cache hits short-circuit first.
 pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
-    // Shortcut: if it looks like an IP literal, parse it.
     if let Some(addr) = parse_ip_literal(hostname) {
         return Ok(addr);
     }
 
-    // Check cache first.
     if let Some(addr) = dns_cache_lookup(hostname) {
         klog_debug!(
             "dns: cache hit for {:?} -> {}.{}.{}.{}",
@@ -758,20 +662,18 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
         return Ok(addr);
     }
 
-    // The resolver configuration is the authority: an operator's static
-    // override outranks anything DHCP learned, and a second interface's lease
-    // can contribute a server the first NIC never sees.
+    // The resolver config is the authority: a static override outranks DHCP,
+    // and a second interface's lease can carry a server the first NIC never sees.
     let dns_server = crate::resolver::primary_octets().ok_or(DnsResolveError::NoDnsServer)?;
     if dns_server == [0; 4] {
         klog_debug!("dns: no DNS server configured");
         return Err(DnsResolveError::NoDnsServer);
     }
 
-    // Get our IP for the source address.
     let src_ip = crate::iface::first_ipv4().map(|ip| ip.0).unwrap_or([0; 4]);
 
-    // Both buffers live on the heap (KVec): 512 + DNS_MAX_RESPONSE on the stack
-    // would push this function past the stack-safety gate.
+    // Both buffers live on the heap: 512 + DNS_MAX_RESPONSE on the stack would
+    // push this function past the stack-safety gate.
     let mut resolver = DnsResolver::new(hostname)?;
     let mut resp_buf = slopos_ostd::KVec::<u8>::zeroed(DNS_MAX_RESPONSE)
         .map_err(|_| DnsResolveError::NoDnsServer)?;
@@ -789,9 +691,8 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
                     addr[3],
                     ttl
                 );
-                // Passive connectivity evidence. Only this arm counts: the
-                // cache hit and the IP-literal shortcut above return without a
-                // packet, so neither says anything about the network now.
+                // Only this arm is evidence of connectivity: the cache hit and
+                // the IP-literal shortcut above send no packet.
                 crate::connectivity::note_dns_success();
                 dns_cache_insert(hostname, addr, ttl);
                 return Ok(addr);
@@ -800,7 +701,6 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
             DnsStep::Query { timeout_ms } => {
                 let src_port = 49152 + (resolver.query_id() % 16384);
 
-                // Clear any stale RX data.
                 if let Some(d) = crate::net_driver_service::net_driver() {
                     (d.dns_rx_clear)();
                 }
@@ -846,8 +746,8 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
                     resp_len,
                     &resp_buf[..resp_len.min(32)]
                 );
-                // The borrow of `resp_buf` ends when `step` consumes `outcome`
-                // at the top of the next iteration, before it is reused.
+                // The borrow of `resp_buf` ends when the next `step` consumes
+                // `outcome`, before the buffer is reused.
                 outcome = DnsOutcome::Reply(&resp_buf[..resp_len]);
             }
         }

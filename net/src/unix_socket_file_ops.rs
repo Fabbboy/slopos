@@ -1,8 +1,5 @@
-//! FileOps implementation for AF_UNIX sockets.
-//!
-//! The `handle` stored in the open-file entry is a [`SocketHandle`] encoded
-//! as `usize`.  Every method reconstructs the handle at the boundary via
-//! `SocketHandle::from_usize(handle)` before forwarding to `unix_socket::*`.
+//! FileOps implementation for AF_UNIX sockets. The `handle` stored in the
+//! open-file entry is a [`SocketHandle`] encoded as `usize`.
 
 use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
@@ -36,9 +33,8 @@ impl Drop for UnixSocketBacking {
     }
 }
 
-/// Wrap ownership of a freshly-created (or accepted) AF_UNIX endpoint.
-/// On allocation failure the endpoint is closed before returning, so it
-/// cannot leak.
+/// Wrap ownership of a freshly-created (or accepted) AF_UNIX endpoint; on
+/// allocation failure the endpoint is closed rather than leaked.
 pub fn unix_socket_backing(
     handle: SocketHandle,
     account: AccountId,
@@ -88,7 +84,7 @@ impl FileOps for UnixSocketFileOps {
                 };
             }
             if n == 0 {
-                break; // EOF
+                break;
             }
             let n = n as usize;
             match buf.copy_in(total, &staging[..n]) {
@@ -102,7 +98,7 @@ impl FileOps for UnixSocketFileOps {
                 }
             }
             if n < chunk {
-                break; // Short read — don't loop to avoid blocking
+                break; // Looping again on a short read could block.
             }
         }
         total as isize

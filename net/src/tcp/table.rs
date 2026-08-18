@@ -1,51 +1,14 @@
 //! Lock-free demux + per-slot mutation for the TCP connection table.
 //!
-//! ## Read side — wait-free under [`NET_EPOCH`]
+//! Reads (`find`) enter [`NET_EPOCH`] and load the RCU-published indices; no
+//! `SpinLock` is touched on the dispatch path. Mutating a PCB takes exactly
+//! one [`TCP_PCB_SLOTS`] entry; an install or release also takes the matching
+//! [`TCP_SHARDS_WRITE`] lock while the new index is published.
 //!
-//! `find` enters [`NET_EPOCH`] and loads two [`RcuCell`]s — the
-//! per-shard tuple index and the listener-key index. No `SpinLock` is
-//! touched on the dispatch path; multiple readers and a concurrent
-//! writer never serialise.
-//!
-//! ## Write side — per-slot locks + write-serialised index publish
-//!
-//! Established connections live in 16 shards × 4 slots = 64
-//! independently-locked [`PcbSlot`]s. Mutation of a PCB / buffer takes
-//! exactly one [`TCP_PCB_SLOTS`] entry; an install or release also
-//! takes the matching [`TCP_SHARDS_WRITE`] lock for the brief window
-//! during which the published index is updated via
-//! [`RcuCell::replace`]. The displaced index `KBox` is deferred via
-//! the cell's built-in `rcu_call_typed` reclamation.
-//!
-//! Listeners follow the same pattern: a single
-//! [`TCP_LISTENERS_INDEX`] cell + 16 per-listener slots
-//! ([`TCP_LISTENER_SLOTS`]).
-//!
-//! ## Lock-order rules
-//!
-//! All real locks are [`LOCK_LEVEL_RESOURCE`]. The only co-acquire
-//! pattern is `TCP_*_WRITE → TCP_*_SLOTS[i]`, taken in this order
-//! during install/release. Mutation-only call sites
-//! (`tcp::input_process_*`, `tcp::send`, `tcp::recv`, timers) take a
-//! single per-slot lock; no nested acquire.
-//!
-//! Calling any tracked `SpinLock::lock` while a [`NET_EPOCH`] guard
-//! is live is detected by [`slopos_ostd::sync::lock_graph`] and
-//! panics — keep epoch read-side regions structurally short and pure-
-//! RCU-read.
-//!
-//! ## ConnId encoding
-//!
-//! ```text
-//! Bit 31:       1 = listener, 0 = shard
-//! Bits [30:16]: generation of the occupant this id names, never 0
-//! Bits  [15:8]: shard index (0..15) — only when bit 31 = 0
-//! Bits   [7:0]: slot index within shard (0..3) or listener table (0..15)
-//! ```
-//!
-//! Every lookup checks the generation against the slot's current occupant, so
-//! an id that outlived its connection resolves to nothing rather than to
-//! whichever connection was installed in its place.
+//! Lock order: all locks are [`LOCK_LEVEL_RESOURCE`], and the only co-acquire
+//! is `TCP_*_WRITE → TCP_*_SLOTS[i]`. Taking a tracked `SpinLock` while a
+//! [`NET_EPOCH`] guard is live panics via [`slopos_ostd::sync::lock_graph`],
+//! so epoch read-side regions must stay pure-RCU-read.
 
 use core::fmt;
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
@@ -61,25 +24,14 @@ use super::pcb::{Pcb, PcbState};
 use super::tuple::{TcpError, TcpTuple};
 use crate::timer::NET_TIMER_WHEEL;
 
-// =============================================================================
-// Constants
-// =============================================================================
-
-/// Number of independently-hashed shards for established connections.
 pub const NUM_SHARDS: usize = 16;
 
-/// Slots per shard. 16 × 4 = 64 total established-connection capacity.
+/// 16 × 4 = 64 total established-connection capacity.
 pub const SLOTS_PER_SHARD: usize = 4;
 
-/// Maximum number of LISTEN sockets.
 pub const MAX_LISTENERS: usize = 16;
 
-/// Total per-slot PCB lock count across all shards.
 pub const TOTAL_PCB_SLOTS: usize = NUM_SHARDS * SLOTS_PER_SHARD;
-
-// =============================================================================
-// ConnId — type-safe connection handle
-// =============================================================================
 
 /// Type-safe handle to a connection slot. Encodes whether the
 /// connection is in a shard or in the listener table, the shard/slot
@@ -92,16 +44,14 @@ pub const TOTAL_PCB_SLOTS: usize = NUM_SHARDS * SLOTS_PER_SHARD;
 /// bits  7:0  slot index within the shard or the listener table
 /// ```
 ///
-/// The generation is what makes an id name a *connection* rather than a
-/// slot. Slots are recycled — 64 established and 16 listening — and without
-/// it a released-and-refilled slot answers to the previous occupant's id, so
-/// a timer that outlived its connection fires on the connection that replaced
-/// it and a `close` on a stale socket tears down someone else's.
+/// The generation is what makes an id name a *connection* rather than a slot:
+/// slots are recycled, and without it a timer that outlived its connection
+/// fires on the connection that replaced it, and a `close` on a stale socket
+/// tears down someone else's.
 ///
-/// 15 bits gives 32767 generations per slot. Aliasing an id needs the slot
-/// released and refilled that many times while the id is still held, and the
-/// only holders are a timer payload (bounded by the longest TCP timer), a
-/// socket's `conn_id` (cleared at close) and a local across a dropped lock.
+/// 15 bits gives 32767 generations per slot, and the only id holders are a
+/// timer payload (bounded by the longest TCP timer), a socket's `conn_id`
+/// (cleared at close) and a local across a dropped lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct ConnId(u32);
@@ -115,7 +65,6 @@ impl ConnId {
     /// set and the slot index is past the listener table.
     pub const SENTINEL: Self = Self(u32::MAX);
 
-    /// Create a ConnId for an established connection in a shard.
     #[inline]
     pub fn new_shard(shard: usize, slot: usize, generation: u16) -> Self {
         Self(Self::encode_generation(generation) | ((shard as u32) << 8) | (slot as u32))

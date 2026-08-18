@@ -1,14 +1,9 @@
 //! DHCP: the wire format, and the client that speaks it.
 //!
-//! Split so the two halves can be reasoned about separately. [`codec`] is pure
-//! encode/decode; [`client`] is a pure state machine over events and actions.
-//! Neither touches a socket, a timer or a clock, which is what lets a test walk
-//! a lease from DISCOVER through renewal, rebinding and expiry in a few
-//! microseconds of `MockClock` time.
-//!
-//! The transport that binds this to a real interface — a UDP port listener on
-//! 68, the timer arming, and installing what a lease says — is wired on top of
-//! these two and is deliberately the only part that knows about either.
+//! [`codec`] is pure encode/decode and [`client`] a pure state machine over
+//! events and actions; neither touches a socket, a timer or a clock, so a test
+//! can walk a lease through renewal and expiry on `MockClock` time. [`transport`]
+//! is the only half that knows about the interface, the port and the timers.
 
 pub mod client;
 pub mod codec;

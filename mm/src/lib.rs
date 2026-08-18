@@ -44,22 +44,19 @@ use slopos_ostd::sync::BspToken;
 /// Promote the global allocator from OSTD's bootstrap bump pool to
 /// the `mm` crate's BSS-resident `slab::KERNEL_SLAB`. Must run after
 /// the buddy allocator + HHDM are live (Memory phase priority ≥ 10)
-/// and after [`slab::init_kernel_slab`] has transitioned the slab
-/// state machine from `Uninit` to `Live`.
+/// and after [`slab::init_kernel_slab`] has moved the slab state
+/// machine from `Uninit` to `Live`.
 ///
 /// The `&BspToken<'brand>` witness binds the call to the BSP-init
-/// scope opened by `slopos_ostd::sync::run_bsp_init`; it is forwarded
-/// to OSTD's [`register_kernel_slab_handle`], which is one-shot.
+/// scope; the [`register_kernel_slab_handle`] it forwards to is
+/// one-shot.
 pub fn global_allocator_use_kernel_slab<'brand>(token: &BspToken<'brand>) {
     register_kernel_slab_handle(token, crate::slab::slab_handle());
 }
 
 /// Ask every registered reclaimer for up to `want` pages, returning how many
-/// came back.
-///
-/// The kernel-facing entry point for the reclaim tier: `mm` owns the
-/// registrations, so callers reach it here rather than naming
-/// `slopos_ostd::mm::reclaim` and having to know which crates registered.
+/// came back. `mm` owns the registrations, so kernel callers reach the reclaim
+/// tier here rather than through `slopos_ostd::mm::reclaim`.
 pub fn reclaim_pages(want: u32) -> u32 {
     slopos_ostd::mm::reclaim::run(want)
 }

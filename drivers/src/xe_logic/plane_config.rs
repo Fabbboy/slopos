@@ -1,10 +1,8 @@
-//! Decode/encode of the primary display plane's live configuration: the
-//! `PLANE_CTL` control word, `PLANE_SIZE`, `PLANE_POS` and the linear
-//! `PLANE_STRIDE` unit.
+//! Decode/encode of the primary display plane's live configuration: `PLANE_CTL`,
+//! `PLANE_SIZE`, `PLANE_POS` and the linear `PLANE_STRIDE` unit.
 //!
-//! Firmware may leave the plane Y-tiled and render-compressed, while SlopOS
-//! scans out of a linear framebuffer, so the driver reads back whatever it finds
-//! and re-points the plane — hence the decode / encode-repoint split here.
+//! Firmware may leave the plane Y-tiled and render-compressed while SlopOS scans
+//! out of a linear framebuffer, hence the decode / encode-repoint split.
 
 use slopos_abi::PixelFormat;
 
@@ -19,8 +17,7 @@ use super::regs::{
 /// different unit (X-tile 512 B, Y-tile 128 B), so this is linear-only.
 pub const LINEAR_STRIDE_UNIT_BYTES: u32 = 64;
 
-// Derived from the placed register constants so the register map stays the only
-// source of truth, and `const` rather than literals so they work as match patterns.
+// Derived from the register map, and `const` so they work as match patterns.
 const FORMAT_FIELD_RGB8888: u32 = reg_field_get(PLANE_CTL_FORMAT_MASK, PLANE_CTL_FORMAT_XRGB8888);
 const TILING_FIELD_LINEAR: u32 = reg_field_get(PLANE_CTL_TILING_MASK, PLANE_CTL_TILING_LINEAR);
 const TILING_FIELD_X: u32 = reg_field_get(PLANE_CTL_TILING_MASK, PLANE_CTL_TILING_X);
@@ -81,7 +78,6 @@ impl ColorOrder {
         }
     }
 
-    /// Zero for BGRX.
     pub const fn ctl_bit(self) -> u32 {
         match self {
             Self::Rgbx => PLANE_CTL_COLOR_ORDER_RGBX,
@@ -207,8 +203,7 @@ pub const fn decode_ctl(plane_ctl: u32) -> PlaneCtl {
 /// plane leaves it.
 pub const fn encode_ctl_linear(format: PlaneFormat, color_order: ColorOrder, enable: bool) -> u32 {
     let enable_bit = if enable { PLANE_CTL_ENABLE } else { 0 };
-    // Linear tiling and render-decompression are both all-zero bits, so they are
-    // left out of the OR rather than spelled `| 0`.
+    // Linear tiling and render-decompression are all-zero bits, hence absent here.
     reg_field_set(PLANE_CTL_FORMAT_MASK, format.to_field())
         | color_order.ctl_bit()
         | PLANE_CTL_YUV_RANGE_CORRECTION_DISABLE
@@ -263,8 +258,7 @@ pub const fn plane_to_pixel_format(plane_format_bits: u32) -> Option<PixelFormat
         .to_pixel_format()
 }
 
-// Compile-time proof that each encode/decode pair inverts exactly, over the
-// representative live-panel cases; a regression in the bit math fails the build.
+// Compile-time proof that each encode/decode pair inverts, over the live-panel cases.
 const _: () = {
     assert!(decode_size(encode_size(1920, 1080)).0 == 1920);
     assert!(decode_size(encode_size(1920, 1080)).1 == 1080);
@@ -286,8 +280,6 @@ const _: () = {
     assert!(live.render_decompressed);
     assert!(matches!(live.color_order, ColorOrder::Bgrx));
 
-    // Re-encoding the linear repoint target keeps format/order/enable while
-    // forcing linear tiling and clearing render-decompression.
     let repoint = encode_ctl_linear(PlaneFormat::Rgb8888, ColorOrder::Bgrx, true);
     let back = decode_ctl(repoint);
     assert!(back.enable);
@@ -296,7 +288,6 @@ const _: () = {
     assert!(!back.render_decompressed);
     assert!(matches!(back.color_order, ColorOrder::Bgrx));
 
-    // RGBX color order survives the same round-trip.
     let rgbx = decode_ctl(encode_ctl_linear(
         PlaneFormat::Rgb8888,
         ColorOrder::Rgbx,
@@ -305,7 +296,6 @@ const _: () = {
     assert!(!rgbx.enable);
     assert!(matches!(rgbx.color_order, ColorOrder::Rgbx));
 
-    // Tiling helpers round-trip for the X / Y / Yf field values.
     assert!(matches!(Tiling::from_field(TILING_FIELD_X), Tiling::XTiled));
     assert!(matches!(
         Tiling::from_field(TILING_FIELD_YF),

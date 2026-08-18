@@ -381,7 +381,6 @@ struct IfaceTableInner {
 /// live table is already using.
 static NEXT_IFINDEX: AtomicU32 = AtomicU32::new(1);
 
-/// The kernel's interface table.
 pub static IFACE_TABLE: IfaceTable =
     IfaceTable::new(lock_class!("NET_IFACES", LOCK_LEVEL_REGISTRY));
 
@@ -551,7 +550,6 @@ impl IfaceTable {
         }
     }
 
-    /// Number of registered interfaces.
     pub fn count(&self) -> usize {
         self.inner.lock().slots.iter().flatten().count()
     }
@@ -626,7 +624,6 @@ impl IfaceTable {
         self.with_mut(ifindex, |iface| iface.dhcp_managed = managed)
     }
 
-    /// Set the interface MTU.
     pub fn set_mtu(&self, ifindex: u32, mtu: u16) -> Result<(), IfaceError> {
         // 68 is the IPv4 minimum reassembly buffer; below it nothing is legally
         // sendable.
@@ -660,7 +657,6 @@ impl IfaceTable {
         })?
     }
 
-    /// Remove one address.
     pub fn del_addr(&self, ifindex: u32, addr: Ipv4Addr, prefix_len: u8) -> Result<(), IfaceError> {
         self.with_mut(ifindex, |iface| {
             let n = iface.n_addrs as usize;

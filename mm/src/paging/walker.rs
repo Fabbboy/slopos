@@ -1,8 +1,7 @@
 //! Read-only page-table resolution.
 //!
-//! The walk takes one entry by value per level through
-//! [`super::page_table_defs::entry_at`], so it never forms a reference
-//! into a page-table frame and needs no receiver to anchor one to.
+//! One entry is taken by value per level, so the walk never forms a
+//! reference into a page-table frame.
 
 use super::page_table_defs::{PageTableEntry, PageTableLevel, entry_at};
 use crate::paging_defs::PAGE_SIZE_4KB;
@@ -45,10 +44,8 @@ pub fn walk_phys(pml4_phys: PhysAddr, vaddr: VirtAddr) -> MmResult<WalkResult> {
         }
 
         if entry.is_huge() && level.supports_huge_pages() {
-            // `supports_huge_pages` is exactly the set of levels with a
-            // page size, so the fallback is unreachable — it is here so a
-            // read-only walk in a `#![forbid(unsafe_code)]` crate carries
-            // no panic edge.
+            // Unreachable fallback: `supports_huge_pages` is exactly the set
+            // of levels with a page size. It keeps this walk panic-edge free.
             let page_size = level.page_size().unwrap_or(PAGE_SIZE_4KB);
             return Ok(WalkResult {
                 entry,

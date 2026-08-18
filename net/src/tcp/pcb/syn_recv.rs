@@ -1,16 +1,7 @@
 //! `SynReceived` state: server saw a SYN, sent SYN+ACK, waiting for ACK.
 //!
-//! RFC 793 §3.4 segment arrival at `SYN_RECEIVED` has three cases:
-//!
-//! 1. **RST** → release the PCB and flag `RESET_RECEIVED`.
-//! 2. **ACK with bad value** → reply with `RST(seq = ack_num)`.
-//!    A "bad" ACK here means `ack_num < snd_una` or
-//!    `ack_num > snd_nxt`.
-//! 3. **Valid ACK** → transition to `Data` / `ClosePhase::Established`.
-//!    The connection is now fully open.
-//!
-//! Non-ACK segments are dropped silently (they would be impossible
-//! in a correct 3WHS — at this point the peer must send ACK).
+//! Segment arrival follows RFC 793 §3.4.  Non-ACK segments are dropped
+//! silently — a correct 3WHS cannot produce one here.
 
 use core::mem;
 
@@ -23,7 +14,6 @@ use super::data::DataState;
 use super::{Pcb, PcbState};
 use crate::timer::TimerToken;
 
-/// State-specific payload for `SYN_RECEIVED`.
 #[derive(Debug)]
 pub struct SynRecvState {
     pub iss: SeqNum,
@@ -70,14 +60,9 @@ impl SynRecvState {
 
     /// Apply an incoming segment to a SYN_RECEIVED PCB.
     ///
-    /// Returns `Actions` by value rather than `Result<Actions, _>`:
-    /// wrapping the ~1 KiB `Actions` in a `Result` discriminant pushes
-    /// the per-handler stack frame above the gate. The lone fallible
-    /// path — `KBox::try_init(DataState::init_*)` — `.expect`s the
-    /// allocation; OOM here would kill the connection regardless and
-    /// the kernel's allocator panics on whole-system OOM. Threading
-    /// `Result<KBox<Actions>, _>` is tracked as a follow-up that needs
-    /// the matching out-param refactor across the dispatcher.
+    /// Returns `Actions` by value rather than `Result<Actions, _>`: wrapping
+    /// the ~1 KiB `Actions` in a `Result` discriminant pushes the per-handler
+    /// stack frame above the stack-size gate.
     pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, _now_ms: u64) -> Actions {
         let mut actions = Actions::new();
 
@@ -86,9 +71,9 @@ impl SynRecvState {
             unreachable!("SynRecvState::on_segment called with non-SynRecv state");
         };
 
-        // RST — RFC 5961: validate sequence against receive window.
-        // In SYN_RECEIVED, any in-window RST tears down the half-open
-        // connection (no challenge ACK — the connection isn't established).
+        // RST — RFC 5961: validate sequence against receive window.  Any
+        // in-window RST tears down the half-open connection; no challenge ACK,
+        // since the connection is not established.
         if hdr.is_rst() {
             let effective_wnd = s.rcv_wnd as u32;
             match challenge_ack::classify_rst(hdr.seq_num, s.rcv_nxt.raw(), effective_wnd) {
@@ -103,19 +88,16 @@ impl SynRecvState {
             }
         }
 
-        // Must have ACK.
         if !hdr.is_ack() {
             return actions;
         }
 
-        // Validate ACK range.
         if seq_lt(hdr.ack_num, s.snd_una.raw()) || seq_gt(hdr.ack_num, s.snd_nxt.raw()) {
             actions.push_segment(SegmentBuilder::bare_rst(tuple, hdr.ack_num));
             return actions;
         }
 
-        // Valid ACK → ESTABLISHED.  Capture every field we need out
-        // of the SynRecv state before we swap the variant out.
+        // Capture every field we need before the variant is swapped out.
         let iss = s.iss;
         let irs = s.irs;
         let snd_nxt = s.snd_nxt;
@@ -133,10 +115,8 @@ impl SynRecvState {
         let ts_enabled = s.ts_enabled;
         let _peer_tsval = s.peer_tsval;
         let _ = s;
-        // Heap-direct: build the new DataState in place inside a fresh
-        // KBox. Allocation failure surfaces as `TcpError::OutOfMemory`
-        // up through `Pcb::on_segment` -> `tcp::input`, which maps it
-        // to `ERRNO_ENOMEM` at the syscall boundary.
+        // TODO(tech-debt): `.expect` on OOM kills the connection — thread
+        // `Result<KBox<Actions>, _>` out once the dispatcher takes an out-param.
         let data = slopos_ostd::KBox::try_init(DataState::init_new(
             iss,
             irs,
@@ -155,8 +135,7 @@ impl SynRecvState {
         let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
 
         actions.notify |= SocketNotify::NEW_ESTABLISHED | SocketNotify::ACCEPT_WAKE;
-        // Note: no outgoing segment — the 3WHS is complete; the peer's
-        // ACK doesn't need a response.
+        // No outgoing segment: the 3WHS is complete.
         let _ = tuple;
         actions
     }

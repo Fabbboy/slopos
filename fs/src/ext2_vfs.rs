@@ -12,53 +12,29 @@ use slopos_ostd::sync::{InitFlag, Mutex};
 
 const EXT2_ROOT_INODE: u32 = 2;
 
-// ============================================================================
-// Persistent mounted-filesystem state.
-//
-// Both the superblock geometry AND the write-back buffer cache live here for
-// the lifetime of the mount. The cache is *not* rebuilt per call: the thin,
-// allocation-free `Ext2Fs` handle borrows it inside `with_fs`. This is what
-// makes durability structural — dirty blocks accumulate in a cache that is
-// never dropped, so a missed flush can no longer lose data; it is persisted
-// later by eviction, the background flusher, an explicit `sync`, or shutdown.
-// ============================================================================
-
 struct CachedExt2 {
-    /// The filesystem's sole writable handle to its backing block device —
-    /// an owned capability (e.g. a virtio-blk `BlockWriteToken`) boxed behind
-    /// `dyn BlockDevice`. Held for the kernel's lifetime, so no other code can
-    /// acquire a second writer to this device (Layer 1: ownership = exclusion).
+    /// The filesystem's sole writable handle to its backing block device, held
+    /// for the kernel's lifetime so no second writer to it can be acquired.
     device: KBox<dyn BlockDevice + Send + Sync>,
     superblock: Ext2Superblock,
     block_size: u32,
     inode_size: u16,
     /// The persistent write-back buffer cache, sized to `block_size` at mount.
     cache: BlockCache,
-    /// The on-disk superblock is stale (free-count drift from a mutating
-    /// op). Lives here — not only on the per-call `Ext2Fs` handle — so the
-    /// background flusher's sync sees dirtiness produced by earlier ops.
+    /// Free-count drift from a mutating op. Lives here — not only on the
+    /// per-call `Ext2Fs` handle — so a later sync sees earlier ops' dirtiness.
     superblock_dirty: bool,
 }
 
-/// The mounted-filesystem lock is a *sleeping* mutex: ext2 operations
-/// perform block-device I/O whose completion waits are scheduler-backed,
-/// so the holder may legitimately deschedule mid-operation. A spinning,
-/// preemption-disabling lock here (the previous `PreemptMutex`) made every
-/// contender burn its CPU unpreemptibly for the full duration of a
-/// multi-barrier sync — and suppressed the holder CPU's timer-tick
-/// scheduling entirely, which is exactly how a stalled flush froze the
-/// whole system. Linux holds sleeping inode/fs mutexes across block I/O
-/// for the same reason.
+/// A *sleeping* mutex: ext2 operations perform block-device I/O whose
+/// completion waits are scheduler-backed, so the holder may legitimately
+/// deschedule mid-operation.
 static CACHED_EXT2: Mutex<Option<CachedExt2>> =
     Mutex::new(None, lock_class!("CACHED_EXT2", LOCK_LEVEL_RESOURCE));
 static EXT2_VFS_INIT: InitFlag = InitFlag::new();
 
-// ---- Background writeback (flusher) plumbing ----
-
-/// Best-effort count of dirty cache blocks awaiting writeback, published by
-/// each mutating op and the flusher. The flusher's wait predicate reads only
-/// this and the stop flag — it performs no I/O and takes no lock, so it stays
-/// a pure observer.
+/// Best-effort count of dirty cache blocks awaiting writeback. The flusher's
+/// wait predicate reads only this and the stop flag, so it takes no lock.
 static DIRTY_PENDING: AtomicUsize = AtomicUsize::new(0);
 static FLUSH_STOP: KernelIoStop = KernelIoStop::new(
     "ext2-flush",
@@ -66,12 +42,10 @@ static FLUSH_STOP: KernelIoStop = KernelIoStop::new(
 );
 static FLUSH_THREAD_STARTED: InitFlag = InitFlag::new();
 
-/// Periodic writeback cadence — analog of Linux `dirty_writeback_centisecs`
-/// (5 s). Dirty blocks never linger longer than this between syncs.
+/// Periodic writeback cadence — analog of Linux `dirty_writeback_centisecs`.
 const FLUSH_INTERVAL_MS: u64 = 5_000;
 /// Eager-wake threshold — analog of `dirty_background_ratio`. Past this many
-/// dirty blocks a mutating op kicks the flusher immediately rather than waiting
-/// for the periodic tick.
+/// dirty blocks a mutating op kicks the flusher instead of awaiting the tick.
 const FLUSH_EAGER_THRESHOLD: usize = 48;
 /// First retry delay after a failed sync (exponential backoff floor).
 const FLUSH_BACKOFF_MIN_MS: u64 = 50;
@@ -90,8 +64,6 @@ impl StaticExt2Vfs {
         let cached = guard.as_mut().ok_or(VfsError::IoError)?;
         let (superblock, block_size, inode_size) =
             (cached.superblock, cached.block_size, cached.inode_size);
-        // Borrow the persistent cache and device disjointly; building the
-        // handle allocates nothing.
         let mut fs = Ext2Fs::new(
             &*cached.device,
             &mut cached.cache,
@@ -106,28 +78,18 @@ impl StaticExt2Vfs {
         let dirty = fs.dirty_count();
         drop(fs);
 
-        // Write-back policy: do NOT synchronously flush per op. Dirty blocks
-        // stay in the persistent cache and are written back by eviction, the
-        // background flusher, an explicit `sync`, or shutdown. Durability is no
-        // longer hostage to remembering a per-call flush.
+        // Deliberately no per-op flush: dirty blocks stay in the persistent
+        // cache until eviction, the background flusher, `sync`, or shutdown.
         if result.is_ok() {
-            // Publish the in-memory superblock changes from THIS op only on
-            // success; a failed op must not leak free-count drift into the
-            // live superblock.
+            // Publish superblock changes only on success: a failed op must not
+            // leak free-count drift into the live superblock.
             cached.superblock = new_superblock;
             cached.superblock_dirty = new_superblock_dirty;
             note_dirty(dirty);
         }
-        // NOTE (crash/failure atomicity): on the error path we leave any blocks
-        // the failed op already dirtied in the persistent cache (we do not
-        // track per-op write sets, so we cannot selectively undo them without
-        // dropping other ops' legitimately-dirty blocks). A later sync may thus
-        // persist partial metadata from a failed op (e.g. an allocated-but-
-        // unreferenced inode), which is fsck-recoverable free-count/orphan
-        // drift — the exact class a write-ahead journal (jbd2-style) would make
-        // atomic. Adding that journal is the documented next durability layer;
-        // see the crate notes. Validation-only failures (the common case)
-        // mutate nothing and are unaffected.
+        // TODO(tech-debt): a failed op leaves its dirtied blocks cached, so a
+        // later sync can persist partial metadata (fsck-recoverable orphan and
+        // free-count drift) — the real fix is a write-ahead journal.
         result
     }
 }
@@ -264,22 +226,16 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
 pub static EXT2_VFS_STATIC: StaticExt2Vfs = StaticExt2Vfs;
 
 pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) -> VfsResult<()> {
-    // Atomically claim the one-shot init. A second call returns an error rather
-    // than silently dropping the caller's capability token (which would release
-    // the exclusive write claim) while falsely reporting success.
+    // A second call must error rather than silently drop the caller's
+    // capability token, which would release the exclusive write claim.
     if !EXT2_VFS_INIT.init_once() {
         return Err(VfsError::AlreadyExists);
     }
 
-    // Wrap the device in a read-time integrity verifier if the image carries a
-    // verity trailer (no-op otherwise). Corruption of a not-yet-written block
-    // then fails the read loudly instead of returning bad bytes.
     let device = crate::verity::build_verified(device);
 
-    // Validate the filesystem against the owned device. On failure, roll the
-    // one-shot flag back so it stays in lockstep with `CACHED_EXT2`
-    // (`is_set()` ⟺ a filesystem is actually mounted) and a later attempt can
-    // retry. The owned `device` drops here, releasing its (failed) claim.
+    // Every failure below rolls the one-shot flag back, keeping `is_set()` in
+    // lockstep with `CACHED_EXT2` so a later attempt can retry.
     let (superblock, block_size, inode_size) = match Ext2Fs::mount_params(&*device) {
         Ok(parts) => parts,
         Err(e) => {
@@ -288,7 +244,6 @@ pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) ->
         }
     };
 
-    // Build the persistent buffer cache sized to this filesystem's block size.
     let cache = match BlockCache::new(block_size) {
         Ok(c) => c,
         Err(e) => {
@@ -311,18 +266,14 @@ pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) ->
     });
     drop(guard);
 
-    // Start the background writeback flusher once a filesystem is mounted.
-    // Spawn failures are non-fatal: eviction + explicit `sync` + shutdown still
-    // provide durability, just without periodic background writeback.
     start_flusher();
 
     Ok(())
 }
 
 /// Flush all dirty cached blocks and the superblock to the backing device with
-/// ordered durability barriers (see [`Ext2Fs::sync`]). Safe to call from any
-/// context that may hold no FS lock (the flusher thread, `vfs` sync, kernel
-/// shutdown). A no-op if no ext2 filesystem is mounted.
+/// ordered durability barriers (see [`Ext2Fs::sync`]). Takes the FS lock, so
+/// the caller must hold none. A no-op if no ext2 filesystem is mounted.
 pub fn ext2_vfs_sync() -> VfsResult<()> {
     if !EXT2_VFS_INIT.is_set() {
         return Ok(());
@@ -333,8 +284,7 @@ pub fn ext2_vfs_sync() -> VfsResult<()> {
     let Some(cached) = guard.as_mut() else {
         return Ok(());
     };
-    // Nothing dirty anywhere: skip the device barriers entirely instead of
-    // issuing no-op flush commands every periodic tick.
+    // Skip the device barriers rather than issue no-op flushes every tick.
     if cached.cache.dirty_count() == 0 && !cached.superblock_dirty {
         DIRTY_PENDING.store(0, Ordering::Relaxed);
         return Ok(());
@@ -359,8 +309,8 @@ pub fn ext2_vfs_sync() -> VfsResult<()> {
 }
 
 /// Request a final synchronous writeback at kernel shutdown. Must be called
-/// while interrupts are still enabled (the virtio-blk completion path needs
-/// IRQs) — see `boot::shutdown::kernel_shutdown`. Best-effort.
+/// while interrupts are still enabled — the virtio-blk completion path needs
+/// them. Best-effort.
 pub fn ext2_vfs_shutdown_sync() {
     FLUSH_STOP.request();
     let _ = ext2_vfs_sync();
@@ -372,8 +322,8 @@ fn start_flusher() {
     }
     slopos_ostd::sync::kernel_io_task::register_kernel_io_stop(&FLUSH_STOP);
     if slopos_ostd::spawn_kernel_io!("ext2-flush", ext2_flusher_entry).is_err() {
-        // Roll back so a later mount attempt can retry the spawn; durability
-        // is unaffected (eviction/sync/shutdown still persist).
+        // Roll back so a later mount attempt can retry the spawn; durability is
+        // unaffected, since eviction, `sync` and shutdown still persist.
         FLUSH_THREAD_STARTED.reset();
     }
 }
@@ -382,22 +332,16 @@ fn start_flusher() {
 ///
 /// Sleeps up to [`FLUSH_INTERVAL_MS`], or wakes early when a mutating op
 /// crosses [`FLUSH_EAGER_THRESHOLD`] dirty blocks, then performs one ordered
-/// [`ext2_vfs_sync`]. Runs at `TaskPriority::KernelIo` (above user tasks) so
-/// writeback keeps up even under user load. The wait predicate only observes
-/// atomics — no I/O, no locks — keeping it pure.
+/// [`ext2_vfs_sync`]. Runs at `TaskPriority::KernelIo` so writeback keeps up
+/// under user load.
 ///
-/// A failed sync leaves blocks dirty, so `DIRTY_PENDING > 0` would satisfy
-/// the wait predicate immediately and re-run sync back-to-back forever — an
-/// unbounded retry storm against a device that just demonstrated it cannot
-/// complete a write/flush. Persistent failures therefore back off
-/// exponentially ([`FLUSH_BACKOFF_MIN_MS`] → [`FLUSH_BACKOFF_MAX_MS`]),
-/// ignoring dirty-counter wakes until the backoff sleep elapses (cf. Linux
-/// writeback's congestion backoff).
+/// A failed sync leaves blocks dirty, which would satisfy the wait predicate
+/// immediately and retry back-to-back forever, so persistent failures back off
+/// exponentially ([`FLUSH_BACKOFF_MIN_MS`] → [`FLUSH_BACKOFF_MAX_MS`]) and
+/// ignore dirty-counter wakes until the backoff sleep elapses.
 fn ext2_flusher_entry(token: KernelIoToken<'static>) {
     let mut backoff_ms: u64 = 0;
     loop {
-        // A backoff pass ignores the dirty counter: the device just failed a
-        // write, so a dirty block is not a reason to try again sooner.
         let waited = if backoff_ms > 0 {
             token.park_timeout(&FLUSH_STOP, || false, backoff_ms)
         } else {
@@ -408,8 +352,8 @@ fn ext2_flusher_entry(token: KernelIoToken<'static>) {
             )
         };
 
-        // One last sync either way, and on the stop path it is the whole point:
-        // dirty blocks that never reach the device are lost.
+        // Sync on the stop path too: dirty blocks that never reach the device
+        // are lost.
         let result = ext2_vfs_sync();
         backoff_ms = if result.is_err() {
             (backoff_ms * 2).clamp(FLUSH_BACKOFF_MIN_MS, FLUSH_BACKOFF_MAX_MS)
@@ -426,10 +370,6 @@ fn ext2_flusher_entry(token: KernelIoToken<'static>) {
 pub fn ext2_vfs_is_initialized() -> bool {
     EXT2_VFS_INIT.is_set()
 }
-
-// ============================================================================
-// Helpers
-// ============================================================================
 
 fn ext2_error_to_vfs(e: Ext2Error) -> VfsError {
     match e {
@@ -480,16 +420,9 @@ fn ext2_file_type_to_vfs(file_type: u8) -> FileType {
     }
 }
 
-// ============================================================================
-// Reclaim
-// ============================================================================
-
-/// The block cache as a reclaim source.
-///
-/// Clean cached blocks are the cheapest pages in the kernel to give back: the
-/// bytes are already on disk, so dropping one costs a re-read and can lose
-/// nothing. Dirty ones are deliberately out of scope — writing them back is
-/// I/O, on a path that runs precisely because memory is short.
+/// The block cache as a reclaim source. Only clean blocks are in scope:
+/// dropping one costs a re-read and loses nothing, whereas writing a dirty one
+/// back is I/O on a path that runs precisely because memory is short.
 struct Ext2CacheReclaim;
 
 impl slopos_ostd::mm::reclaim::Reclaimable for Ext2CacheReclaim {
@@ -498,10 +431,9 @@ impl slopos_ostd::mm::reclaim::Reclaimable for Ext2CacheReclaim {
     }
 
     fn reclaimable_pages(&self) -> u32 {
-        // `try_lock`, and zero when it fails: reclaim runs on an allocation
-        // failure path that may already hold an allocator lock, and the FS
-        // lock is a sleeping mutex held across block I/O. Waiting here would
-        // block on the very I/O that needs memory to proceed.
+        // `try_lock` only: reclaim runs on an allocation-failure path that may
+        // already hold an allocator lock, and the FS lock is a sleeping mutex
+        // held across block I/O — waiting blocks on the I/O that needs memory.
         let Some(guard) = CACHED_EXT2.try_lock() else {
             return 0;
         };

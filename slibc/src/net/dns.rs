@@ -1,15 +1,10 @@
 //! DNS resolution — getaddrinfo and friends.
-//! The wizards ask the Slopsea to reveal its hidden addresses.
 
 use crate::mem::malloc;
 use crate::pal::{Pal, Sys};
 use crate::string::u_strlen;
 
 use super::addr::{AF_INET, SOCK_STREAM, SockAddr, SockAddrIn};
-
-// =============================================================================
-// getaddrinfo error codes
-// =============================================================================
 
 pub const EAI_NONAME: i32 = -2;
 pub const EAI_AGAIN: i32 = -3;

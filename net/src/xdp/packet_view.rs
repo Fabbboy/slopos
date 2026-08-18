@@ -1,10 +1,8 @@
 //! Safe view over a received frame for XDP filters.
 //!
-//! [`PacketView`] wraps the in-flight [`PacketBuf`] and exposes bounds-checked,
-//! on-demand header parses plus raw mutable access. At the ingress hook the
-//! packet's `head` is still `0`, so [`PacketView::frame`] is the complete L2
-//! frame (Ethernet header onward); all parses are relative to it. Header parses
-//! reuse the stack's existing parsers rather than reinventing them.
+//! At the ingress hook the packet's `head` is still `0`, so
+//! [`PacketView::frame`] is the complete L2 frame and all parses are relative
+//! to it.
 
 use crate::checksum;
 use crate::packetbuf::PacketBuf;
@@ -13,79 +11,66 @@ use crate::tcp::header::{TcpHeader, parse_header};
 use crate::types::{EtherType, IpProtocol, Ipv4Addr, MacAddr};
 use crate::{ETH_HEADER_LEN, IPV4_HEADER_LEN};
 
-/// Parsed Ethernet header fields.
 #[derive(Clone, Copy, Debug)]
 pub struct EthernetView {
-    /// Destination MAC.
     pub dst: MacAddr,
-    /// Source MAC.
     pub src: MacAddr,
-    /// EtherType (host order).
+    /// Host order.
     pub ethertype: u16,
 }
 
-/// Parsed IPv4 header fields.
 #[derive(Clone, Copy, Debug)]
 pub struct Ipv4View {
-    /// IP header length in bytes (IHL × 4).
+    /// In bytes (IHL × 4).
     pub header_len: usize,
-    /// L4 protocol number.
     pub protocol: u8,
-    /// Source address.
     pub src: Ipv4Addr,
-    /// Destination address.
     pub dst: Ipv4Addr,
 }
 
-/// Parsed UDP header fields.
 #[derive(Clone, Copy, Debug)]
 pub struct UdpView {
-    /// Source port (host order).
+    /// Host order.
     pub src_port: u16,
-    /// Destination port (host order).
+    /// Host order.
     pub dst_port: u16,
-    /// UDP length field (host order).
+    /// Host order.
     pub length: u16,
 }
 
-/// Safe, bounds-checked view over a received frame.
 pub struct PacketView<'a> {
     pkt: &'a mut PacketBuf,
 }
 
 impl<'a> PacketView<'a> {
-    /// Wrap a packet for filtering. The packet's active region must be the full
-    /// L2 frame (the case at the ingress hook).
+    /// The packet's active region must be the full L2 frame (the case at the
+    /// ingress hook).
     #[inline]
     pub fn new(pkt: &'a mut PacketBuf) -> Self {
         Self { pkt }
     }
 
-    /// The full L2 frame bytes.
     #[inline]
     pub fn frame(&self) -> &[u8] {
         self.pkt.payload()
     }
 
-    /// The full L2 frame bytes, mutable (filters may rewrite headers/payload).
     #[inline]
     pub fn frame_mut(&mut self) -> &mut [u8] {
         self.pkt.payload_mut()
     }
 
-    /// Alias for [`frame_mut`](Self::frame_mut) — raw mutable frame access.
+    /// Alias for [`frame_mut`](Self::frame_mut).
     #[inline]
     pub fn payload_mut(&mut self) -> &mut [u8] {
         self.pkt.payload_mut()
     }
 
-    /// Frame length in bytes.
     #[inline]
     pub fn len(&self) -> usize {
         self.pkt.len()
     }
 
-    /// `true` if the frame is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.pkt.is_empty()
@@ -191,7 +176,6 @@ impl<'a> PacketView<'a> {
         if frame.len() <= l4_start + 18 {
             return false;
         }
-        // Zero the checksum field before computing.
         frame[l4_start + 16] = 0;
         frame[l4_start + 17] = 0;
         let csum = tcp_checksum::tcp_checksum(src, dst, &frame[l4_start..]);

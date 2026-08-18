@@ -198,10 +198,9 @@ pub fn test_so_rcvbuf_resize() -> TestResult {
     }
     let sock = sock as u32;
 
-    // `SO_RCVBUF` is a byte count; the queue holds whole datagrams, and every
-    // one of those occupies a buffer from the global packet pool. One byte of
-    // buffer therefore does not buy one slot, and no byte count buys more
-    // slots than the pool has buffers.
+    // `SO_RCVBUF` counts bytes, but the queue holds whole datagrams and each one
+    // occupies a global pool buffer: slots are neither one per byte nor able to
+    // exceed the pool.
     let size: u32 = 256;
     assert_eq_test!(
         socket_setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &size.to_ne_bytes()),

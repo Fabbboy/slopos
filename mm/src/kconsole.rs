@@ -1,8 +1,5 @@
-//! Diagnostic-console command over memory state.
-//!
-//! One command rather than several: buddy, per-CPU cache, slab and the TLB
-//! quiesce epoch are the four numbers that answer "is memory the reason this
-//! machine has stopped", and reading them together is what makes them useful.
+//! Diagnostic-console command over memory state: buddy, per-CPU cache, slab
+//! and the TLB quiesce epoch, read together in one command.
 
 use slopos_ostd::kconsole::{KCMD_INFORMATIONAL, KConsole};
 use slopos_ostd::kline;
@@ -38,11 +35,8 @@ fn run_memory(kc: &mut KConsole<'_>) {
         heap.free_count
     );
 
-    // The heap's own backing, charged to the root as `KernelMeta`. Printed
-    // beside the buddy's `allocated` because the pair is what makes the root's
-    // row reconcilable: heap pages are a subset of allocated ones, so a
-    // charged count above `allocated` is a leak in the accounting rather than
-    // in the allocator.
+    // Heap pages are a subset of the buddy's `allocated`, so a charged count
+    // above it is a leak in the accounting rather than in the allocator.
     let heap_pages = crate::slab::page::charged_heap_pages();
     kline!(
         kc,
@@ -52,9 +46,6 @@ fn run_memory(kc: &mut KConsole<'_>) {
         pages.allocated
     );
 
-    // What could be given back under pressure, per registrant. A reclaimer
-    // that has quietly stopped finding anything reads as zero here rather
-    // than as an allocation failure nobody can explain.
     slopos_ostd::mm::reclaim::for_each_reclaimer(|name, pages| {
         kline!(kc, "reclaim: {:<18} {} pages", name, pages);
     });
@@ -68,8 +59,6 @@ fn run_memory(kc: &mut KConsole<'_>) {
         last_deferred
     );
 
-    // Bounded by CPU count. A per-CPU cache that stopped draining is the shape
-    // an allocator stall takes before it becomes an out-of-memory panic.
     for cpu in 0..slopos_ostd::cpu::x86_64::pcr::get_cpu_count() {
         let Some(pcp) = crate::page_alloc::get_pcp_stats(cpu) else {
             continue;

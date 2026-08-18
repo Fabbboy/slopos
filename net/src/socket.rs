@@ -16,14 +16,11 @@ use crate::tcp;
 use crate::tcp::listener as tcp_listener;
 use crate::types::{Ipv4Addr, NetError, Port, SockAddr};
 
-/// Internal storage for protocol-specific socket state.
 pub enum SocketInner {
-    /// UDP socket state (stateless at protocol level).
     Udp(UdpSocketInner),
     Icmp(IcmpSocketInner),
     Tcp(TcpSocketInner),
     Raw(RawSocketInner),
-    /// AF_UNIX stream socket — actual state lives in `unix_socket::UNIX_STATE`.
     Unix(UnixSocketInner),
 }
 
@@ -34,100 +31,73 @@ pub struct IcmpSocketInner {
 }
 
 pub struct TcpSocketInner {
-    /// Optional transport connection identifier.
     pub conn_id: Option<tcp::ConnId>,
-    /// Two-queue listen state for TCP listening sockets.
     pub listen: Option<tcp_listener::TcpListenState>,
 }
 
 pub struct RawSocketInner;
 
 /// AF_UNIX socket — the real state (ring buffers, wait queues) lives in
-/// `unix_socket::UNIX_STATE`.  This struct only records which unix slot
-/// and which side of the pair this FD represents.
+/// `unix_socket::UNIX_STATE`.
 pub struct UnixSocketInner {
     pub unix_idx: u32,
 }
 
 /// Socket status and mode flags.
-///
-/// This is a small bitflags-like wrapper with no external dependency.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SocketFlags(u32);
 
 impl SocketFlags {
-    /// No flags set.
     pub const NONE: Self = Self(0);
-    /// Non-blocking I/O mode.
     pub const O_NONBLOCK: Self = Self(1 << 0);
-    /// Read side has been shut down.
     pub const SHUT_RD: Self = Self(1 << 1);
-    /// Write side has been shut down.
     pub const SHUT_WR: Self = Self(1 << 2);
 
-    /// Return `true` if all bits in `other` are set.
     pub const fn contains(self, other: Self) -> bool {
         (self.0 & other.0) == other.0
     }
 
-    /// Set the given flag bits.
     pub fn set(&mut self, flag: Self) {
         self.0 |= flag.0;
     }
 
-    /// Clear the given flag bits.
     pub fn clear(&mut self, flag: Self) {
         self.0 &= !flag.0;
     }
 
-    /// Return raw bit representation.
     pub const fn bits(self) -> u32 {
         self.0
     }
 
-    /// Construct from raw bits.
     pub const fn from_bits(bits: u32) -> Self {
         Self(bits)
     }
 }
 
-/// Per-socket configurable options.
 pub struct SocketOptions {
-    /// Allow local address reuse.
     pub reuse_addr: bool,
     /// Receive buffer size in bytes.
-    ///
-    /// Default: 16384, valid range: 256..=262144.
     pub recv_buf_size: usize,
     /// Send buffer size in bytes.
-    ///
-    /// Default: 16384, valid range: 256..=262144.
     pub send_buf_size: usize,
     /// Receive timeout in milliseconds (`None` means infinite).
     pub recv_timeout: Option<u64>,
     /// Send timeout in milliseconds (`None` means infinite).
     pub send_timeout: Option<u64>,
-    /// Enable keepalive (TCP only).
+    /// TCP only.
     pub keepalive: bool,
     /// Disable Nagle algorithm (TCP only).
     pub tcp_nodelay: bool,
 }
 
 impl SocketOptions {
-    /// Default receive buffer size in bytes.
     pub const RECV_BUF_DEFAULT: usize = 16_384;
-    /// Default send buffer size in bytes.
     pub const SEND_BUF_DEFAULT: usize = 16_384;
-    /// Minimum allowed receive buffer size in bytes.
     pub const RECV_BUF_MIN: usize = 256;
-    /// Maximum allowed receive buffer size in bytes.
     pub const RECV_BUF_MAX: usize = 262_144;
-    /// Minimum allowed send buffer size in bytes.
     pub const SEND_BUF_MIN: usize = 256;
-    /// Maximum allowed send buffer size in bytes.
     pub const SEND_BUF_MAX: usize = 262_144;
 
-    /// Construct options with defaults.
     pub const fn new() -> Self {
         Self {
             reuse_addr: false,
@@ -140,9 +110,6 @@ impl SocketOptions {
         }
     }
 
-    /// Validate and normalize a receive buffer size request.
-    ///
-    /// Returns `NetError::InvalidArgument` if the value is out of range.
     pub fn validate_recv_buf_size(size: usize) -> Result<usize, NetError> {
         if !(Self::RECV_BUF_MIN..=Self::RECV_BUF_MAX).contains(&size) {
             return Err(NetError::InvalidArgument);
@@ -150,9 +117,6 @@ impl SocketOptions {
         Ok(size)
     }
 
-    /// Validate and normalize a send buffer size request.
-    ///
-    /// Returns `NetError::InvalidArgument` if the value is out of range.
     pub fn validate_send_buf_size(size: usize) -> Result<usize, NetError> {
         if !(Self::SEND_BUF_MIN..=Self::SEND_BUF_MAX).contains(&size) {
             return Err(NetError::InvalidArgument);
@@ -168,8 +132,6 @@ impl Default for SocketOptions {
 }
 
 /// Fixed-capacity queue with ring-buffer semantics.
-///
-/// Fixed-capacity queue with ring-buffer semantics.
 /// Push never overwrites; it returns `false` when full.
 pub struct BoundedQueue<T> {
     slots: KVec<Option<T>>,
@@ -178,7 +140,6 @@ pub struct BoundedQueue<T> {
 }
 
 impl<T> BoundedQueue<T> {
-    /// Create a queue with `capacity` slots.
     pub fn new(capacity: usize) -> Self {
         let slots: KVec<Option<T>> = core::iter::repeat_with(|| None).take(capacity).collect();
         Self {
@@ -188,9 +149,6 @@ impl<T> BoundedQueue<T> {
         }
     }
 
-    /// Push an item to the tail.
-    ///
-    /// Returns `false` if the queue is full; no item is overwritten.
     pub fn push(&mut self, item: T) -> bool {
         if self.is_full() {
             return false;
@@ -205,7 +163,6 @@ impl<T> BoundedQueue<T> {
         true
     }
 
-    /// Pop an item from the head.
     pub fn pop(&mut self) -> Option<T> {
         if self.is_empty() {
             return None;
@@ -220,27 +177,22 @@ impl<T> BoundedQueue<T> {
         self.slots[idx].take()
     }
 
-    /// Return `true` if the queue has no elements.
     pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    /// Return `true` if the queue cannot accept more elements.
     pub fn is_full(&self) -> bool {
         self.len == self.capacity()
     }
 
-    /// Number of queued items.
     pub const fn len(&self) -> usize {
         self.len
     }
 
-    /// Maximum number of storable items.
     pub fn capacity(&self) -> usize {
         self.slots.len()
     }
 
-    /// Clear all queued items.
     pub fn clear(&mut self) {
         for slot in &mut self.slots {
             let _ = slot.take();
@@ -249,11 +201,8 @@ impl<T> BoundedQueue<T> {
         self.len = 0;
     }
 
-    /// Resize queue capacity, preserving item order. The queue is left
-    /// untouched if either allocation fails.
-    ///
-    /// If `new_capacity` is smaller than current length, oldest items are kept
-    /// until capacity is reached and the rest are dropped.
+    /// Resize capacity, preserving item order; the queue is left untouched if
+    /// either allocation fails. Shrinking keeps the oldest items, drops the rest.
     pub fn resize(&mut self, new_capacity: usize) -> Result<(), AllocError> {
         let mut drained: KVec<T> = KVec::with_capacity(self.len)?;
         let mut slots: KVec<Option<T>> = KVec::with_capacity(new_capacity)?;
@@ -288,20 +237,11 @@ impl<T> fmt::Debug for BoundedQueue<T> {
 
 /// Who opened a socket.
 ///
-/// Two identifiers, because "may this caller be told who owns it" and "what
-/// number names that owner" have different right answers.
-///
-/// `process` is the owning process, and it decides disclosure: tasks sharing
-/// one process share the descriptor table that names this socket, so
-/// withholding the owner from a sibling task would protect a fact the sibling
-/// can read directly. An [`FdTable`] rather than a pid because a disclosure
-/// decision must not be inheritable: a recycled id would let the next holder
-/// of that number read the previous one's socket ownership.
-///
-/// `task_id` is what is reported, because it is the number the rest of the
-/// userland ABI speaks — `getpid` returns it, `kill` and `waitpid` accept it.
-/// An address-space id names nothing any other syscall would take, so a tool
-/// that printed one would produce a pid nobody could act on.
+/// `process` decides disclosure, and is an [`FdTable`] rather than a pid because
+/// a recycled id would let the next holder of that number read the previous
+/// one's socket ownership. `task_id` is what gets reported, because it is the
+/// number the rest of the userland ABI speaks; an address-space id names
+/// nothing another syscall would take.
 #[derive(Clone, Copy)]
 pub struct SocketOwner {
     pub process: Option<FdTable>,
@@ -317,31 +257,21 @@ impl SocketOwner {
 }
 
 pub struct Socket {
-    /// Protocol-specific socket state.
     pub inner: SocketInner,
-    /// Generic lifecycle state.
     pub state: SocketState,
-    /// Mode/shutdown flags.
     pub flags: SocketFlags,
-    /// Socket options.
     pub options: SocketOptions,
-    /// Optional bound local address.
     pub local_addr: Option<SockAddr>,
-    /// Optional connected peer address.
     pub remote_addr: Option<SockAddr>,
-    /// Receive queue of `(packet, source address)` tuples.
     pub recv_queue: BoundedQueue<(PacketBuf, SockAddr)>,
-    /// Deferred error reported on next operation.
     pub pending_error: Option<NetError>,
     /// Who opened it. Set once, at the single allocation site.
     pub owner: SocketOwner,
 }
 
 impl Socket {
-    /// Default receive queue capacity in packets.
     pub const RECV_QUEUE_DEFAULT_CAPACITY: usize = 16;
 
-    /// Create a new socket object with defaults.
     pub fn new(inner: SocketInner) -> Self {
         Self {
             inner,
@@ -352,30 +282,24 @@ impl Socket {
             remote_addr: None,
             recv_queue: BoundedQueue::new(Self::RECV_QUEUE_DEFAULT_CAPACITY),
             pending_error: None,
-            // Unowned until the allocation site says otherwise. Not `0`, which
-            // is an id a real task can hold: a default that names a live task
-            // would attribute a socket to one that never opened it, and
-            // attribution is the field's whole purpose.
+            // Not `0`: that is an id a real task can hold, so the default would
+            // attribute the socket to a task that never opened it.
             owner: SocketOwner::UNOWNED,
         }
     }
 
-    /// Return `true` if non-blocking mode is enabled.
     pub fn is_nonblocking(&self) -> bool {
         self.flags.contains(SocketFlags::O_NONBLOCK)
     }
 
-    /// Return `true` if read shutdown is active.
     pub fn is_read_shutdown(&self) -> bool {
         self.flags.contains(SocketFlags::SHUT_RD)
     }
 
-    /// Return `true` if write shutdown is active.
     pub fn is_write_shutdown(&self) -> bool {
         self.flags.contains(SocketFlags::SHUT_WR)
     }
 
-    /// Enable or disable non-blocking mode.
     pub fn set_nonblocking(&mut self, nonblocking: bool) {
         if nonblocking {
             self.flags.set(SocketFlags::O_NONBLOCK);
@@ -384,13 +308,11 @@ impl Socket {
         }
     }
 
-    /// Take and clear any pending error.
     pub fn take_pending_error(&mut self) -> Option<NetError> {
         self.pending_error.take()
     }
 }
 
-/// Slab-like socket table with freelist allocation.
 pub struct SlabSocketTable {
     slots: KVec<Option<Socket>>,
     freelist: KVec<usize>,
@@ -398,18 +320,12 @@ pub struct SlabSocketTable {
 }
 
 impl SlabSocketTable {
-    /// Default initial slot count.
     pub const INITIAL_CAPACITY: usize = 64;
-    /// Hard maximum slot count.
-    ///
-    /// The per-socket wait-queue spine is sized to this, so the two must
-    /// agree or a high slab index would find no queue and fall back to the
-    /// folded array.
+    /// Hard maximum slot count. The per-socket wait-queue spine is sized to
+    /// this; a mismatch leaves a high slab index with no queue.
     pub const MAX_CAPACITY: usize = slopos_abi::net::MAX_SOCKET_SLOTS;
 
-    /// Create an empty, const-initializable table.
-    ///
-    /// This is used for global static initialization; first use should call
+    /// Empty table for `static` initialisation; first use must call
     /// [`init_if_needed`](Self::init_if_needed).
     pub const fn empty() -> Self {
         Self {
@@ -419,9 +335,6 @@ impl SlabSocketTable {
         }
     }
 
-    /// Lazily initialize with default capacities if currently empty.
-    ///
-    /// Also syncs the allocation bitmap with the initial capacity.
     pub fn init_if_needed(&mut self) {
         if self.max_capacity == 0 {
             *self = Self::new(Self::INITIAL_CAPACITY, Self::MAX_CAPACITY);
@@ -429,8 +342,6 @@ impl SlabSocketTable {
         }
     }
 
-    /// Create a slab table with explicit initial and maximum capacities.
-    ///
     /// Freelist is populated in reverse so index 0 is allocated first.
     pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
         let init_cap = core::cmp::min(initial_capacity, max_capacity);
@@ -449,18 +360,10 @@ impl SlabSocketTable {
 
     /// Allocate a new socket slot owned by `owner`.
     ///
-    /// Returns the socket index on success. If no free slots are available,
-    /// attempts to grow capacity (doubling, capped at `max_capacity`).
-    /// Also marks the index in the allocation bitmap.
-    ///
-    /// The owner is taken here rather than assigned afterwards because this is
-    /// the only place a socket comes into existence — both `socket_create` and
-    /// `socket_accept` pass through it. An owner set after the fact is one an
-    /// allocation path can forget, and the one that would forget is `accept`:
-    /// its socket would answer to nobody while the connection it names is live.
-    ///
+    /// The owner is taken here because this is the only place a socket comes
+    /// into existence; one assigned afterwards is one `accept` could forget.
     /// [`SocketOwner`] is what `net_query` redacts against, so a wrong value
-    /// here is a wrong disclosure rather than a cosmetic slip.
+    /// here is a wrong disclosure.
     pub fn alloc(&mut self, inner: SocketInner, owner: SocketOwner) -> Option<usize> {
         self.init_if_needed();
         if self.freelist.is_empty() {
@@ -478,18 +381,14 @@ impl SlabSocketTable {
         Some(idx)
     }
 
-    /// Get an immutable socket reference by index.
     pub fn get(&self, idx: usize) -> Option<&Socket> {
         self.slots.get(idx)?.as_ref()
     }
 
-    /// Get a mutable socket reference by index.
     pub fn get_mut(&mut self, idx: usize) -> Option<&mut Socket> {
         self.slots.get_mut(idx)?.as_mut()
     }
 
-    /// Free an active slot and return it to the freelist.
-    /// Also clears the index in the allocation bitmap.
     pub fn free(&mut self, idx: usize) {
         if let Some(slot) = self.slots.get_mut(idx) {
             if slot.take().is_some() {
@@ -499,17 +398,14 @@ impl SlabSocketTable {
         }
     }
 
-    /// Number of active sockets.
     pub fn count_active(&self) -> usize {
         self.slots.iter().filter(|s| s.is_some()).count()
     }
 
-    /// Current slot capacity.
     pub fn capacity(&self) -> usize {
         self.slots.len()
     }
 
-    /// Number of active sockets (alias of [`count_active`](Self::count_active)).
     pub fn len(&self) -> usize {
         self.count_active()
     }
@@ -542,10 +438,8 @@ impl SlabSocketTable {
     }
 }
 
-/// Ephemeral port allocator for dynamic local port selection.
-///
-/// this allocator and both old/new socket paths may use it.
-/// Access must be serialized by the outer lock (no internal atomics).
+/// Ephemeral port allocator. Access must be serialized by the outer lock
+/// (no internal atomics).
 #[derive(slopos_ostd::SlotFields)]
 pub struct EphemeralPortAllocator {
     bitmap: Bitmap<{ words_for(Self::EPHEMERAL_PORT_COUNT) }>,
@@ -558,10 +452,8 @@ impl EphemeralPortAllocator {
     pub const EPHEMERAL_PORT_START: u16 = 49_152;
     /// End of IANA ephemeral range.
     pub const EPHEMERAL_PORT_END: u16 = 65_535;
-    /// Total number of ephemeral ports.
     pub const EPHEMERAL_PORT_COUNT: usize = 16_384;
 
-    /// Create a fresh allocator with no allocated ports.
     pub const fn new() -> Self {
         Self {
             bitmap: Bitmap::new(),
@@ -570,27 +462,20 @@ impl EphemeralPortAllocator {
         }
     }
 
-    /// Reset every bit in-place, without materialising a fresh `Self`
-    /// on the caller's stack. Equivalent to `*self = Self::new()` but
-    /// keeps the 2 KiB bitmap on the heap slot it already occupies.
+    /// Equivalent to `*self = Self::new()`, but in place: a fresh `Self` would
+    /// materialise the 2 KiB bitmap on the caller's stack.
     pub fn reset(&mut self) {
         self.bitmap.clear_all();
         self.next_port = Self::EPHEMERAL_PORT_START;
         self.allocated_count = 0;
     }
 
-    /// In-place [`Init`] recipe equivalent to [`Self::new`]. Used by
-    /// `KBox::try_init(EphemeralPortAllocator::init_default())` so
-    /// runtime callers (e.g. test fixtures) avoid the 2 KiB stack
-    /// materialisation that `Self::new()` would otherwise incur. The
-    /// `AllocError` carrier is the absorption shim required by
-    /// `KBox::try_init`'s `E: From<AllocError>` bound — the closure
-    /// itself never errors.
+    /// In-place [`Init`] recipe equivalent to [`Self::new`], so a runtime
+    /// caller avoids materialising the 2 KiB bitmap on its stack. The
+    /// `AllocError` carrier satisfies `KBox::try_init`'s `E: From<AllocError>`
+    /// bound; the closure itself never errors.
     pub fn init_default() -> impl Init<Self, slopos_ostd::mm::AllocError> {
         use slopos_ostd::mm::AllocError;
-        // Closure zero-fills the whole slot (a valid empty `Bitmap`)
-        // and then writes the two scalar fields whose `new()` isn't
-        // all-zero.
         init_struct_with(
             |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
                 slot.zero_all();
@@ -602,8 +487,6 @@ impl EphemeralPortAllocator {
     }
 
     /// Allocate one ephemeral port using round-robin selection.
-    ///
-    /// Returns `None` if all ephemeral ports are currently allocated.
     pub fn alloc(&mut self) -> Option<Port> {
         if self.allocated_count >= Self::EPHEMERAL_PORT_COUNT {
             return None;
@@ -626,7 +509,6 @@ impl EphemeralPortAllocator {
         Some(Port(candidate))
     }
 
-    /// Release a previously allocated ephemeral port.
     pub fn release(&mut self, port: Port) {
         let p = port.0;
         if !(Self::EPHEMERAL_PORT_START..=Self::EPHEMERAL_PORT_END).contains(&p) {
@@ -639,7 +521,6 @@ impl EphemeralPortAllocator {
         }
     }
 
-    /// Return `true` if `port` is currently allocated.
     pub fn is_in_use(&self, port: Port) -> bool {
         let p = port.0;
         if !(Self::EPHEMERAL_PORT_START..=Self::EPHEMERAL_PORT_END).contains(&p) {
@@ -648,7 +529,6 @@ impl EphemeralPortAllocator {
         self.bitmap.test((p - Self::EPHEMERAL_PORT_START) as usize)
     }
 
-    /// Number of currently available ephemeral ports.
     pub fn available(&self) -> usize {
         Self::EPHEMERAL_PORT_COUNT - self.allocated_count
     }
@@ -660,15 +540,8 @@ impl Default for EphemeralPortAllocator {
     }
 }
 
-// =============================================================================
-// Socket allocation bitmap — separate lock from per-socket state
-// =============================================================================
-
-/// Socket allocation bitmap, keyed separately from per-socket data.
-///
-/// The bitmap tracks which socket indices are occupied. This allows
-/// allocation decisions to be made without locking the full socket table,
-/// reducing contention on the hot data-access path.
+/// Socket allocation bitmap, on its own lock so allocation decisions do not
+/// contend with the socket table's hot data path.
 pub struct SocketAllocBitmap {
     bitmap: Bitmap<{ words_for(SlabSocketTable::MAX_CAPACITY) }>,
     allocated_count: usize,
@@ -684,12 +557,11 @@ impl SocketAllocBitmap {
         }
     }
 
-    /// Mark capacity as initialized (called when the socket table grows).
+    /// Called when the socket table grows.
     pub fn set_capacity(&mut self, cap: usize) {
         self.initialized_capacity = cap;
     }
 
-    /// Allocate a free index. Returns `None` if all slots are occupied.
     pub fn alloc(&mut self) -> Option<usize> {
         if self.allocated_count >= self.initialized_capacity {
             return None;
@@ -700,7 +572,6 @@ impl SocketAllocBitmap {
         Some(idx)
     }
 
-    /// Release a previously allocated index.
     pub fn free(&mut self, idx: usize) {
         if idx < self.initialized_capacity && self.bitmap.test(idx) {
             self.bitmap.clear(idx);
@@ -708,17 +579,14 @@ impl SocketAllocBitmap {
         }
     }
 
-    /// Check if an index is currently allocated.
     pub fn is_allocated(&self, idx: usize) -> bool {
         idx < self.initialized_capacity && self.bitmap.test(idx)
     }
 
-    /// Number of active sockets.
     pub fn count_active(&self) -> usize {
         self.allocated_count
     }
 
-    /// Clear all allocations.
     pub fn clear(&mut self) {
         for i in 0..self.initialized_capacity {
             self.bitmap.clear(i);
@@ -727,30 +595,23 @@ impl SocketAllocBitmap {
     }
 }
 
-/// Socket allocation bitmap — separate lock from per-socket data.
 pub static SOCKET_ALLOC: slopos_ostd::sync::SpinLock<SocketAllocBitmap> =
     slopos_ostd::sync::SpinLock::new(
         SocketAllocBitmap::new(),
         slopos_ostd::lock_class!("SOCKET_ALLOC", slopos_ostd::sync::LOCK_LEVEL_REGISTRY),
     );
 
-/// Global slab-based socket table.
 pub static NEW_SOCKET_TABLE: slopos_ostd::sync::SpinLock<SlabSocketTable> =
     slopos_ostd::sync::SpinLock::new(
         SlabSocketTable::empty(),
         slopos_ostd::lock_class!("NEW_SOCKET_TABLE", slopos_ostd::sync::LOCK_LEVEL_REGISTRY),
     );
 
-/// Ephemeral port allocator.
 pub static EPHEMERAL_PORTS: slopos_ostd::sync::SpinLock<EphemeralPortAllocator> =
     slopos_ostd::sync::SpinLock::new(
         EphemeralPortAllocator::new(),
         slopos_ostd::lock_class!("EPHEMERAL_PORTS", slopos_ostd::sync::LOCK_LEVEL_REGISTRY),
     );
-
-// =============================================================================
-// Socket operations
-// =============================================================================
 
 use core::cmp;
 
@@ -790,16 +651,13 @@ pub enum SocketState {
 
 /// How many datagram slots a `SO_RCVBUF` of `bytes` buys.
 ///
-/// The queue holds `PacketBuf`s, and every one of those is a buffer from the
-/// global [`crate::pool::POOL_SIZE`] pool — so a queue longer than the pool
-/// describes a depth no socket can ever reach while costing real memory per
-/// slot, on every socket at once.
+/// Clamped to the global [`crate::pool::POOL_SIZE`]: a longer queue names a
+/// depth no socket can reach, at real per-slot cost on every socket at once.
 fn recv_queue_slots(bytes: usize) -> usize {
     let by_size = bytes / crate::pool::BUF_SIZE;
     by_size.clamp(1, crate::pool::POOL_SIZE)
 }
 
-/// The recv-readiness event for a socket table slot.
 #[inline]
 fn sock_recv_ev(idx: u32) -> KernelEvent {
     KernelEvent::SocketRecv {
@@ -807,7 +665,6 @@ fn sock_recv_ev(idx: u32) -> KernelEvent {
     }
 }
 
-/// The send-readiness event for a socket table slot.
 #[inline]
 fn sock_send_ev(idx: u32) -> KernelEvent {
     KernelEvent::SocketSend {
@@ -815,7 +672,6 @@ fn sock_send_ev(idx: u32) -> KernelEvent {
     }
 }
 
-/// The accept-readiness event for a listening socket table slot.
 #[inline]
 fn sock_accept_ev(idx: u32) -> KernelEvent {
     KernelEvent::SocketAccept {
@@ -910,16 +766,12 @@ pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
 }
 
 /// True NIC-DMA transmit of one TCP segment whose payload lives in pinned user
-/// pages (TCP `MSG_ZEROCOPY`). Builds the Eth/IPv4/TCP headers, offloads the TCP
-/// checksum to the device (pseudo-header seed + `csum_start`/`csum_offset`), and
-/// DMAs the payload straight from `z`'s pages — re-DMA-safe across retransmits
-/// (the driver holds an independent refcount on the pages until reclaim; the
-/// send-queue chunk holds the data until ACK). On any ineligibility (cold
-/// neighbor, no checksum offload, too many SG runs, oversize/loopback) or device
-/// rejection it copies the segment's bytes from the pin into `scratch` and sends
-/// them the ordinary way. Returns `0` on success or a negated errno (mirrors
-/// [`socket_send_tcp_segment`]); the caller treats a nonzero result as a drain
-/// stop (the chunk is queued, so the RTO retransmits).
+/// pages (TCP `MSG_ZEROCOPY`): the TCP checksum is offloaded to the device and
+/// the payload DMAs straight from `z`'s pages. Re-DMA-safe across retransmits —
+/// the driver refcounts the pages independently of the send-queue chunk. On any
+/// ineligibility or device rejection it copies the bytes into `scratch` and
+/// sends them the ordinary way. Returns `0` or a negated errno; the caller
+/// treats a nonzero result as a drain stop.
 fn socket_send_tcp_segment_zerocopy(
     seg: &TcpOutSegment,
     z: tcp::ZcSource,
@@ -956,9 +808,8 @@ fn socket_send_tcp_segment_zerocopy(
         )
         && let Some(src_mac) = net::DEVICE_REGISTRY.mac_by_index(dev)
     {
-        // TCP header + options into a temp; patch the checksum field with the
-        // pseudo-header seed (the device sums [csum_start..end] = TCP header +
-        // DMA'd payload and completes it — NEEDS_CSUM).
+        // Patch the checksum field with the pseudo-header seed: the device sums
+        // [csum_start..end] and completes it (NEEDS_CSUM).
         let mut tcp_hdr = [0u8; 60];
         if let Some(tcp_hdr_len) = tcp::write_tcp_segment(seg, &[], &mut tcp_hdr) {
             let tcp_total = tcp_hdr_len + len;
@@ -997,11 +848,9 @@ fn socket_send_tcp_segment_zerocopy(
                 csum_start: (net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN) as u16,
                 csum_offset: 16,
             };
-            // Independent keepalive clone for the driver TX slot (survives a
-            // teardown mid-DMA); `z.keepalive` stays owned for the copy
-            // fallback. Independently charged too: this is a distinct
-            // in-flight DMA holding the pages down, released by the driver's
-            // own reclaim rather than by the send queue's.
+            // Independent keepalive clone for the driver TX slot: it survives a
+            // teardown mid-DMA and is released by the driver's own reclaim,
+            // while `z.keepalive` stays owned for the copy fallback.
             if let Some(driver_ka) = z.keepalive.redup() {
                 match net::DEVICE_REGISTRY.tx_zerocopy_notif_by_index(
                     dev,
@@ -1012,16 +861,13 @@ fn socket_send_tcp_segment_zerocopy(
                     z.token.clone(),
                 ) {
                     Ok(()) => return 0,
-                    // Device rejected (ring full / oversize): fall through to the
-                    // copy fallback, which sends (or surfaces the device error).
+                    // Ring full / oversize: fall through to the copy fallback.
                     Err(_) => {}
                 }
             }
         }
     }
 
-    // Copy fallback: read the segment straight from the pinned pages and send it
-    // the ordinary way (cold neighbor / ineligible / device rejected).
     if len > scratch.len()
         || copy_out_frames(z.keepalive.as_slice(), z.byte_start, &mut scratch[..len]).is_err()
     {
@@ -1033,38 +879,16 @@ fn socket_send_tcp_segment_zerocopy(
 /// Outcome of a signal-interruptible socket wait.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SockWait {
-    /// Predicate fired before timeout or signal.
     Ready,
-    /// `timeout_ms > 0` elapsed without the predicate firing.
     Timeout,
-    /// A signal is pending against the current task; abort the syscall
-    /// and let the dispatcher deliver it.
+    /// A signal is pending: abort the syscall and let the dispatcher deliver it.
     Signal,
 }
 
-/// Block on `wq` until `pred()` returns true, returning early on
-/// pending signal so the syscall surfaces `EINTR` instead of stalling
-/// up to the full timeout.
-///
-/// **IRQ-driven RX contract.** The threaded NAPI kthread
-/// (`drivers/src/virtio_net.rs::napi_thread_entry`) runs at
-/// `TaskPriority::KernelIo` and parks on `NAPI_WAKER`, woken from
-/// the NIC IRQ handler. Every RX packet committed to the virtio
-/// used ring reaches `tcp::input` / `socket_deliver_*` on an IRQ
-/// boundary regardless of the parked user task. The local-CPU
-/// preempt-pending path (`sched/src/scheduler.rs::schedule_task`)
-/// hands the kthread the CPU on IRQ exit when it outranks the
-/// running task; the lost-wakeup edge is closed by the post-burst
-/// `has_pending_rx` recheck and the `NapiWaker`'s armed-bit. Phase 2
-/// retired the synchronous-kick safety net the predicate held during
-/// Phase 1 — the kthread alone is the RX cadence.
-///
-/// The predicate is augmented with a `has_pending_signal()` probe
-/// so `wait_event{,_timeout}` short-circuits as soon as a `kill()`
-/// queues a signal (the kill path also calls `unblock_task` which
-/// wakes us synchronously). Both arms re-check
-/// `has_pending_signal()` after wake to disambiguate "signal woke
-/// us" from "data woke us"/"timeout expired".
+/// Block until `pred()` returns true, returning early on a pending signal so
+/// the syscall surfaces `EINTR` instead of stalling out the full timeout.
+/// The predicate carries a `has_pending_signal()` probe, and both arms re-check
+/// it after wake to tell "signal woke us" from "data woke us"/"timeout expired".
 fn wait_socket_event<F: FnMut() -> bool>(
     ev: KernelEvent,
     mut pred: F,
@@ -1074,15 +898,10 @@ fn wait_socket_event<F: FnMut() -> bool>(
         return SockWait::Signal;
     }
     let mut predicate = || {
-        // Sync-drain inside the wake-up predicate. The IRQ-driven
-        // netpoll kthread is the primary RX cadence, but the
-        // current virtio-net MSI-X configuration shows post-probe
-        // IRQ-delivery gaps that have not yet been root-caused. Until
-        // the driver-level fix lands, every wait predicate runs one
-        // synchronous drain burst on the caller's CPU so a wake
-        // observes the most recent committed used-ring state. The
-        // kick is a no-op when no NIC driver is registered.
-        // Allowlisted in `scripts/check_wait_predicate_purity.sh`.
+        // TODO(tech-debt): synchronous drain compensating for un-root-caused
+        // virtio-net MSI-X IRQ-delivery gaps — the netpoll kthread should be
+        // the sole RX cadence. Allowlisted in
+        // `scripts/check_wait_predicate_purity.sh`.
         crate::napi::kick();
         pred()
     };
@@ -1114,9 +933,8 @@ fn socket_is_icmp(sock: &Socket) -> bool {
     matches!(sock.inner, SocketInner::Icmp(_))
 }
 
-/// `true` iff `sock_idx` is an AF_INET TCP socket. Lets the ring's `OP_SEND_ZC`
-/// dispatch route to the TCP `MSG_ZEROCOPY` send-queue path (which holds the
-/// pinned pages across retransmits) instead of the UDP/ICMP one-shot NIC-DMA leaf.
+/// Lets the ring's `OP_SEND_ZC` dispatch pick the TCP `MSG_ZEROCOPY`
+/// send-queue path over the UDP/ICMP one-shot NIC-DMA leaf.
 pub fn socket_is_tcp(sock_idx: u32) -> bool {
     let table = NEW_SOCKET_TABLE.lock();
     table
@@ -1160,7 +978,6 @@ fn socket_notify_accept_waiters() {
         if sock.state != SocketState::Listening {
             continue;
         }
-        // Check accept queue in TcpListenState.
         let has_pending = if let SocketInner::Tcp(ref tcp_inner) = sock.inner {
             tcp_inner
                 .listen
@@ -1180,16 +997,11 @@ pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
     if let Some(conn_id) = actions.conn_id {
         socket_notify_tcp_idx_waiters(conn_id);
 
-        // Wire completed 3WHS into the listener's accept queue.
-        // The child PCB inherits the parent listener's socket_id at
-        // install time, so we read it directly instead of looking up
-        // the old TCP_DEMUX table.
+        // The child PCB inherits the listener's socket_id at install time.
         if actions.notify.contains(tcp::SocketNotify::NEW_ESTABLISHED) {
             if let Some(tuple) = tcp::with_pcb(conn_id, |pcb| pcb.tuple) {
-                // Passive connectivity evidence: a completed handshake with an
-                // off-link peer is proof the path beyond the gateway works,
-                // and it cost no packet of its own. Atomics only, so it is
-                // safe here despite the locks this path takes around it.
+                // Free evidence the path beyond the gateway works. Atomics
+                // only, so it is safe despite the locks this path takes.
                 crate::connectivity::note_tcp_established(crate::types::Ipv4Addr(tuple.remote_ip));
                 let listener_sock_idx =
                     tcp::with_pcb(conn_id, |pcb| pcb.socket_id.map(|s| s.0)).flatten();
@@ -1209,10 +1021,8 @@ pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
                     })
                     .flatten();
                     if let Some(accepted) = accepted_meta {
-                        // `None` means the named socket is not a listener at
-                        // all — this is a client's own `connect` completing,
-                        // and there is no accept queue in play. `Some(false)`
-                        // means it *is* a listener and its backlog is full.
+                        // `None`: not a listener — a client's own `connect`
+                        // completing. `Some(false)`: listener backlog full.
                         let queued = {
                             let mut table = NEW_SOCKET_TABLE.lock();
                             match table.get_mut(listener_idx as usize) {
@@ -1230,9 +1040,8 @@ pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
                                 _ => None,
                             }
                         };
-                        // A completed handshake nothing will ever accept still
-                        // holds a shard slot, so reset the peer rather than
-                        // leak it.
+                        // A handshake nothing will ever accept still holds a
+                        // shard slot, so reset the peer rather than leak it.
                         if queued == Some(false) {
                             let rst = tcp::SegmentBuilder::bare_rst(
                                 accepted.tuple,
@@ -1378,9 +1187,8 @@ pub fn socket_create(domain: u16, sock_type: u16, protocol: u16, owner: SocketOw
         _ => return errno_i32(ERRNO_EPROTONOSUPPORT),
     };
 
-    // Off-lock, and before the first socket exists: the per-socket wait-queue
-    // spine allocates, and the table lock is a cli-spinlock. Idempotent, so
-    // every create pays one relaxed load after the first.
+    // Off-lock: the per-socket wait-queue spine allocates and the table lock is
+    // a cli-spinlock. Idempotent after the first call.
     slopos_ostd::sync::event_bus::ensure_socket_queues_allocated();
 
     let mut table = NEW_SOCKET_TABLE.lock();
@@ -1396,9 +1204,9 @@ pub fn socket_create(domain: u16, sock_type: u16, protocol: u16, owner: SocketOw
 
 /// Send `payload` to `dst_ip:dst_port`.
 ///
-/// `payload` is a kernel staging buffer — every caller stages user bytes
-/// through one before calling, so no user address reaches this function and
-/// the bytes cannot change under it.
+/// `payload` is a kernel staging buffer: every caller stages user bytes through
+/// one first, so no user address reaches the socket layer and the bytes cannot
+/// change under it. The same holds for the other slice entry points here.
 pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u16) -> i64 {
     let len = payload.len();
     if len > UDP_DGRAM_MAX_PAYLOAD {
@@ -1507,10 +1315,9 @@ pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u
             Err(err) => map_net_err(err) as i64,
         }
     } else {
-        // ICMP SOCK_DGRAM contract (matches Linux):
-        // User buffer = [type(1)|code(1)|cksum(2)|id(2)|seq(2)|payload...]
-        // Kernel reads sequence from bytes 6-7, uses socket's bound
-        // identifier, and sends the payload portion after the header.
+        // ICMP SOCK_DGRAM contract (matches Linux): the user buffer is
+        // [type(1)|code(1)|cksum(2)|id(2)|seq(2)|payload…], and the socket's
+        // bound identifier overrides the id field.
         if payload.len() < crate::icmp::ICMP_HEADER_LEN {
             return errno_i32(ERRNO_EINVAL) as i64;
         }
@@ -1523,10 +1330,6 @@ pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u
     }
 }
 
-/// Receive one datagram into `out`, reporting the sender through `src_out`.
-///
-/// `out` is a kernel staging buffer — every caller copies to or from user
-/// memory itself, so no user address reaches this function.
 pub fn socket_recvfrom(sock_idx: u32, out: &mut [u8], src_out: Option<&mut SockAddr>) -> i64 {
     let (nonblocking, timeout_ms) = {
         let table = NEW_SOCKET_TABLE.lock();
@@ -1674,7 +1477,6 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
         Ok(tcp_idx) => {
             if let SocketInner::Tcp(tcp_inner) = &mut sock.inner {
                 tcp_inner.conn_id = Some(tcp_idx);
-                // Create TcpListenState with two-queue model.
                 let Some(listen_state) = tcp_listener::TcpListenState::new(backlog as usize, local)
                 else {
                     return errno_i32(ERRNO_ENOMEM);
@@ -1683,8 +1485,6 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
             }
             sock.state = SocketState::Listening;
 
-            // Set bidirectional link on the connection.
-            // (Listener is already registered in TCP_LISTENERS by tcp::listen.)
             tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(sock_idx)));
 
             0
@@ -1694,8 +1494,7 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
 }
 
 pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16) -> i32 {
-    // The accept path allocates a socket slot too, so the queue spine has to
-    // exist here as well — and off-lock, before the table lock below.
+    // Off-lock, before the table lock: accept allocates a socket slot too.
     slopos_ostd::sync::event_bus::ensure_socket_queues_allocated();
     loop {
         let (nonblocking, timeout_ms) = {
@@ -1717,8 +1516,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
             let Some(listen_sock) = table.get_mut(sock_idx as usize) else {
                 return errno_i32(ERRNO_ENOTSOCK);
             };
-            // Captured before the accepted socket is allocated: `alloc` takes
-            // `&mut table`, so the listener borrow cannot still be live.
+            // Captured before `alloc` takes `&mut table` and ends this borrow.
             let listen_owner = listen_sock.owner;
             let listen_opts = SocketOptions {
                 reuse_addr: listen_sock.options.reuse_addr,
@@ -1731,7 +1529,6 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
             };
             let is_nonblocking = listen_sock.is_nonblocking();
 
-            // Dequeue from the TcpListenState accept queue.
             let accepted = if let SocketInner::Tcp(ref mut tcp_inner) = listen_sock.inner {
                 tcp_inner.listen.as_mut().and_then(|ls| ls.accept())
             } else {
@@ -1739,7 +1536,6 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
             };
 
             if let Some(accepted_conn) = accepted {
-                // Find the TCP connection index for this accepted connection.
                 let tcp_idx = tcp::find(&accepted_conn.tuple);
 
                 let Some(tcp_idx) = tcp_idx else {
@@ -1759,7 +1555,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                 }
 
                 // The accepted socket belongs to whoever owns the listener:
-                // nobody else was ever in a position to ask for it.
+                // nobody else was in a position to ask for it.
                 let owner = listen_owner;
                 let Some(new_idx) = table.alloc(
                     SocketInner::Tcp(TcpSocketInner {
@@ -1795,7 +1591,6 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                     accepted_conn.tuple.remote_port,
                 );
 
-                // Set bidirectional socket↔connection link.
                 tcp::set_socket_idx(tcp_idx, Some(tcp::SocketId(new_idx as u32)));
 
                 return new_idx as i32;

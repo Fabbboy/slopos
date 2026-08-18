@@ -1,8 +1,4 @@
 //! Tests for the interface table and the state model it derives.
-//!
-//! The three derivations (`realised`, `oper_state`, `if_flags`) are pure, so
-//! the interesting half of this file needs no table at all. The matrix test
-//! below is the whole state model, enumerated rather than sampled.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
@@ -20,30 +16,19 @@ use slopos_abi::net::{
 
 /// A scratch table for the tests that mutate one.
 ///
-/// Deliberately **not** the kernel's `IFACE_TABLE`: these tests run inside a
-/// live kernel whose NIC is already attached and addressed, and whose NAPI
-/// thread reads that table on every packet. Emptying the real one would delete
-/// the boot configuration out from under both the running system and every
-/// later test.
-///
-/// A `static` rather than a local because the table is ~1.2 KiB and the
-/// build's stack-frame gate caps a frame at 2 KiB. Its own lock class keeps a
-/// deliberate ordering experiment here from teaching the validator anything
-/// about the production table.
+/// Deliberately **not** the kernel's `IFACE_TABLE`: clearing the live table
+/// would delete the boot configuration out from under the running system. A
+/// `static` because the ~1.2 KiB table would blow the 2 KiB stack-frame gate,
+/// and its own lock class keeps the ordering here away from the real table's.
 static TEST_TABLE: iface::IfaceTable = iface::IfaceTable::new(slopos_ostd::lock_class!(
     "NET_IFACES.test",
     slopos_ostd::sync::LOCK_LEVEL_REGISTRY
 ));
 
-/// Empty the scratch table and hand it back ready to use.
 fn fresh_table() -> &'static iface::IfaceTable {
     TEST_TABLE.clear();
     &TEST_TABLE
 }
-
-// =============================================================================
-// Names
-// =============================================================================
 
 fn test_ifname_validation() -> TestResult {
     assert_test!(IfName::new(b"lo").is_some(), "`lo` must be accepted");
@@ -68,24 +53,18 @@ fn test_ifname_validation() -> TestResult {
         "an embedded NUL must be rejected"
     );
 
-    // Exactly IFNAMSIZ is legal and round-trips without a terminator.
     let full = IfName::new(b"0123456789abcdef").expect("16 bytes is legal");
     assert_eq_test!(full.as_bytes().len(), 16, "16-byte name round-trips");
     pass!()
 }
 
-// =============================================================================
-// The state model
-// =============================================================================
-
 /// Every combination of `(kind, admin_up, enabled, carrier)`, asserted against
 /// both derivations.
 ///
-/// Two rows are the ones people get wrong and are worth naming: a realised
-/// loopback reports `Unknown` rather than `Up`, matching what `ip link show lo`
-/// prints on Linux; and an Ethernet interface that is admin-up while networking
-/// is disabled reports `Down` **without losing `IFF_UP`**, because the flag is
-/// intent and the operational state is effect.
+/// The two rows people get wrong: a realised loopback reports `Unknown` rather
+/// than `Up`, matching what `ip link show lo` prints on Linux; an Ethernet
+/// interface that is admin-up while networking is disabled reports `Down`
+/// **without losing `IFF_UP`**, because the flag is intent.
 fn test_operstate_matrix() -> TestResult {
     struct Row {
         kind: IfaceKind,
@@ -98,7 +77,6 @@ fn test_operstate_matrix() -> TestResult {
     }
 
     const ROWS: &[Row] = &[
-        // --- Loopback: exempt from the master switch entirely. ---
         Row {
             kind: IfaceKind::Loopback,
             admin_up: true,
@@ -135,7 +113,6 @@ fn test_operstate_matrix() -> TestResult {
             want_set: IFF_LOOPBACK,
             want_clear: IFF_UP | IFF_RUNNING,
         },
-        // --- Ethernet, admin down: the master switch changes nothing. ---
         Row {
             kind: IfaceKind::Ethernet,
             admin_up: false,
@@ -172,7 +149,6 @@ fn test_operstate_matrix() -> TestResult {
             want_set: IFF_BROADCAST,
             want_clear: IFF_UP | IFF_RUNNING,
         },
-        // --- Ethernet, admin up: where every distinction shows up. ---
         Row {
             kind: IfaceKind::Ethernet,
             admin_up: true,
@@ -226,8 +202,8 @@ fn test_operstate_matrix() -> TestResult {
             );
         }
 
-        // carrier_detect = true, dhcp = false: the two modifiers are asserted
-        // separately below so this matrix stays about the four core inputs.
+        // carrier_detect = true, dhcp = false; both modifiers are asserted
+        // separately below.
         let flags = if_flags(
             row.kind,
             row.admin_up,
@@ -254,8 +230,6 @@ fn test_operstate_matrix() -> TestResult {
         }
     }
 
-    // `realised` is the predicate the other two are built on, so assert it
-    // directly rather than only through its consequences.
     assert_test!(
         realised(IfaceKind::Loopback, true, false),
         "loopback is realised even with networking disabled"
@@ -287,7 +261,6 @@ fn test_carrier_assumed_flag() -> TestResult {
         "a device that cannot detect carrier must be flagged"
     );
 
-    // Loopback has no lower layer at all, so the flag is meaningless there.
     let lo = if_flags(IfaceKind::Loopback, true, true, true, false, false);
     assert_eq_test!(
         lo & IFF_SLOP_CARRIER_ASSUMED,
@@ -297,20 +270,15 @@ fn test_carrier_assumed_flag() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Prefix arithmetic
-// =============================================================================
-
 fn test_prefix_to_mask() -> TestResult {
     assert_eq_test!(prefix_to_mask(0), 0, "/0 is 0.0.0.0");
     assert_eq_test!(prefix_to_mask(8), 0xFF00_0000, "/8 is 255.0.0.0");
     assert_eq_test!(prefix_to_mask(24), 0xFFFF_FF00, "/24 is 255.255.255.0");
     assert_eq_test!(prefix_to_mask(32), u32::MAX, "/32 is all ones");
-    // A shift of 32 on a u32 is UB in C and a panic in debug Rust; the
-    // implementation must special-case it rather than rely on wrapping.
+    // A shift of 32 on a u32 panics in debug Rust, so the implementation must
+    // special-case it rather than rely on wrapping.
     assert_eq_test!(prefix_to_mask(33), u32::MAX, "over-long prefix saturates");
 
-    // Every valid prefix must have contiguous leading ones and nothing else.
     for len in 0..=32u8 {
         let mask = prefix_to_mask(len);
         assert_eq_test!(
@@ -364,14 +332,9 @@ fn test_addr_derived_fields() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// The table
-// =============================================================================
-
-/// Interface indices are never reused, even when a device index and a name are.
-///
-/// This is the property that stops a monitor consumer which missed a removal
-/// from applying a later event to a different interface wearing the same slot.
+/// Interface indices are never reused, even when a device index and a name
+/// are: a monitor consumer that missed a removal must not apply a later event
+/// to a different interface wearing the same slot.
 fn test_ifindex_is_monotonic_while_names_are_reused() -> TestResult {
     let t = fresh_table();
 
@@ -417,8 +380,8 @@ fn test_ifindex_is_monotonic_while_names_are_reused() -> TestResult {
     pass!()
 }
 
-/// Names follow the kind: `lo` for loopback, `ethN` for everything else, with
-/// the lowest free suffix rather than a running count.
+/// `lo` for loopback, `ethN` for everything else, with the lowest free suffix
+/// rather than a running count.
 fn test_names_follow_kind() -> TestResult {
     let t = fresh_table();
 
@@ -466,7 +429,6 @@ fn test_names_follow_kind() -> TestResult {
         "second ethernet must be eth1"
     );
 
-    // Freeing eth0 must hand its name back, not leave a hole.
     t.detach(DevIndex(1));
     let c = t
         .attach(
@@ -495,8 +457,7 @@ fn test_names_follow_kind() -> TestResult {
     pass!()
 }
 
-/// The per-interface address list is bounded, and hitting the bound must not
-/// disturb the addresses already there.
+/// Hitting the bound must not disturb the addresses already there.
 fn test_addr_list_is_bounded() -> TestResult {
     let t = fresh_table();
     let idx = t
@@ -539,7 +500,6 @@ fn test_addr_list_is_bounded() -> TestResult {
         "the refusal must not have disturbed the existing addresses"
     );
 
-    // Re-adding the same address/prefix replaces rather than duplicates.
     let replace = IfaceAddr::permanent(
         Ipv4Addr([10, 0, 0, 10]),
         24,
@@ -565,7 +525,7 @@ fn test_addr_list_is_bounded() -> TestResult {
 }
 
 /// An administrative down drops the lease but keeps the operator's own
-/// configuration: a static address is not the lease's to discard.
+/// configuration.
 fn test_retain_addrs_keeps_static_drops_dhcp() -> TestResult {
     let t = fresh_table();
     let idx = t
@@ -656,8 +616,7 @@ fn test_admin_guard_is_exclusive() -> TestResult {
     pass!()
 }
 
-/// Losing carrier must not clear administrative intent — an unplugged cable is
-/// not a request to disable the interface.
+/// An unplugged cable is not a request to disable the interface.
 fn test_carrier_loss_keeps_admin_intent() -> TestResult {
     let t = fresh_table();
     let idx = t
@@ -689,8 +648,6 @@ fn test_carrier_loss_keeps_admin_intent() -> TestResult {
         "administrative intent must survive carrier loss"
     );
 
-    // An idempotent update reports nothing, so a poll loop that sees the same
-    // state twice does not emit a second event.
     assert_test!(
         t.set_carrier(DevIndex(1), false).is_none(),
         "an unchanged carrier must not report a transition"
@@ -699,8 +656,8 @@ fn test_carrier_loss_keeps_admin_intent() -> TestResult {
     pass!()
 }
 
-/// Source selection must prefer a real interface over loopback, which is
-/// registered first and would otherwise answer every question with 127.0.0.1.
+/// Loopback is registered first and would otherwise answer every source
+/// selection with 127.0.0.1.
 fn test_first_ipv4_skips_loopback() -> TestResult {
     let t = fresh_table();
 
@@ -720,8 +677,6 @@ fn test_first_ipv4_skips_loopback() -> TestResult {
     )
     .expect("lo addr");
 
-    // With only loopback configured, it is still the answer — there is nothing
-    // else to give.
     assert_eq_test!(
         t.first_ipv4().map(|ip| ip.0),
         Some([127, 0, 0, 1]),
@@ -771,7 +726,7 @@ fn test_first_ipv4_skips_loopback() -> TestResult {
 }
 
 /// An unrealised interface's addresses stop counting as ours, which is what
-/// makes the RX-acceptance test follow administrative state for free.
+/// makes RX acceptance follow administrative state for free.
 fn test_unrealised_addrs_are_not_ours() -> TestResult {
     let t = fresh_table();
     let eth = t
@@ -810,7 +765,6 @@ fn test_unrealised_addrs_are_not_ours() -> TestResult {
         "the address itself is retained; only its realisation changed"
     );
 
-    // The master switch has the same effect without touching intent.
     t.set_admin_intent(eth, true).expect("set intent");
     t.set_enabled_flag(false);
     assert_test!(
@@ -831,10 +785,8 @@ fn test_unrealised_addrs_are_not_ours() -> TestResult {
 }
 
 /// A device attached while networking is disabled comes up with intent set but
-/// unrealised, and the next enable realises it.
-///
-/// This is the case a remember-which-were-up design gets wrong: the device was
-/// in nobody's snapshot, so a restore has nothing to restore it from.
+/// unrealised, and the next enable realises it — the case a
+/// remember-which-were-up snapshot design gets wrong.
 fn test_attach_while_disabled_is_unrealised() -> TestResult {
     let t = fresh_table();
     t.set_enabled_flag(false);
@@ -880,8 +832,8 @@ fn test_attach_while_disabled_is_unrealised() -> TestResult {
     pass!()
 }
 
-/// `snapshot` reports both what it wrote and what exists, so a caller with a
-/// short buffer can tell it was truncated.
+/// `snapshot` reports both what it wrote and the true total, so a caller with
+/// a short buffer can tell it was truncated.
 fn test_snapshot_reports_truncation() -> TestResult {
     let t = fresh_table();
     for i in 0..3u8 {

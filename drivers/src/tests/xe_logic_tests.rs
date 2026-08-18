@@ -558,9 +558,6 @@ pub fn xe_ddb_carve_cursor() -> TestResult {
     pass!()
 }
 
-/// `wm_value` / `cursor_wm0` compose the enable, ignore-lines, lines, and blocks
-/// fields; the cursor level-0 watermark is enabled, block-based, and strictly
-/// below the cursor DDB allocation.
 pub fn xe_ddb_wm_value() -> TestResult {
     let wm0 = ddb::cursor_wm0();
     assert_test!(wm0 & regs::WM_ENABLE != 0, "cursor WM0 is enabled");
@@ -572,8 +569,7 @@ pub fn xe_ddb_wm_value() -> TestResult {
         regs::reg_field_get(regs::WM_BLOCKS_MASK, wm0),
         ddb::CURSOR_WM0_BLOCKS
     );
-    // The block count must stay strictly below the cursor's DDB allocation (i915
-    // treats a watermark >= the plane's allocation as invalid).
+    // A watermark >= the plane's DDB allocation is invalid.
     assert_test!(
         ddb::CURSOR_WM0_BLOCKS < ddb::CURSOR_DDB_BLOCKS,
         "the WM0 block count is below the cursor DDB allocation"

@@ -1,7 +1,5 @@
-//! Demand Paging - Lazy page allocation on first access
-//!
-//! When a process accesses a page in a lazy-anonymous VMA, the page fault
-//! handler calls into this module to allocate a physical page and map it.
+//! Demand paging: the page-fault handler calls in here to allocate and map a
+//! physical page the first time a lazy-anonymous VMA is touched.
 
 use slopos_abi::addr::VirtAddr;
 use slopos_ostd::mm::KArc;
@@ -15,9 +13,8 @@ use crate::tlb;
 use crate::user_mappings::{ostd_map_4kb_user, ostd_virt_to_phys_4kb};
 use crate::vma_region::VmaRegion;
 
-/// Whether a fault with `error_code` inside `region` is a demand-paging
-/// fault: the page is absent and the region is lazily-backed anonymous
-/// memory.
+/// A demand-paging fault: the page is absent and `region` is lazily-backed
+/// anonymous memory.
 pub fn is_demand_fault_in_region(error_code: u64, region: &VmaRegion) -> bool {
     let is_present = (error_code & 0x01) != 0;
     if is_present {
@@ -81,13 +78,10 @@ pub fn handle_demand_fault(
 
     let mut phys = alloc_kernel_page();
     if phys.is_null() {
-        // One bounded reclaim-and-retry. A demand fault has no syscall return
-        // path to back off on, so this is the last point at which the fault
-        // can still be serviced rather than turned into a signal.
-        //
-        // Here and not inside `try_charge`: the account arena takes no locks
-        // by construction, and a reclaim hook there would give it an inbound
-        // edge from every charge site at once.
+        // One bounded reclaim-and-retry: a demand fault has no syscall return
+        // path to back off on. Here and not inside `try_charge` — the account
+        // arena takes no locks by construction, and a reclaim hook there would
+        // give it an inbound edge from every charge site at once.
         if slopos_ostd::mm::reclaim::run(1) != 0 {
             phys = alloc_kernel_page();
         }

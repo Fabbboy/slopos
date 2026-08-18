@@ -1,23 +1,10 @@
-//! Tests that the real mutators announce themselves to the monitors.
+//! Tests that the real mutators announce themselves to the monitors, run
+//! against a monitor opened on the kernel's own registry.
 //!
-//! The monitor is only worth having if the stack actually posts to it, so these
-//! run the production paths — `iface::attach`, `iface_ctl::configure_ipv4`,
-//! `iface_ctl::set_admin_up`, `iface::set_carrier` — against a monitor opened
-//! on the kernel's own registry, and assert the records that come out.
-//!
-//! # Why a mock, and what is not touched
-//!
-//! These run inside a live kernel whose real NIC the rest of the suite is
-//! using, so each test registers its own device, drives *that* one, and
-//! unregisters it. Nothing here toggles the master switch: it acts on every
-//! registered device by construction, so exercising it would down the live NIC
-//! and fail every socket test that follows. `NET_EV_GLOBAL_ENABLE` is therefore
-//! wired but unasserted here — the same boundary `iface_ctl_tests` documents.
-//!
-//! Every assertion filters by the fixture's own `ifindex`. The kernel table is
-//! shared with a running system: the DHCP client can re-lease and the carrier
-//! poll can fire while a test is mid-flight, and a test that counted every
-//! record in the ring would be asserting on the machine's weather.
+//! The rest of the suite is using the live NIC, so each test registers its own
+//! device and filters every assertion by that device's `ifindex`. The master
+//! switch (`NET_EV_GLOBAL_ENABLE`) stays unasserted: it acts on every
+//! registered device, so exercising it would down the live NIC.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_fs::fileio::FdTable;
@@ -48,21 +35,11 @@ use crate::pool::PacketPool;
 use crate::route;
 use crate::types::{DevIndex, Ipv4Addr, MacAddr, NetError};
 
-/// A process id no real process carries, for the monitors these open.
-/// The owner these tests register monitors under.
-///
-/// The kernel's table rather than a synthetic pid: a monitor's owner is a
-/// permission key, and a made-up number is not one any process could hold.
-/// What the tests need is a *nameable, distinguishable* owner, which this is
-/// without registering a process.
+/// The owner these tests register monitors under: the kernel's own table,
+/// rather than a synthetic pid no process could hold.
 const TEST_OWNER: FdTable = FdTable::Kernel;
 
 /// A device whose link state a test can move.
-///
-/// The carrier flag is an `AtomicBool` rather than a lock because that is the
-/// [`NetDevice::carrier`] contract — the registry reads it while enumerating —
-/// and a mock that took a lock there would be modelling something the real
-/// driver is forbidden to do.
 struct CarrierMock {
     mac: MacAddr,
     link_up: AtomicBool,
@@ -108,8 +85,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Register and attach exactly as the real probe path does: register
-    /// first, attach only after it returns.
+    /// Register first, attach only after it returns — the real probe order.
     fn new(mac: MacAddr) -> Option<Self> {
         let mock = KArc::try_new(CarrierMock {
             mac,
@@ -123,14 +99,13 @@ impl Fixture {
         Some(Self { dev, ifindex, mock })
     }
 
-    /// Move the mock's link, then tell the interface layer — the same two steps
-    /// the driver's carrier poll performs, in the same order.
+    /// Move the mock's link, then tell the interface layer — the order the
+    /// driver's carrier poll uses.
     fn set_link(&self, up: bool) -> Option<(u32, iface::OperState, iface::OperState)> {
         self.mock.link_up.store(up, Ordering::Release);
         iface::set_carrier(self.dev, up)
     }
 
-    /// Put the tree back exactly as it was found.
     fn teardown(self) {
         route::remove_device_routes(self.dev);
         drop(NEIGHBOR_CACHE.flush_device(self.dev));
@@ -140,7 +115,7 @@ impl Fixture {
 }
 
 /// A monitor on the kernel registry, released on drop so a failing assertion
-/// cannot leak a slot into the rest of the suite.
+/// cannot leak a slot.
 struct Monitor {
     handle: usize,
 }
@@ -155,8 +130,7 @@ impl Monitor {
 
     /// Drain everything queued, keeping only the records naming `ifindex`.
     ///
-    /// Chunked through a small stack array: the ring holds 64 records and the
-    /// build's frame gate caps a stack frame at 2 KiB.
+    /// Chunked through a small stack array to stay under the 2 KiB frame gate.
     fn drain_for(&self, ifindex: u32, out: &mut [NetEvent]) -> usize {
         let mut chunk = [NetEvent::default(); 8];
         let mut kept = 0usize;
@@ -191,12 +165,6 @@ impl Drop for Monitor {
     }
 }
 
-// =============================================================================
-// Carrier
-// =============================================================================
-
-/// A carrier transition produces exactly one interface record, and it carries
-/// the operational states either side of the change.
 fn test_producer_carrier_loss_posts_one_iface_changed() -> TestResult {
     let Some(monitor) = Monitor::open(NET_MON_IFACE) else {
         return fail!("could not open a monitor");
@@ -245,9 +213,8 @@ fn test_producer_carrier_loss_posts_one_iface_changed() -> TestResult {
     pass!()
 }
 
-/// Re-reporting the state the interface already has is not a change. The
-/// driver's poll calls this every 50 ms, so an implementation that announced
-/// each sample would fill every subscriber's ring twenty times a second.
+/// The driver's poll re-samples the link every 50 ms, so an unchanged link
+/// must post nothing or it would fill every subscriber's ring.
 fn test_producer_idempotent_carrier_posts_nothing() -> TestResult {
     let Some(monitor) = Monitor::open(NET_MON_IFACE) else {
         return fail!("could not open a monitor");
@@ -289,11 +256,6 @@ fn test_producer_idempotent_carrier_posts_nothing() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Administrative transitions
-// =============================================================================
-
-/// An administrative down is announced, and announced once.
 fn test_producer_admin_down_posts_iface_changed() -> TestResult {
     let Some(monitor) = Monitor::open(NET_MON_IFACE) else {
         return fail!("could not open a monitor");
@@ -323,7 +285,6 @@ fn test_producer_admin_down_posts_iface_changed() -> TestResult {
     assert_eq_test!(payload.admin_up, 0, "the intent is what moved");
     assert_test!(payload.flags & IFF_UP == 0, "so IFF_UP is gone");
 
-    // Asking again for the state it already has is not a change.
     let _ = iface_ctl::set_admin_up(f.ifindex, false);
     assert_eq_test!(
         monitor.count_for(f.ifindex),
@@ -335,12 +296,6 @@ fn test_producer_admin_down_posts_iface_changed() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Addresses and routes
-// =============================================================================
-
-/// Configuring an interface announces the address and both routes, with
-/// payloads a renderer can use without a follow-up query.
 fn test_producer_configure_posts_addr_and_routes() -> TestResult {
     let Some(monitor) = Monitor::open(NET_MON_ADDR | NET_MON_ROUTE) else {
         return fail!("could not open a monitor");
@@ -407,8 +362,6 @@ fn test_producer_configure_posts_addr_and_routes() -> TestResult {
     pass!()
 }
 
-/// An administrative down withdraws what it announced, in the order that keeps
-/// a consumer's view consistent: routes before the address they derive from.
 fn test_producer_admin_down_withdraws_addr_and_routes() -> TestResult {
     let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 10, 5])) else {
         return fail!("could not register a mock device");
@@ -462,13 +415,6 @@ fn test_producer_admin_down_withdraws_addr_and_routes() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Interface lifetime
-// =============================================================================
-
-/// An interface appearing and disappearing are both events, and both report a
-/// transition against `NOTPRESENT` so a consumer needs no special case for the
-/// first or last record about an interface.
 fn test_producer_attach_and_detach_are_announced() -> TestResult {
     let Some(monitor) = Monitor::open(NET_MON_IFACE) else {
         return fail!("could not open a monitor");
@@ -503,17 +449,6 @@ fn test_producer_attach_and_detach_are_announced() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// End to end
-// =============================================================================
-
-/// The property the whole design exists for: a subscriber holding a monitor
-/// becomes readable because the network changed, and reads the change out of
-/// the fd as bytes.
-///
-/// Everything else here asserts a producer posts. This asserts the fd a
-/// userland status indicator would hold goes from quiet to `POLLIN` on a real
-/// carrier event.
 fn test_producer_change_wakes_a_subscribed_fd() -> TestResult {
     let Some(monitor) = Monitor::open(NET_MON_DEFAULT) else {
         return fail!("could not open a monitor");
@@ -523,9 +458,7 @@ fn test_producer_change_wakes_a_subscribed_fd() -> TestResult {
     };
     monitor.count_for(f.ifindex);
 
-    // Drain whatever the attach left so the fd is genuinely quiet. Anything the
-    // live NIC posts concurrently would only make this stricter, never weaker:
-    // the assertion below is that a specific record arrives, not that one does.
+    // Drain whatever the attach left so the fd is genuinely quiet.
     let mut sink = [NetEvent::default(); 16];
     let _ = NETMON_TABLE.drain(monitor.handle, &mut sink);
     assert_eq_test!(
@@ -565,19 +498,11 @@ fn test_producer_change_wakes_a_subscribed_fd() -> TestResult {
     pass!()
 }
 
-/// An administrative down makes a subscribed monitor readable.
+/// The kernel half of what `utest_ip_e2e` checks from userland.
 ///
-/// The kernel half of what `utest_ip_e2e` checks from userland: the whole chain
-/// — `set_admin_up` → `post_iface_changed` → `netmon_post` → the ring →
-/// `poll_events` — with no userland, no `poll(2)`, no spawn and no deadline, so
-/// a failure localises the fault to the producer side of the syscall boundary
-/// and a pass puts it on the userland side.
-///
-/// It downs its **own mock interface**, never `lo`: taking loopback down
+/// Downs its **own mock interface**, never `lo`: taking loopback down
 /// withdraws `127.0.0.0/8` and would break every socket test after it in the
-/// same boot. Nothing in the posting path branches on loopback — `realise`
-/// treats every interface alike, and only `oper_state` distinguishes them — so
-/// a mock exercises the same code.
+/// same boot.
 fn test_producer_admin_down_makes_a_monitor_readable() -> TestResult {
     let Some(monitor) = Monitor::open(NET_MON_IFACE) else {
         return fail!("could not open a monitor");
@@ -586,8 +511,6 @@ fn test_producer_admin_down_makes_a_monitor_readable() -> TestResult {
         return fail!("could not register a mock device");
     };
 
-    // Drain whatever the attach posted, then confirm the fd is quiet — the
-    // same precondition the userland test establishes.
     let mut sink = [NetEvent::default(); 16];
     let _ = NETMON_TABLE.drain(monitor.handle, &mut sink);
     assert_eq_test!(

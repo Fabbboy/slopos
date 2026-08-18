@@ -1,10 +1,5 @@
-//! Unit tests for `tcp::pcb::data::DataState::on_segment`.
-//!
-//! Covers the six RFC 793 closing substates via the `ClosePhase`
-//! sub-enum plus the algorithmic wire-in of RTT, congestion control,
-//! and the retransmit queue.  Each test constructs a `Pcb` in a
-//! specific `ClosePhase` directly, drives a synthetic segment, and
-//! asserts on the resulting `Actions` + mutated state.
+//! Unit tests for `tcp::pcb::data::DataState::on_segment`: the RFC 793
+//! closing substates, plus RTT, congestion control and the retransmit queue.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
@@ -79,10 +74,6 @@ fn data_ref(pcb: &Pcb) -> &DataState {
     }
 }
 
-// =============================================================================
-// RST fast path
-// =============================================================================
-
 pub fn test_data_rst_releases_and_notifies() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
@@ -108,10 +99,6 @@ pub fn test_data_rst_releases_and_notifies() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Unexpected SYN → RST + release
-// =============================================================================
-
 pub fn test_data_unexpected_syn_triggers_rst_and_release() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
@@ -122,10 +109,6 @@ pub fn test_data_unexpected_syn_triggers_rst_and_release() -> TestResult {
     assert_test!(actions.release, "release");
     pass!()
 }
-
-// =============================================================================
-// Plain payload accept
-// =============================================================================
 
 pub fn test_data_in_order_payload_accepted() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
@@ -162,10 +145,6 @@ pub fn test_data_in_order_payload_sets_recv_wake() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Out-of-order payload
-// =============================================================================
-
 pub fn test_data_ooo_payload_queued_and_dup_ack_emitted() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
@@ -184,10 +163,6 @@ pub fn test_data_ooo_payload_queued_and_dup_ack_emitted() -> TestResult {
     assert_eq_test!(d.rcv_nxt.raw(), PEER_IRS + 1, "rcv_nxt unchanged");
     pass!()
 }
-
-// =============================================================================
-// FIN transitions
-// =============================================================================
 
 pub fn test_data_fin_in_established_goes_close_wait() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
@@ -208,7 +183,6 @@ pub fn test_data_fin_in_established_goes_close_wait() -> TestResult {
         actions.notify.contains(SocketNotify::PEER_CLOSED),
         "PEER_CLOSED bit"
     );
-    // ACK of the FIN goes out.
     assert_eq_test!(actions.segments_len, 1, "ACK emitted");
     pass!()
 }
@@ -216,8 +190,7 @@ pub fn test_data_fin_in_established_goes_close_wait() -> TestResult {
 pub fn test_data_fin_in_fin_wait_1_goes_closing() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::FinWait1);
     let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
-    // Peer's FIN arrives; our FIN not yet acked.  ack_num below
-    // snd_nxt means peer hasn't acked our FIN.
+    // ack_num below snd_nxt: the peer has not acked our FIN.
     let actions = DataState::on_segment(
         &mut pcb,
         &mut bufs,
@@ -237,9 +210,7 @@ pub fn test_data_fin_in_fin_wait_1_goes_closing() -> TestResult {
 pub fn test_data_fin_ack_in_fin_wait_1_simultaneous_close() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::FinWait1);
     let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
-    // Peer FIN+ACK acks our FIN AND carries theirs → transition to
-    // TimeWait directly.  snd_nxt in this test harness is OUR_ISS+1
-    // so our "FIN" sits at OUR_ISS+1.
+    // snd_nxt in this test harness is OUR_ISS+1, so our FIN sits at OUR_ISS+1.
     let _actions = DataState::on_segment(
         &mut pcb,
         &mut bufs,
@@ -273,10 +244,6 @@ pub fn test_data_fin_in_fin_wait_2_goes_time_wait() -> TestResult {
     assert_eq_test!(actions.segments_len, 1, "ACK emitted before transition");
     pass!()
 }
-
-// =============================================================================
-// Pure-ACK state transitions
-// =============================================================================
 
 pub fn test_data_ack_in_fin_wait_1_transitions_to_fin_wait_2() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::FinWait1);
@@ -330,18 +297,12 @@ pub fn test_data_ack_in_last_ack_releases() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// snd_una / snd_wnd updates via process_ack
-// =============================================================================
-
 pub fn test_data_ack_advances_snd_una() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
-    // Bump snd_nxt so there's room for the ACK to advance.
     if let PcbState::Data(d) = &mut pcb.state {
         d.snd_nxt = SeqNum::new(OUR_ISS + 100);
-        // Fake up 99 bytes in flight so sendmap.total_bytes matches
-        // snd_nxt - snd_una and the invariant passes.
+        // sendmap.total_bytes must match snd_nxt - snd_una for the invariant.
         let _ = d.sendmap.push_sent(SeqNum::new(OUR_ISS + 1), 99, 0);
     }
     let actions = DataState::on_segment(
@@ -361,14 +322,9 @@ pub fn test_data_ack_advances_snd_una() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Stale ACK ignored, duplicate ACK counted
-// =============================================================================
-
 pub fn test_data_stale_ack_ignored() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
-    // ACK below snd_una — stale, should not change state.
     let _ = DataState::on_segment(
         &mut pcb,
         &mut bufs,
@@ -385,7 +341,6 @@ pub fn test_data_stale_ack_ignored() -> TestResult {
 pub fn test_data_duplicate_ack_does_not_advance_snd_una() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
-    // Set up inflight data so dup-ack is meaningful.
     if let PcbState::Data(d) = &mut pcb.state {
         d.snd_nxt = SeqNum::new(OUR_ISS + 100);
         let _ = d.sendmap.push_sent(SeqNum::new(OUR_ISS + 1), 99, 0);

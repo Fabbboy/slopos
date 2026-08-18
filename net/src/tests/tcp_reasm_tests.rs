@@ -85,16 +85,11 @@ pub fn test_reasm_non_contiguous_ranges() -> TestResult {
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// Overlapping inserts
-// -----------------------------------------------------------------------------
-
-/// Insert [100,110) then [105,115) — should merge to [100,115).
 pub fn test_reasm_overlapping_merge() -> TestResult {
     let mut asm = fresh_asm();
 
-    asm.insert(100, 10); // [100, 110)
-    asm.insert(105, 10); // [105, 115) — overlaps
+    asm.insert(100, 10);
+    asm.insert(105, 10);
     assert_eq_test!(asm.range_count(), 1, "merged to one range");
 
     let (blocks, count) = asm.sack_blocks();
@@ -103,11 +98,6 @@ pub fn test_reasm_overlapping_merge() -> TestResult {
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// Adjacent merge
-// -----------------------------------------------------------------------------
-
-/// Insert [100,110) then [110,120) — adjacent intervals merge.
 pub fn test_reasm_adjacent_merge() -> TestResult {
     let mut asm = fresh_asm();
 
@@ -120,27 +110,19 @@ pub fn test_reasm_adjacent_merge() -> TestResult {
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// Drain contiguous integration
-// -----------------------------------------------------------------------------
-
-/// Full integration: OOO data written into ring buffer, gap filled, drain
-/// advances head, user reads correct byte stream.
 pub fn test_reasm_drain_integration() -> TestResult {
     let mut asm = fresh_asm();
     let mut recv = fresh_recv();
     let rcv_nxt: u32 = 1000;
 
-    // OOO segment at 1050, 30 bytes.
     let ooo_data = [0xBBu8; 30];
     let offset = 1050u32.wrapping_sub(rcv_nxt) as usize;
     recv.buf.write_at_offset(offset, &ooo_data);
     asm.insert(1050, 30);
 
-    // In-order: fill the 50-byte gap.
     let gap = [0xAAu8; 50];
     recv.enqueue(&gap, 0);
-    let new_rcv_nxt = rcv_nxt + 50; // 1050
+    let new_rcv_nxt = rcv_nxt + 50;
 
     let drained = asm.drain_contiguous(new_rcv_nxt);
     assert_eq_test!(drained, 30, "drained 30 OOO bytes");
@@ -153,11 +135,6 @@ pub fn test_reasm_drain_integration() -> TestResult {
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// SACK blocks
-// -----------------------------------------------------------------------------
-
-/// Up to 4 SACK blocks, sorted by left edge.
 pub fn test_reasm_sack_blocks() -> TestResult {
     let mut asm = fresh_asm();
 
@@ -165,11 +142,10 @@ pub fn test_reasm_sack_blocks() -> TestResult {
     asm.insert(300, 10);
     asm.insert(100, 10);
     asm.insert(700, 10);
-    asm.insert(900, 10); // 5th range — only 4 returned as SACK blocks
+    asm.insert(900, 10);
 
     let (blocks, count) = asm.sack_blocks();
     assert_eq_test!(count, 4, "capped at 4 SACK blocks");
-    // Sorted by left edge.
     assert_eq_test!(blocks[0].0, 100, "first block");
     assert_eq_test!(blocks[1].0, 300, "second block");
     assert_eq_test!(blocks[2].0, 500, "third block");
@@ -177,11 +153,6 @@ pub fn test_reasm_sack_blocks() -> TestResult {
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// Duplicate insertion
-// -----------------------------------------------------------------------------
-
-/// Inserting the same range twice is a no-op (merges with itself).
 pub fn test_reasm_duplicate_is_noop() -> TestResult {
     let mut asm = fresh_asm();
 
@@ -194,29 +165,20 @@ pub fn test_reasm_duplicate_is_noop() -> TestResult {
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// write_at_offset wrap-around
-// -----------------------------------------------------------------------------
-
-/// Ring buffer near-full with head near the end of the backing array;
-/// write_at_offset must wrap around correctly.
 pub fn test_reasm_write_at_offset_wrap() -> TestResult {
     let mut recv = fresh_recv();
 
-    // Fill the buffer almost completely, then consume to move tail forward.
-    // This positions head near the end of the backing array.
+    // Fill then drain to put head near the end of the backing array, so the
+    // write at offset 700 wraps past it.
     let fill: KBox<[u8; 32000]> = KBox::zeroed().expect("alloc");
     recv.enqueue(&*fill, 0);
     let mut discard: KBox<[u8; 32000]> = KBox::zeroed().expect("alloc");
     recv.dequeue(&mut *discard);
-    // Now: tail≈32000, head≈32000, count=0, free=32768.
 
-    // Write at offset 700 (wraps past end of backing array).
     let payload = [0xCCu8; 100];
     let wrote = recv.buf.write_at_offset(700, &payload);
     assert_eq_test!(wrote, 100, "wrote 100 bytes wrapping around");
 
-    // Fill the gap so we can read the OOO data.
     let mut gap: KBox<[u8; 700]> = KBox::zeroed().expect("alloc");
     gap.iter_mut().for_each(|b| *b = 0xAA);
     recv.enqueue(&*gap, 0);
@@ -231,40 +193,26 @@ pub fn test_reasm_write_at_offset_wrap() -> TestResult {
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// Capacity limit
-// -----------------------------------------------------------------------------
-
-/// write_at_offset returns 0 when offset is beyond free space.
 pub fn test_reasm_write_at_offset_capacity() -> TestResult {
     let mut recv = fresh_recv();
 
-    // Fill buffer to leave only 100 bytes free.
     let fill: KBox<[u8; 32668]> = KBox::zeroed().expect("alloc"); // 32768 - 100
     recv.enqueue(&*fill, 0);
 
-    // Offset 100 → exactly at the boundary, no room for data.
     let wrote = recv.buf.write_at_offset(100, b"x");
     assert_eq_test!(wrote, 0, "no room at offset=free_space");
 
-    // Offset 50 → 50 bytes available.
     let wrote = recv.buf.write_at_offset(50, &[0xFFu8; 100]);
     assert_eq_test!(wrote, 50, "capped at available space");
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// Sequence-space wrap
-// -----------------------------------------------------------------------------
-
-/// Assembler intervals near u32::MAX — wrapping-aware comparison must
-/// keep them sorted and merge correctly.
 pub fn test_reasm_seq_wrap() -> TestResult {
     let mut asm = fresh_asm();
 
     let near_wrap: u32 = 0xFFFF_FFF0;
-    asm.insert(near_wrap, 16); // [FFF0, 0000) — wraps
-    asm.insert(0, 16); // [0000, 0010) — adjacent across wrap
+    asm.insert(near_wrap, 16);
+    asm.insert(0, 16);
 
     assert_eq_test!(asm.range_count(), 1, "merged across wrap");
 
@@ -275,29 +223,20 @@ pub fn test_reasm_seq_wrap() -> TestResult {
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// Drain stops at recv buffer capacity
-// -----------------------------------------------------------------------------
-
-/// When the recv buffer is nearly full, drain cannot advance head past
-/// the buffer's capacity.
 pub fn test_reasm_drain_respects_capacity() -> TestResult {
     let mut asm = fresh_asm();
     let mut recv = fresh_recv();
 
-    // Fill recv buffer to leave only 50 bytes free.
     let fill: KBox<[u8; 32718]> = KBox::zeroed().expect("alloc"); // 32768 - 50
     recv.enqueue(&*fill, 0);
 
     let rcv_nxt: u32 = fill.len() as u32;
 
-    // Write a 100-byte OOO segment — only 50 bytes fit.
     let ooo = [0xDDu8; 100];
     let wrote = recv.buf.write_at_offset(0, &ooo);
     assert_eq_test!(wrote, 50, "capped at free space");
     asm.insert(rcv_nxt, wrote);
 
-    // Drain: the assembler tracked 50 bytes.
     let drained = asm.drain_contiguous(rcv_nxt);
     assert_eq_test!(drained, 50, "drained what fit");
     recv.buf.advance_head(drained);
@@ -306,22 +245,15 @@ pub fn test_reasm_drain_respects_capacity() -> TestResult {
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// Eviction policy
-// -----------------------------------------------------------------------------
-
-/// When the assembler is full (16 ranges) and a lower-seq range arrives,
-/// the highest-seq range is evicted to keep segments near the gap.
+/// A full assembler evicts its highest-seq range, keeping segments near the gap.
 pub fn test_reasm_eviction_keeps_lowest() -> TestResult {
     let mut asm = fresh_asm();
 
-    // Fill all 16 slots with ranges at seq 200, 216, 232, ...
     for i in 0..16 {
         asm.insert(200 + (i as u32) * 16, 8);
     }
     assert_eq_test!(asm.range_count(), 16, "full");
 
-    // Insert a lower-seq range — should evict the highest.
     asm.insert(100, 8);
     assert_eq_test!(asm.range_count(), 16, "still full after eviction");
 
@@ -329,10 +261,6 @@ pub fn test_reasm_eviction_keeps_lowest() -> TestResult {
     assert_eq_test!(blocks[0].0, 100, "lowest range preserved");
     pass!()
 }
-
-// -----------------------------------------------------------------------------
-// Commutativity fuzz
-// -----------------------------------------------------------------------------
 
 fn splitmix32(state: &mut u64) -> u32 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -342,8 +270,6 @@ fn splitmix32(state: &mut u64) -> u32 {
     (z ^ (z >> 31)) as u32
 }
 
-/// Insert the same set of non-overlapping ranges in different random orders.
-/// The Assembler (and ring buffer contents) must produce identical results.
 pub fn test_reasm_insert_order_commutative_fuzz() -> TestResult {
     let mut seed = 0x01234567_89ABCDEFu64;
 
@@ -372,7 +298,6 @@ pub fn test_reasm_insert_order_commutative_fuzz() -> TestResult {
             order_b.swap(i, j);
         }
 
-        // Order A: write into ring buffer + assembler.
         let mut asm_a = fresh_asm();
         let mut recv_a = fresh_recv();
         for idx in order_a {
@@ -385,7 +310,6 @@ pub fn test_reasm_insert_order_commutative_fuzz() -> TestResult {
         recv_a.buf.advance_head(drained_a);
         let out_a = drain_to_vec(&mut recv_a);
 
-        // Order B.
         let mut asm_b = fresh_asm();
         let mut recv_b = fresh_recv();
         for idx in order_b {
@@ -404,10 +328,6 @@ pub fn test_reasm_insert_order_commutative_fuzz() -> TestResult {
     }
     pass!()
 }
-
-// =============================================================================
-// Register the test suite
-// =============================================================================
 
 slopos_testing::stest!(name = test_reasm_single_ooo_segment, suite = tcp_reasm);
 slopos_testing::stest!(name = test_reasm_non_contiguous_ranges, suite = tcp_reasm);

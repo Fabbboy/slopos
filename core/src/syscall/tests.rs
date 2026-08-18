@@ -1840,7 +1840,6 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
         "signal number not passed in RDI"
     );
 
-    // Restorer at [rsp]; the SignalFrame starts at [rsp + 8].
     let restorer_on_stack: u64 = match user_copy_in(pid, user_frame.rsp()) {
         Some(v) => v,
         None => {
@@ -6846,9 +6845,8 @@ slopos_testing::stest!(
     suite = syscall_signal
 );
 
-/// A task marked for death exits at its next return-to-user boundary. The kill
-/// flag sits outside the deliverable range, so `claim_pending_signal` never
-/// sees it and something on the way back to CPL3 has to act on it.
+/// The kill flag sits outside the deliverable range, so `claim_pending_signal`
+/// never sees it and something on the way back to CPL3 has to act on it.
 pub fn test_killed_task_exits_at_return_to_user() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6877,7 +6875,6 @@ pub fn test_killed_task_exits_at_return_to_user() -> TestResult {
     );
     assert_test!(task_guard.is_killed(), "the mark must be observable");
 
-    // The kill bit must stay invisible to signal delivery itself.
     assert_test!(
         !task::task_has_deliverable_signal(&*task_guard),
         "the kill bit must not read as a deliverable signal"
@@ -6903,9 +6900,9 @@ slopos_testing::stest!(
     suite = syscall_signal
 );
 
-/// SIGKILL marks its target and lets the target exit from its own context, so
-/// destructors run on the victim's own stack and the disposition supplies the
-/// `128 + signal` exit code POSIX specifies.
+/// SIGKILL marks its target and lets it exit from its own context, so
+/// destructors run on the victim's own stack; the exit code is `128 + signal`
+/// per POSIX.
 pub fn test_sigkill_marks_the_target_and_exits_with_the_signal() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6977,9 +6974,8 @@ slopos_testing::stest!(
     suite = syscall_signal
 );
 
-/// Installing a keyboard layout needs console administration: there is one
-/// layout table and it feeds every TTY and the compositor's input path, so this
-/// is `loadkeys`, not `setxkbmap`.
+/// One layout table feeds every TTY and the compositor's input path, so
+/// installing one is console administration — `loadkeys`, not `setxkbmap`.
 pub fn test_keymap_load_requires_console_admin() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -7025,8 +7021,8 @@ pub fn test_keymap_load_requires_console_admin() -> TestResult {
         "an unprivileged task installed a keyboard layout"
     );
 
-    // The privileged caller is stopped by the validator instead — a different
-    // refusal, which is what proves the gate is the only thing between them.
+    // The privileged caller is stopped by the validator instead: a different
+    // refusal is what proves the gate is the only thing between them.
     let Some(admin_buf) = map_user_rw_page(admin_pid) else {
         return fail!("could not map a user page");
     };
@@ -7057,9 +7053,8 @@ slopos_testing::stest!(
     suite = syscall_core
 );
 
-/// `process_list` reports only tasks that can still run code. A `Zombie` has no
-/// address space, no descriptor table and no scheduler placement — it is an
-/// exit-status receipt, not something a caller should be invited to kill.
+/// `process_list` reports only tasks that can still run code: a `Zombie` has no
+/// address space, no descriptor table and no placement — it is an exit receipt.
 pub fn test_process_list_excludes_exited_tasks() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -7247,8 +7242,7 @@ pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
         return fail!("parent has no fd table");
     };
 
-    // WNOHANG with no children at all is ECHILD, not EAGAIN: a supervisor loop
-    // keys on the difference.
+    // ECHILD versus EAGAIN matters: a supervisor loop keys on the difference.
     let wait_any = |wnohang: u64| -> u64 {
         let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
         frame.regs_mut().rdi = u32::MAX as u64;
@@ -7286,7 +7280,6 @@ pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
         "the child did not become a Zombie"
     );
 
-    // The reap resolves the child without the caller ever naming it.
     let rc = wait_any(1);
     assert_test!(
         rc != slopos_abi::Errno::EAGAIN.as_u64() && rc != slopos_abi::Errno::ECHILD.as_u64(),
@@ -7306,9 +7299,8 @@ pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
 }
 
 /// An explicit `SIGCHLD = SIG_IGN` parent gets no zombies (POSIX
-/// `SA_NOCLDWAIT`), while a `SIG_DFL` parent still does. SlopOS maps SIGCHLD's
-/// *default* action to Ignore, so keying the skip on the effective disposition
-/// would leave `waitpid` nothing to reap for any ordinary parent.
+/// `SA_NOCLDWAIT`). SlopOS maps SIGCHLD's *default* action to Ignore, so keying
+/// the skip on the effective disposition would leave `waitpid` nothing to reap.
 pub fn test_sigchld_ignore_skips_the_zombie_state() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -7342,15 +7334,14 @@ pub fn test_sigchld_ignore_skips_the_zombie_state() -> TestResult {
         status
     };
 
-    // SIGCHLD's default is Ignore, but the *status* is still kept.
     assert_eq_test!(
         exit_status_of(SIG_DFL),
         Some(TaskStatus::Zombie),
         "a default-disposition parent lost its child's exit status"
     );
 
-    // An explicit SIG_IGN declares the parent will never reap, so holding a
-    // receipt for it would hold one forever.
+    // An explicit SIG_IGN declares the parent will never reap, so a receipt
+    // would be held forever.
     assert_test!(
         !matches!(exit_status_of(SIG_IGN), Some(TaskStatus::Zombie)),
         "a SIG_IGN parent still accumulated a zombie"
@@ -7359,9 +7350,8 @@ pub fn test_sigchld_ignore_skips_the_zombie_state() -> TestResult {
     pass!()
 }
 
-/// A parent that never reaps cannot grow its zombie set without bound: each
-/// retained receipt pins a `Task`, a 32 KiB kernel stack, a 16 KiB data stack
-/// and a registry slot, so an unbounded set walks the machine to spawn failure.
+/// Each unreaped receipt pins a `Task`, a 32 KiB kernel stack, a 16 KiB data
+/// stack and a registry slot, so an unbounded set ends in spawn failure.
 pub fn test_zombie_budget_is_enforced_per_parent() -> TestResult {
     let _fixture = SyscallFixture::new();
 

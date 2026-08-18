@@ -1,9 +1,8 @@
 //! Per-test registry walked by the harness.
 //!
-//! Every `stest!` invocation emits a static `TestDesc` into the
-//! `.test_registry` linker section. The harness reads the section between the
-//! linker-provided symbols `__start_test_registry` and `__stop_test_registry`,
-//! sorts by `(module_path, name)`, then runs each entry.
+//! Every `stest!` emits a static `TestDesc` into the `.test_registry` linker
+//! section; the harness reads the section, sorts by `(module, name)`, then runs
+//! each entry.
 
 use core::cmp::Ordering;
 
@@ -18,11 +17,8 @@ pub enum TestKind {
     Userland = 1,
 }
 
-/// Compile-time descriptor for one test entry.
-///
-/// Stored in the `.test_registry` linker section. The userland-test fields
-/// (`bin`, `argv`) are populated by Phase 3's `utest!` macro and ignored by
-/// kernel tests.
+/// Compile-time descriptor for one test entry. `bin`/`argv` are set by `utest!`
+/// and ignored by kernel tests.
 #[repr(C)]
 pub struct TestDesc {
     pub name: &'static str,
@@ -36,8 +32,8 @@ pub struct TestDesc {
     pub argv: &'static [&'static str],
 }
 
-/// `flags` bit: panic from this test should be reported as Pass with the
-/// `EXPECTED_PANIC` suffix. Used by the bootstrap panic-isolation canary.
+/// `flags` bit: a panic from this test is reported as Pass with an
+/// `EXPECTED_PANIC` suffix.
 pub const FLAG_EXPECTED_PANIC: u32 = 0x1;
 
 impl slopos_ostd::ffi::registry::RegistryEntry for TestDesc {
@@ -45,7 +41,6 @@ impl slopos_ostd::ffi::registry::RegistryEntry for TestDesc {
         &[slopos_ostd::ffi::registry::RegistryId::Tests];
 }
 
-/// Walk every entry in `.test_registry`.
 pub fn registry_iter() -> impl Iterator<Item = &'static TestDesc> {
     slopos_ostd::ffi::registry::registry_slice::<TestDesc>(
         slopos_ostd::ffi::registry::RegistryId::Tests,
@@ -58,9 +53,8 @@ fn is_bootstrap(desc: &TestDesc) -> bool {
 }
 
 fn cmp_desc(a: &&TestDesc, b: &&TestDesc) -> Ordering {
-    // Bootstrap framework self-tests run first regardless of module path,
-    // so a `bootstrap_*` failure aborts the run before any subsystem test
-    // wastes time on broken plumbing.
+    // `bootstrap_*` sorts ahead of everything so broken plumbing aborts the run
+    // before any subsystem test spends time on it.
     let a_boot = is_bootstrap(a);
     let b_boot = is_bootstrap(b);
     if a_boot != b_boot {
@@ -107,10 +101,9 @@ fn merge_pass(src: &[&'static TestDesc], dst: &mut [&'static TestDesc], width: u
     }
 }
 
-/// Collect every registry entry into a heap-backed vector and sort by
-/// `(module, name)` byte order. Bottom-up merge sort over a second buffer of
-/// pointers: the registry holds thousands of entries and an O(n^2) sort here
-/// costs more wall-clock than the test run it is ordering.
+/// Sort every registry entry by `(module, name)`. Bottom-up merge sort: the
+/// registry holds thousands of entries and an O(n^2) sort would cost more than
+/// the run it orders.
 pub fn registry_sorted() -> Result<KVec<&'static TestDesc>, AllocError> {
     let mut src: KVec<&'static TestDesc> = KVec::new();
     for desc in registry_iter() {

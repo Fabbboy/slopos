@@ -67,10 +67,8 @@ pub fn test_napi_budget_limiting() -> TestResult {
     pass!()
 }
 
-/// Phase-2 regression: `NapiWaker::rearm` makes the next `wait`
-/// short-circuit without parking. Models the post-burst recheck
-/// where the IRQ races the kthread's re-park; an unrearmed `wait`
-/// in that window would lose the wake-up.
+/// Models the post-burst recheck where the IRQ races the kthread's re-park: an
+/// unrearmed `wait` in that window would lose the wake-up.
 pub fn test_napi_waker_rearm_short_circuits() -> TestResult {
     use crate::napi_waker::NapiWaker;
     static WAKER: NapiWaker = NapiWaker::new(
@@ -78,8 +76,6 @@ pub fn test_napi_waker_rearm_short_circuits() -> TestResult {
         lock_class!("test.napi_waker.waiters", LOCK_LEVEL_RESOURCE),
     );
     WAKER.rearm();
-    // The park predicate consumes the armed flag, so an edge left by `rearm`
-    // is what makes the next park return without blocking.
     assert_test!(
         WAKER.consume_edge_for_test(),
         "rearm must leave an edge to consume"

@@ -1,16 +1,9 @@
 //! `BoundDevice` — the single capability handed to a driver's `probe`.
 //!
-//! A probe receives `&mut BoundDevice` and vends every hardware resource it
-//! needs through it: MMIO windows, IRQ bindings, and DMA buffers. Each vend
-//! acquires through an ostd primitive and then hands ownership to the device's
-//! [`Devres`] bag, so a probe that fails partway releases everything it touched
-//! (in reverse order) when the registry drops the bag — no hand-rolled teardown
-//! at each error site. On success the bag moves into the device's claim slot and
-//! the resources live for the binding's lifetime.
-//!
-//! `BoundDevice` is pure-safe glue: it holds two references (~16 bytes), every
-//! resource rvalue is heap-boxed inside [`Devres::attach`], and all `unsafe`
-//! lives in the ostd primitives it drives.
+//! A probe vends MMIO windows, IRQ bindings and DMA buffers through it. Every
+//! vend hands ownership to the device's [`Devres`] bag, so a probe that fails
+//! partway releases what it took, in reverse order, when the registry drops the
+//! bag; on success the bag lives for the binding's lifetime.
 
 use slopos_abi::PhysAddr;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
@@ -41,34 +34,27 @@ pub enum BoundError {
 }
 
 /// The capability a probe drives to acquire device resources.
-///
-/// Borrows the device's enumeration record and its [`Devres`] bag for the
-/// duration of the probe.
 pub struct BoundDevice<'d> {
     info: &'d PciDeviceInfo,
     res: &'d mut Devres,
 }
 
 impl<'d> BoundDevice<'d> {
-    /// Pair a device record with the bag its resources attach to.
     pub fn new(info: &'d PciDeviceInfo, res: &'d mut Devres) -> Self {
         Self { info, res }
     }
 
-    /// The device's PCI enumeration record (vendor/device/class, BARs, MSI
-    /// capability offsets). `PciDeviceInfo` is `Copy`, so a probe typically
-    /// snapshots it (`let info = *bound.info();`) before vending, freeing the
-    /// borrow for subsequent `&mut self` vend calls.
+    /// The device's PCI enumeration record. `PciDeviceInfo` is `Copy`, so a
+    /// probe snapshots it (`let info = *bound.info();`) to free the borrow for
+    /// subsequent `&mut self` vend calls.
     #[inline]
     pub fn info(&self) -> &PciDeviceInfo {
         self.info
     }
 
-    /// Take ownership of `res`, returning a borrowed view valid while the bag
-    /// is borrowed. The resource releases (its `Drop` runs) on probe failure or
-    /// unbind. This is the escape hatch for resource kinds without a dedicated
-    /// vend method (e.g. an [`slopos_ostd::irq::OwnedIrq`] already programmed by
-    /// a bus-specific helper).
+    /// Escape hatch for resource kinds without a dedicated vend method (e.g. an
+    /// [`slopos_ostd::irq::OwnedIrq`] already programmed by a bus-specific
+    /// helper). `res` drops on probe failure or unbind.
     pub fn attach<T: Send + Sync + 'static>(&mut self, res: T) -> Result<&T, BoundError> {
         self.res.attach(res).map_err(|_| BoundError::OutOfMemory)
     }
@@ -91,18 +77,14 @@ impl<'d> BoundDevice<'d> {
 
     /// Reserve and map `[phys, phys + len)` as an uncacheable MMIO window.
     ///
-    /// The returned [`IoMem`] is `Clone`; callers that need owned storage clone
-    /// it (the VA persists for the kernel lifetime — the bag cell is the
-    /// leak-tracking anchor, the clone is a working copy).
+    /// The returned [`IoMem`] is `Clone`: the bag cell is the leak-tracking
+    /// anchor, a clone is a working copy whose VA persists for kernel lifetime.
     pub fn map_region(&mut self, phys: PhysAddr, len: usize) -> Result<&IoMem, BoundError> {
         let region = MmioRegion::map(phys, len).ok_or(BoundError::MapFailed)?;
         self.res.attach(region).map_err(|_| BoundError::OutOfMemory)
     }
 
     /// Map a length-`len` window of BAR `bar` at byte `offset` within it.
-    ///
-    /// Resolves the BAR's physical base from the device record and forwards to
-    /// [`map_region`](Self::map_region).
     pub fn map_bar(&mut self, bar: u8, offset: u32, len: usize) -> Result<&IoMem, BoundError> {
         let b = self
             .info
@@ -116,11 +98,9 @@ impl<'d> BoundDevice<'d> {
         self.map_region(phys, len)
     }
 
-    /// Allocate an IDT vector, install `handler` on it, and hand the resulting
-    /// owned binding to the bag. Returns the vector number (a `Copy` `u8`), so
-    /// no borrow lingers and the caller can immediately vend again (e.g.
-    /// allocate the next queue's vector, or program a device register with this
-    /// one).
+    /// Allocate an IDT vector, install `handler` on it, and hand the owned
+    /// binding to the bag. Returns the vector number by value, so no borrow
+    /// lingers and the caller can vend again immediately.
     pub fn request_irq<F>(&mut self, handler: F) -> Result<u8, BoundError>
     where
         F: Fn(&IrqContext<'_>) + Send + Sync + 'static,

@@ -37,24 +37,14 @@ pub use user_ctx_init::init_user_ctx_for_new_task;
 
 /// Kernel-task entry-point function pointer.
 ///
-/// Always `extern "C"` so caller side (driver-spawned kernel
-/// threads, idle tasks, exec'd user-mode round-trippers) can hand a
-/// bare `extern "C" fn(*mut c_void)` straight to the scheduler
-/// without a transmute. Mirrors the `extern "sysv64" fn() -> !`
-/// pattern used by the OSTD task-exit hook.
+/// `extern "C"` so a caller can hand a bare `extern "C" fn(*mut c_void)`
+/// straight to the scheduler without a transmute.
 pub type TaskEntry = extern "C" fn(*mut c_void);
 
 /// Build a [`TaskEntry`] from a kernel-half virtual address.
 ///
-/// Used by the exec path to convert `PROCESS_CODE_START_VA` (a usize
-/// constant) into the function-pointer shape the scheduler expects.
-/// The reinterpretation is sound because `TaskEntry` and `usize` have
-/// the same size + layout on x86_64; the value is a kernel-mapped
-/// instruction-pointer that the user-mode round-trip will jump to.
-///
-/// Caller invariant: `addr` names a valid instruction sequence
-/// reachable on next dispatch. Every caller passes a kernel-defined
-/// constant.
+/// Caller invariant: `addr` names a valid instruction sequence reachable on
+/// next dispatch. Every caller passes a kernel-defined constant.
 ///
 /// # Panics
 ///

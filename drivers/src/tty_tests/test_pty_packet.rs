@@ -1,12 +1,7 @@
-//! Split from test_ldisc.rs: test_pty_packet.rs
+//! PTY packet-mode (TIOCPKT) tests.
 
 use super::fixtures::*;
 
-// ===========================================================================
-// PTY Packet Mode (TIOCPKT)
-// ===========================================================================
-
-/// Verify TIOCPKT and TIOCPKT_* ABI constant values.
 pub fn test_abi_constants() -> TestResult {
     use slopos_abi::syscall::{
         TIOCPKT, TIOCPKT_DATA, TIOCPKT_DOSTOP, TIOCPKT_FLUSHREAD, TIOCPKT_FLUSHWRITE,
@@ -43,21 +38,18 @@ pub fn test_abi_constants() -> TestResult {
     TestResult::Pass
 }
 
-/// With packet mode ON, master read gets TIOCPKT_DATA prefix.
 pub fn test_tiocpkt_on_data_prefixed() -> TestResult {
     let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
 
-    // Enable packet mode on the master.
     if let Err(e) = tty::set_packet_mode(master, true) {
         klog_info!("TTY_TEST: BUG - set_packet_mode failed: {:?}", e);
         packet_mode_teardown_pty(master, slave, &saved);
         return TestResult::Fail;
     }
 
-    // Slave write -> master read should get TIOCPKT_DATA prefix.
     let _ = tty::write(slave, b"hi", false);
     let mut buf = [0u8; 16];
     match tty::read(master, &mut buf, true) {
@@ -83,7 +75,6 @@ pub fn test_tiocpkt_on_data_prefixed() -> TestResult {
     TestResult::Pass
 }
 
-/// With packet mode OFF, master read has no prefix.
 pub fn test_tiocpkt_off_normal_read() -> TestResult {
     let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
@@ -110,7 +101,6 @@ pub fn test_tiocpkt_off_normal_read() -> TestResult {
     TestResult::Pass
 }
 
-/// Slave input flush sets TIOCPKT_FLUSHREAD on master.
 pub fn test_tiocpkt_slave_flush_read() -> TestResult {
     let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
@@ -119,11 +109,10 @@ pub fn test_tiocpkt_slave_flush_read() -> TestResult {
 
     tty::set_packet_mode(master, true).unwrap();
 
-    // Use TCSETSF (set_termios_flush) on the slave to trigger FLUSHREAD.
+    // TCSETSF (set_termios_flush) is what raises FLUSHREAD.
     let t = tty::get_termios(slave).unwrap();
     tty::set_termios_flush(slave, &t).unwrap();
 
-    // Master read should return the FLUSHREAD packet event.
     let mut buf = [0u8; 16];
     match tty::read(master, &mut buf, true) {
         Ok(1) if (buf[0] & slopos_abi::syscall::TIOCPKT_FLUSHREAD) != 0 => {}
@@ -144,7 +133,6 @@ pub fn test_tiocpkt_slave_flush_read() -> TestResult {
     TestResult::Pass
 }
 
-/// Slave IXON toggle triggers TIOCPKT_DOSTOP / TIOCPKT_NOSTOP.
 pub fn test_tiocpkt_ixon_toggle() -> TestResult {
     let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
@@ -153,7 +141,6 @@ pub fn test_tiocpkt_ixon_toggle() -> TestResult {
 
     tty::set_packet_mode(master, true).unwrap();
 
-    // Enable IXON on the slave -> should produce DOSTOP.
     let mut t = tty::get_termios(slave).unwrap();
     t.c_iflag |= InputFlags::IXON;
     tty::set_termios(slave, &t).unwrap();
@@ -173,7 +160,6 @@ pub fn test_tiocpkt_ixon_toggle() -> TestResult {
         }
     }
 
-    // Clear IXON -> should produce NOSTOP.
     t.c_iflag &= !InputFlags::IXON;
     tty::set_termios(slave, &t).unwrap();
 
@@ -196,7 +182,6 @@ pub fn test_tiocpkt_ixon_toggle() -> TestResult {
     TestResult::Pass
 }
 
-/// Disabling packet mode clears pending events.
 pub fn test_tiocpkt_disable_clears_events() -> TestResult {
     let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
@@ -205,18 +190,13 @@ pub fn test_tiocpkt_disable_clears_events() -> TestResult {
 
     tty::set_packet_mode(master, true).unwrap();
 
-    // Trigger an event.
     let mut t = tty::get_termios(slave).unwrap();
     t.c_iflag |= InputFlags::IXON;
     tty::set_termios(slave, &t).unwrap();
 
-    // Disable packet mode — should clear pending events.
     tty::set_packet_mode(master, false).unwrap();
-
-    // Re-enable and check there are no stale events.
     tty::set_packet_mode(master, true).unwrap();
 
-    // Write data so there IS something to read.
     let _ = tty::write(slave, b"X", false);
     let mut buf = [0u8; 16];
     match tty::read(master, &mut buf, true) {
@@ -238,7 +218,6 @@ pub fn test_tiocpkt_disable_clears_events() -> TestResult {
     TestResult::Pass
 }
 
-/// poll_events reports POLLIN when packet events are pending.
 pub fn test_poll_packet_events_pollin() -> TestResult {
     let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
@@ -247,7 +226,6 @@ pub fn test_poll_packet_events_pollin() -> TestResult {
 
     tty::set_packet_mode(master, true).unwrap();
 
-    // No events, no data -> POLLIN should NOT be set.
     let revents = tty::poll_events(master, slopos_abi::syscall::POLLIN);
     if (revents & slopos_abi::syscall::POLLIN) != 0 {
         klog_info!("TTY_TEST: BUG - POLLIN should not be set with no data and no events");

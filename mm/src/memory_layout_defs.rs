@@ -1,80 +1,40 @@
 //! Memory layout constants for x86_64.
-//!
-//! This module defines the virtual and physical address space layout used
-//! by SlopOS, including kernel space, user space, and special regions.
 
 use crate::paging_defs::PAGE_SIZE_4KB;
-
-// =============================================================================
-// Boot-Time Memory
-// =============================================================================
 
 /// Boot stack size (16 KB).
 pub const BOOT_STACK_SIZE: u64 = 0x4000;
 
-/// Boot stack physical address.
 pub const BOOT_STACK_PHYS_ADDR: u64 = 0x20000;
 
-/// Early PML4 table physical address.
 pub const EARLY_PML4_PHYS_ADDR: u64 = 0x30000;
 
-/// Early PDPT table physical address.
 pub const EARLY_PDPT_PHYS_ADDR: u64 = 0x31000;
 
-/// Early PD table physical address.
 pub const EARLY_PD_PHYS_ADDR: u64 = 0x32000;
 
-// =============================================================================
-// Kernel Virtual Address Space
-// =============================================================================
-
-/// Kernel virtual base address.
 /// The kernel is mapped in the highest 2GB of 64-bit address space.
 pub const KERNEL_VIRTUAL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 
-/// Higher Half Direct Map base address.
-/// Physical memory is identity-mapped starting at this virtual address.
+/// Higher Half Direct Map base; physical memory is mapped starting here.
 pub const HHDM_VIRT_BASE: u64 = 0xFFFF_8000_0000_0000;
 
-/// MMIO virtual address space base.
-/// Device MMIO regions are mapped starting at this virtual address.
-/// This is separate from HHDM because Limine v8+ only maps RAM in HHDM.
+/// Device MMIO maps here, separate from HHDM because Limine v8+ maps only RAM
+/// in HHDM.
 pub const MMIO_VIRT_BASE: u64 = 0xFFFF_8100_0000_0000;
 
-/// MMIO virtual address space size (16 GB should be more than enough).
+/// MMIO virtual address space size (16 GB).
 pub const MMIO_VIRT_SIZE: u64 = 0x0000_0004_0000_0000;
 
-/// Sentinel kernel-half virtual address for the user-VA-predicate
-/// guard in `mm/src/user_copy.rs::check_kernel_guard`. Any reliably-
-/// mapped higher-half address suffices — the guard merely asserts
-/// that the predicate rejects a known-kernel VA. The constant has no
-/// memory-layout role beyond being kernel-half and stable across
-/// boots.
+/// Sentinel kernel-half address for `mm/src/user_copy.rs::check_kernel_guard`.
+/// Any stable higher-half address suffices; it has no memory-layout role.
 pub const KERNEL_HALF_PROBE_VA: u64 = 0xFFFF_FFFF_9000_0000;
 
-// =============================================================================
-// Kernel Stack Virtual Region (dynamic task stacks)
-// =============================================================================
-//
-// A dedicated kernel virtual address region backs `KernelStack` allocations.
-// Physical frames are requested on demand from the page allocator and mapped
-// into this region; each stack has an unmapped guard page below it to catch
-// overflow via page fault.
-//
-// This region is **independent of the kernel image**, so growing kernel code
-// (adjusting `_kernel_end`) does not reduce task-stack capacity — unlike the
-// previous scheme that allocated stacks from the kernel heap, whose free
-// pages compete with the reserved kernel-image region.
-//
-// Layout (between the heap and the IST/exception-stack region):
-//   KERNEL_HEAP_VEND      = 0xFFFF_FFFF_A000_0000  (heap ends)
-//   KSTACK_VA_BASE        = 0xFFFF_FFFF_A000_0000  (new region starts)
-//   KSTACK_VA_END         = 0xFFFF_FFFF_C000_0000  (new region ends)
-//   EXCEPTION_STACK_BASE  = 0xFFFF_FFFF_C000_0000  (IST region begins)
-//
-// 512 MB / 64 KB stride = 8192 slots.
+// Kernel task stacks: frames are mapped on demand into this region, each stack
+// with an unmapped guard page below it to catch overflow by page fault. The
+// region is independent of the kernel image, so growing kernel code costs no
+// task-stack capacity.
 
-/// Base of the kernel-stack virtual region.
 pub const KSTACK_VA_BASE: u64 = 0xFFFF_FFFF_A000_0000;
 
 /// End of the kernel-stack virtual region (exclusive).
@@ -83,32 +43,15 @@ pub const KSTACK_VA_END: u64 = 0xFFFF_FFFF_C000_0000;
 /// Stride per slot: 1 guard page + up to 60 KB usable, rounded to 64 KB.
 pub const KSTACK_STRIDE: u64 = 0x10000;
 
-/// Guard page size (one unmapped 4 KB page per slot).
 pub const KSTACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
 
-/// Maximum number of concurrently allocated kernel stacks.
 pub const KSTACK_MAX_SLOTS: usize = ((KSTACK_VA_END - KSTACK_VA_BASE) / KSTACK_STRIDE) as usize;
 
-// =============================================================================
-// Data-Stack Virtual Region (SafeStack dual-stack data stacks)
-// =============================================================================
-//
-// Mirror of the KSTACK VA region, dedicated to the SafeStack-sanitizer
-// data stacks.  Each task that owns a kernel stack also owns one data
-// stack in this region.  Address-taken locals and dynamic allocas live on
-// the data stack; return addresses and register spills remain on the
-// kernel stack — isolating the two is what defeats ROP by design.
-//
-// Layout (above the exception-stack region):
-//   EXCEPTION_STACK_REGION_BASE  = 0xFFFF_FFFF_C000_0000
-//   ... IST slots (MAX_CPUS * 7 * 64 KB) ...
-//   USTACK_VA_BASE               = 0xFFFF_FFFF_D000_0000  (data-stack region)
-//   USTACK_VA_END                = 0xFFFF_FFFF_F000_0000
-//
-// 512 MB / 64 KB stride = 8192 slots — matches the KSTACK cap so every live
-// task can own one of each.
+// SafeStack data stacks, one per task that owns a kernel stack: address-taken
+// locals and dynamic allocas live here while return addresses and register
+// spills stay on the kernel stack, which is what defeats ROP. The slot count
+// matches KSTACK_MAX_SLOTS so every live task can own one of each.
 
-/// Base of the data-stack virtual region.
 pub const USTACK_VA_BASE: u64 = 0xFFFF_FFFF_D000_0000;
 
 /// End of the data-stack virtual region (exclusive).
@@ -117,141 +60,83 @@ pub const USTACK_VA_END: u64 = 0xFFFF_FFFF_F000_0000;
 /// Stride per data-stack slot (64 KB, matches KSTACK_STRIDE).
 pub const USTACK_STRIDE: u64 = 0x10000;
 
-/// Guard page size for the data stack (one 4 KB page, unmapped).
 pub const USTACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
 
-/// Maximum concurrent data stacks (matches KSTACK_MAX_SLOTS).
 pub const USTACK_MAX_SLOTS: usize = ((USTACK_VA_END - USTACK_VA_BASE) / USTACK_STRIDE) as usize;
 
-// =============================================================================
-// User Virtual Address Space
-// =============================================================================
-
-/// User space start virtual address.
 pub const USER_SPACE_START_VA: u64 = 0x0000_0000_0000_0000;
 
 /// User space end virtual address (up to canonical hole).
 pub const USER_SPACE_END_VA: u64 = 0x0000_8000_0000_0000;
 
-/// Start of kernel (high-canonical) virtual address space.
+/// Start of the high-canonical kernel half; between `USER_SPACE_END_VA` and
+/// this address lies the non-canonical hole, which faults on access.
 ///
-/// On x86-64, addresses between `USER_SPACE_END_VA` and this value fall in
-/// the non-canonical hole and fault on access.  Anything at or above this
-/// address is in the high-canonical half reserved for the kernel.
-///
-/// Use this to reject user-supplied addresses that would land in kernel space
-/// (e.g. ELF segment validation).  For the kernel's own load address, use
-/// `KERNEL_VIRTUAL_BASE` instead.
+/// Use this to reject user-supplied addresses; the kernel's own load address is
+/// `KERNEL_VIRTUAL_BASE`.
 pub const KERNEL_SPACE_START_VA: u64 = 0xFFFF_8000_0000_0000;
 
-/// Process code segment start virtual address.
 pub const PROCESS_CODE_START_VA: u64 = 0x0000_0000_0040_0000;
 
-/// Process data segment start virtual address.
 pub const PROCESS_DATA_START_VA: u64 = 0x0000_0000_0080_0000;
 
-/// Process static TLS block base virtual address.
 pub const PROCESS_TLS_BASE_VA: u64 = 0x0000_0000_00C0_0000;
 
-/// Process heap start virtual address.
 pub const PROCESS_HEAP_START_VA: u64 = 0x0000_0000_0100_0000;
 
-/// Process heap maximum virtual address.
 pub const PROCESS_HEAP_MAX_VA: u64 = 0x0000_0000_4000_0000;
 
-/// Process stack top virtual address.
 pub const PROCESS_STACK_TOP_VA: u64 = 0x0000_7FFF_FF00_0000;
 
 /// Process stack size in bytes (1 MB).
 pub const PROCESS_STACK_SIZE_BYTES: u64 = 0x0000_0000_0010_0000;
 
-/// mmap region start virtual address (above heap max).
 pub const PROCESS_MMAP_START_VA: u64 = 0x0000_0000_4000_0000;
 
-/// mmap region end virtual address (below stack).
 pub const PROCESS_MMAP_END_VA: u64 = 0x0000_7FFF_FE00_0000;
 
-// =============================================================================
-// Exception Stack Region
-// =============================================================================
-
-/// Exception stack region base virtual address.
 pub const EXCEPTION_STACK_REGION_BASE: u64 = 0xFFFF_FFFF_C000_0000;
 
-/// Exception (IST) **safe**-stack region end (exclusive) — the data-stack
-/// region (`USTACK_VA_BASE`) begins here.  Used by
-/// `__safestack_pointer_address` to decide, purely from the running `RSP`,
-/// whether instrumented code is executing on an IST/exception stack (and
-/// must therefore walk the per-CPU exception data stack) or on a task /
-/// kernel / boot stack (walk the per-task data stack).  Only IST safe
-/// stacks live in `[EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_END)`;
-/// PCRs are `.bss` statics in the kernel-image region and task stacks are
-/// in `KSTACK`/`USTACK`, so this range uniquely identifies IST context.
+/// Exclusive end of the IST **safe**-stack region, where `USTACK_VA_BASE`
+/// begins. `__safestack_pointer_address` tests the running `RSP` against this
+/// range to tell IST context from task/kernel/boot context; only IST safe
+/// stacks live in it.
 pub const EXCEPTION_STACK_REGION_END: u64 = USTACK_VA_BASE;
 
 /// Stride between exception stacks (64 KB).
 pub const EXCEPTION_STACK_REGION_STRIDE: u64 = 0x0001_0000;
 
-/// Guard page size for exception stacks (one 4 KB page).
 pub const EXCEPTION_STACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
 
-/// Number of pages per exception stack (8 pages = 32 KB).
 pub const EXCEPTION_STACK_PAGES: u64 = 8;
 
 /// Exception stack usable size (32 KB).
 pub const EXCEPTION_STACK_SIZE: u64 = EXCEPTION_STACK_PAGES * PAGE_SIZE_4KB;
 
-// =============================================================================
-// Exception / IST SafeStack DATA-Stack Region (per-CPU)
-// =============================================================================
-//
-// The data-stack analogue of the IST safe-stack region above.  While the
-// IST mechanism gives each exception/IRQ vector a dedicated *safe* stack
-// (RSP), the SafeStack sanitizer needs a matching *data* stack for the
-// handler's address-taken locals (the `[core::fmt::Argument; N]` array a
-// `klog!`/`panic!` builds).  Without it, an exception handler's
-// instrumented code writes those locals onto whichever task happened to be
-// interrupted — the root cause of the recursive-#PF-in-panic crash.
-//
-// One mapped, guard-paged data stack per CPU, shared LIFO across all
-// exception / NMI / MCE / fault-nesting on that CPU (interrupts are masked
-// inside exception handlers, so usage is strictly last-in-first-out and a
-// single per-CPU stack suffices).  `__safestack_pointer_address` selects
-// it (via `gs:[ProcessorControlRegion::ist_unsafe_sp]`) whenever the
-// running `RSP` lies in `EXCEPTION_STACK_REGION`.
-//
-// Layout (above the data-stack/USTACK region, below the top of the
-// high-canonical half):
-//   USTACK_VA_END           = 0xFFFF_FFFF_F000_0000  (per-task data stacks end)
-//   EXC_DSTACK_REGION_BASE   = 0xFFFF_FFFF_F000_0000  (this region starts)
-//   ... MAX_CPUS slots, 128 KB stride ...
+// Per-CPU data-stack analogue of the IST safe-stack region: without it an
+// exception handler's address-taken locals land on whichever task happened to
+// be interrupted. One guard-paged stack per CPU suffices because interrupts are
+// masked inside exception handlers, so nesting is strictly LIFO.
 
-/// Base of the per-CPU exception/IST data-stack region.
 pub const EXC_DSTACK_REGION_BASE: u64 = USTACK_VA_END;
 
-/// Stride per CPU slot (128 KB: 4 KB guard + 124 KB usable).  Generous
-/// versus the 64 KB bootstrap data stack so the deepest exception →
-/// diagnostic-dump → `panic!` → `core::fmt` chain (plus an NMI nested on
-/// top) cannot exhaust it; the guard page + CI budget gate are the
-/// backstops if that assumption is ever violated.
+/// Stride per CPU slot (128 KB: 4 KB guard + 124 KB usable), sized so the
+/// deepest exception → diagnostic-dump → `panic!` → `core::fmt` chain, plus an
+/// NMI nested on top, cannot exhaust it.
 pub const EXC_DSTACK_REGION_STRIDE: u64 = 0x0002_0000;
 
-/// Guard page size for the exception data stack (one unmapped 4 KB page at
-/// the slot base; the stack grows down into it on overflow).
+/// Unmapped guard page at the slot base; the stack grows down into it.
 pub const EXC_DSTACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
 
 /// Usable bytes of one CPU's exception data stack (124 KB).
 pub const EXC_DSTACK_USABLE_SIZE: u64 = EXC_DSTACK_REGION_STRIDE - EXC_DSTACK_GUARD_SIZE;
 
-/// Usable pages of one CPU's exception data stack.
 pub const EXC_DSTACK_PAGES: u64 = EXC_DSTACK_USABLE_SIZE / PAGE_SIZE_4KB;
 
-// Bind the SafeStack resolver's IST-region bounds — which live in
-// `slopos-ostd` (below `mm` in the crate graph, so it cannot import this
-// module) and are consumed as naked-asm `const` operands by
-// `__safestack_pointer_address` — to this canonical layout.  A drift here
-// would silently route an exception handler's address-taken locals onto the
-// wrong data stack, so we fail the build instead.
+// `slopos-ostd` sits below `mm` in the crate graph and cannot import this
+// module, so `__safestack_pointer_address` carries its own copy of these
+// bounds; drift would route an exception handler's locals onto the wrong data
+// stack.
 const _: () = {
     assert!(
         EXCEPTION_STACK_REGION_BASE == slopos_arch::pcr::SAFESTACK_IST_REGION_BASE,

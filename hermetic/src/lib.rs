@@ -2,9 +2,6 @@
 //! registry walked at scope enter/Drop, the [`BootCtx`] capability token
 //! gating boot-time-only mutators, and the [`KernelStackTop<'a>`] and
 //! [`slopos_arch::arch::gdt::IstSlot`] resource newtypes.
-//!
-//! `KernelTestScope` itself lives in `slopos-core` and builds on these
-//! primitives.
 
 #![no_std]
 #![feature(allocator_api)]

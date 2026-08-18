@@ -1,30 +1,9 @@
 //! Tests for the DHCP transport: the glue between the state machine and a real
 //! interface.
 //!
-//! [`dhcp_client_tests`](super::dhcp_client_tests) covers the protocol
-//! exhaustively as a pure unit. What it cannot reach is everything the
-//! transport adds — that a frame actually reaches a device, that lease timers
-//! are armed and that a *stale* one is refused, that the port-68 listener
-//! dispatches, and the order in which `perform` does its work. Those are the
-//! parts a passing boot exercises only incidentally.
-//!
-//! # How these avoid the live NIC
-//!
-//! Each test registers its own mock device, attaches its own interface, drives
-//! that one, and removes it — the pattern `iface_ctl_tests` documents. Two
-//! further precautions matter here because the transport writes *system* state:
-//!
-//! * **Every ACK these tests inject carries no DNS option.** `bind()` only
-//!   touches the resolver when the lease names a server, so the system resolver
-//!   is never overwritten — which would otherwise break every DNS test that
-//!   follows.
-//! * Addresses and routes are installed on the mock's own interface, and
-//!   withdrawn by device, so nothing here can disturb the real NIC's
-//!   configuration.
-//!
-//! The real client is running throughout. It has its own slot and its own
-//! transaction, so a reply crafted here is rejected by it on the transaction id
-//! and vice versa.
+//! Each test registers its own mock device and drives only that one, and every
+//! ACK injected here carries no DNS option, so the system resolver the DNS
+//! tests depend on is never overwritten.
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -48,14 +27,9 @@ const CLIENT_IP: [u8; 4] = [10, 77, 0, 55];
 const MASK: [u8; 4] = [255, 255, 255, 0];
 
 /// What a mock device saw, in order.
-///
-/// Ordering is the point: a RELEASE that reaches the wire *after* the interface
-/// is down is a RELEASE the server cannot match to a binding, because the
-/// source address identifying the client is already gone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MockEvent {
-    /// A frame was transmitted. Carries its DHCP message type, or 0 for a frame
-    /// that is not DHCP (ARP, say).
+    /// Carries the frame's DHCP message type, or 0 for a non-DHCP frame.
     Tx(u8),
     SetDown,
     SetUp,
@@ -155,8 +129,7 @@ impl NetDevice for RecordingMock {
 /// The DHCP message type inside a transmitted Ethernet frame, if it is one.
 ///
 /// Ethernet(14) + IPv4(20) + UDP(8) is the only shape this client emits, so the
-/// offsets are fixed rather than parsed — a frame that does not match simply is
-/// not DHCP.
+/// offsets are fixed rather than parsed.
 fn dhcp_msg_type(frame: &[u8]) -> Option<u8> {
     const L2: usize = 14;
     const L3: usize = 20;
@@ -216,8 +189,7 @@ impl Fixture {
         Some(Self { dev, ifindex, mock })
     }
 
-    /// Start the client and drive it to `Bound` with a lease carrying no DNS
-    /// server — see the module docs for why that matters.
+    /// Start the client and drive it to `Bound`.
     fn bind(&self, lease_secs: u32) -> bool {
         if !crate::dhcp::start(self.dev) {
             return false;
@@ -250,8 +222,8 @@ fn current_xid(dev: DevIndex) -> Option<u32> {
     crate::dhcp::transport::xid_of(dev)
 }
 
-/// Build a server reply. `lease` present means options 51/58/59 are included;
-/// **no DNS option is ever written**, so `bind()` leaves the resolver alone.
+/// Build a server reply. `lease` present adds options 51/58/59; **no DNS
+/// option is ever written**, so `bind()` leaves the resolver alone.
 fn reply(
     buf: &mut [u8; DHCP_FRAME_LEN],
     xid: u32,
@@ -297,12 +269,6 @@ fn routes_for(dev: DevIndex) -> usize {
         .count()
 }
 
-// =============================================================================
-// The transport carries a lease all the way onto an interface
-// =============================================================================
-
-/// A DISCOVER reaches the device, and an OFFER/ACK exchange installs the
-/// address and both routes.
 fn test_dhcp_tx_binds_address_and_routes() -> TestResult {
     let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 77, 1])) else {
         return fail!("could not register a mock device");
@@ -366,10 +332,9 @@ fn test_dhcp_tx_binds_address_and_routes() -> TestResult {
     pass!()
 }
 
-/// The port-68 listener is what delivers a reply at all.
 fn test_dhcp_port_listener_is_claimed() -> TestResult {
-    // The client claims it on first start; a second claim of the same port must
-    // be refused rather than silently shadowing the first.
+    // The client claimed port 68 on first start; a second claim must be refused
+    // rather than silently shadowing the first.
     assert_test!(
         !crate::udp::register_port_listener(codec::UDP_PORT_CLIENT, |_, _, _| {}),
         "port 68 is already claimed by the DHCP client"
@@ -377,18 +342,8 @@ fn test_dhcp_port_listener_is_claimed() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Stale timers — what the epoch guards
-// =============================================================================
-
-/// A refused lease's expiry timer must not tear down the lease that replaced
-/// it.
-///
-/// This is the bug the per-slot epoch exists for, and it is invisible to every
-/// other kind of coverage: it needs two lease lifetimes, and by the time the
-/// stale timer fires the client is legitimately `Bound` again, so checking the
-/// state cannot distinguish it. The sequence is bind, NAK, rebind, then fire
-/// the *first* lease's expiry key.
+/// The bug the per-slot epoch exists for: by the time the stale timer fires the
+/// client is legitimately `Bound` again, so state alone cannot distinguish it.
 fn test_dhcp_stale_expiry_cannot_unbind_a_later_lease() -> TestResult {
     let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 77, 2])) else {
         return fail!("could not register a mock device");
@@ -403,8 +358,7 @@ fn test_dhcp_stale_expiry_cannot_unbind_a_later_lease() -> TestResult {
         return fail!("no expiry timer armed");
     };
 
-    // Renew, then have the server refuse: the lease is torn down and discovery
-    // restarts. The expiry timer armed for the first lease is still in flight.
+    // The expiry timer armed for the first lease stays in flight across the NAK.
     crate::dhcp::renew_now(f.dev);
     let Some(xid) = current_xid(f.dev) else {
         f.teardown();
@@ -418,8 +372,6 @@ fn test_dhcp_stale_expiry_cannot_unbind_a_later_lease() -> TestResult {
         "a NAK gives the address up at once"
     );
 
-    // Bind again. The client is `Bound` once more, so state alone can no longer
-    // tell the stale timer from a live one.
     let Some(xid) = current_xid(f.dev) else {
         f.teardown();
         return fail!("discovery did not restart");
@@ -443,7 +395,6 @@ fn test_dhcp_stale_expiry_cannot_unbind_a_later_lease() -> TestResult {
         "the second lease is installed"
     );
 
-    // Fire the *first* lease's expiry.
     crate::dhcp::on_expire_timer(stale_key);
 
     assert_test!(
@@ -456,8 +407,6 @@ fn test_dhcp_stale_expiry_cannot_unbind_a_later_lease() -> TestResult {
         "and must not withdraw its routes either"
     );
 
-    // The live key still works, so the guard rejects staleness rather than
-    // rejecting everything.
     if let Some(key) = live_key {
         crate::dhcp::on_expire_timer(key);
         assert_test!(
@@ -470,17 +419,8 @@ fn test_dhcp_stale_expiry_cannot_unbind_a_later_lease() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Ordering
-// =============================================================================
-
-/// Stopping releases the lease *before* the address is withdrawn.
-///
-/// A RELEASE carries the client's address in `ciaddr` and is identified by its
-/// source address; sent after the unbind, it names an address the client no
-/// longer holds and the server may not match it to a binding — leaving the
-/// address reserved until the lease runs out, which is the whole thing RELEASE
-/// exists to avoid.
+/// A RELEASE is identified by its source address, so one sent after the unbind
+/// names an address the server may not match to a binding.
 fn test_dhcp_release_precedes_unbind() -> TestResult {
     let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 77, 3])) else {
         return fail!("could not register a mock device");
@@ -509,18 +449,8 @@ fn test_dhcp_release_precedes_unbind() -> TestResult {
     pass!()
 }
 
-/// An administrative down gives the lease back.
-///
 /// Without this an operator's `ip link set eth0 down` silently keeps the
-/// address reserved on the server for the rest of the lease, and the next
-/// machine to ask may be handed one that is still in use.
-///
-/// The ordering assertion is the load-bearing half: the RELEASE must reach the
-/// device **before** `set_down`. That is asserted directly rather than by
-/// reproducing the failure, because a mock device has no driver lock to
-/// re-enter — what prevents that re-entrancy is the call site sitting outside
-/// `device.set_down()`, and no test against a mock can prove that. This pins
-/// the property that call site exists to provide.
+/// address reserved on the server for the rest of the lease.
 fn test_dhcp_admin_down_releases_before_set_down() -> TestResult {
     let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 77, 4])) else {
         return fail!("could not register a mock device");

@@ -1,14 +1,6 @@
-//! Linker-section registry of `HermeticState` impls.
-//!
-//! Each impl emits a `#[link_section = ".hermetic_state_registry"] static` of
-//! type `HermeticVTable`; the linker concatenates them into a contiguous
-//! slice bracketed by `__start_hermetic_state_registry` and
-//! `__stop_hermetic_state_registry`. The scope walks it at enter, topo-sorts
-//! by `DEPENDS_ON`, snapshots in that order, and replays restores in reverse
-//! on drop.
-//!
-//! Snapshots are type-erased: `KBox::into_raw` cast to `NonNull<()>`, cast
-//! back by the vtable's `restore` thunk.
+//! Linker-section registry of `HermeticState` impls: each emits a
+//! `#[link_section = ".hermetic_state_registry"] static` of type
+//! `HermeticVTable`, which the linker concatenates into a contiguous slice.
 
 use slopos_ostd::{AllocError, KVec};
 
@@ -16,9 +8,9 @@ use slopos_ostd::{AllocError, KVec};
 // `register_hermetic_state!` write one canonical type into the section.
 pub use slopos_ostd::test_support::hermetic::HermeticVTable;
 
-/// Iterate every registered `HermeticVTable` in linker order. That order
-/// depends on translation-unit link order; `topo_order` is the scope's
-/// capture-order source of truth.
+/// Iterate every registered `HermeticVTable` in linker order, which depends on
+/// translation-unit link order; `topo_order` is the capture-order source of
+/// truth.
 pub fn registry_iter() -> impl Iterator<Item = &'static HermeticVTable> {
     slopos_ostd::ffi::registry::registry_slice::<HermeticVTable>(
         slopos_ostd::ffi::registry::RegistryId::HermeticStates,
@@ -50,9 +42,8 @@ pub fn topo_order() -> Result<KVec<&'static HermeticVTable>, RegistryError> {
     let n = entries.len();
     let mut in_degree: KVec<usize> = (0..n).map(|_| 0usize).collect();
 
-    // TODO(tech-debt): `in_degree` is never read — this loop's only live
-    // effect is the `MissingDep` check; drop the counter or drive the emit
-    // loop below from it.
+    // TODO(tech-debt): `in_degree` is written but never read — drop the counter
+    // or drive the emit loop below from it.
     for (i, vt) in entries.iter().enumerate() {
         for dep_name in vt.depends_on {
             let mut found = false;

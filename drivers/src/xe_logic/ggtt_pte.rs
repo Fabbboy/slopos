@@ -49,15 +49,12 @@ fn align_up(value: u64, align: u64) -> Option<u64> {
     Some(bumped - (bumped % align))
 }
 
-/// Choose a GGTT byte offset for `pages` contiguous 4 KiB pages, `align`-aligned
-/// and placed strictly above the firmware framebuffer extent
-/// `[fw_surf, fw_surf + fw_len)`, with the whole region fitting inside
-/// `ggtt_total_bytes`.
-///
-/// Rounding the firmware extent's exclusive end up to `align` yields a start at
-/// or beyond `fw_surf + fw_len`, so the result never collides with the firmware
-/// surface. Returns `None` when the alignment is zero, any sum overflows, or the
-/// request cannot fit above the firmware surface within the GGTT.
+/// A GGTT byte offset for `pages` contiguous 4 KiB pages, `align`-aligned and
+/// above the firmware framebuffer extent `[fw_surf, fw_surf + fw_len)`. Rounding
+/// that extent's exclusive end up to `align` puts the start at or beyond
+/// `fw_surf + fw_len`, so the result never collides with the firmware surface.
+/// `None` on zero alignment, on any overflow, or when the request does not fit
+/// inside `ggtt_total_bytes`.
 pub fn alloc_above(
     fw_surf: u64,
     fw_len: u64,

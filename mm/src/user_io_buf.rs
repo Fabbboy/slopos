@@ -7,27 +7,21 @@ use crate::user_ptr::{UserBytes, UserVirtAddr};
 
 /// Allocate a kernel buffer and copy user data into it in one step.
 ///
-/// Returns `ENOMEM` if the allocation fails (never panics), `EFAULT`
-/// if the copy fails. Rejects requests larger than `max_size` bytes
-/// with `EINVAL`.
+/// `EINVAL` above `max_size`, `ENOMEM` if the allocation fails (never
+/// panics), `EFAULT` if the copy fails.
 pub fn memdup_user(addr: u64, len: usize, max_size: usize) -> Result<KVec<u8>, Errno> {
     if len > max_size {
         return Err(Errno::EINVAL);
     }
     let user_bytes = UserBytes::try_new(addr, len).map_err(|_| Errno::EFAULT)?;
-    // `KVec::<u8>::zeroed` allocates `len` bytes directly into the heap;
-    // the byte buffer never materialises on the caller's stack.
     let mut buf = KVec::<u8>::zeroed(len).map_err(|_| Errno::ENOMEM)?;
     copy_bytes_from_user(user_bytes, &mut buf).map_err(|_| Errno::EFAULT)?;
     Ok(buf)
 }
 
-/// Validates that `[addr, addr+len)` lies entirely within user-space.
-///
-/// This is the upfront `access_ok()` equivalent — rejects null,
-/// non-canonical, kernel-space, and overflowing ranges before any
-/// I/O buffer is constructed.  Individual copy operations re-validate
-/// via `UserBytes::try_new` for defense-in-depth.
+/// The upfront `access_ok()` equivalent: rejects null, non-canonical,
+/// kernel-space and overflowing ranges before any I/O buffer is constructed.
+/// Individual copies still re-validate via `UserBytes::try_new`.
 fn validate_user_range(addr: u64, len: usize) -> Result<(), Errno> {
     if len == 0 {
         return Ok(());

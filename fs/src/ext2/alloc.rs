@@ -5,7 +5,6 @@ use super::types::{BlockNum, GroupIdx, InodeNum};
 use crate::blockdev::BlockDevice;
 use slopos_ostd::bitmap_slice;
 
-/// Goal-directed block allocation: try the goal's group first, then scan.
 pub fn allocate_block_near(
     goal: BlockNum,
     superblock: &mut Superblock,
@@ -26,14 +25,12 @@ pub fn allocate_block_near(
         GroupIdx(0)
     };
 
-    // Try goal group first
     if let Some(block) =
         try_alloc_block_in_group(goal_group, superblock, cache, device, block_size)?
     {
         return Ok(block);
     }
 
-    // Scan other groups
     for g in 0..groups_count {
         let group = GroupIdx(g);
         if group == goal_group {
@@ -48,7 +45,6 @@ pub fn allocate_block_near(
     Err(Ext2Error::NoSpace)
 }
 
-/// Simple block allocation (no goal preference).
 pub fn allocate_block(
     superblock: &mut Superblock,
     cache: &mut BlockCache,
@@ -58,7 +54,6 @@ pub fn allocate_block(
     allocate_block_near(BlockNum::ZERO, superblock, cache, device, block_size)
 }
 
-/// Allocate an inode, preferring the same group as the parent.
 pub fn allocate_inode(
     parent_group: GroupIdx,
     superblock: &mut Superblock,
@@ -71,14 +66,13 @@ pub fn allocate_inode(
         return Err(Ext2Error::NoSpace);
     }
 
-    // Try parent's group first (locality for files in same directory)
+    // Locality: files in one directory belong in one group.
     if let Some(ino) =
         try_alloc_inode_in_group(parent_group, superblock, cache, device, block_size)?
     {
         return Ok(ino);
     }
 
-    // Scan other groups
     for g in 0..groups_count {
         let group = GroupIdx(g);
         if group == parent_group {
@@ -92,7 +86,6 @@ pub fn allocate_inode(
     Err(Ext2Error::NoSpace)
 }
 
-/// Free a block: clear its bitmap bit and update counts.
 pub fn free_block(
     block: BlockNum,
     superblock: &mut Superblock,
@@ -127,7 +120,6 @@ pub fn free_block(
     Ok(())
 }
 
-/// Free an inode: clear its bitmap bit and update counts.
 pub fn free_inode(
     ino: InodeNum,
     superblock: &mut Superblock,
@@ -153,8 +145,6 @@ pub fn free_inode(
 
     Ok(())
 }
-
-// ---- Internal helpers ----
 
 fn try_alloc_block_in_group(
     group: GroupIdx,

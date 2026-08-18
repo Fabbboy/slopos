@@ -1,22 +1,17 @@
-//! Self-tests for the test framework itself. The registry-sort
-//! comparator clusters every `bootstrap_*` entry at the front of the
-//! walk so a failure aborts the run before subsystem tests waste time
-//! on broken plumbing.
+//! Self-tests for the test framework itself.
 //!
-//! Order matters within this module — names use `aaa`/`bbb`/`ccc`/`ddd`
-//! suffixes so the lex sort places them in a deterministic sequence
-//! (the panic-isolation check needs to run *after* the canary).
+//! The `aaa`/`bbb`/`ccc`/`ddd` suffixes fix the lex order: the panic-isolation
+//! check must run after the canary.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_ostd::klog_info;
 
-use crate::filter::glob_match;
 use crate::TestResult;
+use crate::filter::glob_match;
 
-/// Incremented at the entry of every bootstrap test (including the
-/// panicking canary, *before* its panic). The isolation check reads it
-/// to confirm the harness ran prior tests in order.
+/// Incremented on entry to every bootstrap test, including the canary before it
+/// panics; the isolation check reads it to confirm prior tests ran.
 static BOOTSTRAP_CTR: AtomicU32 = AtomicU32::new(0);
 static BOOTSTRAP_DROP_CTR: AtomicU32 = AtomicU32::new(0);
 
@@ -82,21 +77,14 @@ fn bootstrap_bbb_capture_roundtrip() -> TestResult {
     }
 }
 
-/// Intentionally panic to exercise the harness's panic-isolation path.
-/// `FLAG_EXPECTED_PANIC` tells the harness to surface this as a Pass
-/// (with `EXPECTED_PANIC` suffix) so the run as a whole stays green.
+/// Panics on purpose to exercise the harness's panic-isolation path.
 fn bootstrap_ccc_panic_canary() -> TestResult {
     BOOTSTRAP_CTR.fetch_add(1, Ordering::Relaxed);
     let _guard = PanicCanaryGuard;
     panic!("intentional bootstrap canary panic");
 }
 
-/// Verifies the harness recovered cleanly from `bootstrap_ccc`'s panic:
-///   1. The counter is at least 4 — proves prior tests (including the
-///      canary) ran in order and incremented before the panic.
-///   2. The canary's Drop guard ran during the caught panic unwind.
-///   3. The klog backend is not stuck on the buffering capture: a fresh
-///      `capture::begin → klog → drain` roundtrip works.
+/// Verifies the harness recovered cleanly from `bootstrap_ccc`'s panic.
 fn bootstrap_ddd_isolation_check() -> TestResult {
     let n = BOOTSTRAP_CTR.fetch_add(1, Ordering::Relaxed);
     if n < 4 {
