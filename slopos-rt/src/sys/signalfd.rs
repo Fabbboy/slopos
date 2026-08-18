@@ -19,13 +19,11 @@ pub fn signalfd(mask: u64, flags: u32) -> i32 {
 }
 
 /// Block the signals in `mask` (`SIG_BLOCK`) so they queue (drainable via a
-/// signalfd) instead of interrupting blocking waits with `EINTR`. A reactor
-/// calls this for every signal it intends to harvest as a completion.
+/// signalfd) instead of interrupting blocking waits with `EINTR`.
 ///
 /// Returns the PREVIOUS blocked mask on success (`Err` carries the negated
-/// errno), so a caller that needs to roll back can restore exactly the bits
-/// it changed — unblocking the whole mask blindly would clear blocks the
-/// process held before this call.
+/// errno), so a caller rolling back restores exactly the bits it changed —
+/// unblocking the whole mask would clear blocks the process held before.
 #[inline(always)]
 pub fn block_signals(mask: u64) -> Result<u64, i32> {
     let set = mask;
@@ -44,9 +42,8 @@ pub fn block_signals(mask: u64) -> Result<u64, i32> {
 
 /// Undo [`block_signals`] (`SIG_UNBLOCK`) so the signals in `mask` resume
 /// their normal (handler / default-action) delivery. Used to roll back when
-/// signalfd creation fails after the mask was already blocked — leaving the
-/// mask blocked with no fd to drain it would make those signals silently
-/// undeliverable for the rest of the process lifetime.
+/// signalfd creation fails: a mask left blocked with no fd to drain it makes
+/// those signals silently undeliverable for the rest of the process lifetime.
 #[inline(always)]
 pub fn unblock_signals(mask: u64) -> i32 {
     let set = mask;

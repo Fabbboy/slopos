@@ -1,5 +1,4 @@
-//! Process management syscall the async `Child::wait` needs: `waitpid`
-//! (reap an exited child task).
+//! `waitpid` shim the async `Child::wait` needs.
 
 use slopos_abi::syscall::SYSCALL_WAITPID;
 use slopos_slibc::pal::raw::syscall2;

@@ -1,13 +1,8 @@
 #![feature(restricted_std)]
 
-//! signalfd end-to-end test — the EINTR-footgun regression test.
-//!
-//! With SIGCHLD blocked, a child's exit is delivered as an **in-band**
-//! `POLLIN` event on a signalfd, not as an out-of-band `EINTR` that aborts
-//! the wait. The proof: a *single* `poll(2)` call (no EINTR-retry loop)
-//! observes the child-exit signal. Unblocked, that same `poll` would return
-//! `EINTR` when SIGCHLD lands (the footgun documented earlier). Draining the
-//! signalfd then yields a `SignalfdSiginfo` whose `ssi_signo` is SIGCHLD.
+//! signalfd end-to-end test: with SIGCHLD blocked, a child's exit arrives as an
+//! in-band `POLLIN` on the signalfd, so a single `poll(2)` — no EINTR-retry
+//! loop — observes it.
 
 use slopos_abi::signal::{SIGCHLD, sig_bit};
 use slopos_abi::syscall::POLLIN;
@@ -17,9 +12,6 @@ use slopos_userland::syscall::{UserPollFd, core as sys_core, fs, process, signal
 fn test_sigchld_inband() -> bool {
     let mask = sig_bit(SIGCHLD);
 
-    // Block SIGCHLD: it now queues (signalfd-drainable) instead of EINTR-ing
-    // a blocked wait — `(pending & !blocked)` excludes it from poll's EINTR
-    // check, while the signalfd (which tests raw `pending`) still reports it.
     let _ = signalfd::block_signals(mask);
 
     let sfd = signalfd::signalfd(mask, 0);
@@ -30,7 +22,6 @@ fn test_sigchld_inband() -> bool {
 
     let pid = process::fork();
     if pid == 0 {
-        // Child: exit immediately; our SIGCHLD will land on the parent.
         sys_core::exit_with_code(0);
     }
     if pid < 0 {
@@ -40,8 +31,6 @@ fn test_sigchld_inband() -> bool {
     }
     let child = pid as u32;
 
-    // SINGLE poll, NO EINTR-retry loop. With SIGCHLD blocked this returns
-    // POLLIN once the child exits; unblocked it would return EINTR.
     let mut pfds = [UserPollFd {
         fd: sfd,
         events: POLLIN,
@@ -50,7 +39,7 @@ fn test_sigchld_inband() -> bool {
     let ready =
         matches!(fs::poll(&mut pfds, 5000), Ok(n) if n >= 1) && (pfds[0].revents & POLLIN) != 0;
 
-    // Drain the siginfo; ssi_signo (LE u32 at offset 0) must be SIGCHLD.
+    // `ssi_signo` is the LE u32 at offset 0 of the drained `SignalfdSiginfo`.
     let mut buf = [0u8; 16];
     let signo_ok = matches!(fs::read_slice(sfd, &mut buf), Ok(n) if n >= 4)
         && u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) == SIGCHLD as u32;

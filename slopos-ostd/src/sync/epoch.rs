@@ -47,11 +47,6 @@ impl Epoch {
     }
 
     /// Open an epoch read-side critical section.
-    ///
-    /// The returned [`EpochGuard`] disables preemption on the current
-    /// CPU and registers a synthetic lock-class entry so that any
-    /// subsequent `SpinLock` acquisition (while the guard is live) is
-    /// reported by lockdep.
     #[inline]
     #[must_use = "dropping the guard immediately ends the epoch critical section"]
     pub fn enter(&self) -> EpochGuard<'_> {
@@ -73,16 +68,14 @@ impl Epoch {
         }
     }
 
-    /// Block until every online CPU has observed at least one
-    /// quiescent state since this call. Wraps
-    /// [`crate::sync::rcu::synchronize_rcu`].
+    /// Block until every online CPU has observed at least one quiescent state
+    /// since this call.
     #[inline]
     pub fn wait(&self) {
         rcu::synchronize_rcu();
     }
 
-    /// Schedule `value` for drop after the next grace period. Safe
-    /// wrapper over [`crate::sync::rcu::rcu_call_typed`].
+    /// Schedule `value` for drop after the next grace period.
     #[inline]
     pub fn defer_kbox<T: Send + 'static>(&self, value: KBox<T>) {
         rcu::rcu_call_typed::<T>(value, drop_typed::<T>);
@@ -90,13 +83,12 @@ impl Epoch {
 }
 
 fn drop_typed<T: Send + 'static>(_b: KBox<T>) {
-    // `KBox::drop` releases the heap allocation; the typed `_b` parameter
-    // exists to give `rcu_call_typed` a monomorphisation handle.
+    // Dropping the typed `_b` releases the allocation; the parameter exists to
+    // give `rcu_call_typed` a monomorphisation handle.
 }
 
-/// RAII guard returned by [`Epoch::enter`]. Carries an embedded
-/// [`RcuReadGuard`] so preemption stays disabled for the scope; lockdep
-/// observes a synthetic class entry tied to the source `Epoch`'s
+/// RAII guard returned by [`Epoch::enter`]: preemption stays disabled for the
+/// scope, and lockdep sees a synthetic class entry keyed on the `Epoch`'s
 /// address.
 #[must_use = "dropping the guard immediately ends the epoch critical section"]
 pub struct EpochGuard<'e> {

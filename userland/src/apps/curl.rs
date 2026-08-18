@@ -626,10 +626,6 @@ impl ChunkDecoder {
     }
 }
 
-/// Drive the HTTP response read off the slopfut runtime: the blocking
-/// `stream.read` becomes an owning `OP_READ` (`slopfut::read`) wrapped in a
-/// `time::timeout` deadline (the read timeout the synchronous path set on
-/// the socket). The body-decode logic is unchanged.
 const RECV_CAP: u32 = 4096;
 
 async fn receive_http_response_async(
@@ -645,9 +641,8 @@ async fn receive_http_response_async(
     let mut read_buf = vec![0u8; RECV_CAP as usize];
 
     loop {
-        // `OP_READ` keeps would-block in-flight, so the only way a read
-        // never resolves is a stalled peer; `time::timeout` bounds it to the
-        // same deadline the old `set_read_timeout` enforced.
+        // `OP_READ` keeps would-block in-flight, so only a stalled peer can
+        // leave a read unresolved; the timeout is the sole bound on it.
         let br = match slopfut::time::timeout(
             IO_TIMEOUT_MS as u64,
             slopfut::read(sock_fd, core::mem::take(&mut read_buf), RECV_CAP),
@@ -658,15 +653,11 @@ async fn receive_http_response_async(
             Err(_) => return Err(CurlError::Timeout),
         };
         read_buf = br.buf;
-        // Map the ring completion onto the old `io::Result<usize>` shape:
-        // res == 0 → EOF, res > 0 → n bytes, res < 0 → recv error.
         let read_result: io::Result<usize> = if br.res < 0 {
             Err(io::Error::from(io::ErrorKind::Other))
         } else {
             Ok(br.res as usize)
         };
-        // Slice the freshly-read bytes into a temporary borrow named
-        // `recv_buf` so the body-decode arms below are unchanged.
         let recv_buf = &read_buf;
         match read_result {
             Ok(0) => {
@@ -859,9 +850,8 @@ fn execute_request(
         return Err(CurlError::SendFailed);
     }
 
-    // Receive on the slopfut runtime. The socket fd is borrowed for the
-    // duration of `block_on` (the stream outlives it), so no ownership of the
-    // TcpStream is transferred — only its raw fd is handed to `OP_READ`.
+    // Only the raw fd is handed to `OP_READ`, so the stream must outlive
+    // `block_on`.
     let sock_fd = stream.as_raw_fd();
     let result = match Ring::setup(8) {
         Ok(ring) => slopfut::block_on(ring, receive_http_response_async(sock_fd, config.verbose)),

@@ -1,10 +1,9 @@
 //! Async byte I/O over a raw fd.
 //!
 //! [`AsyncFd`] is a non-owning async view: it submits `OP_READ`/`OP_WRITE`/
-//! `OP_POLL_ADD`/`OP_ACCEPT` for a fd whose lifetime the caller owns (e.g. via
-//! an `OwnedFd`). Connection setup (`socket`/`connect`/`bind`/`listen`) stays
-//! a plain syscall — only the data plane is async. Concrete `TcpStream` /
-//! `UdpSocket` wrappers layer on this as the userland migration needs them.
+//! `OP_POLL_ADD`/`OP_ACCEPT` for a fd whose lifetime the caller owns. Only the
+//! data plane is async — connection setup (`socket`/`connect`/`bind`/`listen`)
+//! stays a plain syscall.
 
 use slopos_abi::syscall::POLLIN;
 
@@ -27,7 +26,7 @@ impl AsyncFd {
 
     /// Read up to `len` bytes into `buf` (capacity must be `>= len`). The
     /// buffer is owned by the reactor while in flight and returned in the
-    /// [`BufResult`]; slice it as `&buf[..res as usize]`.
+    /// [`BufResult`].
     pub async fn read(&self, buf: Vec<u8>, len: u32) -> BufResult {
         read(self.fd, buf, len).await
     }

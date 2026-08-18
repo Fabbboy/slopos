@@ -13,10 +13,9 @@ pub fn is_space(b: u8) -> bool {
 
 /// Trim a `#` comment from `line`.
 ///
-/// `#` only starts a comment at the beginning of a word and outside quotes, so
-/// `echo a#b` keeps its `#` and `echo "# not a comment"` keeps the whole
-/// string.  Run before expansion, so a variable's value can never be spliced
-/// out of a comment and back into the command.
+/// `#` only starts a comment at the beginning of a word and outside quotes.
+/// Run before expansion, so a variable's value can never be spliced out of a
+/// comment and back into the command.
 pub fn strip_comment(line: &[u8]) -> &[u8] {
     let mut in_single = false;
     let mut in_double = false;
@@ -233,9 +232,8 @@ pub fn expand_variables(input: &[u8], input_len: usize, output: &mut [u8]) -> us
                 i += 2;
                 continue;
             }
-            // `$0` is the shell's own name and `$1`..`$9` its operands.  They
-            // are not environment variables, so they are resolved before the
-            // name lookup below rather than through it.
+            // Positional parameters are not environment variables, so they
+            // resolve here rather than through the name lookup below.
             if next.is_ascii_digit() {
                 let idx = (next - b'0') as usize;
                 if let Some(value) = super::args::positional(idx) {
@@ -290,9 +288,8 @@ fn is_operator(b: u8) -> bool {
 
 /// Length of the redirection operator at the head of `s`, if there is one.
 ///
-/// POSIX's IO_NUMBER rule: leading digits count as the redirected descriptor
-/// only when they touch the `<` or `>`.  So `2>err` redirects fd 2, while
-/// `echo 2 > out` passes `2` as an argument.
+/// POSIX IO_NUMBER: leading digits count as the redirected descriptor only when
+/// they touch the `<` or `>`, so `echo 2 > out` passes `2` as an argument.
 fn scan_redirect(s: &[u8]) -> Option<usize> {
     let mut i = 0usize;
     while i < s.len() && s[i].is_ascii_digit() {
@@ -325,15 +322,15 @@ pub fn shell_parse_line(line: &[u8], tokens: &mut buffers::ParsedTokens) -> i32 
             break;
         }
 
-        // A word starting with `#` comments out the rest of the line.  Sitting
-        // before the operator and word branches, and after the whitespace skip,
-        // gives it the POSIX word-boundary rule without a special case.
+        // Sitting after the whitespace skip and before the operator and word
+        // branches gives `#` the POSIX word-boundary rule without a special
+        // case.
         if line[cursor] == b'#' {
             break;
         }
 
-        // Control operators, longest match first so `&&` is never read as two
-        // background operators and `||` never as two pipes.
+        // Longest match first, so `&&` is never read as two background
+        // operators nor `||` as two pipes.
         let rest = &line[cursor..];
         let control: Option<usize> = match (rest[0], rest.get(1)) {
             (b'&', Some(b'&')) | (b'|', Some(b'|')) => Some(2),
@@ -347,7 +344,6 @@ pub fn shell_parse_line(line: &[u8], tokens: &mut buffers::ParsedTokens) -> i32 
             continue;
         }
 
-        // Redirections, including `&>` and any IO number.
         let redirect = if rest[0] == b'&' && rest.get(1) == Some(&b'>') {
             Some(2)
         } else {

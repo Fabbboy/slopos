@@ -3,12 +3,9 @@
 //! The `RawWaker` data pointer *is* the task id (a `usize`, `Copy`), so there
 //! is no refcount to manage: `clone` returns the same id, `drop` is a no-op,
 //! and `wake`/`wake_by_ref` push the id onto the current thread's scheduler
-//! ready-queue ([`super::executor::wake_task`]). Single-threaded by design —
-//! a waker is only ever fired on the executor thread that created the task
-//! (the reactor and all tasks share one thread), so encoding the id inline is
-//! sound. (Cross-core wakeups never fire this `!Send` waker from another
-//! thread: a cross-core sender writes the target reactor's wakeup-fd, and that
-//! reactor fires the local waker on its own thread — see `super::cross_core`.)
+//! ready-queue ([`super::executor::wake_task`]). A waker is only ever fired on
+//! the executor thread that created the task — the reactor and all tasks share
+//! one thread — so encoding the id inline is sound.
 
 use core::task::{RawWaker, RawWakerVTable, Waker};
 

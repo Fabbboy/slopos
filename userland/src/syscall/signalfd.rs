@@ -1,9 +1,8 @@
 //! signalfd syscall wrapper + the signal-blocking helper a ring reactor uses.
 //!
 //! Together these turn signal delivery from an out-of-band `EINTR` into an
-//! in-band ring/poll event: [`block_signals`] keeps the signals pending
-//! (so `(pending & !blocked)` excludes them from the harvest's EINTR check)
-//! while [`signalfd`] exposes them as a `POLLIN`-able fd to drain.
+//! in-band ring/poll event: [`block_signals`] keeps the signals pending while
+//! [`signalfd`] exposes them as a `POLLIN`-able fd to drain.
 
 use super::raw::{syscall2, syscall4};
 use slopos_abi::signal::SIG_BLOCK;
@@ -19,8 +18,7 @@ pub fn signalfd(mask: u64, flags: u32) -> i32 {
 }
 
 /// Block the signals in `mask` (`SIG_BLOCK`) so they queue (drainable via a
-/// signalfd) instead of interrupting blocking waits with `EINTR`. A reactor
-/// calls this for every signal it intends to harvest as a completion.
+/// signalfd) instead of interrupting blocking waits with `EINTR`.
 #[inline(always)]
 pub fn block_signals(mask: u64) -> i32 {
     let set = mask;

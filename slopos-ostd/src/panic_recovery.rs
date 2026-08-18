@@ -85,8 +85,8 @@ pub fn register_panic_cleanup(handler: PanicCleanupFn) {
     }
 }
 
-/// Snapshotted at hermetic scope-enter and truncated back to on Drop, so the
-/// fixed-size array does not fill up across many test runs.
+/// Snapshotted at hermetic scope-enter and truncated back to on scope Drop, so
+/// the fixed-size array does not fill up across many test runs.
 pub fn cleanup_handler_count() -> usize {
     PANIC_CLEANUP_COUNT
         .load(Ordering::SeqCst)

@@ -1,16 +1,7 @@
 #![feature(restricted_std)]
 
-//! SlopRing end-to-end userland test (opcode parity + async edge).
-//!
-//! Exercises the ring surface against real fds from userland — the only
-//! context with a mapped ring + a process fd table. Covers:
-//!   * `ring_setup` maps a ring and reports sane geometry;
-//!   * `OP_NOP` inline completion;
-//!   * `OP_WRITE` / `OP_READ` over a pipe, with opcode parity vs the
-//!     equivalent blocking `read`/`write` syscalls;
-//!   * deferred completion: a read on an empty pipe blocks, then
-//!     resolves once data is written, harvested via blocking `ring_enter`;
-//!   * the `slopfut` executor + future cancellation (`OP_CANCEL`).
+//! SlopRing end-to-end userland test: opcode dispatch, deferred completion and
+//! the `slopfut` executor, driven against real fds from a process fd table.
 
 use slopos_userland as _;
 
@@ -24,10 +15,8 @@ use slopos_abi::unix::SockAddrUn;
 use slopos_userland::ring::{Ring, slopfut};
 use slopos_userland::syscall::{fs, net};
 
-/// ring_setup returns a usable ring with the expected geometry, and the
-/// shared mapping is *accessible* (this is the first ring the process
-/// creates, so it lands at the mmap-window base — the exact address nc's
-/// ring lands at; exercising it here catches a base-page mapping fault).
+/// The process's first ring lands at the mmap-window base, so touching its
+/// mapping here catches a base-page mapping fault.
 fn test_setup() -> bool {
     let Ok(mut ring) = Ring::setup(8) else {
         return false;
@@ -35,8 +24,6 @@ fn test_setup() -> bool {
     if ring.sq_entries() != 8 || ring.fd() < 0 {
         return false;
     }
-    // Touch the mapping: a NOP round-trip reads/writes the SQ/CQ indices
-    // at the base address.
     let mut sqe = Sqe::ZERO;
     sqe.opcode = OP_NOP;
     sqe.user_data = 0x5e7;
@@ -46,7 +33,6 @@ fn test_setup() -> bool {
     matches!(ring.poll_completion(), Some(cqe) if cqe.user_data == 0x5e7 && cqe.res == 0)
 }
 
-/// OP_NOP completes inline with res == 0.
 fn test_nop() -> bool {
     let Ok(mut ring) = Ring::setup(4) else {
         return false;
@@ -66,8 +52,6 @@ fn test_nop() -> bool {
     }
 }
 
-/// OP_WRITE then OP_READ over a pipe round-trips the bytes, and the
-/// observable result matches the blocking syscall (parity).
 fn test_write_read_pipe() -> bool {
     let Ok((rd, wr)) = fs::pipe() else {
         return false;
@@ -77,7 +61,6 @@ fn test_write_read_pipe() -> bool {
     };
 
     let payload = b"slopring-parity";
-    // Write via the ring.
     let mut wsqe = Sqe::ZERO;
     wsqe.opcode = OP_WRITE;
     wsqe.fd = wr.raw();
@@ -95,7 +78,6 @@ fn test_write_read_pipe() -> bool {
         return false;
     }
 
-    // Read it back via the ring.
     let mut buf = [0u8; 32];
     let mut rsqe = Sqe::ZERO;
     rsqe.opcode = OP_READ;
@@ -106,8 +88,6 @@ fn test_write_read_pipe() -> bool {
     if ring.push_sqe(&rsqe).is_err() {
         return false;
     }
-    // Data is already buffered, so a blocking enter completes it inline
-    // or on the first harvest.
     if ring.submit_and_wait(1).is_err() {
         return false;
     }
@@ -121,12 +101,9 @@ fn test_write_read_pipe() -> bool {
     &buf[..payload.len()] == payload
 }
 
-/// A read on an empty pipe blocks (deferred), then resolves once data is
-/// written — driven by the `slopfut` executor (SLOPRING § 7.1). The read
-/// and a concurrent write are raced via `select2`: the read defers
-/// (-EAGAIN, recorded in-flight) while the write lands inline and makes the
-/// pipe readable, so the deferred read completes in the same blocking
-/// harvest. Exercises real `async`/`await` + ownership-passing buffers.
+/// The read on the empty pipe defers (-EAGAIN, recorded in-flight) while the
+/// raced write lands inline, so the deferred read completes in the same
+/// blocking harvest (SLOPRING § 7.1).
 fn test_deferred_read() -> bool {
     let Ok((rd, wr)) = fs::pipe() else {
         return false;
@@ -145,10 +122,8 @@ fn test_deferred_read() -> bool {
         )
         .await
         {
-            // The reader resolved: the deferred read was harvested.
             slopfut::Either2::A(rd) => rd,
-            // The writer "won" but the reader is what we assert on; fall
-            // through with a sentinel so the test fails loudly.
+            // Writer won: sentinel so the test fails loudly.
             slopfut::Either2::B(_) => slopfut::BufResult {
                 res: -1,
                 buf: Vec::new(),
@@ -161,10 +136,8 @@ fn test_deferred_read() -> bool {
     result.res == msg.len() as i32 && &result.buf[..msg.len()] == msg
 }
 
-/// Dropping an unresolved op future fires `OP_CANCEL` for it. A read on an
-/// empty pipe is raced against a short timer; the timer wins, the read
-/// future is dropped, and its `Drop` cancels the in-flight read — proving
-/// drop-based cancellation works and `block_on` returns rather than hangs.
+/// Dropping an unresolved op future fires `OP_CANCEL` for it, so the timer
+/// winning the race lets `block_on` return rather than hang on the read.
 fn test_cancel() -> bool {
     let Ok((rd, _wr)) = fs::pipe() else {
         return false;
@@ -181,9 +154,7 @@ fn test_cancel() -> bool {
         )
         .await
         {
-            // Empty pipe: the read must not win.
             slopfut::Either2::A(_) => false,
-            // Timer fired; the losing read future is dropped + cancelled.
             slopfut::Either2::B(_) => true,
         }
     });
@@ -192,20 +163,10 @@ fn test_cancel() -> bool {
     timer_won
 }
 
-/// The ring dispatches OP_WRITE / OP_READ to the *socket* FileOps path
-/// (`FileKind::Socket`, via the `ForcedNonblockGuard` that toggles a
-/// socket's *stored* nonblocking flag — SLOPRING § 12 reality 1), not the
-/// pipe path. A full TCP data round-trip needs a peer, and in-process TCP
-/// loopback does not complete its handshake in the test environment (a
-/// pre-existing netstack limitation, unrelated to the ring), so this
-/// proves the socket dispatch deterministically instead: an OP_WRITE on a
-/// freshly-created, *unconnected* TCP socket must route through the
-/// nonblocking write probe → the socket write op and complete inline with
-/// a socket-specific negative errno (e.g. -ENOTCONN) — never blocking,
-/// never crashing, never mis-dispatched to a pipe. The OP_READ/OP_WRITE
-/// *data* path is the same `file_read_fd`/`file_write_fd` code proven by
-/// the pipe round-trip subtests above and exercised end-to-end against a
-/// real remote by `nc`'s ring loop.
+/// OP_WRITE on an unconnected TCP socket must complete inline with a
+/// socket-layer errno, which no pipe/regular fd yields — proving the ring took
+/// the `FileKind::Socket` path. In-process TCP loopback never completes its
+/// handshake here, so a real data round-trip is not available.
 fn test_socket_dispatch() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
         return false;
@@ -224,22 +185,15 @@ fn test_socket_dispatch() -> bool {
     if ring.push_sqe(&wsqe).is_err() || ring.submit().is_err() {
         return false;
     }
-    // The unconnected-socket write is an error "ready now", so it
-    // completes inline (no deferral, no hang). A pipe/regular fd would not
-    // yield this socket-layer errno — so a negative result here proves the
-    // ring drove the FileKind::Socket path.
     match ring.poll_completion() {
         Some(cqe) => cqe.user_data == 0x5e && cqe.res < 0,
         None => false,
     }
 }
 
-/// OP_SEND routes through the *socket send* path (not the generic
-/// `file_write_fd`): an OP_SEND on a freshly-created, *unconnected* TCP
-/// socket must complete inline with a socket-layer negative errno (e.g.
-/// -ENOTCONN/-EPIPE), never blocking, never mis-dispatched. A pipe/regular
-/// fd would not yield this socket-layer errno, so a negative result here
-/// proves the ring drove the socket-send routing distinctly from OP_WRITE.
+/// OP_SEND on an unconnected TCP socket completes inline with a socket-layer
+/// errno, proving the socket-send routing runs distinctly from OP_WRITE's
+/// generic `file_write_fd`.
 fn test_send_socket_dispatch() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
         return false;
@@ -264,12 +218,10 @@ fn test_send_socket_dispatch() -> bool {
     }
 }
 
-/// OP_RECVMSG parses the user `MsgHdr` at `sqe.addr` and validates it:
-/// a null `addr` must complete inline with -EFAULT (proving the msghdr
-/// parse + user-pointer validation runs, distinct from OP_READ which
-/// treats `addr` as a raw data buffer).
+/// OP_RECVMSG treats `sqe.addr` as a user `MsgHdr*` and validates it, unlike
+/// OP_READ which treats it as a raw data buffer.
 fn test_recvmsg_efault() -> bool {
-    // A valid socket so the op reaches msghdr parsing (not ENOTSOCK).
+    // Valid socket so the op reaches msghdr parsing rather than ENOTSOCK.
     let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
         return false;
     };
@@ -285,19 +237,15 @@ fn test_recvmsg_efault() -> bool {
     if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
         return false;
     }
-    // -EFAULT == -14. The msghdr validation rejects the null pointer
-    // before any recv, so this completes inline with exactly -EFAULT.
+    // -EFAULT == -14.
     match ring.poll_completion() {
         Some(cqe) => cqe.user_data == 0xfa01 && cqe.res == -14,
         None => false,
     }
 }
 
-/// OP_RECVFROM with a null `addr2` (the source-addr out-pointer) must
-/// complete inline with -EFAULT, before any recv — proving the
-/// mandatory-out-pointer check runs (distinct from OP_READ/OP_RECVMSG,
-/// which have no source-addr out-pointer). A valid UDP socket so the op
-/// reaches the addr2 check rather than ENOTSOCK.
+/// OP_RECVFROM's source-addr out-pointer `addr2` is mandatory, unlike
+/// OP_READ/OP_RECVMSG which have none.
 fn test_recvfrom_null_addr2_efault() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
         return false;
@@ -317,21 +265,16 @@ fn test_recvfrom_null_addr2_efault() -> bool {
     if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
         return false;
     }
-    // -EFAULT == -14, posted inline before any recv.
+    // -EFAULT == -14.
     match ring.poll_completion() {
         Some(cqe) => cqe.user_data == 0xc0fe && cqe.res == -14,
         None => false,
     }
 }
 
-/// OP_RECVFROM on a fresh, *unbound* UDP socket with no datagram queued
-/// has nothing to receive, so the non-blocking probe returns -EAGAIN and
-/// the op is recorded in-flight (deferred) rather than completing inline.
-/// A pure poll therefore observes *no* CQE (deferred completions land
-/// only inside a blocking `ring_enter` — SLOPRING § 7.1). This proves the
-/// would-block routing without needing a real peer (in-process UDP
-/// loopback does not deliver in the test env). `addr2` is valid so the op
-/// passes the EFAULT check and reaches the recv probe.
+/// With no datagram queued the recv probe returns -EAGAIN and the op is
+/// recorded in-flight, so a pure poll observes no CQE: deferred completions
+/// land only inside a blocking `ring_enter` (SLOPRING § 7.1).
 fn test_recvfrom_eagain_deferred() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
         return false;
@@ -359,17 +302,11 @@ fn test_recvfrom_eagain_deferred() -> bool {
     if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
         return false;
     }
-    // No data: the probe returns -EAGAIN, so the op is deferred (recorded
-    // in-flight) and a pure poll sees nothing. The op's CQE would land
-    // only on a blocking harvest after a peer sends.
     ring.poll_completion().is_none()
 }
 
-/// OP_OPENAT creates a file inline (fs opens never block), returning an
-/// fd >= 0; OP_CLOSE on that fd then returns 0. Opening a missing path
-/// (no O_CREAT) completes inline with a negated errno (fd < 0). Drives
-/// all three through the raw ring, proving the open/close routing and the
-/// fd install + reserve-before-side-effect (ownership op) path.
+/// fs opens never block, so OP_OPENAT and OP_CLOSE both complete inline —
+/// exercising the fd install + reserve-before-side-effect ownership path.
 fn test_openat_close() -> bool {
     use slopos_abi::fs::{O_CREAT, O_RDWR};
 
@@ -377,7 +314,6 @@ fn test_openat_close() -> bool {
         return false;
     };
 
-    // 1. OP_OPENAT (create) → fd >= 0.
     let path = b"/tmp_ring_openat_test\0";
     let mut osqe = Sqe::ZERO;
     osqe.opcode = OP_OPENAT;
@@ -397,7 +333,6 @@ fn test_openat_close() -> bool {
         return false;
     }
 
-    // 2. OP_CLOSE the new fd → 0.
     let mut csqe = Sqe::ZERO;
     csqe.opcode = OP_CLOSE;
     csqe.fd = new_fd;
@@ -413,7 +348,6 @@ fn test_openat_close() -> bool {
         return false;
     }
 
-    // 3. OP_OPENAT on a missing path without O_CREAT → negated errno.
     let missing = b"/no_such_ring_openat_file\0";
     let mut msqe = Sqe::ZERO;
     msqe.opcode = OP_OPENAT;
@@ -431,9 +365,7 @@ fn test_openat_close() -> bool {
     )
 }
 
-/// The `slopfut` runtime constructors for the new ops resolve correctly:
-/// `openat` opens a file inline (fd >= 0) and `close` then returns 0.
-/// Exercises the async wrappers + the ownership-passing path buffer.
+/// The `slopfut` openat/close wrappers and their ownership-passing path buffer.
 fn test_slopfut_openat_close() -> bool {
     use slopos_abi::fs::{O_CREAT, O_RDWR};
 
@@ -451,11 +383,8 @@ fn test_slopfut_openat_close() -> bool {
     })
 }
 
-/// `select3` over two reads + a timer with ownership-passing buffers —
-/// nc's exact loop shape. Pipe A is fed data so its read wins; pipe B's
-/// read and the timer lose and are dropped (cancelled). Verifies the
-/// winner's buffer comes back with the data, proving the multiplexing +
-/// buffer ping-pong the nc port relies on.
+/// `select3` over two reads + a timer with ownership-passing buffers — nc's
+/// loop shape: the winner's buffer must come back carrying the data.
 fn test_select3_pingpong() -> bool {
     let Ok((rd_a, wr_a)) = fs::pipe() else {
         return false;
@@ -470,7 +399,6 @@ fn test_select3_pingpong() -> bool {
     let msg = b"abc";
 
     let ok = slopfut::block_on(ring, async move {
-        // Make pipe A readable, then race A-read / B-read / timer.
         let w = slopfut::write(wa, msg.to_vec()).await;
         if w.res != msg.len() as i32 {
             return false;
@@ -490,16 +418,14 @@ fn test_select3_pingpong() -> bool {
     ok
 }
 
-/// The subtests. Each returns `true` on success.
-/// Registering a fixed-buffer set succeeds; a double-register is rejected
-/// (-EEXIST), unregister succeeds, and a zero-count register is -EINVAL. Proves
-/// the `RING_REGISTER_BUFFERS` / `RING_UNREGISTER_BUFFERS` plumbing + pinning.
+/// `RING_REGISTER_BUFFERS` / `RING_UNREGISTER_BUFFERS`: a double-register is
+/// -EEXIST and a zero-count register is -EINVAL.
 fn test_register_fixed_buffers() -> bool {
     let Ok(ring) = Ring::setup(8) else {
         return false;
     };
-    // The registered buffer is the process's own (anonymous) memory; touch it
-    // so its page is faulted in before the kernel pins it.
+    // Touch the anonymous buffer so its page is faulted in before the kernel
+    // pins it.
     let mut buf = [0u8; 256];
     for (i, b) in buf.iter_mut().enumerate() {
         *b = i as u8;
@@ -512,25 +438,20 @@ fn test_register_fixed_buffers() -> bool {
     if ring.register_buffers(&iovecs) != 0 {
         return false;
     }
-    // Double register without unregister → -EEXIST.
     if ring.register_buffers(&iovecs) >= 0 {
         return false;
     }
     if ring.unregister_buffers() != 0 {
         return false;
     }
-    // Zero-count registration → -EINVAL.
     if ring.register_buffers(&[]) >= 0 {
         return false;
     }
     true
 }
 
-/// `OP_SEND` from a registered fixed buffer routes through the socket-send path
-/// after staging the pinned buffer: on an unconnected TCP socket it completes
-/// inline with a socket-layer errno (e.g. -ENOTCONN). A negative `res` proves
-/// the fixed buffer (buf_index) resolved + the send path ran from it — no user
-/// `addr` was supplied.
+/// No user `addr` is supplied, so reaching the socket-layer errno at all proves
+/// `buf_index` resolved to the registered fixed buffer.
 fn test_fixed_send_dispatch() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
         return false;
@@ -565,9 +486,8 @@ fn test_fixed_send_dispatch() -> bool {
     }
 }
 
-/// `OP_SEND_ZC` without the fixed-buffer flag is rejected inline with a single
-/// error CQE (no `F_MORE`/`F_NOTIF`): zero-copy send must name its pinned data
-/// via a registered fixed buffer. Deterministic — no networking.
+/// Zero-copy send must name its pinned data via a registered fixed buffer, so
+/// without the flag it is rejected inline with a single error CQE.
 fn test_send_zc_requires_fixed_buffer() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
         return false;
@@ -584,7 +504,6 @@ fn test_send_zc_requires_fixed_buffer() -> bool {
     if ring.push_sqe(&sqe).is_err() || ring.submit().is_err() {
         return false;
     }
-    // Exactly one CQE: a negative errno, with neither notification bit set.
     let Some(cqe) = ring.poll_completion() else {
         return false;
     };
@@ -595,15 +514,13 @@ fn test_send_zc_requires_fixed_buffer() -> bool {
     {
         return false;
     }
-    ring.poll_completion().is_none() // no spurious second CQE
+    ring.poll_completion().is_none()
 }
 
-/// End-to-end `OP_SEND_ZC` two-CQE protocol over a connected UDP socket: a
-/// successful zero-copy send posts a result CQE carrying `SLOPRING_CQE_F_MORE`
-/// ("notification to follow") and then a terminal CQE carrying
-/// `SLOPRING_CQE_F_NOTIF` (registered buffer reusable) — mirroring io_uring's
-/// `IORING_OP_SEND_ZC`. The datagram only needs to be *queued* to the NIC (the
-/// SLIRP backend processes virtio TX); delivery is irrelevant to the protocol.
+/// The `OP_SEND_ZC` two-CQE protocol: a result CQE carrying
+/// `SLOPRING_CQE_F_MORE` ("notification to follow"), then a terminal CQE
+/// carrying `SLOPRING_CQE_F_NOTIF` (registered buffer reusable). The datagram
+/// only needs to be queued to the NIC; delivery is irrelevant.
 fn test_udp_send_zc_two_cqe() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
         return false;
@@ -611,8 +528,8 @@ fn test_udp_send_zc_two_cqe() -> bool {
     let Ok(mut ring) = Ring::setup(8) else {
         return false;
     };
-    // Connect to the SLIRP gateway (UDP connect just sets the default dest +
-    // Connected state; no handshake), so the send resolves a destination.
+    // UDP connect only records the default dest, so the send resolves one
+    // without a handshake.
     let dst = SockAddrIn {
         family: AF_INET,
         port: 9999u16.to_be(),

@@ -13,8 +13,6 @@ fn parse_u64_arg(arg: &[u8]) -> Option<u64> {
     arg_as_str(arg)?.parse().ok()
 }
 
-// --- Commands ---
-
 pub fn cmd_sleep(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         shell_write_idx(b"sleep: missing operand (milliseconds)\n", COLOR_ERROR_RED);
@@ -81,10 +79,8 @@ pub fn cmd_seq(argc: i32, argv: &[&[u8]]) -> i32 {
     loop {
         write_u64(i);
         if !shell_write(NL.as_bytes()) {
-            // A SIGINT that interrupts the blocking TTY write surfaces as a
-            // failed write (EINTR) — the handler has already marked the
-            // interrupt. Classify before assuming a real I/O error, or ^C
-            // reports a write failure instead of an interrupt.
+            // A SIGINT interrupting the blocking TTY write surfaces as a failed
+            // write (EINTR), so classify before assuming a real I/O error.
             if interrupt::take_pending() {
                 return interrupt::EXIT_INTERRUPTED;
             }
@@ -110,11 +106,6 @@ pub fn cmd_yes(argc: i32, argv: &[&[u8]]) -> i32 {
 
     loop {
         if !shell_write(text) || !shell_write(NL.as_bytes()) {
-            // A SIGINT that interrupts the blocking TTY write surfaces as a
-            // failed write (EINTR) — the handler has already marked the
-            // interrupt. Classify before assuming a real I/O error: the old
-            // code returned 0 here, reporting ^C as a clean exit and leaving
-            // the interrupt flag pending.
             if interrupt::take_pending() {
                 return interrupt::EXIT_INTERRUPTED;
             }

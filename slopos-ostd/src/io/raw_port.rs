@@ -1,18 +1,11 @@
 //! Non-registry-gated typed I/O port handle.
 //!
-//! This is the pre-registry sibling of [`crate::io::port::IoPort`]. The
-//! registry-gated `IoPort<T>` requires
+//! The pre-registry sibling of [`crate::io::port::IoPort`], which needs
 //! [`register_io_port_registry`](crate::io::port::register_io_port_registry)
-//! to have run on the BSP — which means it cannot serve early-boot
-//! consumers (the panic logger, the boot driver init paths that touch
-//! the UART / PIT / PS/2 before BSP-init completes).
-//!
-//! `raw_port::Port<T>` provides the same `in/out` asm primitives without
-//! the registry gate. Construction is `pub const fn new(u16)`; reading and
-//! writing remain `unsafe` because port I/O has arbitrary hardware side
-//! effects.
-//!
-//! New code should prefer the registry-gated [`IoPort`](crate::io::port::IoPort).
+//! to have run on the BSP and so cannot serve early-boot consumers (the panic
+//! logger, the UART / PIT / PS/2 boot paths). Same `in`/`out` primitives
+//! without the gate; new code should prefer
+//! [`IoPort`](crate::io::port::IoPort).
 
 #[allow(unused_imports)]
 use core::arch::asm;
@@ -25,8 +18,7 @@ mod private {
     impl Sealed for u32 {}
 }
 
-/// Trait for types that can be read from and written to I/O ports.
-/// Sealed: only implemented for `u8`, `u16`, `u32`.
+/// Sealed: implemented only for `u8`, `u16`, `u32`.
 pub trait PortValue: private::Sealed + Copy {
     /// # Safety
     /// Port I/O can have arbitrary side effects on hardware state.
@@ -157,20 +149,9 @@ impl PortValue for u32 {
     }
 }
 
-/// Host-only I/O-port mock store.
-///
-/// A 64-slot direct-mapped table: each port's value lives at
-/// `port mod CAP`. Collisions overwrite. For the host integration
-/// tests + `cargo miri test`, the only consumers of port I/O are
-/// the early-console UART probe and a handful of identity-port
-/// drivers in tests/io_port.rs that don't depend on any particular
-/// real value being returned from probes.
-///
-/// Special-cased ports:
-/// - `0x3FD` (UART LSR): always returns `0x20` (TX empty) so the
-///   poll loop in [`crate::early_console::write_byte`] terminates
-///   immediately on host. Without this, host tests that emit klog
-///   bytes early would spin forever.
+/// Host-only I/O-port mock store: a 64-slot direct-mapped table at
+/// `port mod CAP`, collisions overwriting. Host consumers only probe; none
+/// depends on a particular value coming back.
 #[cfg(not(target_os = "none"))]
 mod host_mock {
     use core::sync::atomic::{AtomicU32, Ordering};
@@ -183,7 +164,8 @@ mod host_mock {
     }
 
     pub(super) fn read(port: u16) -> u32 {
-        // COM1 LSR at 0x3FD: pretend TX is always empty.
+        // COM1 LSR: TX always empty, or the early-console poll loop never
+        // terminates on host.
         if port == 0x3FD {
             return 0x20;
         }
@@ -252,9 +234,8 @@ impl<T: PortValue> core::fmt::Debug for Port<T> {
 #[inline(always)]
 pub unsafe fn io_wait() {
     const DELAY_PORT: Port<u8> = Port::new(0x80);
-    // SAFETY: port 0x80 is the POST diagnostic port; writing 0 to it
-    // has no observable hardware effect beyond a short stall, and on
-    // host builds the port-I/O is routed through `host_mock` so no
+    // SAFETY: writing 0 to the POST diagnostic port has no observable effect
+    // beyond a short stall; host builds route through `host_mock`, so no
     // privileged instruction executes.
     unsafe { DELAY_PORT.write(0) }
 }

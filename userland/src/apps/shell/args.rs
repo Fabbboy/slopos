@@ -28,9 +28,8 @@ static POSITIONAL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
 /// Parse an argument vector into an [`Invocation`].
 ///
-/// Tolerates a completely empty `argv` — the terminal emulator spawns the shell
-/// with no arguments at all, not even a program name — so nothing here may
-/// assume an `argv[0]` is present.
+/// Tolerates a completely empty `argv`: the terminal emulator spawns the shell
+/// with no arguments at all, not even a program name.
 pub fn parse(argv: &[&str]) -> Result<Invocation, UsageError> {
     let name = argv.first().copied().unwrap_or("sh");
     let mut rest = argv.iter().skip(1);
@@ -65,13 +64,11 @@ pub fn parse(argv: &[&str]) -> Result<Invocation, UsageError> {
         }
     }
 
-    // Everything after the operand that selected the mode is a positional
-    // parameter.
     operands.extend(rest.map(|a| a.as_bytes().to_vec()));
 
     let source = if let Some(text) = command {
-        // For `-c`, the first remaining operand renames `$0` and the rest are
-        // `$1`.. — POSIX's rule, and how `sh -c 'echo $0' name` reports `name`.
+        // POSIX: under `-c` the first remaining operand renames `$0`, the rest
+        // are `$1`...
         let mut positional = vec![name.as_bytes().to_vec()];
         if !operands.is_empty() {
             positional[0] = operands.remove(0);

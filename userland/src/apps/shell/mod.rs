@@ -35,20 +35,16 @@ static LAST_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 static LAST_BG_PID: AtomicU32 = AtomicU32::new(0);
 static SHELL_PID: AtomicU32 = AtomicU32::new(0);
 
-/// Whether this shell has a user at a terminal.  Decided once, before anything
-/// else runs, and consulted by everything that only makes sense with one: the
-/// banner, the prompt, the line editor, colored output, and job control.
+/// Whether this shell has a user at a terminal.  Decided once at startup.
 static INTERACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn is_interactive() -> bool {
     INTERACTIVE.load(Ordering::Relaxed)
 }
 
-/// Set by the `exit` builtin so the command loop unwinds normally.
-///
-/// Calling `exit(2)` from inside a builtin would skip the redirect restore and
-/// the terminal handback its caller still owes, so `exit` records the request
-/// and the loop that owns those obligations acts on it.
+/// Set by the `exit` builtin so the command loop unwinds normally: `exit(2)`
+/// from a builtin would skip the redirect restore and terminal handback its
+/// caller still owes.
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static EXIT_STATUS: AtomicI32 = AtomicI32::new(0);
 
@@ -96,11 +92,10 @@ pub fn shell_pid() -> u32 {
 
 pub(crate) const PROMPT_BUF_MAX: usize = 280;
 
-// Fallback: matches the previous hardcoded `[/path] $ ` format.
 const DEFAULT_PS1: &[u8] = b"[\\w] \\$ ";
 
 /// Expand PS1 escape sequences (`\w` `\u` `\h` `\$` `\t` `\n` `\\`) into
-/// `text_buf`/`color_buf`. Returns bytes written.
+/// `text_buf`/`color_buf`.
 fn expand_ps1(
     ps1: &[u8],
     text_buf: &mut [u8; PROMPT_BUF_MAX],
@@ -257,7 +252,6 @@ pub struct ShellState {
     pub prompt_len: usize,
 }
 
-/// Entry point.  Returns the shell's exit status.
 pub fn shell_user_main(argv: &[&str]) -> i32 {
     let invocation = match args::parse(argv) {
         Ok(inv) => inv,
@@ -267,11 +261,9 @@ pub fn shell_user_main(argv: &[&str]) -> i32 {
         }
     };
 
-    // POSIX's interactivity rule, as bash states it: stdin decides whether
-    // there is a user typing, stderr decides whether there is anywhere to
-    // complain to.  stdout is deliberately not consulted, so `shell > log`
-    // typed at a terminal still prompts — exactly as `bash | cat` does.  A
-    // shell handed a script has a source that is not the user either way.
+    // POSIX interactivity rule: stdin decides whether a user is typing, stderr
+    // whether there is anywhere to complain to; stdout is not consulted, so
+    // `shell > log` typed at a terminal still prompts.
     let interactive = invocation.force_interactive
         || (matches!(invocation.source, args::Source::Stdin)
             && crate::syscall::fs::isatty(0)
@@ -284,10 +276,8 @@ pub fn shell_user_main(argv: &[&str]) -> i32 {
     exec::initialize_job_control();
 
     if interactive {
-        // Long-running builtins poll the recorded flag as their cancellation
-        // point.  A non-interactive shell leaves SIGINT at SIG_DFL instead, so
-        // Ctrl+C on `yes … | shell` kills it rather than being swallowed by a
-        // handler nothing in the script loop ever consults.
+        // Only interactive: a non-interactive shell leaves SIGINT at SIG_DFL,
+        // since nothing in the script loop ever polls the recorded flag.
         interrupt::install();
         return shell_interactive_main();
     }
@@ -301,9 +291,8 @@ pub fn shell_user_main(argv: &[&str]) -> i32 {
 }
 
 fn shell_interactive_main() -> i32 {
-    // fd 0/1/2 are the PTY slave the parent terminal emulator provides.
-    // The shell is a pure slave-side process: all editing rides the raw fd0
-    // escape-sequence reader; all output is ANSI to fd1.
+    // fd 0/1/2 are the PTY slave the parent terminal emulator provides; editing
+    // rides the raw fd0 escape-sequence reader and output is ANSI to fd1.
     banner::print_welcome_banner();
 
     let mut state = ShellState {
@@ -334,8 +323,8 @@ fn shell_interactive_main() -> i32 {
                 set_last_exit_code(exec::STATUS_SYNTAX_ERROR);
                 continue;
             }
-            // End of input is how an interactive shell ends: exit with the
-            // status of the last command, as POSIX requires.
+            // POSIX: EOF ends an interactive shell with the last command's
+            // status.
             input::LineOutcome::Eof => return last_exit_code(),
         }
 

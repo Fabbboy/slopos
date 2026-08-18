@@ -1,10 +1,8 @@
 //! Type-level page sizes for the cursor map/unmap/protect API.
 //!
-//! Each `PageSize` impl pins a concrete leaf level (4 KiB / 2 MiB /
-//! 1 GiB) at compile time. Cursor methods take `S: PageSize` as a
-//! turbofish parameter so a 2 MiB map cannot accidentally produce a
-//! 4 KiB leaf or vice versa — the size flows through `walk_to_leaf`'s
-//! target-level argument and the HUGE-bit decision in `to_leaf_flags`.
+//! Each impl pins a concrete leaf level at compile time, and cursor methods
+//! take `S: PageSize` by turbofish, so a 2 MiB map cannot produce a 4 KiB leaf
+//! or vice versa.
 //!
 //! # Example
 //!
@@ -21,19 +19,14 @@ mod sealed {
 
 /// Marker trait identifying a leaf page-size at the type level.
 ///
-/// Sealed because the architectural set of leaf sizes is closed
-/// (4 KiB / 2 MiB / 1 GiB on x86_64); downstream impls would invite
-/// the cursor walker to fall over a non-existent level.
+/// Sealed: the architectural set of leaf sizes is closed at 4 KiB / 2 MiB /
+/// 1 GiB, and a fourth impl would walk the cursor to a non-existent level.
 pub trait PageSize: sealed::Sealed {
-    /// The page-table level at which this size's leaf entry lives.
     const LEVEL: PageTableLevel;
-    /// Byte length of one leaf at this size.
     const BYTES: u64;
-    /// Whether the leaf entry must carry the `HUGE` PTE bit.
     const HUGE_BIT: bool;
 }
 
-/// 4 KiB leaf at Level::One. No `HUGE` bit.
 pub struct Size4Kb;
 impl sealed::Sealed for Size4Kb {}
 impl PageSize for Size4Kb {
@@ -42,7 +35,6 @@ impl PageSize for Size4Kb {
     const HUGE_BIT: bool = false;
 }
 
-/// 2 MiB leaf at Level::Two. Carries `HUGE`.
 pub struct Size2Mb;
 impl sealed::Sealed for Size2Mb {}
 impl PageSize for Size2Mb {
@@ -51,7 +43,6 @@ impl PageSize for Size2Mb {
     const HUGE_BIT: bool = true;
 }
 
-/// 1 GiB leaf at Level::Three. Carries `HUGE`.
 pub struct Size1Gb;
 impl sealed::Sealed for Size1Gb {}
 impl PageSize for Size1Gb {

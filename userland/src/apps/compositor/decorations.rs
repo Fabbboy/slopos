@@ -1,8 +1,5 @@
-//! Window decoration rendering and hit-testing for the new chrome design.
-//!
-//! Draws title bars with rounded corners, macOS-style signal buttons
-//! (close / minimize / expand), and provides hit-test queries for
-//! mouse interaction.
+//! Title bars with rounded corners, the signal buttons
+//! (close / minimize / expand) and the hit-tests that map a cursor onto them.
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::Color32;
@@ -12,24 +9,15 @@ use slopos_gfx::canvas_ops::{circle_filled, line_aa};
 use crate::gfx::{self, DrawBuffer};
 use crate::theme;
 
-// ── Title bar font size ──────────────────────────────────────────────────
 const TITLE_FONT_SIZE: u16 = 14;
 
-// ── Glyph dimensions ─────────────────────────────────────────────────────
 /// Half-length of the close/expand cross/plus glyph arms.
 const GLYPH_HALF: i32 = theme::SIGNAL_GLYPH_SIZE / 2;
-/// Half-width of the minimize dash glyph.
 const MINIMIZE_DASH_HALF: i32 = 4;
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 /// Render the title bar, signal buttons, and window frame for one window.
 ///
-/// * `focused` -- whether this window currently has keyboard focus.
-/// * `signal_hovered` -- whether the cursor is inside the signal-button group box.
-/// * `clip` -- optional clipping rectangle for partial redraws.
+/// `signal_hovered` is whether the cursor is inside the signal-button group box.
 pub fn draw_window_decorations(
     buf: &mut DrawBuffer,
     window_x: i32,
@@ -57,13 +45,8 @@ pub fn draw_window_decorations(
     );
 }
 
-/// Hit-test the signal button group.
-///
-/// Returns which button (if any) the point `(px, py)` falls on, given the
-/// window's top-left corner.
-///
-/// Returns: `Some(0)` = close, `Some(1)` = minimize, `Some(2)` = expand,
-/// `None` = miss.
+/// Hit-test the signal button group: `Some(0)` = close, `Some(1)` = minimize,
+/// `Some(2)` = expand, `None` = miss.
 pub fn hit_test_signal_button(window_x: i32, window_y: i32, px: i32, py: i32) -> Option<u8> {
     let buttons: [(i32, u8); 3] = [
         (window_x + theme::SIGNAL_BUTTON_1_CX, 0), // close
@@ -82,21 +65,17 @@ pub fn hit_test_signal_button(window_x: i32, window_y: i32, px: i32, py: i32) ->
     None
 }
 
-/// Returns `true` if `(px, py)` is inside the signal-button group bounding box.
 pub fn hit_test_signal_group(window_x: i32, window_y: i32, px: i32, py: i32) -> bool {
     let gx = window_x + theme::SIGNAL_GROUP_X;
     let gy = window_y + theme::SIGNAL_GROUP_Y;
     px >= gx && px < gx + theme::SIGNAL_GROUP_W && py >= gy && py < gy + theme::SIGNAL_GROUP_H
 }
 
-/// Detect if `(px, py)` is in a resize grab zone around the window.
+/// Detect if `(px, py)` is in a resize grab zone: the shadow region outside the
+/// window frame, with corners taking priority over edges.
 ///
-/// The grab zone is the shadow region outside the window frame (content +
-/// title bar). Uses the labwc `ssd_get_resizing_type()` algorithm: corners
-/// take priority over edges, with adaptive corner thresholds.
-///
-/// `window_y` is the content top (kernel's `window.y`); the title bar
-/// extends above it.
+/// `window_y` is the content top (kernel's `window.y`); the title bar extends
+/// above it.
 pub fn hit_test_resize_edge(
     window_x: i32,
     window_y: i32,
@@ -110,30 +89,25 @@ pub fn hit_test_resize_edge(
     let ww = window_w as i32;
     let wh = window_h as i32;
 
-    // Frame bounds (content + title bar)
     let frame_x0 = window_x;
     let frame_y0 = window_y - theme::TITLE_BAR_HEIGHT;
     let frame_x1 = window_x + ww - 1;
     let frame_y1 = window_y + wh - 1;
 
-    // Extended bounds (frame + shadow spread = grab zone)
     let spread = theme::SHADOW_SPREAD;
     let ext_x0 = frame_x0 - spread;
     let ext_y0 = frame_y0 - spread;
     let ext_x1 = frame_x1 + spread;
     let ext_y1 = frame_y1 + spread;
 
-    // Outside the extended bounds entirely?
     if px < ext_x0 || px > ext_x1 || py < ext_y0 || py > ext_y1 {
         return ResizeEdge::NONE;
     }
 
-    // Inside the frame rect? Not a resize zone.
     if px >= frame_x0 && px <= frame_x1 && py >= frame_y0 && py <= frame_y1 {
         return ResizeEdge::NONE;
     }
 
-    // Cursor is in the shadow region. Classify edges.
     let frame_w = ww;
     let frame_h = wh + theme::TITLE_BAR_HEIGHT;
     let corner_range = {
@@ -155,7 +129,6 @@ pub fn hit_test_resize_edge(
     let near_top = py < frame_y0 + corner_range;
     let near_bottom = py > frame_y1 - corner_range;
 
-    // Corners first (higher priority)
     if near_top && near_left {
         return ResizeEdge::TOP_LEFT;
     }
@@ -169,7 +142,6 @@ pub fn hit_test_resize_edge(
         return ResizeEdge::BOTTOM_RIGHT;
     }
 
-    // Single edges
     if py < frame_y0 {
         return ResizeEdge::TOP;
     }
@@ -186,17 +158,10 @@ pub fn hit_test_resize_edge(
     ResizeEdge::NONE
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
 /// Draw the opaque title-bar background with rounded top corners.
 ///
-/// The top `r` rows of the bar are filled row-by-row, clipped to the
-/// quarter-circle arc so the corner pixels are never written — leaving
-/// whatever is already in the framebuffer (desktop, shadow, or a lower
-/// window) visible through the rounded corner. The remaining rows fill
-/// the full bar width.
+/// The corner pixels are never written, so whatever is already in the
+/// framebuffer stays visible through the rounded corner.
 fn draw_title_bar_background(
     buf: &mut DrawBuffer,
     window_x: i32,
@@ -227,7 +192,6 @@ fn draw_title_bar_background(
         .max(0)
         .min(theme::TITLE_BAR_HEIGHT);
 
-    // Corner band: fill only the span inside the rounded arc on each row.
     if r > 0 && 2 * r <= w {
         let cy = window_y + r;
         let r_sq = r * r;
@@ -246,7 +210,6 @@ fn draw_title_bar_background(
         }
     }
 
-    // Body: rows below the corner band, full bar width.
     let body_y0 = window_y + r;
     let body_y1 = window_y + theme::TITLE_BAR_HEIGHT - 1;
     if body_y0 <= body_y1 {
@@ -265,7 +228,6 @@ fn draw_signal_buttons(
 ) {
     let button_cy = window_y + theme::SIGNAL_BUTTON_CY;
 
-    // Determine button colors.
     let (close_color, min_color, expand_color) = if focused {
         (
             theme::SIGNAL_CLOSE,
@@ -287,7 +249,6 @@ fn draw_signal_buttons(
     ];
 
     for &(cx, color) in &buttons {
-        // Quick clip check for this button.
         let bx0 = cx - theme::SIGNAL_BUTTON_RADIUS;
         let by0 = button_cy - theme::SIGNAL_BUTTON_RADIUS;
         let bx1 = cx + theme::SIGNAL_BUTTON_RADIUS;
@@ -304,7 +265,6 @@ fn draw_signal_buttons(
         circle_filled(buf, cx, button_cy, theme::SIGNAL_BUTTON_RADIUS, color);
     }
 
-    // Draw interior glyphs when the group is hovered and the window is focused.
     if focused && signal_hovered {
         draw_signal_glyphs(buf, window_x, window_y, clip);
     }
@@ -320,7 +280,6 @@ fn draw_signal_glyphs(buf: &mut DrawBuffer, window_x: i32, window_y: i32, clip: 
     );
     let cy = window_y + theme::SIGNAL_BUTTON_CY;
 
-    // Close button (x): two diagonal lines crossing at center.
     let close_cx = window_x + theme::SIGNAL_BUTTON_1_CX;
     let close_rect = DamageRect {
         x0: close_cx - GLYPH_HALF,
@@ -347,7 +306,6 @@ fn draw_signal_glyphs(buf: &mut DrawBuffer, window_x: i32, window_y: i32, clip: 
         );
     }
 
-    // Minimize button (-): horizontal line centered in button.
     let min_cx = window_x + theme::SIGNAL_BUTTON_2_CX;
     let min_rect = DamageRect {
         x0: min_cx - MINIMIZE_DASH_HALF,
@@ -366,7 +324,6 @@ fn draw_signal_glyphs(buf: &mut DrawBuffer, window_x: i32, window_y: i32, clip: 
         );
     }
 
-    // Expand button (+): horizontal + vertical lines centered in button.
     let exp_cx = window_x + theme::SIGNAL_BUTTON_3_CX;
     let exp_rect = DamageRect {
         x0: exp_cx - MINIMIZE_DASH_HALF,
@@ -431,7 +388,6 @@ fn draw_title_text(
     }
 }
 
-/// Draw title text using the TTF font renderer.
 fn draw_title_text_ttf(
     buf: &mut DrawBuffer,
     window_x: i32,
@@ -446,9 +402,6 @@ fn draw_title_text_ttf(
 ) {
     let (measured_w, measured_h) = font.measure_text(title, TITLE_FONT_SIZE);
 
-    // Truncate title if it exceeds the maximum width. Build a truncated
-    // slice by scanning characters until the accumulated width exceeds
-    // the limit (leaving room for "...").
     let (display_title, needs_ellipsis) = if measured_w > max_text_w {
         truncate_title_for_width(title, font, max_text_w)
     } else {
@@ -463,7 +416,6 @@ fn draw_title_text_ttf(
         measured_w.min(max_text_w)
     };
 
-    // Center horizontally in the title bar.
     let text_x = window_x + (window_w as i32 - display_w) / 2;
     let text_y = window_y + (theme::TITLE_BAR_HEIGHT - measured_h.min(TITLE_FONT_SIZE as i32)) / 2;
 
@@ -515,8 +467,6 @@ fn draw_title_text_bitmap(
         return;
     }
 
-    // Determine how many characters we can display. If the title is longer
-    // than the available space, reserve 3 characters for "...".
     let title_bytes = title.as_bytes();
     let title_len = title_bytes.len();
     let (display_len, needs_ellipsis) = if title_len > max_chars {
@@ -534,8 +484,6 @@ fn draw_title_text_bitmap(
     let text_x = window_x + (window_w as i32 - display_w) / 2;
     let text_y = window_y + (theme::TITLE_BAR_HEIGHT - cell_h) / 2;
 
-    // Build a truncated string view. Since we're working with byte-indexed
-    // ASCII-safe content, find a valid UTF-8 boundary.
     let safe_end = find_utf8_boundary(title, display_len);
     let display_str = &title[..safe_end];
 
@@ -547,11 +495,8 @@ fn draw_title_text_bitmap(
     }
 }
 
-/// Truncate a title string so its rendered width (with "..." appended) fits
-/// within `max_w` pixels when rendered at `TITLE_FONT_SIZE` using the given
-/// font.
-///
-/// Returns `(truncated_slice, needs_ellipsis)`.
+/// Truncate `title` so its rendered width with "..." appended fits `max_w`
+/// pixels at `TITLE_FONT_SIZE`. Returns `(truncated_slice, needs_ellipsis)`.
 fn truncate_title_for_width<'a>(
     title: &'a str,
     font: &FontRenderer,
@@ -603,7 +548,6 @@ fn isqrt_i32(n: i32) -> i32 {
     x
 }
 
-/// Check whether two `DamageRect`s overlap.
 fn rects_intersect(a: &DamageRect, b: &DamageRect) -> bool {
     a.x0 <= b.x1 && a.x1 >= b.x0 && a.y0 <= b.y1 && a.y1 >= b.y0
 }

@@ -1,23 +1,15 @@
-//! `slopfut` — a small, production-shaped `async`/`await` runtime over one
-//! [`Ring`](super::Ring).
+//! `slopfut` — a small `async`/`await` runtime over one [`Ring`](super::Ring).
 //!
-//! This is the real executor the SlopRing "async edge" was missing: a
-//! single-threaded scheduler with real wakers ([`executor`]), a reactor that
-//! turns ring completions into woken tasks ([`reactor`]), leaf op-futures
-//! with ownership-passing buffers ([`op`]), and combinators ([`select`]).
-//! On top sit the higher-level surfaces a tokio-class runtime offers:
+//! A single-threaded scheduler with real wakers ([`executor`]), a reactor that
+//! turns ring completions into woken tasks ([`reactor`]), leaf op-futures with
+//! ownership-passing buffers ([`op`]), and combinators ([`select`]). On top sit
 //! [`time`] (sleep/timeout), [`io`] (async TCP/UDP/file), [`sync`]
 //! (Notify/channels), [`signal`] (ctrl_c via signalfd), and [`process`]
 //! (Child::wait via pidfd).
 //!
-//! ## Model
-//!
 //! SLOPRING §7.1: deferred completions progress only inside a blocking
 //! `ring_enter`, so the runtime is single-threaded and its only sleep is the
-//! reactor's `park`. [`block_on`] runs a root future to completion while
-//! [`spawn`]ed tasks run concurrently on the same thread; a future is polled
-//! only when its waker fires (a ring completion, or another task), never by
-//! re-polling everything.
+//! reactor's `park`.
 
 use super::Ring;
 
