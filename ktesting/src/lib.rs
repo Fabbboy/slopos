@@ -27,12 +27,13 @@ pub mod xsave_tests;
 #[cfg(feature = "tests")]
 pub mod zz_lockdep_tests;
 
-pub use config::{TestConfig, Verbosity, config_from_cmdline};
+pub use config::{config_from_cmdline, TestConfig, Verbosity};
 pub use harness::{
-    TestRunSummary, cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms, tests_mark_panic,
+    cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms, tests_mark_panic,
     tests_request_shutdown, tests_reset_panic_state, tests_run_all, tests_run_userland,
+    TestRunSummary,
 };
-pub use registry::{FLAG_EXPECTED_PANIC, TestDesc, TestKind};
+pub use registry::{TestDesc, TestKind, FLAG_EXPECTED_PANIC};
 pub use result::{TestOutcome, TestResult};
 pub use runner::execute_test;
 pub use slopos_service_core::paste;

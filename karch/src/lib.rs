@@ -35,9 +35,9 @@ pub use slopos_ostd::irq::interrupt_frame::InterruptFrame;
 pub use slopos_ostd::sync::init_flag::InitFlag;
 
 pub use slopos_ostd::cpu::x86_64::pcr::{
-    MAX_CPUS, apic_id_from_cpu_index, cpu_index_from_apic_id, get_bsp_apic_id, get_cpu_count,
+    apic_id_from_cpu_index, cpu_index_from_apic_id, get_bsp_apic_id, get_cpu_count,
     get_current_cpu, get_online_cpu_count, is_bsp, is_cpu_online, mark_cpu_offline,
-    mark_cpu_online,
+    mark_cpu_online, MAX_CPUS,
 };
 
 #[macro_export]

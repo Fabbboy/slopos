@@ -7,8 +7,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_ostd::klog_info;
 
-use crate::TestResult;
 use crate::filter::glob_match;
+use crate::TestResult;
 
 /// Incremented on entry to every bootstrap test, including the canary before it
 /// panics; the isolation check reads it to confirm prior tests ran.

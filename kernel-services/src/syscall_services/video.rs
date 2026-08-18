@@ -1,10 +1,10 @@
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_abi::DisplayInfo;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::video_traits::VideoResult;
+use slopos_abi::DisplayInfo;
 
 /// Task ID of the compositor process, set on first framebuffer flip.
 static COMPOSITOR_TASK_ID: AtomicU32 = AtomicU32::new(0);

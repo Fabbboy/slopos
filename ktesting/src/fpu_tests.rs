@@ -2,7 +2,7 @@ use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
 use slopos_ostd::cpu::x86_64::xsave;
 use slopos_ostd::task::{FpuState, XSTATE_RESERVED_OFFSET};
 use slopos_ostd::test_support::cpu_state;
-use slopos_ostd::{KBox, klog_info};
+use slopos_ostd::{klog_info, KBox};
 
 use crate::TestResult;
 use crate::{fail, pass};

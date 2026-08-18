@@ -13,7 +13,7 @@ use slopos_ostd::lock_class;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::{DisplayInfo, FramebufferData};
 use slopos_ostd::klog_info;
-use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, LockClassKey, SpinLock};
+use slopos_ostd::sync::{LockClassKey, SpinLock, LOCK_LEVEL_RESOURCE};
 
 /// Outcome of a [`SingletonResource::claim`] reservation attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
