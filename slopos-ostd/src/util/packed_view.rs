@@ -1,18 +1,11 @@
-//! Bounds-checked unaligned `T` read from a byte slice.
-//!
-//! The kernel's ACPI / MADT / MCFG / HPET parsers walk
-//! `#[repr(C, packed)]` structs that live inside firmware-supplied
-//! tables. The natural read pattern — `*(bytes.as_ptr() as *const T)`
-//! — is unsafe because of (a) potentially-misaligned base, and
-//! (b) potentially-truncated trailing bytes. This helper resolves both
-//! with one `core::ptr::read_unaligned` behind an explicit bounds
-//! check.
+//! Bounds-checked unaligned `T` read from a byte slice, for the
+//! `#[repr(C, packed)]` structs in firmware-supplied ACPI tables: the base may
+//! be misaligned and the trailing bytes truncated.
 
 use crate::mm::Pod;
 
-/// Read a `T: Pod` from `bytes` at the given offset, copying bytes
-/// into the result by value. The base pointer is not required to be
-/// aligned to `T`'s alignment; reads are issued as `read_unaligned`.
+/// Read a `T: Pod` from `bytes` at `offset`; the base need not be aligned to
+/// `T`'s alignment.
 ///
 /// Returns `None` if `offset + size_of::<T>() > bytes.len()`.
 #[inline]

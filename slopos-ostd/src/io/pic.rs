@@ -1,10 +1,6 @@
-//! Internal legacy 8259 PIC lifecycle.
-//!
-//! The 8259 pair is a sensitive system interrupt controller.  SlopOS
-//! never routes IRQs through it; when ACPI MADT `PCAT_COMPAT` reports a
-//! PC-AT-compatible dual 8259 setup, boot performs the mandatory
-//! init-and-mask sequence here while switching to APIC/IOAPIC operation.
-//! No client-visible port handle or driver API is exposed for the PIC.
+//! Internal legacy 8259 PIC lifecycle. SlopOS never routes IRQs through the
+//! 8259; ACPI mandates this init-and-mask sequence when MADT `PCAT_COMPAT`
+//! reports a dual 8259 and the OS switches to APIC/IOAPIC operation.
 
 use crate::io::raw_port::{Port, io_wait};
 use crate::sync::{BspToken, InitFlag};
@@ -28,10 +24,8 @@ static LEGACY_8259_DISABLED: InitFlag = InitFlag::new();
 
 /// Initialize the legacy dual 8259 pair into a known state and mask all IRQs.
 ///
-/// ACPI requires this when MADT `PCAT_COMPAT` is set and the OS enables
-/// ACPI APIC operation.  The `BspToken` keeps the operation pinned to
-/// the BSP boot-init phase; the sequence is idempotent for repeated
-/// init paths and tests.
+/// The `BspToken` pins this to the BSP boot-init phase; the sequence is
+/// idempotent across repeated init paths and tests.
 pub fn init_and_disable_legacy_8259<'brand>(_token: &BspToken<'brand>) {
     if !LEGACY_8259_DISABLED.claim() {
         return;

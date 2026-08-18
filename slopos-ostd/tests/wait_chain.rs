@@ -1,12 +1,9 @@
 //! The wait-for cycle walk.
 //!
-//! Acquiring a `SpinLock` is not possible here — `PreemptGuard::new` does
-//! an unguarded `gs:`-relative RMW — so holder attribution is pinned
-//! in-kernel by `boot/src/tests/watchdog_tests.rs`. What is testable here
-//! is the graph, which is pure CPU indices.
-//!
-//! Each test owns distinct CPU indices: the graph is a process-global
-//! array and `cargo test` runs integration tests on parallel threads.
+//! A `SpinLock` cannot be acquired here — `PreemptGuard::new` does an
+//! unguarded `gs:`-relative RMW — so holder attribution is pinned in-kernel
+//! and only the graph is testable. Each test owns distinct CPU indices: the
+//! graph is a process-global array and `cargo test` runs on parallel threads.
 
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
@@ -17,9 +14,8 @@ use slopos_ostd::watchdog::wait_chain_closes_cycle;
 fn an_untaken_lock_names_no_holder() {
     let lock: SpinLock<u32> =
         SpinLock::new(0, lock_class!("test.wait_chain", LOCK_LEVEL_UNORDERED));
-    // A zeroed holder field decodes as "CPU 0, ticket 0", which is exactly
-    // what a virgin lock's ticket pair also reads as. Both conjuncts of the
-    // validation exist to reject this.
+    // A zeroed holder field decodes as "CPU 0, ticket 0" — what a virgin
+    // lock's ticket pair also reads as. Both conjuncts exist to reject it.
     assert_eq!(lock.holder_cpu_for_test(), None);
 }
 
@@ -58,8 +54,8 @@ fn a_chain_that_leaves_the_graph_is_not_a_cycle() {
     reset_slot(B);
     reset_slot(C);
 
-    // C is not spinning at all — the holder is stuck somewhere the graph
-    // cannot describe, which is not the same answer as "no cycle".
+    // C is not spinning at all: the holder is stuck somewhere the graph
+    // cannot describe.
     plant_wait(A, Some(B), 1);
     plant_wait(B, Some(C), 2);
 
@@ -80,8 +76,7 @@ fn a_link_that_left_its_wait_breaks_the_cycle() {
     plant_wait(B, Some(A), 2);
     assert!(wait_chain_closes_cycle(A));
 
-    // B won its lock and moved on. The edge it published is stale, and a
-    // walk that still believed it would print a cycle that never existed.
+    // B won its lock and moved on; the edge it published is stale.
     clear_wait(B);
     assert!(!wait_chain_closes_cycle(A));
 
@@ -99,9 +94,8 @@ fn an_edge_being_republished_is_not_believed() {
     plant_wait(B, Some(A), 2);
     assert!(wait_chain_closes_cycle(A));
 
-    // B is between publishing one holder and the next. Its edge names A,
-    // and believing it would close a cycle out of a value that is mid-flight
-    // — which is the difference between a proof and a coincidence.
+    // B is between publishing one holder and the next: its edge names A,
+    // but the value is mid-flight.
     plant_mid_update(B, A);
     assert!(!wait_chain_closes_cycle(A));
 
@@ -111,8 +105,7 @@ fn an_edge_being_republished_is_not_believed() {
 
 #[test]
 fn a_long_acyclic_chain_is_bounded_and_rejected() {
-    // Longer than MAX_WAIT_HOPS, so the walk stops without a verdict of
-    // "cycle" rather than following it forever.
+    // Longer than MAX_WAIT_HOPS, so the walk stops without a "cycle" verdict.
     const BASE: usize = 30;
     const LEN: usize = 12;
     for i in 0..LEN {

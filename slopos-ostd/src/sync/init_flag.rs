@@ -1,8 +1,5 @@
-//! Atomic boolean init/state flags.
-//!
-//! [`InitFlag`] is the canonical "has this one-shot init run?" gate.
-//! [`StateFlag`] is the toggleable variant used for runtime state like
-//! in-progress shutdown.
+//! Atomic boolean flags: [`InitFlag`] gates one-shot init, [`StateFlag`]
+//! tracks toggleable runtime state such as in-progress shutdown.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -56,21 +53,14 @@ impl Default for InitFlag {
     }
 }
 
-/// Atomic flag for tracking in-progress operations.
-///
-/// Similar to `InitFlag` but with semantics suited for tracking whether
-/// an operation is currently in progress (shutdown, panic handling, etc).
-///
-/// The key difference from `InitFlag`:
-/// - `InitFlag`: "Has X been done?" (monotonic: false -> true, stays true)
-/// - `StateFlag`: "Is X currently happening?" (can toggle)
+/// Atomic flag for an in-progress operation. Unlike [`InitFlag`], which is
+/// monotonic false -> true, this one toggles.
 #[repr(transparent)]
 pub struct StateFlag {
     flag: AtomicBool,
 }
 
 impl StateFlag {
-    /// Create a new inactive flag.
     #[inline]
     pub const fn new() -> Self {
         Self {
@@ -78,49 +68,38 @@ impl StateFlag {
         }
     }
 
-    /// Atomically try to enter this state.
-    ///
-    /// Returns `true` if this call entered the state (was previously inactive).
-    /// Returns `false` if already in this state.
+    /// Returns `true` if this call entered the state, `false` if already in it.
     #[inline]
     pub fn enter(&self) -> bool {
         !self.flag.swap(true, Ordering::SeqCst)
     }
 
-    /// Check if currently in this state.
     #[inline]
     pub fn is_active(&self) -> bool {
         self.flag.load(Ordering::Acquire)
     }
 
-    /// Check if currently in this state (relaxed ordering).
     #[inline]
     pub fn is_active_relaxed(&self) -> bool {
         self.flag.load(Ordering::Relaxed)
     }
 
-    /// Mark as active.
     #[inline]
     pub fn set_active(&self) {
         self.flag.store(true, Ordering::Release);
     }
 
-    /// Mark as inactive.
     #[inline]
     pub fn set_inactive(&self) {
         self.flag.store(false, Ordering::Release);
     }
 
-    /// Leave this state (mark inactive).
     #[inline]
     pub fn leave(&self) {
         self.set_inactive();
     }
 
-    /// Atomically check if active and clear if so (consume pattern).
-    ///
-    /// Returns `true` if the flag was active (and is now inactive).
-    /// Returns `false` if the flag was already inactive.
+    /// Returns `true` if the flag was active, clearing it.
     #[inline]
     pub fn take(&self) -> bool {
         self.flag.swap(false, Ordering::SeqCst)

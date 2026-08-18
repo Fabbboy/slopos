@@ -1,42 +1,30 @@
 //! The diagnostic console: a key, pressed on the physical console, that makes
 //! the kernel say what it is doing.
 //!
-//! # Shape
-//!
 //! A *trigger* turns a keypress into one call to [`request`], which sets a bit
 //! and raises the bottom half. A *drain* at the bottom-half point runs every
 //! queued command. Commands live in a linker registry, so the crate that owns
 //! a subsystem's data also owns the command that prints it, and OSTD never
 //! names one.
 //!
-//! # Why the trigger and the drain are separate
+//! Trigger and drain are separate because triggers run where nothing may
+//! allocate, log, or take a lock — the keyboard IRQ handler, the serial drain
+//! under the per-TTY lock — while what a command wants to do (walk the task
+//! registry, take the allocator's lock, emit hundreds of UART lines) is legal
+//! only in ordinary task context.
 //!
-//! Triggers run where nothing may allocate, log, or take a lock: the keyboard
-//! IRQ handler, and the serial drain under the per-TTY lock. [`request`] is one
-//! `fetch_or` and one `gs`-relative byte store, which is exactly what
-//! [`crate::sync::bh::raise`] permits from those contexts. Everything a command
-//! actually wants to do — walk the task registry, take the allocator's lock,
-//! emit hundreds of lines through a 115200-baud UART — is legal only in
-//! ordinary task context, and that is where the drain runs.
-//!
-//! # Why the queue is global and the timer pokes
-//!
-//! `bh::raise` marks the *calling* CPU. A request raised from the keyboard IRQ
-//! would therefore drain only on the CPU that took that IRQ — which, when the
-//! console is being used for its actual purpose, is a candidate for the wedged
-//! one. So the pending set is a global bitmap, and every CPU's timer tick calls
-//! [`poll_from_timer`] to raise its own bottom half while anything is queued.
-//! Whichever CPU reaches the point first runs the command.
-//!
-//! # One execution tier
+//! The pending set is global rather than per-CPU because [`crate::sync::bh::raise`]
+//! marks only the *calling* CPU, and the CPU that took the keyboard IRQ is a
+//! candidate for the wedged one; every CPU's timer tick calls
+//! [`poll_from_timer`] while anything is queued.
 //!
 //! Every command runs at the bottom-half point, with interrupts and preemption
-//! enabled. There is no NMI-context tier and no handler may assume one: a
-//! *returning* NMI handler must be fault-free, because the `iretq` of any fault
-//! it takes would unblock NMI while it is still running, and the frame-pointer
-//! walk a backtrace needs is fault-*recoverable* rather than fault-free. The
-//! all-CPU probe gets its registers by asking each CPU to describe itself from
-//! its own NMI handler, never by walking a peer from here.
+//! enabled, and none may assume an NMI-context tier: a *returning* NMI handler
+//! must be fault-free, because the `iretq` of any fault it takes would unblock
+//! NMI while it is still running, and the frame-pointer walk a backtrace needs
+//! is fault-*recoverable* rather than fault-free. The all-CPU probe therefore
+//! asks each CPU to describe itself from its own NMI handler rather than
+//! walking a peer.
 
 use core::fmt;
 
@@ -47,33 +35,26 @@ pub mod probe;
 
 pub use config::{KConfig, current as policy, enabled, install};
 
-/// The command reads state and prints it.
-///
-/// It writes no kernel state, sends no signal, and cannot fail the machine.
-/// Permitted by the default policy.
+/// The command reads state and prints it: no kernel writes, no signals, and it
+/// cannot fail the machine. Permitted by the default policy.
 pub const KCMD_INFORMATIONAL: u8 = 1 << 0;
 
-/// The command takes the machine down.
-///
-/// Registered unconditionally so the help command can list it, and refused unless the
-/// policy mask names this bit — which the default does not.
+/// The command takes the machine down. Registered unconditionally so the help
+/// command can list it, and refused unless the policy mask names this bit —
+/// which the default does not.
 pub const KCMD_DESTRUCTIVE: u8 = 1 << 1;
 
 /// One diagnostic command.
 ///
-/// `#[repr(C)]` and 48 bytes: the linker concatenates these into an array that
-/// [`registry_slice`] divides by this stride, so the size is part of the
-/// contract and `scripts/check_registry_sections.sh` holds the section span to
-/// a whole number of them.
+/// `#[repr(C)]` and 48 bytes: [`registry_slice`] divides the concatenated
+/// section by this stride, so the size is part of the contract and
+/// `scripts/check_registry_sections.sh` holds the span to a whole number of
+/// them.
 #[repr(C)]
 pub struct KCommand {
-    /// Runs at the bottom-half point, interrupts and preemption enabled.
     pub run: for<'a> fn(&mut KConsole<'a>),
-    /// Short name, shown by the help command.
     pub name: &'static str,
-    /// One line of help, shown by the help command.
     pub help: &'static str,
-    /// The ASCII key that selects this command.
     pub key: u8,
     /// Exactly one of [`KCMD_INFORMATIONAL`] / [`KCMD_DESTRUCTIVE`].
     pub flags: u8,
@@ -132,17 +113,12 @@ macro_rules! kcommand {
     };
 }
 
-// ---------------------------------------------------------------------------
-// The emit handle
-// ---------------------------------------------------------------------------
-
 /// The only way to emit from a command.
 ///
 /// Invariant-branded and `!Send + !Sync`: the handle describes one drain on one
 /// CPU and cannot be stashed for later or handed to another. The line budget
 /// lives in the handle rather than in a rule each command is asked to respect,
-/// so a command that walks a structure the kernel lets grow without bound
-/// cannot monopolise the console by accident.
+/// so a command walking an unbounded structure cannot monopolise the console.
 pub struct KConsole<'brand> {
     budget: u32,
     emitted: u32,
@@ -166,9 +142,9 @@ impl KConsole<'_> {
 
     /// Emit one line. Stops at the budget and says so exactly once.
     ///
-    /// `#[inline(never)]` on purpose: `check_stack_sizes.sh` measures the debug
-    /// ELF, where inlining a `format_args!` emitter into each of its callers
-    /// grows every one of their frames against a 2 KiB cap.
+    /// `#[inline(never)]` on purpose: inlining a `format_args!` emitter into
+    /// each caller grows every one of their frames against
+    /// `check_stack_sizes.sh`'s 2 KiB cap.
     #[inline(never)]
     pub fn line(&mut self, args: fmt::Arguments<'_>) {
         if self.emitted >= self.budget {
@@ -186,9 +162,6 @@ impl KConsole<'_> {
     }
 
     /// Emit `prefix` followed by a symbolized code address.
-    ///
-    /// A bare address is only useful to someone holding the matching ELF; the
-    /// symbol is what makes a dump readable in a bug report.
     #[inline(never)]
     pub fn sym(&mut self, prefix: fmt::Arguments<'_>, addr: u64) {
         match crate::ksym::lookup(addr) {
@@ -200,8 +173,8 @@ impl KConsole<'_> {
         }
     }
 
-    /// Lines still allowed. A command walking an unbounded structure checks
-    /// this so it can stop at a coherent boundary rather than mid-record.
+    /// Lines still allowed, so a command walking an unbounded structure can
+    /// stop at a coherent boundary rather than mid-record.
     #[inline]
     pub fn budget_left(&self) -> u32 {
         self.budget.saturating_sub(self.emitted)
@@ -230,25 +203,17 @@ macro_rules! ksymline {
     };
 }
 
-// ---------------------------------------------------------------------------
-// The pending set
-// ---------------------------------------------------------------------------
-
-/// Queued command keys, one bit per ASCII code.
-///
-/// Global rather than per-CPU: see the module header. A bitmap rather than a
-/// ring because a command is idempotent — asking for the task table twice
-/// before either runs should print it once.
+/// Queued command keys, one bit per ASCII code. A bitmap rather than a ring
+/// because a command is idempotent — asking for the task table twice before
+/// either runs should print it once.
 static PENDING: [core::sync::atomic::AtomicU64; 2] = [
     core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0),
 ];
 
-/// Queue `key` for the next drain.
-///
-/// One `fetch_or` and one `gs`-relative byte store: no lock, no allocation, no
-/// registry read. Legal from a hard IRQ handler and from under a cli-spinlock,
-/// which is what every trigger path needs.
+/// Queue `key` for the next drain. No lock, no allocation, no registry read:
+/// legal from a hard IRQ handler and from under a cli-spinlock, which is what
+/// every trigger path needs.
 pub fn request(key: u8) {
     if key >= 128 || !enabled() {
         return;
@@ -258,11 +223,8 @@ pub fn request(key: u8) {
     crate::sync::bh::raise();
 }
 
-/// Raise this CPU's bottom half if anything is queued.
-///
-/// Called from the timer tick on every CPU. Two relaxed loads in the common
-/// case, and it never emits or dispatches — it exists purely so a request
-/// raised on one CPU can be answered by another.
+/// Raise this CPU's bottom half if anything is queued. Called from every CPU's
+/// timer tick, so a request raised on one CPU can be answered by another.
 #[inline]
 pub fn poll_from_timer() {
     use core::sync::atomic::Ordering;
@@ -274,8 +236,7 @@ pub fn poll_from_timer() {
 /// Run every queued command. Returns whether it did anything.
 ///
 /// Concurrent drains need no single-flight flag: the `swap` partitions the
-/// pending set between them, so each queued command runs exactly once no
-/// matter how many CPUs reach this at once.
+/// pending set between them, so each queued command runs exactly once.
 pub fn drain() -> bool {
     use core::sync::atomic::Ordering;
     let words = [
@@ -298,10 +259,9 @@ pub fn drain() -> bool {
 
 /// Dispatch one key.
 ///
-/// Runs *every* entry whose key matches rather than the first. A duplicate key
-/// is a build-time mistake that `kcon_keys_are_unique` fails on; producing both
-/// outputs is a far better failure than silently picking whichever landed
-/// earlier in link order.
+/// Runs *every* matching entry rather than the first: a duplicate key is a
+/// build-time mistake `kcon_keys_are_unique` fails on, and printing both beats
+/// silently picking whichever landed earlier in link order.
 fn run_key(key: u8, cfg: &KConfig) {
     let mut matched = false;
     for cmd in commands() {
@@ -327,19 +287,12 @@ fn run_key(key: u8, cfg: &KConfig) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Help
-// ---------------------------------------------------------------------------
-
 /// Body of the help command, which a kernel crate registers.
 ///
-/// OSTD supplies the text but not the registry entry. A `#[used]` static in
-/// `.kconsole_registry` keeps its `run` pointer alive through `--gc-sections`,
-/// and OSTD is linked into userland binaries too, whose linker script brackets
-/// no kernel registry — so a command registered here would leave every
-/// userland binary referencing `__start_kconsole_registry` and failing to
-/// link. Registration belongs to crates only the kernel links, which is what
-/// this module claims about commands in general.
+/// OSTD supplies the text but not the registry entry: OSTD is linked into
+/// userland binaries too, whose linker script brackets no kernel registry, so
+/// an entry here would leave every userland binary referencing
+/// `__start_kconsole_registry` and failing to link.
 pub fn help_body(kc: &mut KConsole<'_>) {
     let cfg = config::current();
     kline!(kc, "kconsole: commands (policy mask 0x{:x})", cfg.mask);
@@ -347,8 +300,7 @@ pub fn help_body(kc: &mut KConsole<'_>) {
         let permitted = if cmd.flags & cfg.mask != 0 {
             ' '
         } else {
-            // An operator who presses a listed key and gets nothing should be
-            // able to see beforehand that policy is why.
+            // So an operator sees, before pressing, that policy will refuse it.
             'x'
         };
         kline!(

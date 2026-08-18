@@ -23,9 +23,7 @@ fn atlas() -> Option<&'static GlyphAtlas> {
         .as_ref()
 }
 
-/// Fallback cell width when the font atlas is unavailable.
 const FALLBACK_CELL_W: i32 = 8;
-/// Fallback cell height when the font atlas is unavailable.
 const FALLBACK_CELL_H: i32 = 16;
 
 pub fn cell_width() -> i32 {
@@ -47,9 +45,8 @@ pub fn draw_char<T: Canvas>(
     atlas()?.draw_char(target, x, y, ch as u32, fg, bg)
 }
 
-/// Draw a glyph by Unicode codepoint (non-ASCII codepoints fall back to the
-/// atlas replacement glyph). Used by the terminal emulator which keeps full
-/// `u32` codepoints per cell rather than narrowing to a byte.
+/// Draw a glyph by Unicode codepoint; non-ASCII codepoints fall back to the
+/// atlas replacement glyph.
 pub fn draw_glyph<T: Canvas>(
     target: &mut T,
     x: i32,

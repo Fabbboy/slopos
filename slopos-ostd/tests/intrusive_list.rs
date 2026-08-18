@@ -134,7 +134,7 @@ fn remove_tail() {
     list.push(nn(&c)).unwrap();
     list.remove(nn(&c)).unwrap();
     assert_eq!(list.len(), 2);
-    // After removing tail, push another to verify tail pointer is correct.
+    // The extra push checks the tail pointer left behind by the removal.
     let d = Node::new(4);
     list.push(nn(&d)).unwrap();
     let v: Vec<u32> = std::iter::from_fn(|| list.pop())
@@ -179,7 +179,6 @@ fn iter_yields_all_elements_in_fifo_order() {
         .map(|p| unsafe { p.as_ref().value })
         .collect();
     assert_eq!(v, [10, 20, 30]);
-    // iter() does not consume; len unchanged.
     assert_eq!(list.len(), 3);
 }
 
@@ -190,10 +189,8 @@ fn pop_then_push_clears_link_so_node_can_be_reused() {
     let b = Node::new(2);
     list.push(nn(&a)).unwrap();
     list.push(nn(&b)).unwrap();
-    // Pop a (head); its link should be cleared so a re-push succeeds.
     let popped = list.pop().unwrap();
     assert_eq!(unsafe { popped.as_ref().value }, 1);
-    // Re-push: a is the popped node, whose link is now null.
     list.push(nn(&a)).unwrap();
     let v: Vec<u32> = std::iter::from_fn(|| list.pop())
         .map(|p| unsafe { p.as_ref().value })
@@ -239,10 +236,8 @@ fn link_load_observes_push_state() {
     let b = Node::new(2);
     list.push(nn(&a)).unwrap();
     list.push(nn(&b)).unwrap();
-    // After push, a's link points at b; b is the tail (null).
     assert_eq!(a.link.load(), Box::as_ref(&b) as *const _ as *mut Node);
     assert!(b.link.load().is_null());
-    // pop(a) clears a's link slot.
     list.pop().unwrap();
     assert!(a.link.load().is_null());
 }
@@ -259,10 +254,8 @@ fn re_push_of_sole_tail_rejected() {
 
 #[test]
 fn cross_role_lists_have_distinct_types() {
-    // Smoke test that `OtherRole` is reachable. The strong guarantee
-    // (no `Linked<OtherRole>` for `Node` → cannot build that list)
-    // is enforced by the `compile_fail` doctest on `Linked` in
-    // `src/sync/intrusive.rs`; this test just keeps the marker live.
+    // The real guarantee — no `Linked<OtherRole>` for `Node` — is the
+    // `compile_fail` doctest on `Linked`; this only keeps the marker live.
     let _list: IntrusiveLinkedList<Node, TestRole> = IntrusiveLinkedList::new();
     let _: core::marker::PhantomData<OtherRole> = core::marker::PhantomData;
 }

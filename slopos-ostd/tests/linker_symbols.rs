@@ -1,10 +1,7 @@
 //! Host-side smoke tests for `slopos_ostd::arch::x86_64::linker`.
 //!
-//! The kernel linker symbols don't exist when `cargo test` runs on the
-//! host; the module's `#[cfg(not(target_os = "none"))]` stub provides
-//! synthetic non-null addresses backed by a private BSS buffer so the
-//! invariants ("range non-empty", "start <= end", "stack top distinct")
-//! can be exercised without a kernel ELF.
+//! The linker symbols don't exist off-target; the module's host stub answers
+//! with synthetic addresses so the range invariants hold without a kernel ELF.
 
 use slopos_ostd::arch::x86_64::linker;
 
@@ -42,9 +39,7 @@ fn kernel_stack_top_is_non_null() {
 
 #[test]
 fn kernel_image_envelops_or_aliases_text() {
-    // The kernel image starts at the same address as `.text` per
-    // `link.ld:36` (`_kernel_start = _text_start;`). The host stub
-    // mirrors this — both ranges start at the same byte.
+    // `link.ld` sets `_kernel_start = _text_start`; the host stub mirrors it.
     let text = linker::text_range();
     let image = linker::kernel_image_range();
     assert_eq!(text.start as usize, image.start as usize);

@@ -1,11 +1,9 @@
 //! Kernel task control block + context-switch primitives.
 //!
-//! The live task control block is [`kernel_task::TaskInner`] (aliased
-//! `Task` in the `slopos-sched` crate, which drives scheduling).
-//! OSTD owns the context-switch register snapshot ([`TaskContext`]),
-//! the switch assembly, the kernel-thread spawner, and the
-//! [`LinkProvider`] hook that absorbs the unsafe intrusive-list
-//! `Linked` impls into the trusted core.
+//! The live control block is [`kernel_task::TaskInner`], aliased `Task` in the
+//! scheduling crate. OSTD owns [`TaskContext`], the switch assembly, the
+//! kernel-thread spawner, and the [`LinkProvider`] hook that keeps the unsafe
+//! intrusive-list `Linked` impls inside the trusted core.
 
 pub mod abi;
 pub mod addr;

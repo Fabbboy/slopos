@@ -140,16 +140,8 @@ const ICMP_TYPE_ECHO_REQUEST: u8 = 8;
 const ICMP_TYPE_ECHO_REPLY: u8 = 0;
 const DRAIN_TIMEOUT_MS: i64 = 200;
 
-/// Pure computation of the next `select` deadline (ms) from the loop's
-/// three timing cases. Extracted so the state machine is host-testable
-/// without a socket or clock:
-///   - draining (Ctrl-C pressed): fixed `DRAIN_TIMEOUT_MS`;
-///   - all packets sent: the per-reply timeout;
-///   - still sending: time remaining until the next send (>= 1ms, or 0 if
-///     the send is already due).
-///
-/// `remaining_to_next_send_ms` is `None` when `next_send` is already in the
-/// past (send due now), `Some(ms)` otherwise.
+/// Next `select` deadline (ms). `remaining_to_next_send_ms` is `None` when
+/// `next_send` is already in the past (send due now), `Some(ms)` otherwise.
 fn compute_timeout_ms(
     stop_requested: bool,
     all_sent: bool,
@@ -233,9 +225,7 @@ fn send_ping(
     }
 }
 
-/// Process a datagram the reactor already received: the source address
-/// rides in `src` (from `RecvFromResult.src` — no second syscall), and the
-/// data region is `data`. Records the RTT and prints the reply line.
+/// The source address rides in `src` from `RecvFromResult` — no second syscall.
 fn handle_reply(data: &[u8], src: &SockAddrIn, clock_start: &Instant, stats: &mut PingStats) {
     let received = data.len();
     if received < ICMP_HEADER_LEN {
@@ -262,19 +252,11 @@ fn handle_reply(data: &[u8], src: &SockAddrIn, clock_start: &Instant, stats: &mu
     }
 }
 
-/// socket recv buffer capacity (max ICMP reply we care about).
 const RECV_CAP: usize = 1600;
 
-/// The async send/receive loop. Races SIGINT / `OP_RECVFROM` / timer, acts
-/// on whichever fires, and breaks once Ctrl-C's drain completes or all
-/// requested packets are sent and drained/timed out.
-///
-/// Ctrl-C arrives as a real SIGINT: the terminal stays in its normal cooked
-/// mode (ISIG on), the line discipline raises SIGINT against the foreground
-/// process group — which the kernel-side spawn handoff guarantees is ping —
-/// and `listener` surfaces it as an in-band ring completion. No raw-mode
-/// termios juggling, no stdin byte-scanning, and no failure mode where a
-/// transient fd-0 error silently disables Ctrl-C for the rest of the run.
+/// Races SIGINT / `OP_RECVFROM` / timer, acting on whichever fires, and breaks
+/// once Ctrl-C's drain completes or all requested packets are sent and
+/// drained/timed out.
 async fn run_loop(
     config: &PingConfig,
     sock_fd: i32,
@@ -288,9 +270,8 @@ async fn run_loop(
     let mut stop_requested = false;
     let mut next_send = *clock_start;
 
-    // The recv buffer ping-pongs between the loop and the in-flight read,
-    // mirroring the nc template: the winner returns its buffer; a cancelled
-    // loser keeps its buffer in the reactor, so the loser gets a fresh one.
+    // The race winner returns its buffer; a cancelled loser leaves its buffer
+    // in the reactor, so the loser gets a fresh one.
     let mut recv_buf = vec![0u8; RECV_CAP];
 
     loop {
@@ -323,10 +304,6 @@ async fn run_loop(
             remaining_to_next_send_ms,
         );
 
-        // `Either`-style winner discrimination: A = SIGINT, B = recvfrom,
-        // C/B = timer (depending on whether the signal is in the race). The
-        // shared recvfrom/timer interpretation lives in one place below so
-        // the active and drain phases can never silently diverge.
         enum Turn {
             Stop,
             Recv(slopfut::RecvFromResult),
@@ -345,7 +322,6 @@ async fn run_loop(
                 slopfut::Either3::C(_) => Turn::Timer,
             }
         } else {
-            // No signalfd available — only the socket + timer race.
             let f_recv =
                 slopfut::recvfrom(sock_fd, core::mem::take(&mut recv_buf), RECV_CAP as u32);
             let f_timer = Box::pin(slopfut::time::sleep_ms(timeout_ms.max(0) as u64));
@@ -358,9 +334,7 @@ async fn run_loop(
         let mut timed_out = false;
         match turn {
             Turn::Stop => {
-                // The ldisc already echoed "^C" (ECHOCTL); move to a fresh
-                // line. First Ctrl-C switches to the reply-drain state; a
-                // second one force-quits the drain immediately.
+                // The ldisc already echoed "^C" (ECHOCTL); move to a fresh line.
                 println!();
                 if stop_requested {
                     break;
@@ -438,12 +412,10 @@ pub fn ping_main(args: Vec<String>) -> ! {
         std::process::exit(2);
     }
 
-    // Ctrl-C handling rides POSIX job control: the terminal keeps its normal
-    // cooked mode (ISIG on), the ldisc raises SIGINT against the foreground
-    // pgrp (ping, guaranteed by the kernel spawn handoff), and the listener
-    // turns that into an awaitable ring completion. If signalfd creation
-    // fails the mask is unblocked again, so Ctrl-C falls back to the default
-    // SIGINT action (terminate) instead of being silently lost.
+    // Ctrl-C rides POSIX job control: the ldisc raises SIGINT against the
+    // foreground pgrp and the listener turns it into an awaitable ring
+    // completion. If signalfd creation fails the mask is unblocked again, so
+    // Ctrl-C falls back to the default SIGINT action instead of being lost.
     let sigint = slopfut::signal::SignalListener::new(sig_bit(SIGINT));
     if sigint.is_none() {
         eprintln!("ping: warning: signalfd unavailable; Ctrl-C will terminate without stats");
@@ -473,15 +445,9 @@ pub fn ping_main(args: Vec<String>) -> ! {
 
     let clock_start = Instant::now();
 
-    // The send/receive loop rides the slopfut runtime: `select3` over the
-    // SIGINT listener's signalfd `OP_READ`, an `OP_RECVFROM` (whose result
-    // carries the ICMP reply's source address — no second recvfrom syscall),
-    // and an `OP_TIMEOUT` bounding the wait to the next send / reply
-    // deadline. Once Ctrl-C arrives (drain state) the signal branch is
-    // dropped via `select2`.
     let sock_fd = fd.raw();
-    // 16 SQ slots comfortably covers the loop's peak in-flight (signalfd
-    // read + recvfrom + timer); ring setup failure means no loop at all.
+    // 16 SQ slots covers the loop's peak in-flight: signalfd read + recvfrom
+    // + timer.
     match Ring::setup(16) {
         Ok(ring) => {
             slopfut::block_on(

@@ -1,8 +1,4 @@
 //! Host-side integration tests for `slopos_ostd::irq::line`.
-//!
-//! Exercises [`IrqAllocator::alloc`] / [`IrqLine::register_callback`] /
-//! [`dispatch`] / drop semantics with the cargo-test allocator and
-//! handler closures captured via `Arc<AtomicUsize>`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -73,7 +69,6 @@ fn callback_runs_on_dispatch() {
 #[test]
 fn dispatch_on_unregistered_vector_is_noop() {
     let _g = serial();
-    // No registration; dispatch should silently return.
     dispatch(50, 0);
     dispatch(100, 0xDEADBEEF);
 }
@@ -111,8 +106,6 @@ fn dropping_handle_clears_dispatch_slot() {
 fn dropping_line_returns_vector_to_pool() {
     let _g = serial();
     let v_first = IrqAllocator::alloc().expect("first").vector();
-    // Track and drop everything else; the freed vector must be
-    // reachable by exhaustive draining.
     let mut held = std::vec::Vec::new();
     let mut saw_v_first_again = false;
     loop {
@@ -166,9 +159,8 @@ fn handle_borrows_line_and_clears_on_drop() {
             .expect("register");
         dispatch(v, 0);
         assert_eq!(counter.load(Ordering::Relaxed), 1);
-        // Borrow checker forces _h to drop before line; both clear
-        // the dispatch slot but only one actually owns the closure
-        // (the handle does — line.drop sees an already-cleared slot).
+        // _h drops before line; both clear the slot, so line's drop must
+        // tolerate an already-cleared one.
     }
     dispatch(v, 0);
     assert_eq!(counter.load(Ordering::Relaxed), 1);
@@ -182,8 +174,7 @@ fn reset_for_test_drains_dispatch() {
         let line = IrqAllocator::alloc().expect("alloc");
         let v = line.vector();
         let c2 = counter.clone();
-        // Forget the line + handle to confirm reset_for_test drains
-        // the dispatch table even when nothing else does.
+        // Both are forgotten, so nothing but reset_for_test clears the slot.
         let h = line
             .register_callback(move |_| {
                 c2.fetch_add(1, Ordering::Relaxed);

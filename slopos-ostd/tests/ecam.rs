@@ -1,8 +1,4 @@
 //! Host-side tests for `slopos_ostd::pci::EcamConfigSpace`.
-//!
-//! Sets up a fake `IoMem` over a leaked backing buffer (pattern
-//! mirrors `tests/io_mem.rs`) and exercises the BDF arithmetic,
-//! bounds-checks, and the read/write round-trip.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -57,7 +53,6 @@ fn setup() -> MutexGuard<'static, ()> {
         let layout =
             std::alloc::Layout::from_size_align(ECAM_SIZE, PAGE_SIZE).expect("backing layout");
         // SAFETY: nonzero size; standard allocator contract.
-        // SAFETY: nonzero size; standard allocator contract.
         let backing_ptr_real: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!backing_ptr_real.is_null(), "backing alloc failed");
         let backing_ptr = backing_ptr_real.expose_provenance() as u64;
@@ -108,8 +103,6 @@ fn ecam_new_rejects_inverted_bus_range() {
 #[test]
 fn ecam_new_rejects_undersized_region() {
     let _g = setup();
-    // Reserve only one page — much smaller than the 4 MiB the bus
-    // range demands.
     let region = IoMemRegistry::reserve(
         PhysAddr::new(ECAM_BASE),
         PAGE_SIZE,

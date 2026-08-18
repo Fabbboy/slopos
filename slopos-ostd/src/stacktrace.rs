@@ -42,8 +42,6 @@ pub fn stacktrace_capture_from(
     let max_entries = max_entries as usize;
 
     while rbp != 0 && count < max_entries {
-        // Frame pointer chain is expected to stay in kernel canonical space.
-        // Bail out on anything suspicious instead of dereferencing garbage.
         if rbp & 0x7 != 0 || !is_kernel_address(rbp) {
             break;
         }
@@ -54,9 +52,8 @@ pub fn stacktrace_capture_from(
             break;
         }
 
-        // Fault-recoverable probes: a canonical frame pointer can still
-        // reference an unmapped page (stack guard, freed stack). The probe
-        // truncates the walk instead of letting a diagnostic fault.
+        // A canonical frame pointer can still reference an unmapped page, so
+        // the fault-recoverable probe truncates the walk instead of faulting.
         let Some(next_rbp) =
             crate::arch::x86_64::kernel_ptr::read_volatile_canonical_kernel_u64(rbp)
         else {
@@ -77,7 +74,6 @@ pub fn stacktrace_capture_from(
         }
         count += 1;
 
-        // Zero terminates the frame chain.
         if next_rbp == 0 {
             break;
         }

@@ -1,5 +1,4 @@
-/// Simple fixed-capacity ring buffer mirroring the old C macros.
-/// Uses a backing array with head/tail/count indices.
+/// Fixed-capacity ring buffer over an inline backing array.
 #[derive(Debug, Clone, Copy)]
 pub struct RingBuffer<T, const N: usize> {
     data: [T; N],
@@ -18,8 +17,6 @@ impl<T: Copy, const N: usize> RingBuffer<T, N> {
         }
     }
 
-    /// Create a new ring buffer with all elements set to the given value.
-    /// This is const-compatible and can be used for static initialization.
     #[inline(always)]
     pub const fn new_with(value: T) -> Self {
         Self {
@@ -30,7 +27,6 @@ impl<T: Copy, const N: usize> RingBuffer<T, N> {
         }
     }
 
-    /// Returns the current number of elements in the buffer.
     #[inline(always)]
     pub const fn len(&self) -> usize {
         self.count
@@ -56,13 +52,13 @@ impl<T: Copy, const N: usize> RingBuffer<T, N> {
         N - self.count
     }
 
-    /// Alias for `len()` - number of elements in the buffer.
+    /// Alias for `len()`.
     #[inline(always)]
     pub fn count(&self) -> usize {
         self.len()
     }
 
-    /// Alias for `free_space()` - number of free slots.
+    /// Alias for `free_space()`.
     #[inline(always)]
     pub fn free(&self) -> usize {
         self.free_space()
@@ -87,7 +83,7 @@ impl<T: Copy, const N: usize> RingBuffer<T, N> {
         Some(&self.data[idx])
     }
 
-    /// Expose internal slice for debugging/testing.
+    /// The whole backing array, not just the live region.
     pub fn as_slice(&self) -> &[T] {
         &self.data
     }
@@ -111,14 +107,13 @@ impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
         self.count = 0;
     }
 
-    /// Alias for `reset()` - clear all elements.
+    /// Alias for `reset()`.
     #[inline(always)]
     pub fn flush(&mut self) {
         self.reset()
     }
 
-    /// Discard the oldest `n` elements without reading them.
-    /// Saturates at the current element count.
+    /// Discard the oldest `n` elements, saturating at the element count.
     #[inline(always)]
     pub fn consume(&mut self, n: usize) {
         let consumed = n.min(self.count);
@@ -126,7 +121,7 @@ impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
         self.count -= consumed;
     }
 
-    /// Push with overwrite of the oldest element when full (like RING_BUFFER_PUSH_OVERWRITE).
+    /// Push, overwriting the oldest element when full.
     #[inline(always)]
     pub fn push_overwrite(&mut self, value: T) {
         if self.is_full() {
@@ -138,7 +133,7 @@ impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
         self.count += 1;
     }
 
-    /// Push without overwrite; returns true on success, false if full.
+    /// Push without overwriting; false if full.
     #[inline(always)]
     pub fn try_push(&mut self, value: T) -> bool {
         if self.is_full() {
@@ -150,7 +145,7 @@ impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
         true
     }
 
-    /// Pop oldest element; returns Some(value) or None when empty.
+    /// Pop the oldest element.
     #[inline(always)]
     pub fn try_pop(&mut self) -> Option<T> {
         if self.is_empty() {
@@ -164,9 +159,6 @@ impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
 }
 
 /// Byte-stream bulk operations for protocols like TCP, serial, TTY.
-///
-/// Uses split `copy_from_slice` (compiles to memcpy) instead of
-/// byte-by-byte loops for contiguous segments of the backing array.
 impl<const N: usize> RingBuffer<u8, N> {
     #[inline(always)]
     pub const fn new_zeroed() -> Self {
@@ -178,8 +170,7 @@ impl<const N: usize> RingBuffer<u8, N> {
         }
     }
 
-    /// Write up to `data.len()` bytes into the buffer.
-    /// Returns the number of bytes actually written (capped at free space).
+    /// Write as much of `data` as free space allows; returns bytes written.
     pub fn write(&mut self, data: &[u8]) -> usize {
         let to_write = data.len().min(N - self.count);
         if to_write == 0 {
@@ -199,8 +190,7 @@ impl<const N: usize> RingBuffer<u8, N> {
         to_write
     }
 
-    /// Read up to `out.len()` bytes from the buffer into `out`.
-    /// Returns the number of bytes actually read.
+    /// Fill as much of `out` as the buffer holds; returns bytes read.
     pub fn read(&mut self, out: &mut [u8]) -> usize {
         let to_read = out.len().min(self.count);
         if to_read == 0 {
@@ -220,12 +210,10 @@ impl<const N: usize> RingBuffer<u8, N> {
         to_read
     }
 
-    /// Fill the buffer directly from a volatile [`VmReader`](crate::mm::VmReader)
-    /// over pinned user pages — the SlopRing single-direct-copy path. Up to
-    /// `min(max, free_space, reader.remain())` bytes are volatile-copied
-    /// straight from the pinned pages into this ring's backing array, with no
-    /// intermediate kernel scratch. `max` lets a caller honour a soft cap below
-    /// the raw capacity (e.g. `SO_SNDBUF`). Returns the number of bytes written.
+    /// Volatile-copy up to `min(max, free_space, reader.remain())` bytes from
+    /// pinned user pages straight into the backing array, with no intermediate
+    /// kernel scratch. `max` is a caller's soft cap below capacity (e.g.
+    /// `SO_SNDBUF`).
     pub fn write_from(
         &mut self,
         reader: &mut crate::mm::vmcursor::VmReader<'_>,
@@ -250,11 +238,9 @@ impl<const N: usize> RingBuffer<u8, N> {
         written
     }
 
-    /// Drain the buffer directly into a volatile [`VmWriter`](crate::mm::VmWriter)
-    /// over pinned user pages — the SlopRing single-direct-copy path. Up to
-    /// `min(len, writer.remain())` bytes are volatile-copied straight from this
-    /// ring's backing array into the pinned pages. Returns the number of bytes
-    /// read out.
+    /// Volatile-copy up to `min(len, writer.remain())` bytes from the backing
+    /// array straight into pinned user pages, with no intermediate kernel
+    /// scratch.
     pub fn read_into(&mut self, writer: &mut crate::mm::vmcursor::VmWriter<'_>) -> usize {
         let to_read = self.count.min(writer.remain());
         if to_read == 0 {
@@ -275,9 +261,8 @@ impl<const N: usize> RingBuffer<u8, N> {
         read
     }
 
-    /// Peek at buffered data starting `offset` bytes from the tail,
-    /// copying into `out`. Does not advance the tail.
-    /// Returns the number of bytes copied.
+    /// Copy into `out` starting `offset` bytes from the tail, without
+    /// advancing the tail; returns bytes copied.
     pub fn peek_at(&self, offset: usize, out: &mut [u8]) -> usize {
         if offset >= self.count {
             return 0;
@@ -300,12 +285,9 @@ impl<const N: usize> RingBuffer<u8, N> {
         to_read
     }
 
-    /// Write `data` at position `head + offset` without advancing head or
-    /// count.  Used by the TCP OOO reassembly path to place out-of-order
-    /// payload directly into the receive ring buffer at its final offset.
-    ///
-    /// Returns the number of bytes written (capped so the write cannot
-    /// extend past the buffer's free space).
+    /// Write `data` at `head + offset` without advancing head or count, so TCP
+    /// reassembly can place out-of-order payload at its final position.
+    /// Capped so the write cannot extend past the free space.
     pub fn write_at_offset(&mut self, offset: usize, data: &[u8]) -> usize {
         let free = N - self.count;
         if offset >= free {
@@ -328,10 +310,8 @@ impl<const N: usize> RingBuffer<u8, N> {
         to_write
     }
 
-    /// Advance head by `n` bytes and increase count, without writing any
-    /// data.  Used after OOO drain: the bytes are already in the buffer
-    /// (placed earlier by [`write_at_offset`]), so we just need to extend
-    /// the valid region to cover them.
+    /// Extend the valid region by `n` bytes without writing any: the bytes are
+    /// already there, placed earlier by [`write_at_offset`](Self::write_at_offset).
     pub fn advance_head(&mut self, n: usize) {
         debug_assert!(n <= N - self.count, "advance_head: would exceed capacity");
         let advance = n.min(N - self.count);

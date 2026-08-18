@@ -1,13 +1,9 @@
-//! SlopOS Operating-System Trusted Domain (OSTD).
-//!
-//! This crate is the kernel's trusted core: every line of `unsafe`
-//! in the kernel lives here. All other kernel crates consume the
-//! safe APIs exposed from this crate.
+//! SlopOS Operating-System Trusted Domain (OSTD): the kernel's trusted core,
+//! holding every line of `unsafe` in the kernel behind safe APIs.
 
-// `allow_internal_unsafe` marks the macros that intentionally expand
-// `unsafe` into a `#![forbid(unsafe_code)]` crate. rustc lints the
-// attribute itself under `unsafe_code`, so it can only live here — which
-// is the point: the injector set is greppable from the definitions.
+// rustc lints `allow_internal_unsafe` itself under `unsafe_code`, so the macros
+// that expand `unsafe` into `#![forbid(unsafe_code)]` crates can only be defined
+// here — which keeps the injector set greppable.
 #![feature(allow_internal_unsafe)]
 #![allow(internal_features)]
 #![no_std]
@@ -21,9 +17,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
-// Self-alias so the `#[derive(Pod)]` / `#[derive(Zeroable)]` expansions
-// (which name the trait as `::slopos_ostd::Pod` / `::slopos_ostd::Zeroable`)
-// resolve when used inside this crate itself.
+// Self-alias so `#[derive(Pod)]` / `#[derive(Zeroable)]` expansions, which name
+// `::slopos_ostd::…`, resolve inside this crate itself.
 extern crate self as slopos_ostd;
 
 mod abi_pod;
@@ -73,9 +68,7 @@ pub mod wl_currency;
 #[doc(hidden)]
 pub use paste as __paste;
 
-/// Plain-old-data marker trait. Re-exported at the crate root so
-/// the `#[derive(Pod)]` / `#[derive(Zeroable)]` expansions can
-/// resolve `::slopos_ostd::Pod` / `::slopos_ostd::Zeroable`.
+/// Plain-old-data marker trait.
 pub use mm::Pod;
 pub use slopos_ostd_derive::{Charged, Pod, SlotFields, Zeroable};
 
@@ -90,10 +83,6 @@ pub use user::{
     UserBytes, UserContext, UserCopyError, UserMode, UserPtr, UserPtrError, UserRegs, UserSlice,
     UserVirtAddr,
 };
-
-// ---------------------------------------------------------------------------
-// Convenience re-exports absorbed from slopos-utils.
-// ---------------------------------------------------------------------------
 
 pub use slopos_abi::alignment;
 pub use slopos_abi::alignment::{

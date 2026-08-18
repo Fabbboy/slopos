@@ -17,17 +17,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 const MAX_PIPE_CMDS: usize = 8;
 const MAX_REDIRECTS: usize = 8;
 
-/// The shell could not parse the line.  POSIX reserves 2 for the shell's own
-/// usage errors, distinct from any status a command could return.
+/// POSIX reserves 2 for the shell's own usage errors, distinct from any status
+/// a command could return.
 pub const STATUS_SYNTAX_ERROR: i32 = 2;
 /// The command was found but could not be executed.
 pub const STATUS_CANNOT_EXECUTE: i32 = 126;
-/// No such command.
 pub const STATUS_NOT_FOUND: i32 = 127;
 
-/// Signals a forked job resets to SIG_DFL before running a command — the shell
-/// catches SIGINT and ignores SIGTTOU/SIGTTIN/SIGTSTP, none of which a launched
-/// job should inherit.
+/// Signals a forked job resets to SIG_DFL: the shell catches SIGINT and ignores
+/// SIGTTOU/SIGTTIN/SIGTSTP, none of which a launched job should inherit.
 const JOB_CONTROL_DEFAULT_SIGNALS: slopos_abi::signal::SigSet = {
     use slopos_abi::signal::{SIGINT, SIGTSTP, SIGTTIN, SIGTTOU, sig_bit};
     sig_bit(SIGINT) | sig_bit(SIGTTOU) | sig_bit(SIGTTIN) | sig_bit(SIGTSTP)
@@ -69,7 +67,6 @@ impl Redirect {
     }
 }
 
-/// How a pipeline is joined to the one after it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Connector {
     /// `;` — run regardless.
@@ -104,10 +101,8 @@ impl ParsedCommand {
     }
 }
 
-/// Split `NAME=VALUE` into its halves.
-///
-/// `NAME` must be a shell identifier, so `./a=b` and `-x=1` stay ordinary
-/// arguments and only a genuine assignment is treated as one.
+/// Split `NAME=VALUE` into its halves.  `NAME` must be a shell identifier, so
+/// `./a=b` and `-x=1` stay ordinary arguments.
 fn split_assignment(word: &[u8]) -> Option<(&[u8], &[u8])> {
     let eq = word.iter().position(|&b| b == b'=')?;
     if eq == 0 {
@@ -199,20 +194,16 @@ pub fn clear_foreground_pgid() {
 
 /// Claim the terminal and become a session leader — interactive shells only.
 ///
-/// POSIX gives job control to the shell a user is typing at, and to no other.
 /// A shell running a script must stay in the process group its parent placed it
 /// in: that group is the terminal's foreground group, so a Ctrl+C the user
 /// aimed at the pipeline reaches the script *and* the commands it is running.
-/// Taking a session of its own would move it out of reach of the keyboard
-/// entirely.
 pub fn initialize_job_control() {
     if !super::is_interactive() {
         return;
     }
 
-    // Only claim a session when there is no terminal to steal.  A successful
-    // TIOCGSID means some other session already owns this terminal, and
-    // detaching it from them would leave them unable to read their own input.
+    // A successful TIOCGSID means another session already owns this terminal;
+    // detaching it would leave them unable to read their own input.
     if fs::tcgetsid(0).is_err() {
         let _ = process::setsid();
         let _ = fs::tiocsctty(0);
@@ -254,13 +245,9 @@ pub fn leave_foreground() {
 }
 
 /// Split a redirection operator token into (io number, kind, dup-or-path).
-///
-/// `2>`, `>>`, `<`, `2>&`, `<&`, `&>`.  Returns `None` when the token is not a
-/// redirection operator at all.
 fn classify_redirect(tok: &[u8]) -> Option<(i32, RedirectKind, bool)> {
     if tok == b"&>" {
-        // `&>file` is stdout and stderr together; the stderr half is attached
-        // by the caller once the path is opened.
+        // The stderr half of `&>` is attached by the caller once the path opens.
         return Some((1, RedirectKind::OutputTruncate, false));
     }
 
@@ -345,8 +332,7 @@ fn parse_pipeline(
             cmd.redirects[cmd.redirect_count] = Redirect { kind, fd, target };
             cmd.redirect_count += 1;
 
-            // `&>path` is shorthand for `>path 2>&1`, so stderr follows stdout
-            // to the same place.
+            // `&>path` is shorthand for `>path 2>&1`.
             if tok == b"&>" {
                 if cmd.redirect_count >= MAX_REDIRECTS {
                     return Err(());
@@ -364,9 +350,8 @@ fn parse_pipeline(
 
         let cmd = &mut out.commands[cmd_idx];
 
-        // `NAME=VALUE` words before the command name are assignments, not
-        // arguments.  Once a real word has been seen they are ordinary
-        // arguments again, so `env FOO=bar` passes `FOO=bar` through.
+        // `NAME=VALUE` counts as an assignment only before the command name, so
+        // `env FOO=bar` passes `FOO=bar` through as an argument.
         if cmd.argc == 0 && split_assignment(tok).is_some() {
             if cmd.assign_count >= SHELL_MAX_ARGS {
                 return Err(());
@@ -560,8 +545,7 @@ fn command_resolves(cmd: &ParsedCommand, tokens: &ParsedTokens) -> bool {
 
 fn print_background_job_started(job_id: u16, pid: u32) {
     super::set_last_bg_pid(pid);
-    // Job bookkeeping is a message to the user, not program output: a script's
-    // stdout is somebody's data.
+    // Job bookkeeping is a message to the user, not program output.
     if !super::is_interactive() {
         return;
     }
@@ -574,9 +558,8 @@ fn print_background_job_started(job_id: u16, pid: u32) {
 
 /// Build a NUL-terminated `argv` for the exec/spawn ABI boundary.
 ///
-/// Returns the owned strings alongside the pointer array: the kernel reads
-/// through those pointers during the syscall, so the backing bytes must outlive
-/// the call.
+/// The owned strings come back with the pointer array: the kernel reads through
+/// those pointers during the syscall, so the bytes must outlive it.
 fn build_c_argv(cmd: &ParsedCommand, tokens: &ParsedTokens) -> (Vec<Vec<u8>>, Vec<*const u8>) {
     let owned: Vec<Vec<u8>> = (0..cmd.argc)
         .map(|i| {
@@ -593,7 +576,7 @@ fn build_c_argv(cmd: &ParsedCommand, tokens: &ParsedTokens) -> (Vec<Vec<u8>>, Ve
 }
 
 /// Build a NUL-terminated `envp` of `KEY=VALUE` strings from the shell's
-/// environment, so a child can actually observe what `export` set.
+/// environment.
 fn build_c_envp() -> (Vec<Vec<u8>>, Vec<*const u8>) {
     let mut owned: Vec<Vec<u8>> = Vec::new();
     super::env::for_each(|key, value| {
@@ -609,7 +592,6 @@ fn build_c_envp() -> (Vec<Vec<u8>>, Vec<*const u8>) {
     (owned, ptrs)
 }
 
-/// Wait for one child to exit and report its status.
 fn wait_for(pid: u32) -> i32 {
     loop {
         if let Some(st) = process::waitpid_nohang(pid) {
@@ -629,19 +611,11 @@ fn execute_registry_spawn(
     }
     let spec = registry_spec_for_command(cmd, tokens)?;
 
-    // Foreground jobs get their own pgrp AND the kernel-side atomic
-    // foreground handoff: the child's pgrp becomes the terminal's
-    // foreground group before the child is schedulable, so its first
-    // fd-0 read can never lose the race against the parent's
-    // `enter_foreground` below (which is kept as shell-side state
-    // bookkeeping and is an idempotent re-set kernel-side).
-    // The kernel's foreground handoff resolves its target terminal from the
-    // task's inherited controlling tty, not from fd 0.  A shell running a
-    // script shares its parent's terminal, so asking for the handoff would
-    // hand the *user's* foreground process group to this child — and nothing
-    // would ever give it back, because a script shell's `tcsetpgrp` has a pipe
-    // on fd 0 and cannot restore it.  Only a shell that owns the terminal may
-    // ask.
+    // A foreground job gets its own pgrp and the kernel-side handoff, so it is
+    // the terminal's foreground group before its first fd-0 read.  Only a shell
+    // that owns the terminal may ask: the kernel resolves the handoff from the
+    // inherited controlling tty, so a script shell would hand the *user's*
+    // foreground group to the child with no way to restore it.
     let spawn_flags = if background || !super::is_interactive() {
         spec.flags
     } else {
@@ -651,10 +625,8 @@ fn execute_registry_spawn(
     let (argv_owned, argv_ptrs) = build_c_argv(cmd, tokens);
     let (envp_owned, envp_ptrs) = build_c_envp();
 
-    // The child's empty table inherits exactly the shell's own stdin, stdout
-    // and stderr.  A foreground command writes straight to the terminal, so
-    // `isatty(1)` is true for it, its stdio stays line-buffered, and its output
-    // appears as it is produced rather than when it exits.
+    // Cloning the shell's own 0/1/2 keeps `isatty(1)` true for the child, so
+    // its stdio stays line-buffered and output appears as it is produced.
     let actions = [
         process::clone_fd(0, 0),
         process::clone_fd(1, 1),
@@ -693,7 +665,7 @@ fn execute_registry_spawn(
         return Some(0);
     }
 
-    // Confirm pgid (child already has it via TASK_FLAG_NEW_PGRP) and set fg.
+    // Idempotent: the child already has this pgid via TASK_FLAG_NEW_PGRP.
     if super::is_interactive() {
         let _ = process::setpgid(pid, pid);
     }

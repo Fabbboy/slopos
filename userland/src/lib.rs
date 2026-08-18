@@ -18,9 +18,7 @@ pub use slopos_slibc as slibc;
 pub fn init() {}
 
 /// Process entry. Hands the raw initial stack pointer (`&argc`) to the C
-/// runtime, which parses argc/argv/envp, sets up TLS from the program's
-/// `PT_TLS` (discovered via `AT_PHDR`), and calls `main`. The standard
-/// `_start -> __libc_start_main` contract; nothing here touches TLS.
+/// runtime per the standard `_start -> __libc_start_main` contract.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]

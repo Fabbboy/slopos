@@ -1,17 +1,15 @@
 //! Per-task ring buffer for `SYSCALL_TEST_REPORT` payloads.
 //!
-//! A user task's first `SYSCALL_TEST_REPORT` lazily allocates one of these
-//! rings into `Task::test_reports`. Non-test tasks never call the syscall
-//! and pay zero cost. After the task exits, the kernel-side userland-test
-//! runner calls `task_drain_test_reports` (in the kernel-side scheduler)
-//! to take ownership of the ring and read out the recorded subtests.
+//! A task's first `SYSCALL_TEST_REPORT` lazily allocates one into
+//! `Task::test_reports`; after the task exits the userland-test runner calls
+//! `task_drain_test_reports` to take ownership and read out the subtests.
 
 use slopos_abi::syscall::{TEST_REPORT_MSG_MAX, TEST_REPORT_NAME_MAX, TEST_REPORT_RING_CAPACITY};
 
 use crate::{AllocError, KBox, KVec, Zeroable};
 
-/// One subtest result. `name`/`msg` are length-prefixed byte arrays — the
-/// `*_len` fields hold the populated prefix length; the remainder is zero.
+/// One subtest result; `*_len` holds the populated prefix of `name`/`msg`
+/// and the remainder is zero.
 #[derive(Clone, Copy, Zeroable)]
 #[repr(C)]
 pub struct TestReport {
@@ -23,9 +21,8 @@ pub struct TestReport {
     pub msg: [u8; TEST_REPORT_MSG_MAX],
 }
 
-/// Bounded per-task ring of `TestReport`. Newest report is dropped on
-/// overflow and the `overflow` flag is latched so the runner can flag
-/// truncation in its KTAP output.
+/// A report arriving past capacity is dropped and the `overflow` flag latched
+/// so the runner can mark the KTAP output truncated.
 #[derive(Zeroable)]
 #[repr(C)]
 pub struct TestReportRing {
@@ -47,8 +44,6 @@ impl TestReportRing {
         self.count += 1;
     }
 
-    /// Move every recorded `TestReport` out of the ring into a heap vector,
-    /// resetting the ring to empty in place.
     pub fn drain(&mut self) -> Result<KVec<TestReport>, AllocError> {
         let mut out: KVec<TestReport> = KVec::new();
         for i in 0..self.count as usize {
@@ -64,15 +59,13 @@ impl TestReportRing {
     }
 }
 
-/// Heap-allocate a fresh zeroed ring. Uses in-place init so the ~12 KiB
-/// `TestReportRing` rvalue never lands on the caller's stack — required to
-/// stay under the 2 KiB stack-frame gate.
+/// In-place init keeps the ~12 KiB `TestReportRing` rvalue off the caller's
+/// stack, under the 2 KiB stack-frame gate.
 pub fn alloc_ring() -> Result<KBox<TestReportRing>, AllocError> {
     KBox::<TestReportRing>::zeroed()
 }
 
-/// Construct an empty `TestReport` so users don't need to spell out the
-/// padding byte. Used by the syscall handler when copying name/msg buffers.
+/// Spares callers spelling out the private padding byte.
 pub fn empty_report() -> TestReport {
     TestReport {
         status: 0,
@@ -83,5 +76,3 @@ pub fn empty_report() -> TestReport {
         msg: [0; TEST_REPORT_MSG_MAX],
     }
 }
-
-// =============================================================================

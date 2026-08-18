@@ -1,14 +1,10 @@
 //! The single-threaded task scheduler.
 //!
-//! Real wakers (no re-poll-everything): a task is polled only when its waker
-//! fires (a ring completion via the reactor, or another task via a channel /
-//! `Notify`). [`block_on`] drives a root future to completion while running
-//! any [`spawn`]ed tasks concurrently on the same thread; the reactor's
-//! `park` (a blocking `ring_enter`) is the only sleep point (SLOPRING §7.1).
-//!
-//! Two thread-locals — this scheduler and the [`reactor`](super::reactor) —
-//! are deliberately separate cells so the reactor's `park` can fire a waker
-//! (which borrows *this* cell) without a same-cell re-borrow.
+//! A task is polled only when its waker fires — a ring completion via the
+//! reactor, or another task via a channel / `Notify`. [`block_on`] drives a
+//! root future to completion while running any [`spawn`]ed tasks concurrently
+//! on the same thread; the reactor's `park` (a blocking `ring_enter`) is the
+//! only sleep point (SLOPRING §7.1).
 
 use core::cell::RefCell;
 use core::future::Future;
@@ -116,10 +112,9 @@ impl<T> Future for JoinHandle<T> {
     }
 }
 
-/// Poll every currently-ready spawned task once. A task that returns
-/// `Pending` is retained; one that returns `Ready` is dropped (its
-/// `JoinHandle` already captured the output). Polling may enqueue more tasks
-/// (e.g. a channel send wakes a receiver); the loop drains them too.
+/// Poll every currently-ready spawned task once. A `Pending` task is retained,
+/// a `Ready` one dropped (its `JoinHandle` already captured the output), and
+/// tasks enqueued by those polls are drained by the same loop.
 fn run_ready_tasks() {
     loop {
         let Some(id) = with_sched(|s| s.ready.pop_front()) else {
@@ -168,15 +163,13 @@ pub fn block_on<F: Future>(ring: Ring, fut: F) -> F::Output {
                 break v;
             }
         }
-        // Run any ready spawned tasks (may wake the root / each other).
         run_ready_tasks();
         if take_root_ready() {
             poll_root = true;
             continue;
         }
-        // Quiescent: re-poll only happens via a wakeup. If ops are in flight,
-        // park on the ring (the sole sleep) to drive their completions;
-        // otherwise nothing can make progress — a genuine deadlock.
+        // Quiescent: a re-poll now needs a wakeup, so park on the ring to drive
+        // in-flight completions; with none, nothing can make progress.
         if reactor::with_reactor(|r| r.in_flight()) > 0 {
             reactor::with_reactor(|r| r.park());
             if take_root_ready() {
@@ -187,9 +180,8 @@ pub fn block_on<F: Future>(ring: Ring, fut: F) -> F::Output {
         }
     };
 
-    // Drop the root (cancels any op it still holds) and any lingering spawned
-    // tasks while the reactor is still installed, then tear it down — which
-    // closes the ring fd before freeing orphaned buffers.
+    // Drop the root and any lingering spawned tasks — cancelling the ops they
+    // still hold — while the reactor is still installed, then tear it down.
     drop(root);
     SCHED.with(|c| {
         *c.borrow_mut() = None;
@@ -202,10 +194,9 @@ fn take_root_ready() -> bool {
     with_sched(|s| core::mem::take(&mut s.root_ready))
 }
 
-/// Yield control to the executor once: re-enqueue this task and let other
-/// ready tasks run before it is polled again. Cooperative scheduling for
-/// CPU-bound async work, so one task cannot starve its siblings on the
-/// single executor thread.
+/// Yield control to the executor once: re-enqueue this task and let other ready
+/// tasks run before it is polled again, so CPU-bound async work cannot starve
+/// its siblings on the single executor thread.
 pub async fn yield_now() {
     let mut yielded = false;
     core::future::poll_fn(move |cx| {

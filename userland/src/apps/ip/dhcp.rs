@@ -1,7 +1,4 @@
 //! `ip dhcp` — the DHCP client's lifecycle and state.
-//!
-//! Nothing here is short-circuited locally: every verb issues its real syscall
-//! and renders whatever came back, errno included.
 
 use slopos_abi::net::{
     NET_IFINDEX_NONE, NET_IFOP_DHCP_RELEASE, NET_IFOP_DHCP_RENEW, NET_IFOP_DHCP_START,

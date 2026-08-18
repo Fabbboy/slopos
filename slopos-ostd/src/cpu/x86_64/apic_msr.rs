@@ -1,13 +1,4 @@
 /// IA32_APIC_BASE MSR value (MSR 0x1B).
-///
-/// Layout:
-/// - Bits 0-7: Reserved
-/// - Bit 8: BSP flag (1 = bootstrap processor)
-/// - Bit 9: Reserved
-/// - Bit 10: x2APIC enable
-/// - Bit 11: APIC global enable
-/// - Bits 12-51: APIC base physical address (4KB aligned)
-/// - Bits 52-63: Reserved
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct ApicBaseMsr(pub u64);

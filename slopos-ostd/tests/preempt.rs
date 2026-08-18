@@ -1,8 +1,4 @@
 //! Host-side integration tests for `slopos_ostd::cpu::preempt`.
-//!
-//! Exercises the [`PreemptBackend`] one-shot registration path, the
-//! count-tracking surface, and [`DisabledPreemptGuard`] +
-//! [`IrqEntryGuard`]'s interaction with the active backend.
 
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as StdOrd};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -52,10 +48,6 @@ fn nested_guards_track_count() {
     assert_eq!(preempt_count(), 0);
 }
 
-// ---------------------------------------------------------------------------
-// Recording backend that counts each entrypoint separately.
-// ---------------------------------------------------------------------------
-
 struct RecordingBackend {
     enter: AtomicUsize,
     leave: AtomicUsize,
@@ -102,8 +94,6 @@ static RECORDING: RecordingBackend = RecordingBackend::new();
 
 fn install_recording() {
     RECORDING.reset();
-    // `reset_for_test` cleared any prior installation; the swap inside
-    // `register_preempt_backend` asserts !was_installed.
     slopos_ostd::sync::run_bsp_init_for_test(|t| {
         register_preempt_backend(t, &RECORDING);
     });
@@ -118,7 +108,6 @@ fn registered_backend_redirects_disabled_guard() {
     assert_eq!(RECORDING.leave.load(StdOrd::Relaxed), 0);
     drop(_h);
     assert_eq!(RECORDING.leave.load(StdOrd::Relaxed), 1);
-    // DisabledPreemptGuard uses `leave`, NOT `leave_quiet`.
     assert_eq!(RECORDING.leave_quiet.load(StdOrd::Relaxed), 0);
 }
 
@@ -175,7 +164,6 @@ fn double_register_preempt_backend_panics() {
     let _g = serial();
     install_recording();
     let result = std::panic::catch_unwind(|| {
-        // Intentionally trigger the double-registration panic.
         slopos_ostd::sync::run_bsp_init_for_test(|t| {
             register_preempt_backend(t, &RECORDING);
         });
@@ -183,10 +171,6 @@ fn double_register_preempt_backend_panics() {
     assert!(result.is_err(), "second register should panic");
 }
 
-// Exercises a fresh `reset_for_test` cycle so the next test starts
-// clean — leaves no global state behind by relying on the `serial`
-// reset at the *start* of each test. The explicit name ensures the
-// helper is exercised in CI even if all real assertions are tail-only.
 #[test]
 fn reset_for_test_unregisters_backend() {
     let _g = serial();
@@ -195,10 +179,8 @@ fn reset_for_test_unregisters_backend() {
     assert_eq!(RECORDING.enter.load(StdOrd::Relaxed), 1);
     drop(h);
     preempt::reset_for_test();
-    // After reset, the no-op default backend takes over again.
     let h = DisabledPreemptGuard::new();
     assert_eq!(preempt_count(), 1);
-    // Recording backend should not have been called again.
     assert_eq!(RECORDING.enter.load(StdOrd::Relaxed), 1);
     drop(h);
 }

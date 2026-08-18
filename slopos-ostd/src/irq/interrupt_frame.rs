@@ -31,15 +31,12 @@ pub struct InterruptFrame {
 unsafe impl crate::mm::init::Zeroable for InterruptFrame {}
 
 impl InterruptFrame {
-    /// Borrow an [`InterruptFrame`] from a pointer published by the
-    /// IDT entry trampoline. Returns `None` for null; otherwise wraps
-    /// the raw deref so callers stay in safe Rust.
+    /// Borrow an [`InterruptFrame`] from a pointer published by the IDT entry
+    /// trampoline; `None` for null.
     ///
-    /// Anchored rather than caller-chosen: the frame is alive for the duration
-    /// of one handler invocation, so the honest lifetime is that of something
-    /// living in the handler's own frame — which is what `anchor` is. A
-    /// lifetime the caller names is one it could name twice, and for the
-    /// mutable sibling two `&mut` to one interrupt frame is aliasing UB.
+    /// The lifetime is anchored rather than caller-chosen because the frame is
+    /// alive for exactly one handler invocation: a lifetime the caller names is
+    /// one it could name twice, and two `&mut` to one frame is aliasing UB.
     #[inline]
     pub fn from_ptr<'a, A: ?Sized>(
         anchor: &'a A,

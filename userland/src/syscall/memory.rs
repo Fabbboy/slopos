@@ -33,10 +33,6 @@ pub fn sbrk(increment: isize) -> *mut c_void {
 
 use super::raw::syscall6;
 
-// ---------------------------------------------------------------------------
-// memfd + mmap wrappers (fd-based shared memory)
-// ---------------------------------------------------------------------------
-
 #[inline(always)]
 pub fn memfd_create(flags: u32) -> i32 {
     unsafe { syscall1(SYSCALL_MEMFD_CREATE, flags as u64) as i32 }

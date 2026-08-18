@@ -1,25 +1,8 @@
 //! Host-side tests for `slopos_ostd::sync::lock_graph`.
 //!
-//! Exercises the runtime dependency-graph + cycle-detection validator.
-//! The tests use synthetic lock addresses (not real `SpinLock<T>`
-//! instances) so we can drive `push_lock` / `pop_lock` directly
-//! without ticket-lock interaction.
-//!
-//! Coverage:
-//! - Class registration is keyed on the declaration site, so two instances
-//!   from one `lock_class!` share a class and two sites do not.
-//! - Ascending order across levels is accepted (no panic).
-//! - Same-level distinct classes are accepted as long as the order is
-//!   consistent (no cycle).
-//! - AB-BA cycle detection: acquiring A→B then B→A on different chains
-//!   triggers the cycle report.
-//! - Same-class nesting and same-instance recursion are distinguished, and
-//!   `LO_DUPOK` / `ACQ_RECURSIVE` suppress exactly one each.
-//! - Warn mode reports without panicking and withholds the offending edge.
-//! - Chain-hash cache hit: re-acquiring a previously-validated chain
-//!   prefix is fast-pathed (smoke-tested via held_lock_count + no panic).
-//! - Panic-bypass: `enter_fatal_bypass()` suppresses ordering checks
-//!   while keeping the held-stack walk active.
+//! The tests use synthetic lock addresses (not real `SpinLock<T>` instances) so
+//! `push_lock` / `pop_lock` can be driven directly without ticket-lock
+//! interaction.
 
 use std::panic;
 use std::sync::Mutex;
@@ -35,17 +18,14 @@ use slopos_ostd::sync::lock_graph::{
     set_in_report_for_test, set_lockdep_mode, violation_reports,
 };
 
-/// Serialise every test that touches the global graph state.
-/// `cargo test` parallelises `#[test]` items by default; the class
-/// table / edge pool / chain cache are process-global so concurrent
-/// tests would interleave registrations.
+/// Serialise every test that touches the global graph state: the class table,
+/// edge pool and chain cache are process-global, and `cargo test` parallelises
+/// `#[test]` items by default.
 static LOCK_LOCK: Mutex<()> = Mutex::new(());
 
-/// Take the gate, taking over a poisoning left by an earlier failure. Several
-/// tests here assert by panicking inside `catch_unwind`, and every test opens
-/// with `reset_for_test`, so an inherited poison says nothing about the state
-/// this test will see — while propagating it would bury the one real failure
-/// under an unrelated `PoisonError` from every test that follows.
+/// Take the gate, taking over a poisoning left by an earlier failure. Every
+/// test opens with `reset_for_test`, so an inherited poison says nothing about
+/// the state this test will see.
 fn serial_gate() -> std::sync::MutexGuard<'static, ()> {
     LOCK_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -105,7 +85,6 @@ fn same_level_distinct_classes_accepted() {
         assert_eq!(held_lock_count(), 2);
         pop_lock(b);
         pop_lock(a);
-        // Same order again: chain-hash hit, still accepted.
         push(a, ka);
         push(b, kb);
         pop_lock(b);
@@ -114,9 +93,8 @@ fn same_level_distinct_classes_accepted() {
     assert_eq!(held_lock_count(), 0);
 }
 
-/// The regression test for declaration-site keying: two lock *instances*
-/// built from one `lock_class!` expansion are one class, which is what
-/// stops an array of N locks costing N class slots.
+/// Declaration-site keying: two instances from one `lock_class!` expansion are
+/// one class, so an array of N locks does not cost N class slots.
 #[test]
 fn one_site_two_instances_share_a_class() {
     let _g = serial_gate();
@@ -182,13 +160,12 @@ fn ab_then_ba_detects_cycle() {
     });
     assert!(result.is_err(), "B->A after A->B must be reported");
 
-    // `push_lock` may have pushed before panicking; drain so the next test
-    // starts from an empty stack.
+    // `push_lock` may have pushed before panicking; drain for the next test.
     unsafe { poison_unlock_all_held() };
 }
 
-/// Same class, different instances: an array of like locks nested. Reported
-/// by default because nothing says the site orders its instances.
+/// Nesting two instances of one class is reported by default: nothing says the
+/// site orders its instances.
 #[test]
 fn same_class_different_instance_reports() {
     let _g = serial_gate();
@@ -262,7 +239,7 @@ fn acq_recursive_permits_same_instance() {
 }
 
 /// A non-recursive acquisition nested inside a recursive one is still a
-/// deadlock (a writer behind a reader), so only a recursive *pair* is waved
+/// deadlock (a writer behind a reader): only a recursive *pair* is waved
 /// through.
 #[test]
 fn non_recursive_inside_recursive_still_reports() {
@@ -301,7 +278,6 @@ fn subclass_yields_distinct_classes() {
     }
     assert_eq!(class_count(), before + 2, "subclass 1 is its own class");
 
-    // The reverse order closes a cycle between the two subclasses.
     let result = panic::catch_unwind(|| unsafe {
         push_lock_ex(b, noop_poison, key, 1, ACQ_NONE);
         push_lock_ex(a, noop_poison, key, 0, ACQ_NONE);
@@ -310,9 +286,9 @@ fn subclass_yields_distinct_classes() {
     unsafe { poison_unlock_all_held() };
 }
 
-/// Warn mode reports and keeps going — and must not learn the offending
-/// edge or cache the chain, or the graph goes cyclic and every later
-/// finding is derived noise.
+/// Warn mode reports and keeps going, and must not learn the offending edge or
+/// cache the chain: the graph would go cyclic and every later finding would be
+/// derived noise.
 #[test]
 fn warn_mode_withholds_the_edge() {
     let _g = serial_gate();
@@ -343,8 +319,6 @@ fn warn_mode_withholds_the_edge() {
         "warn mode must still count the finding"
     );
 
-    // Nothing was learned from the violating acquisition, so the same
-    // inversion is still a violation under the panicking policy.
     set_lockdep_mode(LockdepMode::Panic);
     let result = panic::catch_unwind(|| unsafe {
         push(b, kb);
@@ -406,7 +380,6 @@ fn rodata_duplicate_key_is_not_a_collision() {
     let _g = serial_gate();
     setup();
 
-    // Same name and same site string, two distinct `&'static` allocations.
     static K1: LockClassKey =
         LockClassKey::__from_site("dup", "dup.rs:1:1", LOCK_LEVEL_RESOURCE, 0);
     static K2: LockClassKey =
@@ -427,8 +400,6 @@ fn distinct_sites_sharing_an_id_are_reported() {
 
     static K1: LockClassKey =
         LockClassKey::__from_site("collide.a", "a.rs:1:1", LOCK_LEVEL_RESOURCE, 0);
-    // Same name and site as K1 so the ids match, then registered under a
-    // key whose strings differ — the shape a real collision presents as.
     static K2: LockClassKey =
         LockClassKey::__from_site("collide.a", "a.rs:1:1", LOCK_LEVEL_RESOURCE, 0);
     static K3: LockClassKey =
@@ -487,7 +458,6 @@ fn panic_bypass_suppresses_ordering_check() {
 
     enter_fatal_bypass();
 
-    // The inverse order would report without the bypass.
     unsafe {
         push(b, kb);
         push(a, ka);
@@ -520,9 +490,9 @@ fn off_mode_still_tracks_for_poison_walk() {
     set_lockdep_mode(LockdepMode::Panic);
 }
 
-/// The poison walk is a stack drain, not a policy decision. A recovered
-/// oops runs it and the kernel resumes, so latching the fatal bypass there
-/// would switch ordering validation off for the rest of the boot.
+/// The poison walk is a stack drain, not a policy decision: a recovered oops
+/// runs it and the kernel resumes, so latching the fatal bypass there would
+/// switch ordering validation off for the rest of the boot.
 #[test]
 fn poison_walk_does_not_disable_ordering_checks() {
     let _g = serial_gate();
@@ -543,8 +513,6 @@ fn poison_walk_does_not_disable_ordering_checks() {
         "a recovered oops must not latch the fatal bypass"
     );
 
-    // Validation must still be live afterwards: learn A->B, then B->A must
-    // still be reported.
     unsafe {
         push(a, ka);
         push(b, kb);
@@ -562,9 +530,9 @@ fn poison_walk_does_not_disable_ordering_checks() {
     unsafe { poison_unlock_all_held() };
 }
 
-/// A recovery boundary nested inside another releases only what it
-/// acquired. Draining past the outer frame's locks would leave live guards
-/// whose `Drop` releases a second time.
+/// A recovery boundary nested inside another releases only what it acquired:
+/// draining past the outer frame's locks would leave live guards whose `Drop`
+/// releases a second time.
 #[test]
 fn nested_recovery_keeps_outer_locks_held() {
     let _g = serial_gate();
@@ -581,7 +549,6 @@ fn nested_recovery_keeps_outer_locks_held() {
         push(inner, ki);
         assert_eq!(held_lock_count(), 2);
 
-        // The inner recovery boundary unwinds.
         poison_unlock_held_above(mark);
         assert_eq!(
             held_lock_count(),
@@ -613,15 +580,13 @@ fn held_stack_walk_after_chain_acquisition() {
     assert_eq!(held_lock_count(), 0);
 }
 
-/// The entry write and the depth publish are separate stores. An interrupt
-/// between them lets a handler's own acquire claim the slot the interrupted
-/// push had filled but not yet counted, and the empty entry left inside
-/// `depth` has a null address that no `pop_lock` can find — the count never
-/// returns to zero again on that CPU.
+/// The entry write and the depth publish are separate stores: an interrupt
+/// between them lets the handler's own acquire claim the slot the interrupted
+/// push had filled but not yet counted, leaving an entry inside `depth` with a
+/// null address that no `pop_lock` can find.
 ///
-/// Acquiring here with interrupts enabled is what a `PreemptMutex` or an
-/// `Epoch::enter` does, so this drives the update the way those do and asks
-/// what the update itself saw.
+/// Interrupts are enabled here because that is how a `PreemptMutex` or an
+/// `Epoch::enter` acquires.
 #[test]
 fn held_stack_update_masks_interrupts() {
     let _g = serial_gate();
@@ -659,10 +624,9 @@ fn held_stack_update_masks_interrupts() {
 }
 
 /// A lock taken while this CPU is inside a report — the klog ring every
-/// `report_*` acquires from the middle of printing — must still be recorded.
-/// Suppressing the record instead of the check strands the depth: the latch is
-/// raised at the report and a panicking report leaves it raised, so the
-/// matching release does not read the same latch state the acquire did.
+/// `report_*` acquires — must still be recorded. Suppressing the record
+/// instead of the check strands the depth: a panicking report leaves the latch
+/// raised, so the release does not read the state the acquire did.
 #[test]
 fn report_reentrancy_records_without_checking() {
     let _g = serial_gate();
@@ -683,8 +647,8 @@ fn report_reentrancy_records_without_checking() {
             "an acquire inside a report must still be recorded"
         );
 
-        // The latch is cleared before the release, exactly as a panicking
-        // report leaves it for `poison_unlock_held_above` to clear.
+        // Cleared before the release, as a panicking report leaves it for
+        // `poison_unlock_held_above`.
         set_in_report_for_test(false);
         pop_lock(nested);
         assert_eq!(

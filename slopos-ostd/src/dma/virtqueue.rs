@@ -1,16 +1,9 @@
 //! Typed virtqueue-region wrapper.
 //!
-//! Wraps a [`Frame<KernelMeta>`] with a strongly-typed descriptor
-//! array at offset 0 and a bounds-checked payload byte region
-//! immediately after. The descriptor type `T` is provided by the
-//! consumer (e.g. virtio-net's `VirtqDesc`); the wrapper itself is
-//! layout-agnostic beyond requiring `T: Pod`.
-//!
-//! No new `unsafe` is added in this module: every access funnels
-//! through [`Frame::read_at`], [`Frame::write_at`],
-//! [`Frame::read_volatile_at`], [`Frame::write_volatile_at`],
-//! [`Frame::slice_at`], or [`Frame::slice_at_mut`], all of which
-//! bounds-check internally.
+//! Wraps a [`Frame<KernelMeta>`] with a consumer-supplied descriptor array
+//! at offset 0 and a payload byte region immediately after. Adds no
+//! `unsafe`: every access funnels through `Frame`'s bounds-checked
+//! accessors.
 
 use core::marker::PhantomData;
 
@@ -27,19 +20,13 @@ pub struct VirtqueueRegion<T: Pod> {
 }
 
 impl<T: Pod> VirtqueueRegion<T> {
-    /// Build a region from a freshly-allocated frame and a
-    /// descriptor count. Returns `None` if the descriptor array
-    /// would not fit in the frame.
-    ///
-    /// `desc_count == 0` is permitted — the region degenerates to
-    /// a payload-only carry, which the caller may use for raw DMA
-    /// transfer pages that share the same allocation discipline.
+    /// `None` if the descriptor array would not fit in the frame.
+    /// `desc_count == 0` is permitted: the region degenerates to a
+    /// payload-only carry for raw DMA transfer pages.
     pub fn new(frame: Frame<KernelMeta>, desc_count: usize) -> Option<Self> {
         let elem_size = core::mem::size_of::<T>();
         let needed = desc_count.checked_mul(elem_size)?;
-        // Bounds-check against the frame's HHDM mapping by attempting
-        // a zero-byte slice at `needed`; `slice_at(needed, 0)` returns
-        // `None` if `needed` itself is past PAGE_SIZE.
+        // Bounds-check the descriptor array by touching its last byte.
         if needed > 0 {
             frame.slice_at(needed - 1, 1)?;
         }
@@ -51,29 +38,22 @@ impl<T: Pod> VirtqueueRegion<T> {
         })
     }
 
-    /// Number of descriptors the region was sized for.
     #[inline]
     pub fn desc_count(&self) -> usize {
         self.desc_count
     }
 
-    /// Byte offset at which the payload area begins (i.e.
-    /// `desc_count * size_of::<T>()`).
+    /// Byte offset of the payload area: `desc_count * size_of::<T>()`.
     #[inline]
     pub fn payload_offset(&self) -> usize {
         self.payload_offset
     }
 
-    /// Borrow the underlying frame. Useful for callers that need
-    /// the physical address (`frame().phys_u64()`) to publish into
-    /// device registers.
     #[inline]
     pub fn frame(&self) -> &Frame<KernelMeta> {
         &self.frame
     }
 
-    /// Frame's physical address as a `u64`, convenience for the
-    /// common DMA-publish path.
     #[inline]
     pub fn phys_u64(&self) -> u64 {
         self.frame.phys_u64()
@@ -88,8 +68,8 @@ impl<T: Pod> VirtqueueRegion<T> {
         self.frame.read_at::<T>(off)
     }
 
-    /// Volatile load — for descriptors the hardware may concurrently
-    /// mutate (e.g. virtio used-ring entries).
+    /// Volatile load, for descriptors the hardware may concurrently mutate
+    /// (e.g. virtio used-ring entries).
     pub fn read_desc_volatile(&self, idx: usize) -> Option<T> {
         if idx >= self.desc_count {
             return None;
@@ -98,8 +78,7 @@ impl<T: Pod> VirtqueueRegion<T> {
         self.frame.read_volatile_at::<T>(off)
     }
 
-    /// Copy `value` into the descriptor at `idx`. Returns `false`
-    /// if `idx` is out of range.
+    /// Copy `value` into descriptor `idx`; `false` if out of range.
     pub fn write_desc(&mut self, idx: usize, value: &T) -> bool {
         if idx >= self.desc_count {
             return false;
