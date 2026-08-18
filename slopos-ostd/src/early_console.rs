@@ -50,8 +50,7 @@ mod imp {
     use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
     pub(super) const MOCK_CAP: usize = 4096;
-    pub(super) static MOCK_BUFFER: [AtomicU8; MOCK_CAP] =
-        { [const { AtomicU8::new(0) }; MOCK_CAP] };
+    pub(super) static MOCK_BUFFER: [AtomicU8; MOCK_CAP] = [const { AtomicU8::new(0) }; MOCK_CAP];
     pub(super) static MOCK_LEN: AtomicUsize = AtomicUsize::new(0);
 
     pub fn write_byte(b: u8) {
