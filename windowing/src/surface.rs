@@ -2,10 +2,6 @@
 //!
 //! `Surface` handles the windowing lifecycle: display info query, pixel format
 //! negotiation, compositor surface/toplevel creation, and protocol teardown.
-//!
-//! Rendering (pixel buffers, frame presentation) is handled separately by
-//! [`SoftSurface`](crate::soft_surface::SoftSurface) or any other type that
-//! implements [`RenderSurface`](slopos_gfx::RenderSurface).
 
 use slopos_abi::handle::{
     DisplayHandle, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WindowHandle,
@@ -23,12 +19,7 @@ pub enum SurfaceError {
     AttachFailed,
 }
 
-/// A compositor-managed windowing surface.
-///
-/// Handles the protocol lifecycle (create/destroy surface and toplevel
-/// objects) and stores display metadata.  Does **not** own a pixel buffer —
-/// rendering is handled by a separate [`SoftSurface`](crate::soft_surface::SoftSurface)
-/// or another [`RenderSurface`](slopos_gfx::RenderSurface) implementation.
+/// Owns the compositor surface and toplevel objects, not a pixel buffer.
 pub struct Surface {
     handle: ProtocolHandle,
     width: u32,
@@ -40,12 +31,8 @@ pub struct Surface {
 }
 
 impl Surface {
-    /// Create a new compositor surface and toplevel.
-    ///
-    /// Queries the display for pixel format information and registers a
-    /// surface + toplevel via the compositor protocol.  Does **not** allocate
-    /// a pixel buffer — call [`SoftSurface::new()`](crate::soft_surface::SoftSurface::new)
-    /// afterwards to set up rendering.
+    /// Creates the compositor objects only; call
+    /// [`SoftSurface::new()`](crate::soft_surface::SoftSurface::new) to set up rendering.
     pub fn new(handle: ProtocolHandle, width: u32, height: u32) -> Result<Self, SurfaceError> {
         if width == 0 || height == 0 {
             return Err(SurfaceError::BadSize);

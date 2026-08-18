@@ -333,58 +333,41 @@ pub open spec fn step(s: Ledger, t: Step) -> Ledger {
     }
 }
 
-/// Every step preserves the invariant — so L1 and the hierarchy hold in every
-/// reachable state, under every interleaving of the modelled operations.
+/// Every step preserves the invariant, so L1 and the hierarchy hold in every
+/// reachable state.
 pub proof fn step_preserves(s: Ledger, t: Step)
     requires
         ledger_inv(s),
-        // The row cannot hold less than the single outstanding charge; this is
-        // the frame condition the tree gets from `used` being the sum.
+        // Frame condition the tree gets from `used` being the sum: a row
+        // cannot hold less than the charge outstanding against it.
         s.charge_held ==> s.charge_amount <= s.used_leaf,
     ensures
         ledger_inv(step(s, t)),
 {
 }
 
-// ===========================================================================
-// (L4) A denied charge is the identity on every row.
-//
-// The obligation the two-phase Reservation/Charge split exists to deliver, and
-// the one upstream hand-writes a cancel loop for — shipping a warning and a
-// repair store for when it goes wrong.
-// ===========================================================================
-
-/// A refusal at the FIRST level above the leaf leaves every row untouched.
+/// (L4) A refusal at the first level above the leaf leaves every row
+/// untouched — the obligation the two-phase `Reservation`/`Charge` split
+/// exists to deliver.
 pub proof fn l4_denied_at_level1_is_identity(s: Ledger, n: nat)
     ensures
         step(s, Step::TryChargeDeniedAtLevel1 { n }) == s,
 {
 }
 
-/// A refusal at the SECOND level — after the leaf AND the mid have both been
-/// debited — also leaves every row untouched.
-///
-/// This is the partial batch: the walk succeeded for k levels and failed at
-/// k+1, so the unwind has to give back exactly the levels it took and no
-/// others. A cancel loop that unwound one level, or all three, would fail
-/// here.
+/// (L4) The partial batch: the walk succeeded for k levels and failed at k+1,
+/// so the unwind has to give back exactly the levels it took and no others. A
+/// cancel loop that unwound one level, or all three, would fail here.
 pub proof fn l4_denied_at_level2_is_identity(s: Ledger, n: nat)
     ensures
         step(s, Step::TryChargeDeniedAtLevel2 { n }) == s,
 {
 }
 
-// ===========================================================================
-// (L2) No successful charge leaves a row over its ceiling.
-//
-// Stated as a step property. The global form is false as soon as LowerLimit
-// exists, and pretending otherwise would be claiming a guarantee the ceiling
-// does not make.
-// ===========================================================================
-
+/// (L2) No successful charge leaves a row over its ceiling.
 pub proof fn l2_granted_charge_respects_every_ceiling(s: Ledger, n: nat)
     requires
-        // The step was actually taken (the guard held).
+        // The step was actually taken, i.e. the guard held.
         step(s, Step::TryChargeOk { n }) != s,
     ensures
         step(s, Step::TryChargeOk { n }).used_leaf <= s.limit_leaf,
@@ -393,9 +376,8 @@ pub proof fn l2_granted_charge_respects_every_ceiling(s: Ledger, n: nat)
 {
 }
 
-/// And the honest converse: after `LowerLimit`, a row CAN sit above its
-/// ceiling. Stated as a proof rather than left implicit, so nobody later reads
-/// L2 as the global claim it deliberately is not.
+/// The converse: after `LowerLimit` a row CAN sit above its ceiling, stated as
+/// a proof so nobody reads L2 as the global claim it deliberately is not.
 pub proof fn l2_is_not_global_because_a_limit_can_be_lowered()
     ensures
         exists|s: Ledger, to: nat|
@@ -430,15 +412,9 @@ pub proof fn l2_is_not_global_because_a_limit_can_be_lowered()
     ).limit_leaf);
 }
 
-// ===========================================================================
-// (L5) A stale refund is the identity.
-// ===========================================================================
-
-/// A refund arriving after its account's slot was released touches nothing —
-/// not the row, and not whichever principal holds that slot now.
-///
-/// This is what makes a leaked charge self-healing, and what lets a charge
-/// outlive its process at all.
+/// (L5) A refund arriving after its account's slot was released touches
+/// nothing — not the row, and not whichever principal holds that slot now.
+/// This is what lets a charge outlive its process at all.
 pub proof fn l5_stale_refund_is_identity(s: Ledger)
     ensures
         step(s, Step::RefundStale) == s,

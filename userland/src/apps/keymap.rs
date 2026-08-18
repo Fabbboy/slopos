@@ -8,7 +8,7 @@
 //!
 //! A program rather than a shell builtin because installing a layout needs
 //! `TASK_FLAG_CONSOLE_ADMIN`, which the kernel confers on this path and on no
-//! caller. The compositor reaches `/bin/ip` the same way for `NET_ADMIN`.
+//! caller.
 //!
 //! The file → parse → serialise → upload pipeline lives in [`crate::keymap`],
 //! shared with the boot-time applier in init; the kernel never parses layout
@@ -77,8 +77,7 @@ fn set_layout(name: &str) -> i32 {
         return 1;
     }
 
-    // Best-effort persistence (ignored if the root filesystem is read-only);
-    // init re-applies it on the next boot.
+    // Best-effort: fails on a read-only root; init re-applies it on next boot.
     let _ = fs::write(PERSIST_PATH, name.as_bytes());
 
     println!("keymap: switched to {name}");

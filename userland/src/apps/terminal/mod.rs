@@ -127,9 +127,8 @@ enum ExitReason {
     Error,
 }
 
-/// Current font cell metrics `(width, height)` in pixels, each at least 1.
-/// The terminal core is font-agnostic, so the app reads its glyph-atlas
-/// metrics here and passes them into the pure selection geometry.
+/// Font cell `(width, height)` in pixels, each at least 1. The terminal core is
+/// font-agnostic, so the app feeds these into the pure selection geometry.
 fn cell_metrics() -> (i32, i32) {
     (
         crate::gfx::font::cell_width().max(1),
@@ -148,18 +147,14 @@ fn push_winsize(master_fd: i32, rows: u16, cols: u16) {
     let _ = fs::tiocswinsz(master_fd, &ws);
 }
 
-/// Borrow the compositor socket fd from the protocol handle (stable for the
-/// process lifetime).
+/// The compositor socket fd is stable for the process lifetime.
 fn with_client_fd(handle: &slopos_windowing::ProtocolHandle) -> i32 {
     handle.borrow_client().fd()
 }
 
-/// Spawn `/bin/shell` with the PTY slave cloned onto its stdin/stdout/stderr.
-///
-/// The child starts with an empty fd table, so the three `CloneFd` actions
-/// install exactly the slave — the terminal's own descriptors are never
-/// inherited. The shell performs its own `setsid()` + `TIOCSCTTY`, so we
-/// deliberately omit `TASK_FLAG_NEW_PGRP`.
+/// The child starts with an empty fd table, so the `CloneFd` actions install
+/// exactly the slave and no cloexec juggling is needed. `TASK_FLAG_NEW_PGRP` is
+/// deliberately omitted: the shell runs its own `setsid()` + `TIOCSCTTY`.
 fn spawn_shell_on_slave(slave_fd: i32) {
     let actions = [
         process::clone_fd(slave_fd, 0),
@@ -179,8 +174,8 @@ fn spawn_shell_on_slave(slave_fd: i32) {
     }
 }
 
-/// The `block_on` root: select over compositor readiness, master readiness,
-/// and a cursor-blink timer; on each wake drain both fds, render if dirty.
+/// The `block_on` root: selects over compositor readiness, master readiness and
+/// the cursor-blink timer.
 async fn event_loop(
     master_fd: i32,
     compositor_fd: i32,
@@ -194,18 +189,14 @@ async fn event_loop(
     let mut mods: u8 = 0;
     let mut cursor_on = true;
     let mut last_blink = Instant::now();
-    // Every buffer the surface cycles, so an `age` the surface reports can
-    // always be resolved against a recorded frame rather than forcing a full
-    // repaint on every other frame.
     let mut history = DamageHistory::new(SURFACE_BUFFERS);
-    // Damage the grid has reported but that has not yet been presented. Only a
-    // present clears it, so a frame skipped for any reason carries forward
-    // rather than being lost.
+    // Reported but not yet presented. Only a present clears it, so a skipped
+    // frame carries its damage forward rather than losing it.
     let mut pending = CellDamage::new();
     pending.set_rows(grid.rows as usize);
     let mut pending_writes = MasterWriteQueue::new();
     // Destination memfd handed to the compositor between a PasteReady and its
-    // PasteResult (the receiver-provides-the-buffer paste handshake).
+    // PasteResult: the receiver provides the buffer.
     let mut pending_paste: Option<ShmBuffer> = None;
 
     // The first frame has no buffer contents to build on.
@@ -213,7 +204,6 @@ async fn event_loop(
     render_full(grid, &selection, cursor_on, &mut history, &mut pending);
 
     loop {
-        // --- Drain all pending compositor events synchronously. ---
         // Set by app-owned state the grid cannot report damage for.
         let mut repaint_all = false;
         loop {
