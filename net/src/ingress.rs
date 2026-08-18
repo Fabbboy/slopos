@@ -1,8 +1,5 @@
-//! Ingress pipeline — single entry point for all received network packets.
-//!
-//! Every packet received from any network device passes through [`net_rx`],
-//! which parses the Ethernet header, filters by destination MAC, and dispatches
-//! to the appropriate protocol handler (ARP, IPv4).
+//! Ingress pipeline — every packet received from any network device passes
+//! through [`net_rx`].
 
 use slopos_ostd::klog_debug;
 
@@ -11,10 +8,8 @@ use super::packetbuf::PacketBuf;
 use super::types::{EtherType, MacAddr};
 use super::{ETH_HEADER_LEN, arp, ipv4};
 
-/// Process a received packet through the ingress pipeline.
-///
 /// Called from the NAPI poll loop after [`DeviceHandle::poll_rx`] returns a
-/// batch of packets.  Unknown EtherTypes are silently dropped.
+/// batch of packets.
 pub fn net_rx(handle: &DeviceHandle, mut pkt: PacketBuf) {
     let frame = pkt.payload();
     if frame.len() < ETH_HEADER_LEN {

@@ -1,8 +1,4 @@
 //! Generic kernel service registration cell.
-//!
-//! Thin wrapper over `slopos_ostd::sync::OnceLock<&'static T>` that
-//! preserves the historical `ServiceCell` API (`register` / `get` /
-//! `try_get` / `is_initialized`) used by ~10 kernel service tables.
 
 use slopos_ostd::sync::OnceLock;
 
@@ -13,7 +9,7 @@ pub struct ServiceCell<T: 'static> {
 }
 
 impl<T: 'static> ServiceCell<T> {
-    /// Create an uninitialized cell. `name` appears in panic messages.
+    /// `name` appears in panic messages.
     #[inline]
     pub const fn new(name: &'static str) -> Self {
         Self {
@@ -22,7 +18,7 @@ impl<T: 'static> ServiceCell<T> {
         }
     }
 
-    /// Register the service table. Panics if already registered.
+    /// Panics if already registered.
     #[inline]
     pub fn register(&self, services: &'static T) {
         let mut placed = false;
@@ -38,7 +34,7 @@ impl<T: 'static> ServiceCell<T> {
         self.inner.is_completed()
     }
 
-    /// Get the service table. Panics if not initialized.
+    /// Panics if not initialized.
     #[inline]
     pub fn get(&self) -> &'static T {
         match self.inner.get() {
@@ -47,7 +43,6 @@ impl<T: 'static> ServiceCell<T> {
         }
     }
 
-    /// Try to get the service table, returns `None` if not registered.
     #[inline]
     pub fn try_get(&self) -> Option<&'static T> {
         self.inner.get().copied()

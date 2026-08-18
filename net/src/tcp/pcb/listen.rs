@@ -1,22 +1,10 @@
 //! `Listen` state: waiting for incoming SYNs.
 //!
-//! # Behavior
-//!
-//! 1. **RST in** — drop the matching half-open entry, if any, and say nothing.
-//!    A RST aimed at a LISTEN socket can never be a legitimate "reset this
-//!    connection", so answering one would be a stateless-reset amplifier.
-//! 2. **SYN in** — admit it to the [`SynQueue`] and emit the SYN+ACK the queue
-//!    builds. A full queue drops the SYN silently. **No** connection-table
-//!    slot is spent here: half-open state is the listener's, and bounded.
-//! 3. **ACK in** — offer it to the SYN queue as the final ACK of a handshake.
-//!    On a match the handler fills [`Actions::accepted`] and the glue layer in
-//!    `tcp::input` installs the child PCB. On no match, RST: RFC 793 §3.4, an
-//!    ACK arriving at a LISTEN socket proves the sender has stale state.
-//! 4. **Anything else** — dropped silently.
-//!
-//! The handler stays sans-IO — it never touches the connection table itself,
-//! because doing so would need a second mutable borrow while the listener's
-//! own slot lock is held.
+//! A RST is never answered: answering one aimed at a LISTEN socket would make
+//! this a stateless-reset amplifier. A SYN spends a [`SynQueue`] slot, never a
+//! connection-table slot, so half-open state stays the listener's and bounded.
+//! The handler is sans-IO — touching the connection table would need a second
+//! mutable borrow while the listener's own slot lock is held.
 
 use super::super::actions::{Actions, SocketNotify};
 use super::super::header::{DEFAULT_MSS, TcpHeader, parse_tcp_options};
@@ -26,8 +14,8 @@ use super::super::tuple::TcpTuple;
 use super::{Pcb, PcbState};
 use crate::types::{Ipv4Addr, Port, SockAddr};
 
-/// State-specific payload for the Listen variant: the half-open connections
-/// this listener is holding. The accept queue is the socket layer's.
+/// The half-open connections this listener holds; the accept queue is the
+/// socket layer's.
 #[derive(Debug, Default)]
 pub struct ListenState {
     syn: SynQueue,
@@ -40,7 +28,6 @@ impl ListenState {
         }
     }
 
-    /// A listener carrying a SYN queue whose capacity is already reserved.
     pub const fn with_syn_queue(syn: SynQueue) -> Self {
         Self { syn }
     }
@@ -53,8 +40,6 @@ impl ListenState {
         &mut self.syn
     }
 
-    /// Apply an incoming segment to a Listen PCB.
-    ///
     /// `incoming` is the segment's real four-tuple. The listener's own tuple
     /// carries a wildcard remote, so the peer's address has to arrive from the
     /// IPv4 layer rather than be read off the PCB.
@@ -72,14 +57,11 @@ impl ListenState {
             return actions;
         };
 
-        // Step 1: a RST retires the half-open entry it names, and is never
-        // answered.
         if hdr.is_rst() {
             listen.syn.remove(remote);
             return actions;
         }
 
-        // Step 2: a SYN takes a SYN-queue slot, not a connection-table slot.
         if hdr.is_syn() {
             let parsed = parse_tcp_options(options);
             let peer_mss = parsed.mss.unwrap_or(DEFAULT_MSS);
@@ -97,8 +79,7 @@ impl ListenState {
             return actions;
         }
 
-        // Step 3: an ACK either completes a handshake this listener started or
-        // names nothing, which RFC 793 §3.4 answers with a RST.
+        // An ACK matching no half-open handshake: RFC 793 §3.4 answers with RST.
         if hdr.is_ack() {
             if let Some(accepted) = listen.syn.on_ack(remote, hdr.ack_num) {
                 actions.accepted = Some(accepted);

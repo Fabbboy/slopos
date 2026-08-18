@@ -374,13 +374,7 @@ pub fn remove_device_routes(dev: DevIndex) -> usize {
     total
 }
 
-// =============================================================================
-// Helper: prefix length → mask
-// =============================================================================
-
 /// Convert a prefix length (0–32) to a u32 network mask in host byte order.
-///
-/// E.g. `prefix_len_to_mask(24)` → `0xFFFFFF00`.
 #[inline]
 fn prefix_len_to_mask(prefix_len: u8) -> u32 {
     if prefix_len == 0 {

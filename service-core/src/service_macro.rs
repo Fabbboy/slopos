@@ -1,19 +1,8 @@
 //! Declarative macro for defining kernel service interfaces.
 //!
-//! This module provides the [`define_service!`] macro which eliminates boilerplate
-//! when creating kernel service tables. Each service is a struct of function pointers
-//! registered at runtime, enabling late-binding between kernel subsystems.
-//!
-//! # Architecture
-//!
-//! Services follow a provider/consumer pattern:
-//! - **Provider**: Implements the actual functionality and registers a static
-//!   service table at initialization time
-//! - **Consumer**: Calls the service functions through generated wrappers that
-//!   dispatch to the registered implementation
-//!
-//! This pattern allows the `core` crate to define service interfaces without
-//! depending on implementation crates like `drivers` or `video`.
+//! A service is a `#[repr(C)]` struct of function pointers registered once at
+//! init, so `core` can declare an interface without depending on the crate that
+//! implements it.
 //!
 //! # Example
 //!
@@ -35,12 +24,9 @@
 //! }
 //! ```
 //!
-//! The macro generates:
-//! - `pub struct MyServices { ... }` - service table struct
-//! - `pub fn register_my_services(...)` - registration function
-//! - `pub fn is_my_initialized() -> bool` - initialization check
-//! - `pub fn my_services() -> &'static MyServices` - accessor
-//! - wrapper functions for each method (unless `@no_wrapper`)
+//! For `my => MyServices` the macro generates `register_my_services`,
+//! `is_my_initialized`, `my_services`, and a wrapper per method unless
+//! `@no_wrapper`.
 
 #[macro_export]
 macro_rules! define_service {

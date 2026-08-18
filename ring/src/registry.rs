@@ -1,17 +1,10 @@
 //! Global ring registry (SLOPRING § 9, § 13.5).
 //!
-//! Rings live in a single generation-counter [`HandleTable`] (AD-11). A
-//! ring fd stores the ring's [`Handle`] packed
-//! losslessly into the open-file `handle: usize`; resolution validates
-//! the generation, so a closed-then-reused fd, a foreign `FileKind`, or
-//! a stale handle all resolve to a typed error — never UB.
-//!
-//! Each ring also carries its `owner`. [`owner_is`] is the primary
-//! containment for a ring reached from the wrong process: `ring_enter`
-//! and all four register ops reject a handle whose owner is not the
-//! caller. It holds for every route to the handle — including an
-//! intra-process `dup`, which is a legitimate alias of a ring the caller
-//! does own, and a handle a process guessed rather than opened.
+//! Rings live in a single generation-counter [`HandleTable`] (AD-11), the
+//! [`Handle`] packed losslessly into the open-file `handle: usize`; resolution
+//! validates the generation, so a closed-then-reused fd, a foreign `FileKind`,
+//! or a stale handle all resolve to a typed error — never UB. Every route to a
+//! ring is additionally gated on its `owner` (see [`owner_is`]).
 
 use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
@@ -22,42 +15,30 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, Mutex, SpinLock};
 
 use crate::ring_obj::Ring;
 
-/// Maximum concurrent rings system-wide. Bounded so the registry's
-/// fixed-capacity table never reallocates (lock-free-scan-safe shape,
-/// though we always hold the lock here).
+/// Maximum concurrent rings system-wide; bounds the registry's fixed-capacity
+/// table so it never reallocates.
 const MAX_RINGS: usize = 256;
 
-/// Slot-index bit width in the packed fd handle. 12 bits → up to 4096
-/// rings (we cap at `MAX_RINGS`); the remaining 52 bits hold the
-/// generation, which increments by one per slot reuse and so never
-/// wraps in any realistic uptime.
+/// Slot-index bit width in the packed fd handle: 12 bits of slot index, the
+/// remaining 52 the generation, which increments once per slot reuse and so
+/// never wraps in any realistic uptime.
 const SLOT_BITS: u32 = 12;
 
 /// One registry slot: a reference-counted, individually-locked ring
-/// (SLOPRING § 6.3, § 9). The per-ring lock is the per-ring serialization
-/// lock; the [`KArc`] keeps the ring alive for a `with_ring` caller even
-/// if a concurrent `close` removes it from the table (no UAF).
+/// (SLOPRING § 6.3, § 9). The [`KArc`] keeps the ring alive for a `with_ring`
+/// caller even if a concurrent `close` removes it from the table.
 ///
-/// It is a **sleeping [`Mutex`]**, not a `SpinLock`, because the submit
-/// and harvest closures run opcode probes inline under it (`ring_enter`'s
-/// `submit` / `harvest_step`), and a probe for a filesystem opcode
-/// (`OP_OPENAT`, `OP_READ`/`OP_WRITE` on a regular fd, …) descends into
-/// the VFS, whose ext2 + block-device I/O completion waits are now
-/// scheduler-backed — the holder legitimately deschedules mid-probe. A
-/// spinning, preemption-disabling lock here would make that a
-/// scheduling-while-atomic violation (the held lock travels with the
-/// blocked task while every contender spins unpreemptibly with IRQs
-/// masked on the BSP — exactly the freeze the block-I/O rework set out to
-/// kill). The lock is only ever taken in task context (`with_ring` /
-/// `owner_is` from the `ring_enter` / `ring_register` syscall paths),
-/// never from an interrupt handler, so sleeping on it is always legal.
+/// A **sleeping [`Mutex`]**, not a `SpinLock`: the submit and harvest closures
+/// run opcode probes inline under it, and a filesystem opcode descends into the
+/// VFS, whose I/O completion waits are scheduler-backed — the holder
+/// legitimately deschedules mid-probe, which under a preemption-disabling lock
+/// would be scheduling-while-atomic. Only ever taken in task context, never
+/// from an interrupt handler, so sleeping on it is always legal.
 type RingSlot = KArc<Mutex<Ring>>;
 
-/// The global registry-table lock. Held only briefly: to insert, to
-/// remove, or to look up and **clone** a [`RingSlot`] handle. It is
-/// never held while a per-ring lock is held — that decoupling is what
-/// keeps the close path (`FILEIO_SLOT → REGISTRY`) from forming a cycle
-/// with the enter path (per-ring lock → `FILEIO_SLOT`).
+/// The global registry-table lock. Never held while a per-ring lock is held —
+/// that decoupling is what keeps the close path (`FILEIO_SLOT → REGISTRY`) from
+/// forming a cycle with the enter path (per-ring lock → `FILEIO_SLOT`).
 static REGISTRY: SpinLock<Option<HandleTable<RingSlot>>> =
     SpinLock::new(None, lock_class!("ring.REGISTRY", LOCK_LEVEL_REGISTRY));
 
@@ -69,10 +50,8 @@ fn with_registry<R>(f: impl FnOnce(&mut HandleTable<RingSlot>) -> R) -> R {
     f(table)
 }
 
-/// Look up and **clone** the [`RingSlot`] for a packed fd handle. The
-/// table lock is dropped on return (the clone — a refcount bump — keeps
-/// the ring alive). Callers then take the per-ring lock outside the
-/// table lock, which is the load-bearing decoupling.
+/// Look up and **clone** the [`RingSlot`] for a packed fd handle; the table
+/// lock is dropped on return, so callers take the per-ring lock outside it.
 fn slot_for(raw_handle: usize) -> Result<RingSlot, HandleError> {
     let h = Handle::unpack(raw_handle, SLOT_BITS);
     with_registry(|t| t.get(h).map(|a| a.clone()))
@@ -93,39 +72,26 @@ pub fn insert(ring: Ring) -> Option<usize> {
 /// handle, holding **only the per-ring lock** for the closure. Returns
 /// `Err(HandleError)` for a stale / out-of-range / foreign handle.
 ///
-/// The closure runs under the per-ring serialization lock (SLOPRING
-/// § 6.3) for the submit and CQE-post bookkeeping — two threads racing
-/// `ring_enter` on one fd are serialized here, while distinct rings
-/// proceed concurrently. The global registry-table lock is acquired
-/// only to clone the ring's [`RingSlot`] handle and is **released
-/// before** the per-ring lock is taken, so no `REGISTRY → per-ring`
-/// edge exists. The harvest *block* must still run outside the per-ring
-/// lock; the caller drops it before sleeping (see `enter.rs`).
+/// Two threads racing `ring_enter` on one fd serialize here (SLOPRING § 6.3);
+/// distinct rings proceed concurrently. The harvest *block* must run outside
+/// the per-ring lock; the caller drops it before sleeping (see `enter.rs`).
 pub fn with_ring<R>(raw_handle: usize, f: impl FnOnce(&mut Ring) -> R) -> Result<R, HandleError> {
     let slot = slot_for(raw_handle)?;
-    // A task aborted while contending for the per-ring lock never runs `f`.
-    // Reported as `Stale` because that is what the caller can act on — this
-    // handle will not resolve for you — rather than widening a handle-table
-    // error with a scheduling concern no other table consumer can observe.
+    // A lock abort never runs `f`; reported as `Stale` rather than widening
+    // `HandleError` with a scheduling concern no other table consumer observes.
     let Ok(mut ring) = slot.lock() else {
         return Err(HandleError::Stale);
     };
     Ok(f(&mut ring))
 }
 
-/// Remove a ring from the table (last fd closed — SLOPRING § 14). This
-/// drops only the **table's** [`KArc`] reference; the [`Ring`] is freed
-/// when the last clone drops — so a concurrent `with_ring` that already
-/// cloned the slot keeps the ring alive until it finishes (no UAF). The
-/// ring's `Drop` then releases the kernel's `RingMeta` frame refs; any
-/// user PTE still mapped holds its own ref, so frames survive until the
-/// mapping is torn down too. Safe to call on a stale handle (no-op).
+/// Remove a ring from the table (last fd closed — SLOPRING § 14). Drops only
+/// the **table's** [`KArc`], so a concurrent `with_ring` that already cloned
+/// the slot keeps the ring alive until it finishes. No-op on a stale handle.
 ///
-/// The removed slot is taken out **under** the table lock but dropped
-/// **after** it is released: when this was the last clone the `Ring` drops
-/// here, tearing down every in-flight op's held `FileRef`, and that
-/// teardown can take arbitrary subsystem locks (even re-enter the registry
-/// for a passed ring fd) — which must never run under the table spinlock.
+/// The removed slot is dropped **after** the table lock is released: a last
+/// drop tears down every in-flight op's `FileRef`, which can take arbitrary
+/// subsystem locks and even re-enter this registry for a passed ring fd.
 pub fn remove(raw_handle: usize) {
     let h = Handle::unpack(raw_handle, SLOT_BITS);
     let removed = with_registry(|t| t.remove(h).ok());
@@ -134,13 +100,9 @@ pub fn remove(raw_handle: usize) {
 
 /// `true` iff the packed handle resolves to a live ring owned by `table`.
 ///
-/// The primary check gating `ring_enter` and the four register ops against a
-/// foreign or stale ring. Clones the slot under the table lock, releases it,
-/// then reads the owner under the per-ring lock — never holding both at once.
-///
-/// Comparing [`FdTable`]s rather than pids is what makes "foreign" mean the
-/// process and not the number: a caller that inherited the creator's recycled
-/// id compares unequal, because its generation differs.
+/// The check gating `ring_enter` and the four register ops against a foreign or
+/// stale ring. Reads the owner under the per-ring lock, having released the
+/// table lock — never holding both at once.
 pub fn owner_is(raw_handle: usize, table: FdTable) -> bool {
     match slot_for(raw_handle) {
         // An abort denies the ring, which is the safe direction.

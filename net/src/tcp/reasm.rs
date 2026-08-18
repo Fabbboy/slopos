@@ -7,11 +7,9 @@ use super::seq::{seq_ge, seq_gt, seq_le, seq_lt};
 
 pub const ASSEMBLER_MAX_RANGES: usize = 16;
 
-/// Interval-merging tracker for out-of-order received byte ranges.
-///
 /// Each entry is an `(start_seq, end_seq)` half-open interval in absolute TCP
-/// sequence-number space, sorted by `start_seq` (wrapping-aware); no two
-/// entries overlap or are adjacent, because `insert` merges eagerly.
+/// sequence-number space, sorted by `start_seq` (wrapping-aware); `insert`
+/// merges eagerly, so no two entries overlap or are adjacent.
 #[derive(Clone, Copy)]
 pub struct Assembler {
     ranges: [(u32, u32); ASSEMBLER_MAX_RANGES],

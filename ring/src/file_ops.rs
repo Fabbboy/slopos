@@ -1,19 +1,9 @@
 //! `FileKind::Ring` file operations (SLOPRING § 3, § 14).
 //!
-//! A ring is an open file, so it inherits the fd lifecycle: `close`,
-//! `dup`, and exec teardown. It is *not* inherited across `fork` — the
-//! descriptor is installed process-private, so the child's table has no
-//! entry for it. The fd's `handle: usize` is the packed ring
+//! A ring inherits the fd lifecycle (`close`, `dup`, exec teardown) but is
+//! *not* inherited across `fork` — the descriptor is installed
+//! process-private. The fd's `handle: usize` is the packed ring
 //! [`Handle`](slopos_ostd::handle::Handle) from the registry.
-//! Read/write/poll on a ring fd are meaningless (use `ring_enter`), so
-//! they return `-EINVAL` / `POLLNVAL`.
-//!
-//! The fd's owning [`RingBacking`] removes the ring from the registry
-//! on last close, dropping the ring object — which releases the
-//! kernel's `RingMeta` frame refs. Any still-mapped user PTE holds its
-//! own ref, so frames survive until the mapping is also torn down (no
-//! mmap-after-close UAF). Intra-process dup'd ring fds share the one
-//! open-file description, so the teardown runs exactly once.
 
 use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
@@ -41,7 +31,6 @@ impl FileBacking for RingBacking {}
 
 impl Drop for RingBacking {
     fn drop(&mut self) {
-        // The registry remove is idempotent / stale-safe.
         crate::registry::remove(self.handle);
     }
 }
@@ -71,7 +60,6 @@ impl FileOps for RingFileOps {
     }
 
     fn read(&self, _handle: usize, _buf: &mut dyn IoBufWrite, _offset: u64, _flags: u32) -> isize {
-        // A ring fd is driven by ring_enter, not read(2).
         Errno::EINVAL.as_isize()
     }
 

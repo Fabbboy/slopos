@@ -1,19 +1,10 @@
 //! Tests for the connectivity classifier.
 //!
-//! # Why almost all of this is a pure function
-//!
-//! The ladder is the whole state machine, and it depends on five booleans. So
-//! it is written as a pure function over an explicit [`Evidence`] and tested by
-//! enumerating all thirty-two inputs, rather than by arranging thirty-two
-//! network conditions on the machine the test is running on.
-//!
-//! That is not only convenience. These run inside a live kernel whose real NIC
-//! the rest of the suite depends on: the hazard `iface_ctl_tests` documents —
-//! toggling global network state breaks twenty-six unrelated socket and NAPI
-//! tests — applies here with more force, because the classifier reads *every*
-//! global table. The few tests below that need a classifier instance drive a
-//! scratch [`Connectivity`], never [`CONNECTIVITY`], and the one that needs an
-//! interface registers its own mock device and removes it again.
+//! The ladder is a pure function over an explicit [`Evidence`] of five
+//! booleans, so it is tested by enumerating all thirty-two inputs rather than
+//! by arranging thirty-two network conditions on the machine running the test.
+//! These run inside a live kernel: the classifier reads every global table and
+//! the rest of the suite depends on the real NIC.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_fs::fileio::FdTable;
@@ -35,17 +26,11 @@ use crate::packetbuf::PacketBuf;
 use crate::pool::PacketPool;
 use crate::types::{DevIndex, MacAddr, NetError};
 
-/// The owner these tests register monitors under.
-///
-/// The kernel's table rather than a synthetic pid: a monitor's owner is a
-/// permission key, and a made-up number is not one any process could hold.
-/// What the tests need is a *nameable, distinguishable* owner, which this is
-/// without registering a process.
+/// The kernel's own table, rather than a synthetic pid no process could hold.
 const TEST_OWNER: FdTable = FdTable::Kernel;
 
-/// A scratch classifier. Never [`CONNECTIVITY`]: that one describes the machine
-/// this test is running on, and rewriting it would make every later reader —
-/// including `net_query` — report a state nobody measured.
+/// A scratch classifier. Never [`CONNECTIVITY`]: rewriting the live one would
+/// make every later reader report a state nobody measured.
 static SCRATCH: Connectivity = Connectivity::new();
 
 fn fresh() -> &'static Connectivity {
@@ -62,11 +47,6 @@ const WORKING: Evidence = Evidence {
     wan_fresh: true,
 };
 
-// =============================================================================
-// The ladder
-// =============================================================================
-
-/// Every rung, stated as the condition that produces it.
 fn test_conn_ladder_rungs() -> TestResult {
     assert_eq_test!(
         classify(Evidence::default()),
@@ -98,11 +78,8 @@ fn test_conn_ladder_rungs() -> TestResult {
         NET_CONN_FULL,
         "the working case"
     );
-    // An unreachable first hop does not demote a path something off-link has
-    // just answered over: the answer necessarily came through that hop, so
-    // stale gateway evidence says the cache aged, not that the path broke.
-    // Read the other way, a working machine flaps to Limited every time its
-    // ARP entry ages out.
+    // An off-link answer necessarily came through the first hop, so stale
+    // gateway evidence means the ARP entry aged, not that the path broke.
     assert_eq_test!(
         classify(Evidence {
             gateway_reachable: false,
@@ -134,10 +111,6 @@ fn test_conn_ladder_rungs() -> TestResult {
 
 /// All thirty-two inputs, checked against the ladder's own ordering rules
 /// rather than against a second copy of the ladder.
-///
-/// Enumerating beats sampling here because the function is total over five
-/// booleans: an exhaustive check is the same length as a careful selection and
-/// cannot miss the combination nobody thought of.
 fn test_conn_ladder_is_total_and_monotone() -> TestResult {
     for bits in 0u8..32 {
         let e = Evidence {
@@ -149,7 +122,6 @@ fn test_conn_ladder_is_total_and_monotone() -> TestResult {
         };
         let state = classify(e);
 
-        // The kernel's ladder produces exactly four values.
         assert_test!(
             matches!(
                 state,
@@ -158,7 +130,6 @@ fn test_conn_ladder_is_total_and_monotone() -> TestResult {
             "every input maps to a state the ladder can produce"
         );
 
-        // Each rung's precondition, restated as an implication.
         if !e.any_carrier || !e.has_address {
             assert_eq_test!(state, NET_CONN_NONE, "no address means None");
         } else if !e.has_default_route {
@@ -171,8 +142,6 @@ fn test_conn_ladder_is_total_and_monotone() -> TestResult {
             assert_eq_test!(state, NET_CONN_FULL, "an off-link answer means Full");
         }
 
-        // Full is reachable only with every rung satisfied — the property a
-        // status indicator's green dot depends on.
         if state == NET_CONN_FULL {
             assert_test!(
                 e.any_carrier && e.has_address && e.has_default_route && e.wan_fresh,
@@ -183,9 +152,8 @@ fn test_conn_ladder_is_total_and_monotone() -> TestResult {
     pass!()
 }
 
-/// The kernel must never claim a captive portal. It has no HTTP client and will
-/// not grow one to light an icon; the value exists so the space matches
-/// NetworkManager's and so a userland daemon can set it.
+/// The kernel must never claim a captive portal: it has no HTTP client. The
+/// value exists so the space matches NetworkManager's and userland can set it.
 fn test_conn_kernel_never_reports_portal() -> TestResult {
     for bits in 0u8..32 {
         let e = Evidence {
@@ -201,7 +169,6 @@ fn test_conn_kernel_never_reports_portal() -> TestResult {
         );
     }
 
-    // Nor can any sequence of evidence drive an instance into it.
     let c = fresh();
     for bits in 0u8..32 {
         let e = Evidence {
@@ -215,7 +182,6 @@ fn test_conn_kernel_never_reports_portal() -> TestResult {
         assert_test!(c.state() != NET_CONN_PORTAL, "and no state ever becomes it");
     }
 
-    // It is reachable only through the door left open for userland.
     c.set_enabled(false);
     assert_test!(
         c.force_state(NET_CONN_PORTAL).is_some(),
@@ -225,13 +191,8 @@ fn test_conn_kernel_never_reports_portal() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// State, transitions, and the takeover switch
-// =============================================================================
-
-/// A classifier starts at `Unknown` — "nobody has looked yet" is not the same
-/// answer as "nothing is reachable", and a UI shown the second before the first
-/// evaluation would report an outage that never happened.
+/// A classifier starts at `Unknown`: "nobody has looked yet" is not the same
+/// answer as "nothing is reachable".
 fn test_conn_starts_unknown_and_transitions_once() -> TestResult {
     let c = fresh();
     assert_eq_test!(c.state(), NET_CONN_UNKNOWN, "nothing evaluated yet");
@@ -308,8 +269,6 @@ fn test_conn_off_link_needs_a_cached_prefix() -> TestResult {
     pass!()
 }
 
-/// A transition announces itself to the monitors exactly once, with the states
-/// either side in the payload.
 fn test_conn_transition_posts_one_event() -> TestResult {
     let handle = match NETMON_TABLE.open(TEST_OWNER, NET_MON_CONN) {
         Ok(h) => h,
@@ -345,15 +304,8 @@ fn test_conn_transition_posts_one_event() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Gathering from the live tables
-// =============================================================================
-
-/// A device with no carrier is not counted, which is the bottom rung read off
-/// the real interface table rather than a synthetic input.
-///
-/// This is the only test here that touches a global table, and it touches it
-/// the way `iface_ctl_tests` does: its own mock, registered and removed.
+/// The only test here that touches a global table, and it does so the way
+/// `iface_ctl_tests` does: its own mock, registered and removed.
 fn test_conn_gather_ignores_a_carrierless_device() -> TestResult {
     struct DarkMock {
         mac: MacAddr,
@@ -420,10 +372,8 @@ fn test_conn_gather_ignores_a_carrierless_device() -> TestResult {
         "and contributes no address to the gather"
     );
 
-    // `gather_evidence` reads the real tables, so it also sees the live NIC.
-    // What is asserted is the part this test owns: a dark interface adds
-    // nothing. Asserting the whole verdict would be asserting on whatever the
-    // machine's network happens to be doing.
+    // `gather_evidence` reads the real tables, so it also sees the live NIC:
+    // only the delta a dark interface makes can be asserted on.
     let before = connectivity::gather_evidence();
     iface::detach(dev);
     DEVICE_REGISTRY.unregister(dev);
@@ -444,13 +394,9 @@ fn test_conn_gather_ignores_a_carrierless_device() -> TestResult {
 
 /// The `n` console command runs to completion against the live tables.
 ///
-/// It lives with the classifier's tests because it is the classifier's main
-/// consumer, and because what it proves is specific: `run_net` walks four
-/// tables and formats every row, so "it is registered" (which the kconsole
-/// suite's own uniqueness and well-formedness tests already cover) says
-/// nothing about whether the body faults, deadlocks on a second network lock,
-/// or blows the stack budget. Driving it through `request` + `drain` runs it
-/// on the real dispatch path with the real data.
+/// Driven through `request` + `drain` so it runs on the real dispatch path:
+/// registration alone says nothing about whether the body faults, deadlocks on
+/// a second network lock, or blows the stack budget.
 fn test_net_kconsole_command_runs() -> TestResult {
     let commands = slopos_ostd::kconsole::commands();
     let Some(entry) = commands.iter().find(|c| c.key == b'n') else {
@@ -466,11 +412,9 @@ fn test_net_kconsole_command_runs() -> TestResult {
         "a queued informational command must be drained and run"
     );
 
-    // Reaching here at all is the assertion: the body walked the interface
-    // table, the route table, the neighbour cache and the monitor registry,
-    // taking each in its own critical section. A second network lock taken
-    // under the first would have tripped the validator, and a fault would not
-    // have returned.
+    // Reaching here is the assertion: a second network lock taken under the
+    // first would have tripped the validator, and a fault would not have
+    // returned.
     pass!()
 }
 

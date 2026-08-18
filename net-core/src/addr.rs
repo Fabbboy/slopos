@@ -23,8 +23,7 @@ impl Ipv4 {
         self.0
     }
 
-    /// The wildcard; a route carries it for "directly connected" rather than
-    /// a gateway.
+    /// The wildcard; a route carries it for "directly connected" rather than a gateway.
     #[inline]
     pub const fn is_unspecified(self) -> bool {
         let o = self.0;
@@ -40,9 +39,8 @@ impl Ipv4 {
     /// Parses a dotted-quad literal.
     ///
     /// Strictly four decimal parts, each one to three digits and each at most
-    /// 255: no `inet_aton` shorthand or hex/octal form, whose rules are a
-    /// documented source of SSRF filter bypasses. A leading zero is read as
-    /// decimal (`010` is 10, not 8) and accepted.
+    /// 255: no `inet_aton` shorthand or hex/octal form, a documented source of
+    /// SSRF filter bypasses. A leading zero is read as decimal (`010` is 10).
     pub fn from_str_bytes(text: &[u8]) -> Option<Ipv4> {
         let mut out = [0u8; 4];
         let mut iter = text.split(|&b| b == b'.');

@@ -1,11 +1,9 @@
 //! `ring_register(2)` entry points (SLOPRING § 13, ABI v2): registered fixed
 //! buffers + provided buffer rings.
 //!
-//! The `core` syscall handler owns user-copy — it validates `arg`/`nr_args`,
-//! marshals the typed argument (a `BufIovec` array or a `RegisterBufRingCmd`)
-//! into a private kernel copy, and calls these. Each runs the actual pin /
-//! drop under the per-ring serialization lock via [`registry::with_ring`],
-//! after re-checking ownership (defence in depth, like `ring_enter`).
+//! The `core` syscall handler validates and copies the typed argument out of
+//! user memory before calling these; each re-checks ownership and runs the pin
+//! / drop under the per-ring serialization lock via [`registry::with_ring`].
 
 use slopos_abi::Errno;
 use slopos_abi::ring::RegisterBufRingCmd;
@@ -17,9 +15,8 @@ fn eno(e: Errno) -> i32 {
     e.raw()
 }
 
-/// `RING_REGISTER_BUFFERS`: pin `iovecs` (`(addr, len)` pairs, already copied
-/// out of user memory) as the ring's registered fixed-buffer set. Returns 0 or
-/// a negated errno.
+/// `RING_REGISTER_BUFFERS`: pin `iovecs` (`(addr, len)` pairs) as the ring's
+/// registered fixed-buffer set. Returns 0 or a negated errno.
 pub fn ring_register_buffers(table: FdTable, raw_handle: usize, iovecs: &[(u64, u32)]) -> i32 {
     if !registry::owner_is(raw_handle, table) {
         return eno(Errno::EBADF);
@@ -68,8 +65,8 @@ pub fn ring_register_pbuf_ring(table: FdTable, raw_handle: usize, cmd: &Register
 }
 
 /// `RING_UNREGISTER_PBUF_RING`: drop the provided ring for `group`. `-EBUSY`
-/// while any in-flight row still selects that group (the UAF / orphan-reaping
-/// guard — userland must cancel/drain first).
+/// while any in-flight row still selects that group; userland must cancel or
+/// drain those first.
 pub fn ring_unregister_pbuf_ring(table: FdTable, raw_handle: usize, group: u16) -> i32 {
     if !registry::owner_is(raw_handle, table) {
         return eno(Errno::EBADF);

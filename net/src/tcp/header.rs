@@ -1,13 +1,4 @@
 //! TCP header parsing and serialization (RFC 793 §3.1, RFC 7323 §2).
-//!
-//! Contains only header-level primitives: flag bits, option kinds, the
-//! `TcpHeader` wire struct, parsers for the fixed header and for MSS / window
-//! scale options, and writers for the header and its options.  No state
-//! machine, no connection table, no timers.
-
-// ---------------------------------------------------------------------------
-// Header constants
-// ---------------------------------------------------------------------------
 
 /// Minimum TCP header length (no options).
 pub const TCP_HEADER_LEN: usize = 20;
@@ -20,10 +11,6 @@ pub const DEFAULT_MSS: u16 = 1460;
 
 /// Default receive window size advertised in SYN (unscaled, fits in u16).
 pub const DEFAULT_WINDOW_SIZE: u16 = 32768;
-
-// ---------------------------------------------------------------------------
-// TCP flag bits (in the flags byte of the header)
-// ---------------------------------------------------------------------------
 
 pub const TCP_FLAG_FIN: u8 = 0x01;
 pub const TCP_FLAG_SYN: u8 = 0x02;

@@ -1,12 +1,5 @@
-//! Shared helpers for the TCP test suites.
-//!
-//! Before this module existed, `fn reset()` was copy-pasted into each test
-//! file and `establish_connection()` had two subtly different signatures.
-//! Everything new lives here; existing tests migrate via one-line imports.
-//!
-//! The helpers are intentionally thin so each test's intent stays obvious.
-//! Matchers and macros that take on non-trivial state (like [`SegmentMatcher`])
-//! carry inline documentation.
+//! Shared helpers for the TCP test suites: reset, handshake drivers, segment
+//! injection, transmit draining, matchers and mock-clock timer dispatch.
 
 use slopos_ostd::KVec;
 
@@ -18,28 +11,18 @@ use crate::tcp::{
 #[cfg(feature = "test-hooks")]
 use crate::timer::NET_TIMER_WHEEL;
 
-// -----------------------------------------------------------------------------
-// Canonical addresses for unit tests
-// -----------------------------------------------------------------------------
-
 pub const LOCAL_IP: [u8; 4] = [10, 0, 0, 1];
 pub const REMOTE_IP: [u8; 4] = [10, 0, 0, 2];
 pub const REMOTE_PORT: u16 = 80;
-/// Peer's Initial Send Sequence number, used in synthetic SYN+ACK and in
-/// `establish_connection()` so tests can compute expected `rcv_nxt` values.
+/// Peer's Initial Send Sequence number for synthetic SYN+ACKs, so tests can
+/// compute expected `rcv_nxt` values.
 pub const PEER_ISS: u32 = 7000;
-
-// -----------------------------------------------------------------------------
-// Reset
-// -----------------------------------------------------------------------------
 
 /// Canonical "between-tests" reset.
 ///
-/// Drops the socket table first (it holds TCP indices), then the TCP table,
-/// then clears the mock clock so the next test starts at `t=0` in wall-time
-/// terms.  Use this at the top of every test, even if only TCP primitives are
-/// exercised — socket state can leak across tests through the demux tables
-/// otherwise.
+/// Socket table first: it holds TCP indices. Use it at the top of every test
+/// even when only TCP primitives are exercised — socket state leaks across
+/// tests through the demux tables otherwise.
 pub fn reset_all() {
     socket::socket_reset_all();
     tcp::reset_all();
@@ -47,15 +30,7 @@ pub fn reset_all() {
     tcp::clock::MockClock::clear();
 }
 
-// -----------------------------------------------------------------------------
-// 3-way handshake helpers
-// -----------------------------------------------------------------------------
-
 /// Outcome of a successfully driven client-side 3-way handshake.
-///
-/// Both sides' ISS are exposed so tests that need to craft synthetic segments
-/// referring to either sequence space can do so without re-reading the
-/// connection.
 pub struct EstablishedConn {
     pub id: ConnId,
     pub local_port: u16,
@@ -64,10 +39,7 @@ pub struct EstablishedConn {
 }
 
 /// Drive a client-side 3-way handshake against the canonical addresses and
-/// [`REMOTE_PORT`].  Returns the connection id and both sides' ISS.
-///
-/// Uses [`PEER_ISS`] for the synthetic peer ISS so tests can predict peer
-/// sequence numbers deterministically.
+/// [`REMOTE_PORT`], using [`PEER_ISS`] as the synthetic peer ISS.
 pub fn establish_connection() -> EstablishedConn {
     let (id, syn_seg) =
         tcp::connect(LOCAL_IP, REMOTE_IP, REMOTE_PORT).expect("tcp_connect should succeed");
@@ -87,8 +59,7 @@ pub fn establish_connection() -> EstablishedConn {
     };
     let _ = tcp::input(REMOTE_IP, LOCAL_IP, &syn_ack, &[], &[], 0);
 
-    // Disable Nagle so tests that don't explicitly test it are not
-    // affected by sub-MSS deferral.
+    // Nagle off: sub-MSS deferral would perturb tests that do not test it.
     tcp::set_nodelay(id, true);
 
     EstablishedConn {
@@ -99,13 +70,8 @@ pub fn establish_connection() -> EstablishedConn {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Segment injection
-// -----------------------------------------------------------------------------
-
-/// Build a minimal TCP header in host-byte-order form suitable for passing to
-/// [`tcp::input`].  Tests rarely need window scaling or urgent pointers,
-/// so they are defaulted.
+/// Build a minimal host-byte-order TCP header for [`tcp::input`]; window
+/// scaling and urgent pointers are defaulted.
 pub fn make_header(
     src_port: u16,
     dst_port: u16,
@@ -127,8 +93,7 @@ pub fn make_header(
     }
 }
 
-/// Inject a raw segment into the TCP state machine.  This is the single
-/// primitive; the typed helpers below all delegate to it.
+/// Inject a raw segment; the typed helpers below all delegate to it.
 pub fn inject(
     src_ip: [u8; 4],
     dst_ip: [u8; 4],
@@ -157,7 +122,6 @@ pub fn inject_data(conn: &EstablishedConn, seq: u32, ack: u32, data: &[u8]) -> A
     )
 }
 
-/// Inject a bare ACK from the peer.
 pub fn inject_ack(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
     inject(
         REMOTE_IP,
@@ -171,7 +135,6 @@ pub fn inject_ack(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
     )
 }
 
-/// Inject a FIN from the peer.
 pub fn inject_fin(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
     inject(
         REMOTE_IP,
@@ -185,7 +148,6 @@ pub fn inject_fin(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
     )
 }
 
-/// Inject a RST from the peer.
 pub fn inject_rst(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
     inject(
         REMOTE_IP,
@@ -199,7 +161,6 @@ pub fn inject_rst(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
     )
 }
 
-/// Inject a segment with explicit TCP options bytes.
 pub fn inject_with_options(
     src_ip: [u8; 4],
     dst_ip: [u8; 4],
@@ -215,15 +176,11 @@ pub fn inject_with_options(
     tcp::input(src_ip, dst_ip, &hdr, options, payload, tcp::clock::now_ms())
 }
 
-/// Variant of [`inject_with_options`] that writes the resulting [`Actions`]
-/// into a caller-provided slot rather than returning it. Lets a test that
-/// makes several injects in sequence reuse one heap-allocated `Actions`
-/// slot instead of paying ~400 B of return-slot space per call site —
-/// the discard-the-result pattern (`let _ = inject_with_options(...)`)
-/// otherwise inflates the caller's frame past the 2 KiB stack-size gate.
+/// [`inject_with_options`] writing into a caller-provided slot: a discarded
+/// ~400 B `Actions` return slot per call site inflates the caller's frame past
+/// the 2 KiB stack-size gate.
 ///
-/// `#[inline(never)]` so the per-call Actions return slot stays inside
-/// this helper's frame rather than getting hoisted into the test caller.
+/// `#[inline(never)]` keeps that return slot inside this helper's frame.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub fn inject_with_options_into(
@@ -260,11 +217,9 @@ pub fn establish_connection_with_ts() -> EstablishedConn {
         tcp::connect(LOCAL_IP, REMOTE_IP, REMOTE_PORT).expect("tcp_connect should succeed");
     let our_iss = syn_seg.seq_num;
     let local_port = syn_seg.tuple.local_port;
-    // Our SYN should carry a timestamp option.
     assert!(syn_seg.timestamp.is_some(), "SYN should carry TSopt");
     let our_tsval = syn_seg.timestamp.unwrap().0;
 
-    // Peer's SYN-ACK with timestamps.
     let syn_ack = TcpHeader {
         src_port: REMOTE_PORT,
         dst_port: local_port,
@@ -296,11 +251,7 @@ pub fn establish_connection_with_ts() -> EstablishedConn {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Transmit draining
-// -----------------------------------------------------------------------------
-
-/// Poll once for an outgoing segment.  Returns `None` if the connection has
+/// Poll once for an outgoing segment. Returns `None` if the connection has
 /// nothing to send under the current window.
 pub fn poll_once(id: ConnId) -> Option<(TcpOutSegment, KVec<u8>)> {
     let mut buf = [0u8; 1500];
@@ -311,8 +262,7 @@ pub fn poll_once(id: ConnId) -> Option<(TcpOutSegment, KVec<u8>)> {
     })
 }
 
-/// Drain `tcp_poll_transmit` until it returns `None`.  Used by data-transfer
-/// tests that want to observe exactly what bytes were serialized.
+/// Drain `tcp_poll_transmit` until it returns `None`.
 pub fn drain_transmit(id: ConnId) -> KVec<(TcpOutSegment, KVec<u8>)> {
     let mut out: KVec<(TcpOutSegment, KVec<u8>)> = KVec::new();
     while let Some(item) = poll_once(id) {
@@ -321,22 +271,8 @@ pub fn drain_transmit(id: ConnId) -> KVec<(TcpOutSegment, KVec<u8>)> {
     out
 }
 
-// -----------------------------------------------------------------------------
-// State-access macros
-// -----------------------------------------------------------------------------
-
-/// Access the `DataState` of a PCB inside its per-slot lock.
-/// Panics if the PCB doesn't exist or isn't in the `Data` state.
-///
-/// Usage: `with_data_state!(conn.id, |d| assert_eq!(d.snd_nxt.raw(), ...));`
-///
-/// The body executes in the caller's scope (the macro expands to a
-/// guard-binding block, not a closure), so `return` and `?` propagate
-/// to the enclosing function — test assertion macros like
-/// `assert_test!` keep working unchanged.
-/// The macro's three failure arms, out of line: their format-args state is
-/// charged to the caller's frame at opt-level 0, and `with_data_state!` is
-/// used several times per test.
+/// `with_data_state!`'s three failure arms, out of line: their format-args
+/// state is charged to the caller's frame at opt-level 0.
 #[cold]
 #[inline(never)]
 pub fn wds_listener_id() -> ! {
@@ -355,6 +291,11 @@ pub fn wds_wrong_state(name: &str) -> ! {
     panic!("expected Data state, got {}", name);
 }
 
+/// Access the `DataState` of a PCB inside its per-slot lock. Panics if the PCB
+/// does not exist or is not in the `Data` state.
+///
+/// The body executes in the caller's scope — a guard-binding block, not a
+/// closure — so `return` and `?` propagate to the enclosing function.
 #[macro_export]
 macro_rules! with_data_state {
     ($id:expr, |$d:ident| $body:expr) => {{
@@ -374,16 +315,9 @@ macro_rules! with_data_state {
     }};
 }
 
-// -----------------------------------------------------------------------------
-// Segment matcher
-// -----------------------------------------------------------------------------
-
-/// Fluent matcher for [`TcpOutSegment`].
-///
-/// Replaces hand-written `assert_eq_test!(seg.field, expected, "label")` lines
-/// with a builder-style chain that collects failures and reports them all at
-/// once.  Call `.check()` to retrieve a `Result<(), &'static str>` suitable
-/// for the test harness's `fail!` macro.
+/// Fluent matcher for [`TcpOutSegment`]: a chain of checks collects failures,
+/// and `.check()` returns a `Result<(), &'static str>` suitable for the test
+/// harness's `fail!` macro.
 ///
 /// Example:
 /// ```ignore
@@ -464,9 +398,7 @@ impl<'a> SegmentMatcher<'a> {
         self
     }
 
-    /// Consume the matcher and return Ok or the first failure.  Tests that
-    /// need to surface the failing label can inspect the collected list
-    /// themselves before calling `.check()`.
+    /// Consume the matcher and return `Ok` or the first collected failure.
     pub fn check(self) -> Result<(), &'static str> {
         match self.failures.first() {
             Some(&msg) => Err(msg),
@@ -475,24 +407,16 @@ impl<'a> SegmentMatcher<'a> {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Timer wheel driving (used by mock-clock tests in P2.3 onwards)
-// -----------------------------------------------------------------------------
-
 /// Advance the mock clock by `ms` milliseconds then dispatch any expired
-/// timers.  Returns the number of timers dispatched.
+/// timers. Returns the number of timers dispatched.
 #[cfg(feature = "test-hooks")]
 pub fn tick_ms(ms: u64) -> usize {
     tcp::clock::MockClock::advance(ms);
     dispatch_fired_timers()
 }
 
-/// Drive the net timer wheel once and dispatch every expired TCP timer
-/// through its real callback.  Returns the number of timers processed.
-///
-/// Mirrors the production dispatcher in `net/src/timer.rs` so that tests can
-/// exercise retransmit, keepalive, and TIME_WAIT paths deterministically
-/// without waiting for the scheduler's real tick.
+/// Drive the net timer wheel once and dispatch every expired TCP timer through
+/// its real callback. Mirrors the production dispatcher in `net/src/timer.rs`.
 #[cfg(feature = "test-hooks")]
 pub fn dispatch_fired_timers() -> usize {
     use crate::timer::TimerKind;

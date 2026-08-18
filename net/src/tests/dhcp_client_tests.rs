@@ -2,13 +2,10 @@
 //!
 //! Everything here is a pure unit: the client takes events and returns actions,
 //! so a lease can be walked from DISCOVER through renewal, rebinding, refusal
-//! and expiry without a network, without waiting, and — importantly — without
-//! touching the live NIC the rest of the suite is using. That hazard is avoided
-//! by construction rather than by care.
-//!
-//! Time is explicit. The client is handed `now_ms` and the caller arms the
-//! timers, so a sixty-four-second backoff is a function argument rather than a
-//! minute of test runtime.
+//! and expiry without a network and without touching the live NIC the rest of
+//! the suite is using. Time is explicit — the client is handed `now_ms`, so a
+//! sixty-four-second backoff is a function argument rather than a minute of
+//! test runtime.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
@@ -30,17 +27,12 @@ const MASK: [u8; 4] = [255, 255, 255, 0];
 const ROUTER: [u8; 4] = [10, 0, 2, 2];
 const DNS: [u8; 4] = [10, 0, 2, 3];
 
-// =============================================================================
-// Reply construction (a server, for the client to talk to)
-// =============================================================================
-
 /// Build a BOOTP reply carrying `msg_type` and whichever lease options are
-/// supplied. Mirrors what a server puts on the wire, built by hand so the test
-/// does not depend on the encoder it is checking the decoder against.
+/// supplied, by hand, so the test does not depend on the encoder it is checking
+/// the decoder against.
 ///
 /// It borrows the caller's frame rather than returning one: a 320-byte buffer
-/// returned by value costs a copy at every call and, with two or three replies
-/// live in one test, carries a function over the build's 2 KiB stack-frame
+/// returned by value carries a function over the build's 2 KiB stack-frame
 /// gate.
 struct ReplyBuilder<'a> {
     buf: &'a mut [u8; DHCP_FRAME_LEN],
@@ -87,14 +79,12 @@ impl<'a> ReplyBuilder<'a> {
     }
 }
 
-/// A complete OFFER for `xid`.
 fn offer(buf: &mut [u8; DHCP_FRAME_LEN], xid: u32) -> usize {
     let mut b = ReplyBuilder::new(buf, xid, MSG_OFFER, CLIENT_IP);
     b.standard();
     b.finish()
 }
 
-/// A complete ACK for `xid` with explicit lease, T1 and T2.
 fn ack_with_times(buf: &mut [u8; DHCP_FRAME_LEN], xid: u32, lease: u32, t1: u32, t2: u32) -> usize {
     let mut b = ReplyBuilder::new(buf, xid, MSG_ACK, CLIENT_IP);
     b.standard();
@@ -118,8 +108,6 @@ fn nak(buf: &mut [u8; DHCP_FRAME_LEN], xid: u32) -> usize {
     b.finish()
 }
 
-/// Drive a client to Bound, returning it. The path every renewal test starts
-/// from, written once.
 fn bound_client(
     buf: &mut [u8; DHCP_FRAME_LEN],
     lease: u32,
@@ -147,7 +135,6 @@ fn bound_client(
     Some(c)
 }
 
-/// The DHCP message type inside a frame the client built.
 fn frame_msg_type(frame: &[u8]) -> Option<u8> {
     let reply_view = codec::parse_reply(frame, 0);
     let _ = reply_view; // outgoing frames are BOOTREQUEST, so parse by hand
@@ -173,7 +160,6 @@ fn frame_msg_type(frame: &[u8]) -> Option<u8> {
     None
 }
 
-/// Whether a frame carries an option, and its bytes.
 fn frame_option(frame: &[u8], want: u8) -> Option<&[u8]> {
     let mut i = BOOTP_HEADER_LEN;
     while i + 1 < frame.len() {
@@ -205,12 +191,6 @@ fn frame_is_broadcast(frame: &[u8]) -> bool {
     u16::from_be_bytes([frame[10], frame[11]]) & 0x8000 != 0
 }
 
-// =============================================================================
-// Acquisition
-// =============================================================================
-
-/// Starting sends a DISCOVER, broadcast, carrying the client identifier a
-/// server keys its lease database on.
 fn test_dhcp_start_discovers() -> TestResult {
     let mut c = DhcpClient::new(MAC, SEED);
     assert_eq_test!(
@@ -248,8 +228,8 @@ fn test_dhcp_start_discovers() -> TestResult {
     pass!()
 }
 
-/// An OFFER produces a REQUEST naming both the address and the server, which is
-/// what tells the servers that lost the race to release their offers.
+/// The REQUEST names both the address and the server — which is what tells the
+/// servers that lost the race to release their offers.
 fn test_dhcp_offer_produces_request_with_options_50_and_54() -> TestResult {
     let mut buf = [0u8; DHCP_FRAME_LEN];
     let mut c = DhcpClient::new(MAC, SEED);
@@ -289,7 +269,6 @@ fn test_dhcp_offer_produces_request_with_options_50_and_54() -> TestResult {
     pass!()
 }
 
-/// An ACK binds, and the binding carries everything the caller must install.
 fn test_dhcp_ack_binds_with_full_configuration() -> TestResult {
     let mut buf = [0u8; DHCP_FRAME_LEN];
     let mut c = DhcpClient::new(MAC, SEED);
@@ -345,15 +324,8 @@ fn test_dhcp_lease_times_default_to_half_and_seven_eighths() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Retransmission
-// =============================================================================
-
-/// Backoff doubles 4→8→16→32→64 and then stays there, and the client keeps
-/// transmitting indefinitely.
-///
-/// A failed acquisition at probe must never be permanent: twenty rounds of
-/// silence must still be transmitting.
+/// Backoff doubles 4→8→16→32→64 and then stays there: a failed acquisition at
+/// probe must never become permanent.
 fn test_dhcp_backoff_caps_and_retries_forever() -> TestResult {
     let mut c = DhcpClient::new(MAC, SEED);
     c.step(DhcpEvent::Start, 0);
@@ -374,7 +346,6 @@ fn test_dhcp_backoff_caps_and_retries_forever() -> TestResult {
         );
     }
 
-    // Everything after the ceiling stays at the ceiling — and still sends.
     for round in 0..20 {
         let action = c.step(DhcpEvent::Retransmit, 100_000 + round as u64);
         let DhcpAction::Send { retry_ms, .. } = action else {
@@ -394,10 +365,6 @@ fn test_dhcp_backoff_caps_and_retries_forever() -> TestResult {
     );
     pass!()
 }
-
-// =============================================================================
-// Renewal, rebinding, refusal, expiry
-// =============================================================================
 
 /// T1 renews by unicast to the granting server, keeping the address in
 /// `ciaddr` and omitting options 50 and 54 as RFC 2131 §4.3.2 requires.
@@ -434,7 +401,6 @@ fn test_dhcp_t1_renews_by_unicast_keeping_the_address() -> TestResult {
         "a renewing client can receive unicast, so it does not ask for broadcast"
     );
 
-    // And the renewal ACK re-binds without ever dropping the address.
     let len = ack_with_times(&mut buf, c.xid(), 3600, 1800, 3150);
     let action = c.step(DhcpEvent::Reply(&buf[..len]), 1_800_010);
     assert_test!(
@@ -518,9 +484,8 @@ fn test_dhcp_expiry_unbinds() -> TestResult {
     pass!()
 }
 
-/// Stopping releases before unbinding, unicast to the granting server, with the
-/// address still in `ciaddr` — the order is what lets the server hand the
-/// address out again immediately rather than waiting out the lease.
+/// Stopping releases before unbinding: the order is what lets the server hand
+/// the address out again immediately rather than waiting out the lease.
 fn test_dhcp_stop_releases_then_unbinds() -> TestResult {
     let mut buf = [0u8; DHCP_FRAME_LEN];
     let Some(mut c) = bound_client(&mut buf, 3600, 1800, 3150) else {
@@ -554,7 +519,6 @@ fn test_dhcp_stop_releases_then_unbinds() -> TestResult {
         "and naming the server it belongs to"
     );
 
-    // Stopping an unstarted client has nothing to release.
     let mut fresh = DhcpClient::new(MAC, SEED);
     assert_eq_test!(
         fresh.step(DhcpEvent::Stop, 0),
@@ -564,8 +528,6 @@ fn test_dhcp_stop_releases_then_unbinds() -> TestResult {
     pass!()
 }
 
-/// Carrier loss keeps the address and stops the timers; carrier return confirms
-/// the address the client still holds rather than starting from nothing.
 fn test_dhcp_carrier_loss_keeps_the_lease() -> TestResult {
     let mut buf = [0u8; DHCP_FRAME_LEN];
     let Some(mut c) = bound_client(&mut buf, 3600, 1800, 3150) else {
@@ -580,7 +542,6 @@ fn test_dhcp_carrier_loss_keeps_the_lease() -> TestResult {
     assert_eq_test!(c.address(), CLIENT_IP, "so the address stays");
     assert_eq_test!(c.state(), DhcpState::Bound, "and so does the state");
 
-    // While the link is down, timers that leak through do nothing.
     assert_eq_test!(
         c.step(DhcpEvent::T1, 200_000),
         DhcpAction::Idle,
@@ -605,12 +566,6 @@ fn test_dhcp_carrier_loss_keeps_the_lease() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// What the client must ignore
-// =============================================================================
-
-/// A reply for somebody else's transaction, or of the wrong type for the
-/// current state, changes nothing.
 fn test_dhcp_ignores_foreign_and_untimely_replies() -> TestResult {
     let mut buf = [0u8; DHCP_FRAME_LEN];
     let mut c = DhcpClient::new(MAC, SEED);
@@ -626,7 +581,6 @@ fn test_dhcp_ignores_foreign_and_untimely_replies() -> TestResult {
     assert_eq_test!(c.state(), DhcpState::Selecting, "so nothing moved");
     assert_eq_test!(c.xid(), ours, "and the transaction is unchanged");
 
-    // Right transaction, wrong message for this state.
     let len = ack_with_times(&mut buf, ours, 3600, 1800, 3150);
     assert_eq_test!(
         c.step(DhcpEvent::Reply(&buf[..len]), 10),
@@ -635,7 +589,6 @@ fn test_dhcp_ignores_foreign_and_untimely_replies() -> TestResult {
     );
     assert_eq_test!(c.state(), DhcpState::Selecting, "still selecting");
 
-    // An offer naming no server cannot be requested from.
     let mut b = ReplyBuilder::new(&mut buf, ours, MSG_OFFER, CLIENT_IP);
     b.opt(1, &MASK);
     let len = b.finish();
@@ -647,17 +600,14 @@ fn test_dhcp_ignores_foreign_and_untimely_replies() -> TestResult {
     pass!()
 }
 
-/// Every truncation of a valid ACK decodes or refuses, and none panics.
-///
-/// This parses an unauthenticated broadcast from a machine nobody has proved
-/// anything about, so "does not panic on any input" is the property that
-/// matters most in the whole module.
+/// Every truncation of a valid ACK decodes or refuses, and none panics: this
+/// parses an unauthenticated broadcast from a machine nobody has proved
+/// anything about.
 fn test_dhcp_truncated_replies_never_panic() -> TestResult {
     let mut buf = [0u8; DHCP_FRAME_LEN];
     let len = ack_with_times(&mut buf, 0xDEAD_BEEF, 3600, 1800, 3150);
     for n in 0..=len {
         let decoded = codec::parse_reply(&buf[..n], 0xDEAD_BEEF);
-        // Anything shorter than the BOOTP header cannot be a reply at all.
         if n < BOOTP_HEADER_LEN {
             assert_test!(
                 decoded.is_none(),
@@ -666,14 +616,12 @@ fn test_dhcp_truncated_replies_never_panic() -> TestResult {
         }
     }
 
-    // And the client tolerates them as events, at every length.
     for n in 0..=len {
         let mut c = DhcpClient::new(MAC, SEED);
         c.step(DhcpEvent::Start, 0);
         c.step(DhcpEvent::Reply(&buf[..n]), 10);
     }
 
-    // Garbage of every length, not only truncations of something valid.
     let mut junk = [0u8; DHCP_FRAME_LEN];
     for (i, b) in junk.iter_mut().enumerate() {
         *b = (i as u8).wrapping_mul(31).wrapping_add(7);
@@ -684,8 +632,6 @@ fn test_dhcp_truncated_replies_never_panic() -> TestResult {
     pass!()
 }
 
-/// Two clients with different seeds pick different transaction ids.
-///
 /// A transaction id an off-path attacker can guess is one he can answer, so it
 /// must not be derivable from a fixed boot constant plus a counter.
 fn test_dhcp_xid_depends_on_the_seed() -> TestResult {
@@ -698,7 +644,6 @@ fn test_dhcp_xid_depends_on_the_seed() -> TestResult {
         "different seeds must not produce the same transaction id"
     );
 
-    // And a new transaction within one client does not simply increment.
     let first = a.xid();
     a.step(DhcpEvent::Stop, 0);
     a.step(DhcpEvent::Start, 0);

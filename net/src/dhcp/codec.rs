@@ -1,10 +1,6 @@
-//! DHCP wire format: building the four messages this client sends and decoding
-//! what a server sends back.
-//!
-//! Pure encode/decode with no state and no I/O, so every shape a server can put
-//! on the wire — including a truncated or hostile one — is reachable from a
-//! test without a network. The state machine that decides what any of it
-//! *means* is [`super::client`].
+//! DHCP wire format: building the messages this client sends and decoding what
+//! a server sends back.  Pure encode/decode with no state and no I/O; the state
+//! machine that decides what any of it *means* is [`super::client`].
 
 pub const UDP_PORT_SERVER: u16 = 67;
 pub const UDP_PORT_CLIENT: u16 = 68;
@@ -25,9 +21,9 @@ const OPTION_LEASE_TIME: u8 = 51;
 const OPTION_PARAM_REQ_LIST: u8 = 55;
 const OPTION_RENEWAL_T1: u8 = 58;
 const OPTION_REBINDING_T2: u8 = 59;
-/// Client identifier. Servers key their lease database on it, so omitting it
-/// makes a reboot look like a different client and burns a fresh address each
-/// time — which is what RFC 2131 §4.4.1 means by "SHOULD".
+/// Servers key their lease database on it, so omitting it makes a reboot look
+/// like a different client and burn a fresh address — RFC 2131 §4.4.1's
+/// "SHOULD".
 const OPTION_CLIENT_ID: u8 = 61;
 const OPTION_END: u8 = 255;
 
@@ -39,19 +35,14 @@ pub const MSG_OFFER: u8 = 2;
 pub const MSG_REQUEST: u8 = 3;
 pub const MSG_DECLINE: u8 = 4;
 pub const MSG_ACK: u8 = 5;
-/// The server refused. A client that ignores this keeps using an address the
-/// server has given to somebody else, which is worse than having none.
 pub const MSG_NAK: u8 = 6;
 pub const MSG_RELEASE: u8 = 7;
 
 pub const BOOTP_HEADER_LEN: usize = 240;
 
-/// Every message this client sends is exactly this long.
-///
-/// A fixed frame rather than a computed one: RFC 2131 requires a client to
-/// accept at least 576 bytes and says nothing about what it must send, and a
-/// constant-size buffer means no allocation and no length arithmetic on a path
-/// that runs before the machine has an address.
+/// Every message this client sends is exactly this long: a constant-size buffer
+/// means no allocation and no length arithmetic on a path that runs before the
+/// machine has an address, and RFC 2131 constrains only what a client accepts.
 pub const DHCP_FRAME_LEN: usize = 320;
 
 #[derive(Clone, Copy)]
@@ -68,19 +59,12 @@ impl DhcpLease {
     }
 }
 
-// =============================================================================
-// Packet construction
-// =============================================================================
-//
-// Every outgoing message is written into a caller-owned fixed 320-byte frame.
-// 240 of those are the BOOTP header, leaving 80 for options against a worst
-// case of 32 — the headroom is deliberate, and [`OptWriter`] refuses to write
-// past the end rather than trusting that arithmetic.
+// 240 of the 320 bytes are the BOOTP header, leaving 80 for options against a
+// worst case of 32.
 
-/// Bounds-checked option writer.
-///
-/// Carries its own cursor and silently drops an option that would not fit, so
-/// a miscounted length is a missing option rather than a write past the frame.
+/// Bounds-checked option writer: an option that would not fit is silently
+/// dropped, so a miscounted length is a missing option rather than a write past
+/// the frame.
 struct OptWriter<'a> {
     buf: &'a mut [u8; DHCP_FRAME_LEN],
     at: usize,
@@ -91,8 +75,8 @@ impl<'a> OptWriter<'a> {
         Self { buf, at }
     }
 
-    /// Append one option. Dropped whole if it would not fit, never truncated:
-    /// a half-written option would desynchronise every parser downstream.
+    /// Dropped whole if it would not fit, never truncated: a half-written
+    /// option would desynchronise every parser downstream.
     fn put(&mut self, code: u8, data: &[u8]) {
         let need = 2 + data.len();
         if data.len() > u8::MAX as usize || self.at + need + 1 > DHCP_FRAME_LEN {
@@ -104,20 +88,16 @@ impl<'a> OptWriter<'a> {
         self.at += need;
     }
 
-    /// Write the END marker and return the frame length.
     fn finish(self) -> usize {
         self.buf[self.at] = OPTION_END;
         self.at + 1
     }
 }
 
-/// Write the common BOOTP header.
-///
-/// `ciaddr` is the client's own address and must be set exactly when the client
-/// already holds a lease it is confirming — RENEWING, REBINDING and RELEASE.
-/// `broadcast` asks the server to broadcast its reply, which a client with no
-/// configured address has no choice about, and which a renewing client must
-/// *not* set because it can receive unicast.
+/// `ciaddr` must be set exactly when the client already holds a lease it is
+/// confirming — RENEWING, REBINDING and RELEASE.  `broadcast` asks the server
+/// to broadcast its reply: unavoidable for a client with no configured address,
+/// and must *not* be set by a renewing client, which can receive unicast.
 fn write_bootp_header(
     out: &mut [u8; DHCP_FRAME_LEN],
     mac: [u8; 6],
@@ -139,8 +119,7 @@ fn write_bootp_header(
     BOOTP_HEADER_LEN
 }
 
-/// The client identifier every outgoing message carries: hardware type then
-/// MAC.
+/// The client identifier: hardware type then MAC.
 fn put_client_id(w: &mut OptWriter<'_>, mac: [u8; 6]) {
     let id = [
         HTYPE_ETHERNET,
@@ -154,8 +133,8 @@ fn put_client_id(w: &mut OptWriter<'_>, mac: [u8; 6]) {
     w.put(OPTION_CLIENT_ID, &id);
 }
 
-/// The options this client knows how to apply. Asking for more would be asking
-/// a server to spend bytes on something that gets parsed and dropped.
+/// The options this client knows how to apply; anything more would be bytes a
+/// server spends on something that gets parsed and dropped.
 fn put_param_request_list(w: &mut OptWriter<'_>) {
     w.put(
         OPTION_PARAM_REQ_LIST,
@@ -237,8 +216,7 @@ pub fn build_request_renew(
 }
 
 /// RELEASE: unicast to the server that granted the lease, with the address in
-/// `ciaddr`. Sending it is what lets the server hand the address to somebody
-/// else immediately instead of holding it until the lease runs out.
+/// `ciaddr`.
 pub fn build_release(
     mac: [u8; 6],
     xid: u32,
@@ -254,12 +232,6 @@ pub fn build_release(
     w.finish()
 }
 
-// =============================================================================
-// Parsing
-// =============================================================================
-
-/// A decoded server reply.
-///
 /// Lease times are `Option` because their absence is meaningful: RFC 2131
 /// §4.4.5 gives defaults for T1 and T2 derived from the lease, and a client
 /// that silently substituted zero would renew immediately and forever.
@@ -296,10 +268,8 @@ fn be32(data: &[u8]) -> u32 {
     u32::from_be_bytes([data[0], data[1], data[2], data[3]])
 }
 
-/// Walk the option area.
-///
 /// Every step is bounded by the slice length, so a truncated or malformed
-/// packet stops the walk rather than reading past the end. The input is an
+/// packet stops the walk rather than reading past the end: the input is an
 /// unauthenticated broadcast from an unverified server.
 fn parse_options(options: &[u8]) -> DhcpOptions {
     let mut opts = DhcpOptions::default();
@@ -340,12 +310,10 @@ fn parse_options(options: &[u8]) -> DhcpOptions {
     opts
 }
 
-/// Decode a reply, checking only what identifies it as ours: a BOOTP reply,
-/// our transaction, the magic cookie, and a message type.
-///
-/// Whether that message type is one the client wants *right now* is the state
-/// machine's decision, not this function's — which is why an unexpected type
-/// comes back decoded rather than as `None`.
+/// Checks only what identifies the reply as ours: a BOOTP reply, our
+/// transaction, the magic cookie, and a message type.  Whether that type is one
+/// the client wants *right now* is the state machine's decision, which is why
+/// an unexpected type comes back decoded rather than as `None`.
 pub fn parse_reply(payload: &[u8], xid: u32) -> Option<DhcpReply> {
     if payload.len() < BOOTP_HEADER_LEN {
         return None;

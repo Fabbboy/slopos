@@ -120,7 +120,6 @@ pub fn test_neighbor_incomplete_to_reachable_flush() -> TestResult {
         "lookup while Incomplete should return None"
     );
 
-    // `insert_or_update` stands in for the arriving ARP reply.
     let action = cache.insert_or_update(dev, ip, mac, 500);
     match action {
         NeighborAction::FlushPending {
@@ -168,7 +167,6 @@ pub fn test_neighbor_failed_drops_packets() -> TestResult {
         assert_test!(dropped.is_empty(), "no packets dropped during retransmit");
     }
 
-    // Retries exhausted on the 4th call.
     let (action, dropped) = cache.on_retransmit(entry_id);
     assert_test!(
         action.is_none(),
@@ -272,7 +270,6 @@ pub fn test_neighbor_snapshot_owned_reports_every_state() -> TestResult {
         "an ARP-confirmed entry is REACHABLE"
     );
 
-    // The device filter is what makes `ip neigh show dev X` mean anything.
     let (other, other_total) = cache.snapshot_owned(Some(DevIndex(8)));
     assert_test!(
         other.is_empty() && other_total == 0,

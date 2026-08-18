@@ -1,12 +1,9 @@
 //! `ring_setup` / `ring_enter` implementation (SLOPRING § 6, § 7, § 8).
 //!
-//! Both are **synchronous** kernel functions. `ring_enter`'s submit and
-//! CQE-post bookkeeping run under the per-ring serialization lock
-//! (SLOPRING § 6.3); the harvest *block* runs outside it, registering
-//! the *calling task* on each in-flight fd's resource queue (the
-//! poll/select shape, caller-as-waiter — SLOPRING § 7.1). The global
-//! registry-table lock is held only briefly inside `registry::with_ring`
-//! to clone the ring handle, never across the fileio probe or the block.
+//! Submit and CQE-post bookkeeping run under the per-ring serialization lock
+//! (SLOPRING § 6.3); the harvest *block* runs outside it, registering the
+//! calling task on each in-flight fd's resource queue (SLOPRING § 7.1). The
+//! registry-table lock is never held across the fileio probe or the block.
 
 use slopos_abi::Errno;
 use slopos_abi::ring::{
@@ -36,34 +33,26 @@ const PAGE_SIZE: u64 = 4096;
 /// Cap a single harvest re-poll sleep so a wakeup we missed is bounded.
 const MAX_SLEEP_MS: u32 = 50;
 
-/// Negated-errno return value. `Errno::raw()` is *already* negative
-/// (`-EAGAIN` etc.), so this returns it as-is — negating it would yield a
-/// positive value that the syscall layer's `rc < 0` check and userland's
-/// `res < 0` CQE check would both read as success.
+/// Negated-errno return value. `Errno::raw()` is *already* negative, so this
+/// returns it as-is — negating would yield a positive the syscall layer's
+/// `rc < 0` and userland's `res < 0` CQE check both read as success.
 fn eno(e: Errno) -> i32 {
     e.raw()
 }
 
-// ---------------------------------------------------------------------------
-// ring_setup
-// ---------------------------------------------------------------------------
-
-/// `ring_setup(entries, params*)` core (SLOPRING § 6.1). Returns the
-/// ring fd (`>= 0`) or a negated errno. `table` is the caller; the
-/// `out_params` closure receives the populated `RingParams` to copy to
-/// the user out-pointer (so the syscall layer owns user-copy).
+/// `ring_setup(entries, params*)` core (SLOPRING § 6.1). Returns the ring fd
+/// (`>= 0`) or a negated errno; `out_params` receives the populated
+/// `RingParams` so the syscall layer owns the user-copy.
 pub fn ring_setup(
     table: FdTable,
     entries: u32,
     mut out_params: impl FnMut(&slopos_abi::ring::RingParams) -> Result<(), Errno>,
 ) -> i32 {
-    // Validate entries: power of two in 1..=MAX.
     if entries == 0 || entries > SLOPRING_MAX_ENTRIES || !entries.is_power_of_two() {
         return eno(Errno::EINVAL);
     }
 
-    // A ring is mapped into a process's address space, so the kernel table —
-    // which owns none — cannot have one.
+    // A ring is mapped into a process address space; the kernel table owns none.
     let Some(vm_process) = table.process() else {
         return eno(Errno::EINVAL);
     };
@@ -71,45 +60,39 @@ pub fn ring_setup(
     let layout = RingLayout::new(entries);
     let n_pages = (layout.region_bytes as u64).div_ceil(PAGE_SIZE) as usize;
 
-    // Heap-box the buffer registry first (nothing else allocated yet, so a
-    // failure here is a clean -ENOMEM). Keeping it off `Ring`'s inline body
-    // is what holds the `KArc<SpinLock<Ring>>` allocation under the 2 KiB
-    // stack ceiling (Inv. 5').
+    // Allocated first so a failure needs no rollback; boxed off `Ring`'s inline
+    // body to hold the `KArc<SpinLock<Ring>>` allocation under the 2 KiB stack
+    // ceiling (Inv. 5').
     let buffers = match slopos_ostd::KBox::try_new(crate::buffers::BufferRegistry::new()) {
         Ok(b) => b,
         Err(_) => return eno(Errno::ENOMEM),
     };
 
-    // Allocate the RingMeta region.
     let region = match RingRegion::alloc(n_pages) {
         Ok(r) => r,
         Err(_) => return eno(Errno::ENOMEM),
     };
 
-    // Write the immutable header + control masks into the region (the
-    // kernel-owned indices start at 0; user indices start at 0).
     let mut params = layout.to_params();
     if write_initial_region(&region, &layout, &params).is_err() {
         return eno(Errno::EFAULT);
     }
 
-    // Map the region into the caller's address space.
     let paddrs = region.paddrs();
     let user_addr = slopos_mm::process_vm::process_vm_map_ring(vm_process, paddrs.as_slice());
     if user_addr == 0 {
         return eno(Errno::ENOMEM);
     }
     params.region_addr = user_addr;
-    // Re-write region_addr into the shared header so userland can read
-    // it from the mapping too.
+    // Re-write region_addr into the shared header so userland can read it from
+    // the mapping too.
     if region.copy_in(0, &params.to_bytes()).is_err() {
         // best effort; user out-copy below is authoritative
     }
 
-    // Build the ring object.
     let cq_cap = layout.cq_entries as usize;
-    // Pre-reserve the reap buffer to the in-flight bound so a terminal
-    // completion never allocates while draining under the ring lock.
+    // Pre-reserved to the in-flight bound so a terminal completion never
+    // allocates while draining under the ring lock.
     let pending_reap = match KVec::with_capacity(cq_cap) {
         Ok(v) => v,
         Err(_) => {
@@ -134,10 +117,7 @@ pub fn ring_setup(
         pending_reap,
     };
 
-    // Register it, get the packed fd-handle.
     let Some(raw_handle) = registry::insert(ring) else {
-        // Registry full. The mapping + frames are cleaned up when the
-        // process exits or unmaps; for a clean failure, unmap now.
         let _ = slopos_mm::process_vm::process_vm_munmap(
             vm_process,
             user_addr,
@@ -146,9 +126,8 @@ pub fn ring_setup(
         return eno(Errno::ENOMEM);
     };
 
-    // Open a FileKind::Ring fd referring to it. The backing owns the
-    // registry entry from here: a failed install drops it, removing the
-    // ring — only the mapping still needs explicit rollback.
+    // The backing owns the registry entry from here: a failed install drops it,
+    // removing the ring, so only the mapping still needs explicit rollback.
     let Some(backing) = file_ops::ring_backing(raw_handle, table.account()) else {
         let _ = slopos_mm::process_vm::process_vm_munmap(
             vm_process,
@@ -157,10 +136,8 @@ pub fn ring_setup(
         );
         return eno(Errno::ENFILE);
     };
-    // The ring fd is process-private (SLOPRING § 14): a ring's SQ/CQ is
-    // SPSC and its user mapping is not inherited, so neither `fork` nor
-    // `exec` carries the descriptor forward. Matches io_uring, whose ring
-    // fd is `O_CLOEXEC`.
+    // Process-private (SLOPRING § 14): the SQ/CQ is SPSC and the user mapping is
+    // not inherited, so neither `fork` nor `exec` carries the descriptor forward.
     let fd = slopos_fs::fileio_open_fd_with_ops(
         table,
         &file_ops::RING_FILE_OPS,
@@ -177,9 +154,7 @@ pub fn ring_setup(
         return fd;
     }
 
-    // Copy the params out to the user pointer.
     if out_params(&params).is_err() {
-        // Roll back: close the fd (which removes the ring) + unmap.
         let _ = slopos_fs::fileio::file_close_fd(table, fd);
         let _ = slopos_mm::process_vm::process_vm_munmap(
             vm_process,
@@ -192,24 +167,21 @@ pub fn ring_setup(
     fd
 }
 
-/// Serialize the immutable `RingParams` header + the two ring masks +
-/// zeroed indices into the freshly-allocated region.
+/// Serialize the `RingParams` header, the two ring masks and zeroed indices
+/// into a freshly-allocated region.
 fn write_initial_region(
     region: &RingRegion,
     layout: &RingLayout,
     params: &slopos_abi::ring::RingParams,
 ) -> Result<(), ()> {
-    // Header.
     region.copy_in(0, &params.to_bytes()).map_err(|_| ())?;
-    // Masks.
     region
         .store_u32_release(layout.sq_off_mask as usize, layout.sq_entries - 1)
         .map_err(|_| ())?;
     region
         .store_u32_release(layout.cq_off_mask as usize, layout.cq_entries - 1)
         .map_err(|_| ())?;
-    // Indices start at zero (region is zero-filled at alloc, but make it
-    // explicit / fence-correct).
+    // Region is zero-filled at alloc; store explicitly for fence-correctness.
     region
         .store_u32_release(layout.sq_off_head as usize, 0)
         .map_err(|_| ())?;
@@ -222,20 +194,14 @@ fn write_initial_region(
     region
         .store_u32_release(layout.cq_off_tail as usize, 0)
         .map_err(|_| ())?;
-    // CQ flags word starts clear (no overflow yet).
     region
         .store_u32_release(layout.cq_off_flags as usize, 0)
         .map_err(|_| ())?;
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// ring_enter
-// ---------------------------------------------------------------------------
-
-/// `ring_enter(ring_fd, to_submit, min_complete, flags)` core
-/// (SLOPRING § 6.2). Returns the submission count (`>= 0`) or a negated
-/// errno. `table` identifies the calling process.
+/// `ring_enter(ring_fd, to_submit, min_complete, flags)` core (SLOPRING § 6.2).
+/// Returns the submission count (`>= 0`) or a negated errno.
 pub fn ring_enter(
     table: FdTable,
     raw_handle: usize,
@@ -243,13 +209,12 @@ pub fn ring_enter(
     min_complete: u32,
     _flags: u32,
 ) -> i32 {
-    // The ownership check that contains a foreign or stale ring. It holds
-    // for every alias of the fd, including intra-process `dup`s.
+    // Contains a foreign or stale ring; holds for every alias of the fd,
+    // including intra-process `dup`s.
     if !registry::owner_is(raw_handle, table) {
         return eno(Errno::EBADF);
     }
 
-    // ---- Submit phase (under the per-ring lock only) ----
     let submit_result = registry::with_ring(raw_handle, |ring| {
         let n = submit(table, ring, to_submit);
         (n, core::mem::take(&mut ring.pending_reap))
@@ -258,15 +223,14 @@ pub fn ring_enter(
         Ok(v) => v,
         Err(_) => return eno(Errno::EBADF),
     };
-    // Drop rows retired during submit (e.g. OP_CANCEL) with the ring lock
-    // released — a completing op's file teardown must not run under it.
+    // Dropped with the ring lock released: a completing op's file teardown must
+    // not run under it.
     drop(reaped);
 
-    // ---- Complete phase (block the caller; lock dropped while parked) ----
     if min_complete > 0 {
         let rc = harvest(table, raw_handle, min_complete);
-        // On signal with nothing submitted → EINTR; otherwise return the
-        // submit count (never discard a submission — SLOPRING § 6.2).
+        // Never discard a submission (SLOPRING § 6.2): EINTR only when nothing
+        // was submitted.
         if rc == eno(Errno::EINTR) && n_submitted == 0 {
             return eno(Errno::EINTR);
         }
@@ -275,9 +239,8 @@ pub fn ring_enter(
     n_submitted as i32
 }
 
-/// Submit phase: consume up to `to_submit` SQEs, clamped by the SQ
-/// occupancy and `sq_entries` (SLOPRING § 7, § 13.6). Returns the count
-/// of SQEs consumed.
+/// Submit phase: consume up to `to_submit` SQEs, clamped by the SQ occupancy
+/// and `sq_entries` (SLOPRING § 7, § 13.6).
 fn submit(table: FdTable, ring: &mut Ring, to_submit: u32) -> u32 {
     let sq_tail = match ring.read_sq_tail() {
         Ok(t) => t,
@@ -303,9 +266,8 @@ fn submit(table: FdTable, ring: &mut Ring, to_submit: u32) -> u32 {
     consumed
 }
 
-/// Process one submitted SQE: dispatch the special opcodes inline, run
-/// the probe for the rest, and either post a CQE or record an in-flight
-/// row.
+/// Process one submitted SQE: the special opcodes inline, the rest through the
+/// probe, posting a CQE or recording an in-flight row.
 fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe) {
     match sqe.opcode {
         OP_CANCEL => {
@@ -313,8 +275,8 @@ fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe) {
             return;
         }
         OP_TIMEOUT => {
-            // Record a timeout row: its deadline bounds the next harvest
-            // block; the harvest posts -ETIME on expiry (SLOPRING § 12).
+            // The deadline bounds the next harvest block; the harvest posts
+            // -ETIME on expiry (SLOPRING § 12).
             let deadline = get_time_ms().wrapping_add(sqe.off / 1_000_000); // ns → ms
             if !ring
                 .inflight
@@ -331,22 +293,17 @@ fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe) {
         _ => {}
     }
 
-    // Resolve the target fd once, here at submit, into a strong reference the
-    // op holds for its whole in-flight window — so it stays bound to this
-    // exact open file even if userland closes the fd or reuses the number
-    // (the "the ring keeps a real struct file reference" rule). A closed fd
-    // resolves to `None`; `probe` reports it as `-EBADF` (after the static
-    // buffer-selection check). Inline completions drop the reference below
-    // (never the last alias — the fd is still open in this synchronous submit
-    // span); a would-block moves it into the row.
+    // A strong reference held for the op's whole in-flight window keeps it bound
+    // to this exact open file even if userland closes the fd or reuses the
+    // number. A closed fd resolves to `None`; `probe` reports it as `-EBADF`.
     let file: Option<FileRef> = if opcode::needs_file_ref(sqe.opcode) {
         fileio_clone_file_ref(table, sqe.fd)
     } else {
         None
     };
 
-    // Ownership ops reserve a CQE slot before running the side effect
-    // (SLOPRING § 11) so a full CQ never orphans an fd / loses data.
+    // Reserve a CQE slot before the side effect (SLOPRING § 11): a full CQ must
+    // never orphan an fd or lose data.
     if opcode::is_ownership_op(sqe.opcode) {
         let cq_head = match ring.read_cq_head() {
             Ok(h) => h,
@@ -362,16 +319,13 @@ fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe) {
 
     let sel = opcode::buf_sel(sqe);
 
-    // A multishot row is armed and lives entirely in the harvest: even if
-    // it is ready *now*, record it in-flight and let `harvest_step` do the
-    // first post, so the F_MORE bookkeeping + drain loop live in one place
-    // (§1.2). A non-multishot ready op completes inline as before.
+    // Even when ready now, a multishot row is recorded in-flight so the F_MORE
+    // bookkeeping and drain loop live only in `harvest_step` (SLOPRING §1.2).
     let is_multishot =
         sqe.sqe_flags2 & SLOPRING_SQE_MULTISHOT != 0 && multishot_supported(sqe.opcode);
     if is_multishot {
-        // Multishot + a registered/provided buffer is not supported this phase
-        // (one buffer cannot safely back an unbounded stream without per-yield
-        // rotation) — reject rather than silently dropping the selection.
+        // One buffer cannot safely back an unbounded stream without per-yield
+        // rotation; reject rather than silently dropping the selection.
         if sel.is_some() {
             let _ = ring.post_cqe(sqe.user_data, eno(Errno::EINVAL), 0);
             return;
@@ -382,10 +336,9 @@ fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe) {
         return;
     }
 
-    // Reserve a registered fixed buffer for the op's whole in-flight window so
-    // a second op cannot race it and `unregister` sees it busy (the UAF /
-    // orphan-reaping guard). Provided-ring buffers reserve nothing — they are
-    // consumed atomically when a fill actually lands.
+    // A fixed buffer stays reserved for the op's whole in-flight window so a
+    // second op cannot race it and `unregister` sees it busy. Provided-ring
+    // buffers reserve nothing: they are consumed when a fill actually lands.
     if let Some(BufSel::Fixed { index }) = sel
         && let Err(e) = ring.buffers.check_out_fixed(index)
     {
@@ -409,46 +362,37 @@ fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe) {
             }
         }
         Outcome::InlineNotif(res) => {
-            // Zero-copy send (OP_SEND_ZC) on the single-direct-copy backend: the
-            // result CQE carries F_MORE ("notification to follow"), then a
-            // terminal F_NOTIF CQE signals the registered buffer is reusable.
-            // The copy makes the buffer reusable the instant it returns, so the
-            // notification follows immediately (io_uring COPIED fallback).
+            // The direct copy makes the registered buffer reusable the instant
+            // it returns, so the F_MORE result is followed immediately by the
+            // terminal F_NOTIF.
             let _ = ring.post_cqe(sqe.user_data, res, SLOPRING_CQE_F_MORE);
             let _ = ring.post_cqe(sqe.user_data, 0, SLOPRING_CQE_F_NOTIF);
             release_fixed(ring, sel);
         }
         Outcome::DeferredNotif(res) => {
-            // Zero-copy send queued for true NIC DMA: post the result
-            // (F_MORE) now; the terminal F_NOTIF is deferred until the driver
-            // reclaims the TX descriptor (recorded in the registry's deferred
-            // table, drained by the harvest). Do NOT release the fixed buffer —
-            // it stays checked out across the DMA.
+            // The terminal F_NOTIF waits for the driver to reclaim the TX
+            // descriptor, so the fixed buffer stays checked out across the DMA.
             let _ = ring.post_cqe(sqe.user_data, res, SLOPRING_CQE_F_MORE);
         }
     }
 }
 
-/// Release a fixed-buffer reservation if `sel` named one (the op completed or
-/// failed to enqueue — its buffer is no longer held).
+/// Release a fixed-buffer reservation if `sel` named one.
 fn release_fixed(ring: &mut Ring, sel: Option<BufSel>) {
     if let Some(BufSel::Fixed { index }) = sel {
         ring.buffers.check_in_fixed(index);
     }
 }
 
-/// Release the fixed-buffer reservation a completed/cancelled in-flight `row`
-/// held (the terminal-CQE half of the check-out/in lifecycle).
+/// Release the fixed-buffer reservation a retired in-flight `row` held.
 fn release_fixed_row(ring: &mut Ring, row: &InFlight) {
     if row.buf_flags & SLOPRING_SQE_FIXED_BUFFER != 0 {
         ring.buffers.check_in_fixed(row.buf_index);
     }
 }
 
-/// Opcodes that honour `SLOPRING_SQE_MULTISHOT` (SLOPRING § 1.1):
-/// OP_ACCEPT / OP_RECVMSG (consuming, self-limiting) and OP_POLL_ADD
-/// (non-consuming, edge-tracked). Any other opcode ignores the flag and
-/// runs oneshot.
+/// Opcodes that honour `SLOPRING_SQE_MULTISHOT` (SLOPRING § 1.1); any other
+/// opcode ignores the flag and runs oneshot.
 fn multishot_supported(opcode: u8) -> bool {
     matches!(
         opcode,

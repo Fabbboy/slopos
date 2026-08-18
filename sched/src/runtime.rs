@@ -53,30 +53,12 @@ pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Kernel-thread spawner: out-of-OSTD impl of `slopos_ostd::task::KernelThreadSpawner`.
-// ---------------------------------------------------------------------------
-//
-// Drivers and other Phase-2 services spawn kernel threads through OSTD's
-// safe `slopos_ostd::task::spawn(name, entry, priority)` facade; the
-// facade defers to the impl registered here at boot.
-//
-// The `fn()` entry shape comes from OSTD. Internally we trampoline
-// through an `extern "C" fn(*mut c_void)` because that is the
-// scheduler's native `TaskEntry` (`*mut c_void` arg is the legacy task
-// payload; new spawners stash the fn pointer in the payload slot and
-// the trampoline dispatches into it). This trick keeps the scheduler
-// internals stable while exposing a modern signature to drivers.
-
 use slopos_ostd::task::{KernelThreadEntry, KernelThreadSpawner, SpawnError, SpawnedTaskId};
 
-/// Trampoline. The OSTD-facing `spawn` API takes a `fn()`; the
-/// scheduler's native `TaskEntry` is `extern "C" fn(*mut c_void)` with
-/// a different ABI. We bridge by packing the caller's `fn()` into the
-/// `*mut c_void` payload slot — `fn` pointers and data pointers share
-/// size and alignment on every supported target — and recovering the
-/// function pointer here at task entry via OSTD's safe-Rust
-/// `fn_ptr_decode_opt` helper.
+/// Bridges OSTD's `fn()` entry shape to the scheduler's native
+/// `extern "C" fn(*mut c_void)`: the caller's `fn()` rides in the `*mut c_void`
+/// payload slot — fn and data pointers share size and alignment on every
+/// supported target — and is recovered here at task entry.
 pub(crate) extern "C" fn kernel_thread_trampoline(arg: *mut c_void) {
     let raw = arg as *mut ();
     let Some(entry) = slopos_ostd::util::fn_ptr::fn_ptr_decode_opt::<KernelThreadEntry>(raw) else {
@@ -84,7 +66,6 @@ pub(crate) extern "C" fn kernel_thread_trampoline(arg: *mut c_void) {
         return;
     };
 
-    // The running task's own flags, off the guard rather than a raw pointer.
     let fatal_if_panics = slopos_ostd::task::TaskAddr::current().is_some_and(per_cpu::is_idle_task)
         || crate::task_struct::Current::get()
             .is_some_and(|current| current.task().flags & TASK_FLAG_SYSTEM != 0);

@@ -234,7 +234,6 @@ fn resolve_neighbor_and_send(
     }
 }
 
-/// Execute a neighbor action without requiring a [`DeviceHandle`].
 fn execute_neighbor_action_via_registry(_dev: DevIndex, action: super::neighbor::NeighborAction) {
     use super::arp;
     use super::netdev::DEVICE_REGISTRY;

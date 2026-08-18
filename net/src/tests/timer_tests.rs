@@ -1,9 +1,6 @@
 //! Tests for the data-driven timer wheel: schedule + `process_due` dispatch,
 //! cancellation, the `MAX_TIMERS_PER_PROCESS` bound, and fast-forward across a
 //! large clock jump.
-//!
-//! The wheel reads "now" from [`crate::clock`], so each test pins the mock clock
-//! to a known base and advances it to cross deadlines — no per-tick stepping.
 
 use slopos_ostd::KBox;
 use slopos_testing::TestResult;
@@ -250,8 +247,6 @@ pub fn test_timer_empty_wheel_process() -> TestResult {
     pass!()
 }
 
-/// A single large clock jump fires every timer due by then, not just the
-/// nearest.
 pub fn test_timer_fast_forward_fires_all() -> TestResult {
     let (wheel, _clock) = fresh_wheel();
 
@@ -267,7 +262,6 @@ pub fn test_timer_fast_forward_fires_all() -> TestResult {
     pass!()
 }
 
-/// A deadline far beyond any tick-window bound must still fire after one jump.
 pub fn test_timer_large_delay_not_dropped() -> TestResult {
     let (wheel, _clock) = fresh_wheel();
 

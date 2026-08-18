@@ -6,10 +6,8 @@ use slopos_ostd::wl_currency::{self, WL_DELTA};
 
 /// Run `f` against a live task, or report -1 if the id no longer resolves.
 ///
-/// A shared borrow: the target is very often *not* the calling task — the
-/// syscall names an arbitrary id — so an exclusive one would have been a claim
-/// about a task that is concurrently running. The fate trio is atomic for
-/// exactly that reason.
+/// A shared borrow: the syscall names an arbitrary id, so the target is very
+/// often a concurrently running task. The fate trio is atomic for that reason.
 fn with_task<F, R>(task_id: u32, f: F) -> c_int
 where
     F: FnOnce(&Task) -> R,
@@ -30,7 +28,6 @@ pub fn fate_spin() -> FateResult {
 pub fn fate_set_pending(res: FateResult, task_id: u32) -> c_int {
     with_task(task_id, |t| t.set_fate(res.token, res.value))
 }
-/// Take `task_id`'s pending fate, if it has one and the task still exists.
 pub fn fate_take_pending(task_id: u32) -> Option<FateResult> {
     let mut taken = None;
     let _ = with_task(task_id, |t| {

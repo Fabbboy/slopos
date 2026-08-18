@@ -1,12 +1,8 @@
-//! The `ledger` diagnostic command: what each account is holding.
+//! The `ledger` diagnostic command: what each account is holding, plus the
+//! `QUOTA[<phase>]` report line the headroom gate parses.
 //!
-//! Registered from `sched` rather than from OSTD, which defines the arena but
-//! is also linked into userland binaries whose linker script brackets no
-//! kernel section. `sched` owns process identity, which is what an account
-//! row is keyed on.
-//!
-//! Also the emitter of the `QUOTA[<phase>]` report line the headroom gate
-//! parses, for the same reason the lockdep report lives beside its data.
+//! Registered from `sched` rather than from OSTD, which is also linked into
+//! userland binaries whose linker script brackets no kernel section.
 
 use slopos_abi::quota::{QuotaMode, ResourceKind};
 use slopos_ostd::kconsole::{KCMD_INFORMATIONAL, KConsole};
@@ -24,7 +20,6 @@ slopos_ostd::kcommand! {
     run = run_ledger,
 }
 
-/// Render one audit finding.
 fn describe(kc: &mut KConsole<'_>, fault: LedgerFault) {
     match fault {
         LedgerFault::AncestorUnderCount {
@@ -85,12 +80,12 @@ fn describe(kc: &mut KConsole<'_>, fault: LedgerFault) {
     }
 }
 
-/// The runtime form of the ledger's equality invariant.
+/// The runtime form of the ledger's equality invariant; returns the number of
+/// faults found.
 ///
-/// Returns the number of faults found; the caller decides whether that is a
-/// test failure or a console line. This is the only mechanism that can see a
-/// forgotten or unwinder-skipped charge, because the type system's guarantee
-/// stops at "the token is unique", never "the number matches reality".
+/// The only mechanism that can see a forgotten or unwinder-skipped charge: the
+/// type system guarantees the token is unique, never that the number matches
+/// reality.
 pub fn quotacheck(mut emit: impl FnMut(LedgerFault)) -> usize {
     ledger_audit(&mut emit)
 }
@@ -105,12 +100,10 @@ fn mode_name(mode: QuotaMode) -> &'static str {
 
 /// Whether a live process still stands behind `account`.
 ///
-/// A row whose numbers are non-zero with no live process is a **zombie row**:
-/// a charge outliving the process that took it — an in-flight `SCM_RIGHTS`
-/// reference, a keepalive pin the NIC has not reclaimed. Bounded and
-/// self-healing, because the slot's next occupant draws a fresh generation and
-/// the stale refund is a no-op. Listed anyway: a residual risk nobody can see
-/// is indistinguishable from a leak.
+/// A row with non-zero numbers and no live process is a **zombie row**: a
+/// charge outliving the process that took it. Self-healing, because the slot's
+/// next occupant draws a fresh generation and the stale refund is a no-op;
+/// listed anyway, since it is otherwise indistinguishable from a leak.
 fn has_live_process(account: AccountId) -> bool {
     let mut found = false;
     crate::task::task_for_each_active(|task| {
@@ -206,10 +199,9 @@ fn run_ledger(kc: &mut KConsole<'_>) {
     );
 }
 
-/// Emit one `QUOTA[<phase>]` line per account row carrying numbers.
-///
-/// The wire form `scripts/check_quota_headroom.sh` parses. Called at the same
-/// three points the lockdep report is, so one boot answers both ratchets.
+/// Emit one `QUOTA[<phase>]` line per account row carrying numbers — the wire
+/// form `scripts/check_quota_headroom.sh` parses. Called at the same three
+/// points the lockdep report is, so one boot answers both ratchets.
 pub fn quota_report(phase: &str) {
     report_charge_cost();
     let mode = mode_name(quota_mode());
