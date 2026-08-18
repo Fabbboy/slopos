@@ -1,20 +1,15 @@
 //! The single-threaded reactor: it owns the one [`Ring`] and turns ring
 //! completions into woken tasks.
 //!
-//! SLOPRING §7.1 is the load-bearing constraint: deferred completions
-//! progress *only* while a task is blocked inside `ring_enter`, so the
-//! reactor's sole sleep point is [`Reactor::park`] → [`Ring::submit_and_wait`].
-//! On each park it drains the CQ, stores each result in its slot, and wakes
-//! that slot's registered [`Waker`] — which schedules the owning task for
-//! re-poll. The reactor lives in its **own** thread-local (separate from the
-//! scheduler's), so `park` can fire a waker — which borrows the *scheduler's*
-//! cell — without a same-cell re-borrow.
+//! SLOPRING §7.1: deferred completions progress *only* while a task is blocked
+//! inside `ring_enter`, so [`Reactor::park`] is the sole sleep point. The
+//! reactor lives in its **own** thread-local, separate from the scheduler's, so
+//! `park` can fire a waker — which borrows the *scheduler's* cell — without a
+//! same-cell re-borrow.
 //!
-//! Buffer ownership (the UAF guard): the data buffer handed to the kernel is
-//! *moved into its slot* for the whole in-flight window, so it cannot be
-//! freed or moved while the kernel might still write it — even if the owning
-//! future is dropped mid-flight. It comes back to the future on completion,
-//! or is reaped here once a cancellation lands.
+//! A data buffer handed to the kernel is moved into its slot for the whole
+//! in-flight window, so a future dropped mid-flight cannot free or move memory
+//! the kernel might still write.
 
 use core::cell::RefCell;
 use core::task::Waker;
@@ -29,42 +24,27 @@ use crate::ring::{Ring, RingError};
 
 const COOKIE_NONE: u64 = 0;
 const RES_IO_ERR: i32 = -5; // -EIO
-const RES_EINTR: i32 = -4; // -EINTR (transient: a signal interrupted the wait)
+const RES_EINTR: i32 = -4; // -EINTR
 
-/// The cross-core rouse path (Phase-6 Tier B, additive). A reactor parked in
-/// `ring_enter` can only be woken through an fd its ring polls; an `Rc`-based
-/// `!Send` waker cannot cross threads. This self-pipe is the bridge: a
-/// [`super::cross_core`] `Sender` on any thread writes one byte to `write_fd`,
-/// a oneshot `OP_POLL_ADD` on `read_fd` completes in this reactor's `park`, and
-/// the reactor drains the pipe, fires the local wakers in `waiters` (the
-/// receiver tasks), and re-arms the poll. It is created lazily — the first
-/// cross-core receiver constructed on this reactor calls
-/// [`Reactor::ensure_wakeup`]; a reactor with no cross-core receiver never
-/// creates it and behaves exactly as the single-threaded path always has.
-///
-/// A *oneshot* (re-armed each service) poll is used rather than a standing
-/// multishot one: the kernel multishot poll is edge-triggered off a
-/// `last_revents` cache that this reactor's out-of-band pipe drain cannot reset,
-/// so a byte arriving after the drain would not re-fire. A oneshot poll probes
-/// the *current* level on every (re)arm, so a post-drain byte is never lost.
+/// Cross-core rouse bridge: a reactor parked in `ring_enter` can only be woken
+/// through an fd its ring polls, and an `Rc`-based `!Send` waker cannot cross
+/// threads. A [`super::cross_core`] `Sender` on any thread writes one byte to
+/// `write_fd`, a oneshot `OP_POLL_ADD` on `read_fd` completes in this reactor's
+/// `park`, and the reactor drains the pipe and fires `waiters`. Created lazily
+/// by [`Reactor::ensure_wakeup`].
 struct Wakeup {
     read_fd: i32,
     write_fd: i32,
     /// Cookie of the live oneshot `OP_POLL_ADD(read_fd, POLLIN)` row, so `park`
-    /// can recognise its completion. Changes on every re-arm in
-    /// [`Reactor::service_wakeup`].
+    /// can recognise its completion. Changes on every re-arm.
     poll_cookie: u64,
-    /// Local wakers of tasks (cross-core receivers) parked waiting for a
-    /// cross-core item. Fired on every wakeup-byte arrival; receivers re-poll
-    /// and drain their queues. Spurious wakes are harmless (a re-poll that
-    /// finds nothing re-registers).
+    /// Wakers of the cross-core receiver tasks on this reactor, fired on every
+    /// wakeup-byte arrival.
     waiters: Vec<Waker>,
 }
 
 impl Drop for Wakeup {
     fn drop(&mut self) {
-        // The reactor tears down (uninstall sets the cell to None) before the
-        // ring is dropped; close both self-pipe ends so the fds don't leak.
         // The armed poll row is retired by the kernel when its read_fd closes.
         unsafe {
             syscall1(SYSCALL_FS_CLOSE, self.read_fd as u64);
@@ -75,15 +55,12 @@ impl Drop for Wakeup {
 
 struct OpSlot {
     buf: Option<Vec<u8>>,
-    /// FIFO of harvested completions for this op. A oneshot op gets one
-    /// entry; a multishot stream can accumulate several before the
-    /// consumer polls. Each entry is `(res, cqe_flags)`.
+    /// FIFO of harvested `(res, cqe_flags)`; a multishot stream can accumulate
+    /// several before the consumer polls.
     results: VecDeque<(i32, u32)>,
     orphaned: bool,
-    /// The kernel posted a terminal CQE (F_MORE clear) or the op was a
-    /// oneshot whose single completion landed — no more results expected.
+    /// A terminal CQE (`F_MORE` clear) landed — no more results expected.
     terminated: bool,
-    /// Waker of the task awaiting this op; fired when a completion lands.
     waker: Option<Waker>,
 }
 
@@ -92,10 +69,8 @@ pub(super) struct Reactor {
     slots: HashMap<u64, OpSlot>,
     next_cookie: u64,
     in_flight: usize,
-    /// Cross-core rouse self-pipe. `None` until the first cross-core receiver
-    /// arms it via [`Reactor::ensure_wakeup`]; a reactor that never hosts a
-    /// cross-core receiver leaves this `None` and is byte-for-byte the
-    /// single-threaded reactor.
+    /// `None` until the first cross-core receiver arms it via
+    /// [`Reactor::ensure_wakeup`].
     wakeup: Option<Wakeup>,
 }
 
@@ -156,7 +131,7 @@ impl Reactor {
 
     /// Submit one SQE, taking ownership of its (optional) data buffer. The
     /// caller has already filled `addr`/`len`; this stamps a fresh cookie and
-    /// records the slot. Returns the cookie.
+    /// records the slot.
     pub(super) fn submit(&mut self, mut sqe: Sqe, buf: Option<Vec<u8>>) -> Result<u64, RingError> {
         let cookie = self.alloc_cookie();
         sqe.user_data = cookie;
@@ -179,13 +154,11 @@ impl Reactor {
         Ok(cookie)
     }
 
-    /// Submit an SQE armed as **multishot** (`SLOPRING_SQE_MULTISHOT`). The
-    /// kernel keeps the row in flight and posts a CQE (each carrying
-    /// `F_MORE`) on every yield until a terminal event; the slot persists
-    /// across those CQEs and is removed only when its result queue drains
-    /// after termination (see [`Reactor::take_next`]). The slot shape is
-    /// identical to a oneshot's — the `F_MORE`-aware [`Reactor::park`]
-    /// drain is what distinguishes the two.
+    /// Submit an SQE armed as **multishot** (`SLOPRING_SQE_MULTISHOT`): the
+    /// kernel keeps the row in flight and posts an `F_MORE` CQE on every yield
+    /// until a terminal event, so the slot persists across those CQEs and is
+    /// removed only when its result queue drains after termination (see
+    /// [`Reactor::take_next`]).
     pub(super) fn submit_multishot(
         &mut self,
         mut sqe: Sqe,
@@ -213,20 +186,15 @@ impl Reactor {
         None
     }
 
-    /// Pop the next harvested result of a multishot stream. Returns
-    /// `(res, cqe_flags, terminal)` where `terminal` is true for the final
-    /// item of the stream (the kernel's terminal CQE, F_MORE clear). The
-    /// slot is removed only once its result queue is empty *and* the op has
-    /// terminated, so a still-armed stream keeps its slot alive between
-    /// yields.
+    /// Pop the next harvested result of a multishot stream as
+    /// `(res, cqe_flags, terminal)`. The slot is removed only once its result
+    /// queue is empty *and* the op has terminated, so a still-armed stream
+    /// keeps its slot alive between yields.
     pub(super) fn take_next(&mut self, cookie: u64) -> Option<(i32, u32, bool)> {
         let slot = self.slots.get_mut(&cookie)?;
         let (res, flags) = slot.results.pop_front()?;
         let terminal = slot.terminated && slot.results.is_empty();
         if terminal {
-            // `terminated` is set only after the terminal CQE was enqueued,
-            // and we only report terminal once that final result has been
-            // popped — so the queue must be drained here.
             debug_assert!(
                 slot.results.is_empty(),
                 "slopfut: terminal reported with results still queued"
@@ -241,15 +209,12 @@ impl Reactor {
     /// late real completion) is harvested.
     pub(super) fn cancel(&mut self, cookie: u64) {
         match self.slots.get_mut(&cookie) {
-            // Already terminated (oneshot completed, or a multishot whose
-            // terminal CQE already landed): just drop the slot.
             Some(s) if s.terminated => {
                 self.slots.remove(&cookie);
             }
             Some(s) => {
                 s.orphaned = true;
                 s.waker = None;
-                // Discard any buffered interim results — the consumer is gone.
                 s.results.clear();
                 let mut sqe = Sqe::ZERO;
                 sqe.opcode = OP_CANCEL;

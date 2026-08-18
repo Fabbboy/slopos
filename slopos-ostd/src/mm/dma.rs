@@ -164,17 +164,12 @@ static IDENTITY: IdentityMapper = IdentityMapper;
 static IDENTITY_SLOT: &dyn IommuMapper = &IDENTITY;
 
 /// Wire the passthrough [`IdentityMapper`] as the kernel's IOMMU mapper.
-///
-/// Forwards to the single [`register_iommu_mapper`] seam, so the same
-/// once-only / default-deny guarantees apply (its `assert!(prev.is_null())`
-/// rejects a second registration). Default-deny is preserved: a driver that
-/// never allocates DMA touches no mapping, and the slot can only be set once.
 pub fn register_identity_dma_mapper<'brand>(token: &BspToken<'brand>) {
     register_iommu_mapper(token, &IDENTITY_SLOT);
 }
 
 /// Test-only identity-mapper registration that bypasses the `BspToken` and
-/// the double-register assert, so a test can restore the global mapper after
+/// the double-register assert, restoring the global mapper after
 /// [`reset_for_test`] without re-minting the one-shot BSP token.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn register_identity_dma_mapper_for_test() {
@@ -182,16 +177,12 @@ pub fn register_identity_dma_mapper_for_test() {
     IOMMU_MAPPER.inner.store(raw, Ordering::Release);
 }
 
-// ---------------------------------------------------------------------------
-// DmaRun: page ownership for a DMA segment.
-// ---------------------------------------------------------------------------
-
 /// Returns a contiguous run of physical pages to the registered
 /// [`FrameAlloc`](crate::mm::frame::FrameAlloc) on drop.
 ///
-/// One `dealloc` at the head covers the whole run: the allocator recovers a
-/// run's extent from its own descriptor, so `len_pages` is a courtesy
-/// argument rather than the authority on how much comes back.
+/// One `dealloc` at the head covers the whole run: the allocator recovers the
+/// extent from its own descriptor, so `len_pages` is not the authority on how
+/// much comes back.
 struct RunRelease {
     head: PhysAddr,
     len_pages: usize,
@@ -210,19 +201,15 @@ impl Drop for RunRelease {
 ///
 /// [`DmaCoherentMeta`] and [`DmaStreamMeta`] declare
 /// `returns_frame_on_last_drop() == false`, so the per-frame lifecycle resets
-/// each `MetaSlot` but leaves the pages allocated. This type owns the
+/// each `MetaSlot` but leaves the pages allocated; this type owns the
 /// compensating `dealloc`.
 ///
 /// **The field order is load-bearing.** Fields drop in declaration order, so
-/// `segment` — and with it every `MetaSlot` reset — completes before
-/// `release` makes the pages claimable again. That is the ordering
-/// [`Frame`](crate::mm::frame::Frame)'s own destructor establishes for metas
-/// that do return their page: a free-listed paddr always has a slot reading
-/// UNUSED, so the next claimant's `from_unused` cannot lose a race against a
-/// slot that is still TYPED.
+/// every `MetaSlot` reset completes before `release` makes the pages
+/// claimable again — a free-listed paddr must read UNUSED, or the next
+/// claimant's `from_unused` races a slot that is still TYPED.
 struct DmaRun<M: AnyUFrameMeta> {
     segment: USegment<M>,
-    /// Reached only through its `Drop` glue, so tagged `#[allow(dead_code)]`.
     #[allow(dead_code)]
     release: RunRelease,
 }
@@ -230,10 +217,9 @@ struct DmaRun<M: AnyUFrameMeta> {
 impl<M: AnyUFrameMeta> DmaRun<M> {
     /// Allocate `npages` contiguous, zeroed pages and install `M` on each.
     ///
-    /// The release is armed the instant the allocator hands over the run and,
-    /// being the first local declared, is the last local dropped. Every error
-    /// path from there on therefore returns the pages, and so does every
-    /// error path in the callers that take the run by value.
+    /// The release is armed the instant the allocator hands over the run and
+    /// is the last local dropped, so every error path from there on returns
+    /// the pages.
     fn alloc(npages: usize) -> Result<Self, DmaError> {
         let allocator = current_frame_allocator().ok_or(DmaError::NotInitialised)?;
         let opts = FrameAllocOptions {
@@ -268,15 +254,10 @@ impl<M: AnyUFrameMeta> DmaRun<M> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// DmaCoherent.
-// ---------------------------------------------------------------------------
-
 /// IOMMU-mapped, contiguous, coherent (cache-snooped) DMA buffer.
 ///
-/// Constructed via [`Self::alloc`]. Drop releases the IOMMU mapping
-/// and the underlying frames. See module-level docs for the in-flight
-/// DMA caveat — drivers must quiesce the device before drop.
+/// Drop releases the mapping and the frames without a DMA fence: quiesce the
+/// device first.
 pub struct DmaCoherent {
     run: DmaRun<DmaCoherentMeta>,
     iova: u64,
@@ -293,9 +274,7 @@ impl core::fmt::Debug for DmaCoherent {
 
 impl DmaCoherent {
     /// Allocate `npages` contiguous physical pages, install
-    /// [`DmaCoherentMeta`] on each, and IOMMU-map them
-    /// bidirectionally. Requires a registered [`IommuMapper`] and
-    /// [`crate::mm::frame::FrameAlloc`].
+    /// [`DmaCoherentMeta`] on each, and IOMMU-map them bidirectionally.
     pub fn alloc(npages: usize) -> Result<Self, DmaError> {
         if npages == 0 {
             return Err(DmaError::Exhausted);
@@ -310,25 +289,21 @@ impl DmaCoherent {
         Ok(Self { run, iova })
     }
 
-    /// Device-visible IOVA base.
     #[inline]
     pub fn iova(&self) -> u64 {
         self.iova
     }
 
-    /// Total byte length.
     #[inline]
     pub fn len_bytes(&self) -> usize {
         self.run.len_bytes()
     }
 
-    /// Number of pages.
     #[inline]
     pub fn len_pages(&self) -> usize {
         self.run.len_pages()
     }
 
-    /// Physical base address of the underlying contiguous run.
     #[inline]
     pub fn phys_base(&self) -> PhysAddr {
         self.run.head_paddr()
@@ -353,26 +328,14 @@ impl DmaCoherent {
 
 impl Drop for DmaCoherent {
     fn drop(&mut self) {
-        // Driver-side responsibility: device must be quiesced before
-        // the handle drops. OSTD does not issue a DMA fence.
         if let Some(mapper) = current_iommu_mapper() {
             mapper.unmap(self.iova, self.run.len_bytes());
         }
-        // `run` drops after this body: every `MetaSlot` resets, then the
-        // pages go back to the frame allocator.
     }
 }
 
-// ---------------------------------------------------------------------------
-// DmaStream.
-// ---------------------------------------------------------------------------
-
 /// IOMMU-mapped, contiguous, *streaming* DMA buffer carrying an
 /// explicit [`DmaDirection`].
-///
-/// `sync_for_device` / `sync_for_cpu` are no-ops on x86_64 (the
-/// architecture is cache-coherent for DMA); the API is preserved so
-/// drivers can be written portably for future ARM64 support.
 pub struct DmaStream {
     run: DmaRun<DmaStreamMeta>,
     iova: u64,
@@ -464,14 +427,8 @@ impl Drop for DmaStream {
         if let Some(mapper) = current_iommu_mapper() {
             mapper.unmap(self.iova, self.run.len_bytes());
         }
-        // `run` drops after this body: every `MetaSlot` resets, then the
-        // pages go back to the frame allocator.
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests.
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

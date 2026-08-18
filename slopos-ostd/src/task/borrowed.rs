@@ -420,7 +420,6 @@ impl<K, U> TaskInner<K, U> {
         self.children.pop_front()
     }
 
-    /// The head child without detaching it.
     #[inline]
     pub fn children_peek(&self) -> Option<core::ptr::NonNull<TaskInner<K, U>>> {
         self.children.iter().next()
@@ -447,7 +446,6 @@ impl<K, U> TaskInner<K, U> {
     // Reference in, pointer out: a Treiber successor's lifetime is governed by
     // the parked reference the link represents, not by a Rust borrow.
 
-    /// This task's remote-wake inbox successor.
     #[inline]
     pub fn inbox_link(&self) -> &Link<TaskInner<K, U>, RemoteWakeRole> {
         &self.remote_inbox_link
@@ -488,7 +486,6 @@ impl<K, U> TaskInner<K, U> {
         ))
     }
 
-    /// The task's saved stack pointer.
     #[inline]
     pub fn context_rsp(&self) -> u64 {
         self.read_context_field(core::mem::offset_of!(
@@ -497,7 +494,6 @@ impl<K, U> TaskInner<K, U> {
         ))
     }
 
-    /// The task's saved code selector.
     #[inline]
     pub fn context_cs(&self) -> u64 {
         self.read_context_field(core::mem::offset_of!(
@@ -506,7 +502,6 @@ impl<K, U> TaskInner<K, U> {
         ))
     }
 
-    /// The task's saved stack selector.
     #[inline]
     pub fn context_ss(&self) -> u64 {
         self.read_context_field(core::mem::offset_of!(
@@ -515,7 +510,6 @@ impl<K, U> TaskInner<K, U> {
         ))
     }
 
-    /// The task's saved RFLAGS.
     #[inline]
     pub fn context_rflags(&self) -> u64 {
         self.read_context_field(core::mem::offset_of!(
@@ -526,21 +520,16 @@ impl<K, U> TaskInner<K, U> {
 
     /// One racy, unaligned `u64` read out of the saved `context`.
     ///
-    /// Note the two distinct `TaskContext` types: `context` is
-    /// `kernel_task::TaskContext`, the packed 25-register interrupt-frame
-    /// snapshot, while `switch_ctx` is `task::task::TaskContext`, the
-    /// callee-saved frame the switch asm uses. They share a name and not a
-    /// layout, which is why the two readers below cannot be one.
-    ///
-    /// Offset-driven so the six getters above share a single `unsafe` block
-    /// rather than six copies of the same three lines.
+    /// Two distinct types share the name `TaskContext`: `context` is
+    /// `kernel_task::TaskContext`, the packed interrupt-frame snapshot, while
+    /// `switch_ctx` is `task::task::TaskContext`, the callee-saved frame the
+    /// switch asm uses. Different layouts, so the two readers cannot be one.
     #[inline]
     fn read_context_field(&self, offset: usize) -> u64 {
         let base = self.context.as_ptr_racy().cast::<u8>();
         // SAFETY: `offset` is an `offset_of!` into the very `TaskContext` this
-        // pointer addresses, so the read is in bounds. `read_unaligned`
-        // because the struct is packed; no reference is formed, so a
-        // concurrent write is a torn value rather than UB.
+        // pointer addresses, so the read is in bounds; `read_unaligned` because
+        // the struct is packed, and no reference is formed.
         unsafe { base.add(offset).cast::<u64>().read_unaligned() }
     }
 
@@ -554,13 +543,11 @@ impl<K, U> TaskInner<K, U> {
         )
     }
 
-    /// The saved frame pointer of a descheduled task.
     #[inline]
     pub fn switch_ctx_rbp(&self) -> u64 {
         self.read_switch_ctx_field(core::mem::offset_of!(crate::task::TaskContext, rbp))
     }
 
-    /// The saved RFLAGS of a descheduled task.
     #[inline]
     pub fn switch_ctx_rflags(&self) -> u64 {
         self.read_switch_ctx_field(core::mem::offset_of!(crate::task::TaskContext, rflags))
