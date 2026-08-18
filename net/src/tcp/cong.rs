@@ -192,41 +192,27 @@ impl Cubic {
         self.tcp_cwnd = 0;
     }
 
-    /// Compute the Hystart++ RTT increase threshold (ms).
-    /// `clamp(baseline / RTT_DIVISOR, MIN_RTT_THRESH, MAX_RTT_THRESH)`.
+    /// The Hystart++ RTT increase threshold (ms).
     #[inline]
     fn hystart_thresh(&self, baseline_rtt_ms: u32) -> u32 {
         (baseline_rtt_ms / RTT_DIVISOR).clamp(MIN_RTT_THRESH_MS, MAX_RTT_THRESH_MS)
     }
 
-    /// Compute CUBIC's K: the time (ms) to grow from `ssthresh` back to
-    /// `origin_point`.
-    ///
-    /// K = ∛( (W_max − cwnd) / C )  in seconds, converted to ms.
-    ///
-    /// Since `origin_point = W_max` (bytes) and `cwnd ≈ ssthresh` at
-    /// epoch start:
-    ///   K_ms³ = (origin_point − cwnd) * 1e9 / (C * mss)
-    ///         = (origin_point − cwnd) * 5e9 / (2 * mss)
-    ///
-    /// We clamp `origin_point − cwnd` to 0 when cwnd ≥ origin_point
-    /// (which happens after fast convergence adjustments).
+    /// CUBIC's K: the time (ms) to grow from `ssthresh` back to
+    /// `origin_point`, K = ∛((W_max − cwnd) / C), so in bytes and ms
+    /// K_ms³ = (origin_point − cwnd) * 5e9 / (2 * mss).
     fn compute_k(&self, cwnd_at_epoch: u32) -> u64 {
         let diff = self.origin_point.saturating_sub(cwnd_at_epoch);
         if diff == 0 {
             return 0;
         }
-        // K_ms = cbrt( diff * 5_000_000_000 / (2 * mss) )
-        //      = cbrt( diff * 2_500_000_000 / mss )
         let numerator = diff as u64 * (C_DEN * 1_000_000_000) / (C_NUM * self.mss as u64);
         integer_cbrt(numerator)
     }
 
-    /// Compute W_cubic(t_ms) in bytes.
+    /// W_cubic(t_ms) in bytes.
     fn w_cubic(&self, t_ms: u64) -> u32 {
-        // W_cubic(t) = C * (t − K)³ + origin_point   (in segments)
-        // In bytes:  = origin_point + C * mss * (t − K)³ / 1e9
-        //            = origin_point + 2 * mss * (t − K)³ / (5 * 1e9)
+        // origin_point + C * mss * (t − K)³ / 1e9, with C = C_NUM / C_DEN.
         let (delta_ms, above) = if t_ms >= self.k_ms {
             (t_ms - self.k_ms, true)
         } else {
@@ -265,8 +251,7 @@ impl CongestionControl for Cubic {
             return;
         }
 
-        // Recovery exit check: if snd_una has passed the recover point,
-        // exit recovery and deflate cwnd to ssthresh.  RFC 6582 §3.2.
+        // RFC 6582 §3.2: leaving recovery deflates cwnd to ssthresh.
         if let Some(recover) = self.recover {
             if seq_ge(snd_una, recover) {
                 self.recover = None;
@@ -276,37 +261,31 @@ impl CongestionControl for Cubic {
             return;
         }
 
-        // Update Hystart++ per-sample RTT tracking.
         if let Some(rtt) = rtt_sample_ms {
             if rtt < self.curr_round_min_rtt_ms {
                 self.curr_round_min_rtt_ms = rtt;
             }
         }
 
-        // -- Slow start (cwnd < ssthresh) -----------------------------------
         if self.cwnd < self.ssthresh {
-            // Hystart++ round tracking: detect round boundary.
             if !self.round_started {
-                // First ACK ever — seed the round.
                 self.round_start = snd_nxt;
                 self.round_started = true;
             } else if seq_ge(snd_una, self.round_start) {
-                // Round completed.
                 if self.last_round_min_rtt_ms != 0 && self.curr_round_min_rtt_ms != u32::MAX {
                     let thresh = self.hystart_thresh(self.last_round_min_rtt_ms);
 
                     if self.in_css {
-                        // CSS: check if the RTT increase was a false alarm.
+                        // The RTT increase was a false alarm.
                         if self.curr_round_min_rtt_ms
                             < self.css_baseline_rtt_ms.saturating_add(thresh)
                         {
-                            // False alarm — revert to standard SS.
                             self.in_css = false;
                             self.css_rounds = 0;
                         } else {
                             self.css_rounds += 1;
                             if self.css_rounds >= CSS_ROUNDS {
-                                // CSS rounds exhausted → enter CA.
+                                // Pinning ssthresh to cwnd is what enters CA.
                                 self.ssthresh = self.cwnd;
                                 self.in_css = false;
                                 self.css_rounds = 0;
@@ -315,7 +294,6 @@ impl CongestionControl for Cubic {
                     } else if self.curr_round_min_rtt_ms
                         >= self.last_round_min_rtt_ms.saturating_add(thresh)
                     {
-                        // RTT increased beyond threshold → enter CSS.
                         self.in_css = true;
                         self.css_rounds = 0;
                         self.css_baseline_rtt_ms = self.curr_round_min_rtt_ms;

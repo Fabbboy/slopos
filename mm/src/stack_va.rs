@@ -1,43 +1,13 @@
 //! Generic fixed-stride VA-region slot allocator with a per-CPU cache.
 //!
-//! One implementation, parameterised over [`StackRegion`].  Replaces
-//! the historical `kstack_va.rs` and `ustack_va.rs` mirror modules.
+//! A `SpinLock`-protected global bitmap allocator is the source of truth; a
+//! `PreemptGuard`-protected per-CPU cache absorbs the warm path in front of
+//! it. The global `backed_bitmap` may lag for slots living in a CPU's cache
+//! and is re-synchronised on spill.
 //!
-//! # Two-tier structure
-//!
-//! - **Global allocator** ([`StackVaAllocator<R, WORDS>`], protected by
-//!   `SpinLock` at `LOCK_LEVEL_ALLOCATOR`) is the source of truth for
-//!   slot state across the whole system.
-//! - **Per-CPU cache** ([`PerCpuStackCache<R, CAP>`], protected by
-//!   `PreemptGuard` only) sits in front of the global and absorbs the
-//!   warm path so a cache hit never touches the global lock.
-//!
-//! The cache carries a `was_backed` bit per slot so the caller sees the
-//! fast-reuse path for slots that already have mapped frames.  The
-//! global `backed_bitmap` is allowed to lag for slots that live entirely
-//! in a CPU's cache; it gets re-synchronised on spill so a future refill
-//! picks up the correct state.
-//!
-//! # Per-region wiring
-//!
-//! The two concrete regions (`KstackRegion`, `UstackRegion`) live as
-//! private `mod kstack` / `mod ustack` blocks at the bottom of this
-//! file.  Each owns its own statics (one `SpinLock<StackVaAllocator<…>>`
-//! plus one `PcpArray<…>`) and implements the [`StackRegion`] trait's
-//! hidden `_*` wiring methods that the public top-level helpers
-//! ([`alloc_slot`], [`init`], [`pcp_drain_all`], …) dispatch through.
-//! The two regions' statics are intentionally separate so their locks
-//! contend independently.
-//!
-//! # Safety boundaries
-//!
-//! The VA allocator itself is 100% safe Rust: it manipulates bitmap
-//! words and slot indices and never dereferences a stack pointer. The
-//! page-table sentinel install touches
-//! `mm::kernel_mappings::kernel_map_4kb`, which is a safe wrapper over
-//! the kernel master's cursor. The per-CPU cache delegates to OSTD's
-//! `CpuLocal::get_pinned_mut`, which is itself a safe surface gated by
-//! `PreemptGuard` CPU pinning.
+//! The concrete regions (`KstackRegion`, `UstackRegion`) live in the private
+//! `mod kstack` / `mod ustack` blocks below and keep separate statics so
+//! their locks contend independently.
 
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};

@@ -15,10 +15,6 @@ pub const EAI_SYSTEM: i32 = -11;
 pub const AI_PASSIVE: i32 = 0x01;
 pub const AI_NUMERICHOST: i32 = 0x04;
 
-// =============================================================================
-// AddrInfo structure
-// =============================================================================
-
 /// Result node from getaddrinfo — POSIX `struct addrinfo`.
 #[repr(C)]
 pub struct AddrInfo {
@@ -31,10 +27,6 @@ pub struct AddrInfo {
     pub ai_canonname: *mut u8,
     pub ai_next: *mut AddrInfo,
 }
-
-// =============================================================================
-// getaddrinfo / freeaddrinfo / gai_strerror
-// =============================================================================
 
 /// Simplified getaddrinfo — resolves a hostname or dotted-decimal IP.
 ///
@@ -56,19 +48,16 @@ pub unsafe extern "C" fn getaddrinfo(
         return EAI_NONAME;
     }
 
-    // Determine requested socket type from hints
     let (sock_type, protocol) = if !hints.is_null() {
         ((*hints).ai_socktype, (*hints).ai_protocol)
     } else {
         (SOCK_STREAM, 0)
     };
 
-    // Try parsing as dotted-decimal first
     let addr_u32 = super::addr::inet_addr(node);
     let resolved_addr = if addr_u32 != super::addr::INADDR_NONE {
         addr_u32
     } else {
-        // Call the kernel resolver
         let hostname_len = u_strlen(node);
         let mut result_buf = [0u8; 4];
         match Sys::resolve(node, hostname_len, result_buf.as_mut_ptr()) {
@@ -77,7 +66,6 @@ pub unsafe extern "C" fn getaddrinfo(
         }
     };
 
-    // Allocate AddrInfo + SockAddrIn in a single malloc
     let alloc_size = core::mem::size_of::<AddrInfo>() + core::mem::size_of::<SockAddrIn>();
     let ptr = malloc::alloc(alloc_size);
     if ptr.is_null() {
@@ -87,13 +75,11 @@ pub unsafe extern "C" fn getaddrinfo(
     let ai = ptr as *mut AddrInfo;
     let sa = (ptr as *mut u8).add(core::mem::size_of::<AddrInfo>()) as *mut SockAddrIn;
 
-    // Fill in SockAddrIn
     core::ptr::write_bytes(sa, 0, 1);
     (*sa).sin_family = AF_INET as u16;
     (*sa).sin_port = 0; // Service port parsing is not implemented
     (*sa).sin_addr = resolved_addr;
 
-    // Fill in AddrInfo
     (*ai).ai_flags = 0;
     (*ai).ai_family = AF_INET;
     (*ai).ai_socktype = sock_type;
@@ -113,15 +99,13 @@ pub unsafe extern "C" fn freeaddrinfo(res: *mut AddrInfo) {
     let mut cur = res;
     while !cur.is_null() {
         let next = (*cur).ai_next;
-        // AddrInfo and SockAddrIn were allocated as a single block —
-        // ai_addr points inside the same allocation, so only free the
-        // AddrInfo pointer.
+        // AddrInfo and SockAddrIn share one allocation; `ai_addr` points inside
+        // it, so only the AddrInfo pointer is freed.
         malloc::dealloc(cur as *mut core::ffi::c_void);
         cur = next;
     }
 }
 
-/// Return a string describing a getaddrinfo error code.
 #[unsafe(no_mangle)]
 pub extern "C" fn gai_strerror(errcode: i32) -> *const u8 {
     match errcode {

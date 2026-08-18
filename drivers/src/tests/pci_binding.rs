@@ -1,11 +1,8 @@
 //! PCI declarative-match + binding/claim regression tests.
 //!
 //! Exercises the registry's matchmaker core (`MatchIndex` + `matchmake`) over
-//! synthetic drivers and synthetic devices, with a heap-backed claim sink — so
-//! nothing touches real hardware or the live `CLAIMED_BY` table. Covers index
-//! correctness (priority-sorted, deduped candidates), one-driver-per-device
-//! binding, dup-claim prevention, specific-beats-generic priority ordering, and
-//! the deferred-probe substrate.
+//! synthetic drivers and devices with a heap-backed claim sink, so nothing
+//! touches real hardware or the live `CLAIMED_BY` table.
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -20,11 +17,6 @@ use crate::pci::{
     matchmake,
 };
 
-// ---------------------------------------------------------------------------
-// Synthetic device + heap-backed claim sink.
-// ---------------------------------------------------------------------------
-
-/// A synthetic device with just the fields matching reads.
 fn device(vendor: u16, dev: u16, class: u8, subclass: u8) -> PciDeviceInfo {
     let mut d = PciDeviceInfo::zeroed();
     d.vendor_id = vendor;
@@ -34,8 +26,8 @@ fn device(vendor: u16, dev: u16, class: u8, subclass: u8) -> PciDeviceInfo {
     d
 }
 
-/// `ClaimSink` backed by a heap `KVec`, indexed by device index. Single-
-/// threaded, so a `RefCell` suffices — no lock and no lock-graph interaction.
+/// `ClaimSink` backed by a `KVec` indexed by device index; single-threaded, so
+/// a `RefCell` suffices and no lock enters the lock graph.
 struct TestClaims {
     bound: RefCell<KVec<Option<&'static str>>>,
 }

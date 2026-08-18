@@ -149,62 +149,42 @@ const _: () = {
     );
 };
 
-// =============================================================================
-// Reliable Abort Core — per-CPU emergency fault stacks
-// =============================================================================
-//
-// The fatal-fault / panic path switches BOTH the SAFE stack (RSP) and the
-// SafeStack DATA stack to dedicated per-CPU emergency stacks before any
-// `core::fmt` runs, so panic formatting cannot overflow a near-full task stack
-// into its guard page (the recursive-#PF that hides the original fault). These
-// are SEPARATE from the IST/EXC_DSTACK stacks so a fault nested on top of the
-// panic (NMI only — IRQs are off) cannot collide with the report in progress.
-//
-// Layout (above the EXC_DSTACK region, still in the kernel higher half):
-//   EXC_DSTACK_REGION_BASE          = 0xFFFF_FFFF_F000_0000
-//   ... MAX_CPUS slots, 128 KB stride ...
-//   EMERGENCY_DSTACK_REGION_BASE    = 0xFFFF_FFFF_F200_0000  (data stacks)
-//   ... MAX_CPUS slots, 128 KB stride ...
-//   EMERGENCY_SAFE_STACK_REGION_BASE= 0xFFFF_FFFF_F400_0000  (safe/RSP stacks)
-//   ... MAX_CPUS slots, 64 KB stride ...
+// The fatal-fault/panic path switches both the safe (RSP) and SafeStack data
+// stacks to these per-CPU emergency stacks before any `core::fmt` runs, so
+// panic formatting cannot overflow a near-full task stack into its guard page.
+// They are separate from the IST/EXC_DSTACK stacks so an NMI nested on top of
+// the panic cannot collide with the report in progress.
 
-/// Base of the per-CPU emergency DATA-stack region (right above EXC_DSTACK).
 pub const EMERGENCY_DSTACK_REGION_BASE: u64 =
     EXC_DSTACK_REGION_BASE + (slopos_arch::pcr::MAX_CPUS as u64) * EXC_DSTACK_REGION_STRIDE;
 
-/// Stride per CPU slot (128 KB: 4 KB guard + 124 KB usable), matching EXC_DSTACK.
+/// Stride per CPU slot (128 KB: 4 KB guard + 124 KB usable).
 pub const EMERGENCY_DSTACK_REGION_STRIDE: u64 = 0x0002_0000;
 
-/// Guard page size for the emergency data stack (one unmapped 4 KB page).
 pub const EMERGENCY_DSTACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
 
 /// Usable bytes of one CPU's emergency data stack (124 KB).
 pub const EMERGENCY_DSTACK_USABLE_SIZE: u64 =
     EMERGENCY_DSTACK_REGION_STRIDE - EMERGENCY_DSTACK_GUARD_SIZE;
 
-/// Usable pages of one CPU's emergency data stack.
 pub const EMERGENCY_DSTACK_PAGES: u64 = EMERGENCY_DSTACK_USABLE_SIZE / PAGE_SIZE_4KB;
 
-/// Base of the per-CPU emergency SAFE-stack region (right above emergency data).
 pub const EMERGENCY_SAFE_STACK_REGION_BASE: u64 = EMERGENCY_DSTACK_REGION_BASE
     + (slopos_arch::pcr::MAX_CPUS as u64) * EMERGENCY_DSTACK_REGION_STRIDE;
 
 /// Stride per CPU slot (64 KB: 4 KB guard + 60 KB usable).
 pub const EMERGENCY_SAFE_STACK_REGION_STRIDE: u64 = 0x0001_0000;
 
-/// Guard page size for the emergency safe stack (one unmapped 4 KB page).
 pub const EMERGENCY_SAFE_STACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
 
 /// Usable bytes of one CPU's emergency safe stack (60 KB).
 pub const EMERGENCY_SAFE_STACK_USABLE_SIZE: u64 =
     EMERGENCY_SAFE_STACK_REGION_STRIDE - EMERGENCY_SAFE_STACK_GUARD_SIZE;
 
-/// Usable pages of one CPU's emergency safe stack.
 pub const EMERGENCY_SAFE_STACK_PAGES: u64 = EMERGENCY_SAFE_STACK_USABLE_SIZE / PAGE_SIZE_4KB;
 
-/// Exclusive top of the whole emergency-stack reservation; must stay within the
-/// kernel higher half. A compile-time guard against the regions running off the
-/// end of the canonical address space as MAX_CPUS grows.
+/// Guards the emergency-stack reservation against running off the end of the
+/// kernel higher half as MAX_CPUS grows.
 const _: () = {
     let top = EMERGENCY_SAFE_STACK_REGION_BASE
         + (slopos_arch::pcr::MAX_CPUS as u64) * EMERGENCY_SAFE_STACK_REGION_STRIDE;
@@ -214,15 +194,6 @@ const _: () = {
     );
 };
 
-// =============================================================================
-// Default Process Memory Layout
-// =============================================================================
-
-/// Default (non-randomized) process memory layout.
-///
-/// Used as the base layout for ASLR randomization and heap limit checks.
-/// All fields are compile-time constants; ASLR produces a modified copy at
-/// process creation time.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ProcessMemoryLayout {
@@ -236,6 +207,9 @@ pub struct ProcessMemoryLayout {
     pub user_space_end: u64,
 }
 
+/// Default (non-randomized) process memory layout, used as the base for ASLR
+/// randomization and heap limit checks; ASLR produces a modified copy at
+/// process creation time.
 pub const DEFAULT_PROCESS_LAYOUT: ProcessMemoryLayout = ProcessMemoryLayout {
     code_start: PROCESS_CODE_START_VA,
     data_start: PROCESS_DATA_START_VA,
@@ -247,24 +221,14 @@ pub const DEFAULT_PROCESS_LAYOUT: ProcessMemoryLayout = ProcessMemoryLayout {
     user_space_end: USER_SPACE_END_VA,
 };
 
-// =============================================================================
-// Process Limits
-// =============================================================================
-
-/// Maximum number of processes.
-///
-/// Re-exported from `abi` rather than declared here: the process registry,
-/// this crate's address-space table and the descriptor tables key on each
-/// other's slot indices, so the bound is one number in the one crate all
-/// three can see.
+/// Re-exported from `abi` rather than declared here: the process registry, this
+/// crate's address-space table and the descriptor tables key on each other's
+/// slot indices, so the bound must be one number all three can see.
 pub use slopos_abi::task::MAX_PROCESSES;
 
-/// Highest process id the allocator ever hands out.
-///
-/// Ids start at 1, so the id space is `1..=MAX_PROCESS_ID`. It is as wide
-/// as the slot space because nothing indexes an array by process id: the
-/// per-process shootdown table is keyed by address-space slot, and every
-/// other per-process table resolves its slot by lookup.
+/// Highest process id the allocator ever hands out; ids start at 1, so the id
+/// space is `1..=MAX_PROCESS_ID`. It is as wide as the slot space because
+/// nothing indexes an array by process id.
 pub const MAX_PROCESS_ID: u32 = MAX_PROCESSES as u32;
 
 // The free-id ring is `MAX_PROCESSES` entries of `u16`, and every issued
@@ -272,6 +236,3 @@ pub const MAX_PROCESS_ID: u32 = MAX_PROCESSES as u32;
 const _: () = assert!(MAX_PROCESS_ID as usize <= MAX_PROCESSES);
 const _: () = assert!(MAX_PROCESS_ID <= u16::MAX as u32);
 const _: () = assert!(MAX_PROCESS_ID > 0);
-
-// Note: INVALID_PROCESS_ID is defined in abi/src/task.rs as the canonical location.
-// Use `slopos_abi::task::INVALID_PROCESS_ID` directly.

@@ -160,33 +160,13 @@ pub fn set_driver_ok(caps: &VirtioMmioCaps) {
     }
 }
 
-// =============================================================================
-// MSI-X / MSI Interrupt Setup
-// =============================================================================
-
-/// Set up the best available interrupt mechanism for a VirtIO device.
-///
-/// Thin adapter over the shared `driver_core::msi` orchestration: that lifts
-/// the allocate → configure → register dance over the existing
-/// [`crate::msix`] / `crate::msi` primitives and attaches each vector's owned
-/// IRQ binding to the device's [`BoundDevice`] resource bag (so a failed probe
-/// releases them — no `mem::forget` leak). This adapter adds only the
-/// virtio-specific finishing touches: silencing the config-change MSI-X vector
-/// and enabling MSI-X on the PCI function, then re-wrapping into the
-/// [`VirtioMsixState`] shape callers already consume.
-///
-/// Tries MSI-X first (per-queue vectors), then MSI (single shared vector).
-///
-/// # VirtIO initialisation ordering
-///
 /// Must be called **after** feature negotiation and **before**
 /// [`set_driver_ok`]; the returned vectors are written into the queues during
 /// queue setup, which must also precede `DRIVER_OK`. The config-change MSI-X
 /// entry is intentionally left at [`VIRTIO_MSI_NO_VECTOR`].
 ///
-/// Returns `Err` if the device has neither MSI-X nor MSI — VirtIO modern
-/// devices on QEMU q35 always have MSI-X, so this indicates a configuration or
-/// hardware problem.
+/// `Err` means the device has neither MSI-X nor MSI, which on QEMU q35 points at
+/// a configuration or hardware problem rather than an unsupported device.
 pub fn setup_interrupts<H: Fn(u8) + Clone + Send + Sync + 'static>(
     bound: &mut BoundDevice<'_>,
     caps: &VirtioMmioCaps,

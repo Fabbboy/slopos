@@ -1,29 +1,7 @@
-//! Prefix-length-bucketed routing table for IPv4.
-//!
-//! # Architecture
-//!
-//! Routes are stored in a fixed-size array of 33 buckets (one per possible
-//! prefix length, /0 through /32).  Lookup iterates from the longest prefix
-//! (/32) to the shortest (/0), checking only routes at each prefix length.
-//! This gives O(32) worst-case lookup regardless of the total number of routes.
-//!
-//! Within each bucket, routes are sorted by metric (lowest first) so that the
-//! first match at any prefix length is automatically the best-metric route.
-//!
-//! # Concurrency
-//!
-//! All mutable state is behind an [`SpinLock`].  The lock is held briefly for
-//! lookups and modifications.  For a hobby OS with a single-digit route count
-//! this is more than sufficient.
-//!
-//! # Integration
-//!
-//! - **DHCP**: calls [`RouteTable::add`] via [`super::iface_ctl::configure_ipv4`]
-//!   when a lease is obtained, adding both the connected-subnet route and the
-//!   default gateway route.
-//! - **IPv4 egress**: calls [`RouteTable::lookup`] to determine the outgoing
-//!   device and next-hop address for each packet.
-//! - **Loopback**: the `127.0.0.0/8` connected route is added at kernel init.
+//! Prefix-length-bucketed routing table for IPv4: 33 buckets, one per prefix
+//! length. Lookup walks /32 down to /0, so longest-prefix match is O(32)
+//! regardless of route count; within a bucket routes are sorted by metric, so
+//! the first match at a length is the best-metric one.
 
 use core::fmt;
 
@@ -41,43 +19,25 @@ use slopos_ostd::{write_array_field, write_init_field};
 use super::types::{DevIndex, Ipv4Addr};
 use crate::netmon::netmon_post;
 
-// =============================================================================
-// 3B.1 — RouteEntry
-// =============================================================================
-
-/// Maximum number of routes per prefix-length bucket.
 const MAX_ROUTES_PER_BUCKET: usize = 16;
 
-/// A single entry in the routing table.
-///
-/// Routes are compared by `(prefix, prefix_len)` for equality and sorted by
-/// `metric` within a bucket.
 #[derive(Clone, Copy)]
 pub struct RouteEntry {
-    /// Network prefix (e.g. `192.168.1.0` for a /24 route).
     pub prefix: Ipv4Addr,
     /// Prefix length in bits (0–32).
     pub prefix_len: u8,
-    /// Gateway address.  [`Ipv4Addr::UNSPECIFIED`] means directly connected —
-    /// the destination is on the local subnet and no gateway hop is needed.
+    /// [`Ipv4Addr::UNSPECIFIED`] means directly connected — no gateway hop.
     pub gateway: Ipv4Addr,
-    /// Outgoing device index.
     pub dev: DevIndex,
-    /// Route metric (lower = preferred).  Used to break ties when multiple
-    /// routes match at the same prefix length.
+    /// Lower is preferred; breaks ties among routes at the same prefix length.
     pub metric: u32,
 }
 
 impl RouteEntry {
-    /// Returns `true` if `dst` falls within this route's prefix/prefix_len.
-    ///
-    /// The check masks both `dst` and `self.prefix` with a mask derived from
-    /// `self.prefix_len` and compares.  A prefix_len of 0 matches everything
-    /// (default route).
     #[inline]
     pub fn matches(&self, dst: Ipv4Addr) -> bool {
         if self.prefix_len == 0 {
-            return true; // default route matches everything
+            return true;
         }
         let mask = prefix_len_to_mask(self.prefix_len);
         (dst.to_u32_be() & mask) == (self.prefix.to_u32_be() & mask)

@@ -1,27 +1,17 @@
 //! Pinned user buffer — the sound `pin_user_pages(FOLL_PIN)` analogue that
-//! backs SlopRing registered / provided buffers (the io_uring zero-copy path).
+//! backs SlopRing registered / provided buffers.
 //!
-//! [`PinnedUserBuffer::pin`] walks a user VA range and takes an owning
-//! `AnonymousMeta` ref-count on each backing frame (via
-//! [`UFrame::wrap_user_paddr`], which hits `from_in_use` for an already-mapped
-//! page). While the handle lives the frames cannot be freed or recycled — even
-//! if the owner `munmap`s the range — exactly the UAF guard the SlopRing region
-//! mapping uses (the user PTE holds one ref, the pin holds a second). `Drop`
-//! releases every ref.
+//! [`PinnedUserBuffer::pin`] takes an owning `AnonymousMeta` ref on each backing
+//! frame, so while the handle lives the frames cannot be freed or recycled —
+//! even if the owner `munmap`s the range. `Drop` releases every ref.
 //!
-//! Access is **volatile byte-copy only** ([`copy_out`](PinnedUserBuffer::copy_out)
-//! / [`copy_in`](PinnedUserBuffer::copy_in)) — never a `&[u8]`/`&mut [u8]` over
-//! the pages. The pinned memory stays user-mapped and the owner may write it
-//! concurrently, so a non-volatile Rust reference would be instant aliasing UB
-//! (SLOPRING § 5.3 / framekernel AD-3). Volatile access makes a concurrent user
-//! write a well-defined data race instead. This type composes only **safe**
-//! `slopos-ostd` primitives, so `mm` stays `#![forbid(unsafe_code)]` and the
-//! feature adds no `unsafe` anywhere.
+//! Access is **volatile byte-copy only**: the pinned memory stays user-mapped
+//! and the owner may write it concurrently, so a `&[u8]`/`&mut [u8]` over the
+//! pages would be instant aliasing UB (SLOPRING § 5.3 / framekernel AD-3).
 //!
-//! Only **anonymous** user memory is pinnable (the meta the page mapping uses,
-//! [`ostd_map_4kb_user`](crate::user_mappings::ostd_map_4kb_user)); file- and
-//! memfd-backed pages carry a different frame meta and are rejected with
-//! [`PinError::NotAnonymous`], matching `IORING_REGISTER_BUFFERS`.
+//! Only **anonymous** user memory is pinnable; file- and memfd-backed pages
+//! carry a different frame meta and are rejected with
+//! [`PinError::NotAnonymous`].
 
 use slopos_abi::addr::VirtAddr;
 use slopos_abi::quota::PinnedBytesAxis;
@@ -39,8 +29,8 @@ const PAGE_MASK: u64 = (PAGE_SIZE as u64) - 1;
 /// the per-registration page-table walk and the frame `KVec`.
 pub const MAX_PIN_BYTES: usize = 1 << 30;
 
-/// Why a pin attempt failed. Every variant maps to a typed errno at the ring
-/// boundary — never UB.
+/// Why a pin attempt failed; every variant maps to a typed errno at the ring
+/// boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PinError {
     /// `len == 0`, or `va + len` overflows the address space.
@@ -58,39 +48,29 @@ pub enum PinError {
 }
 
 /// One contiguous physical run of a pinned buffer, for DMA descriptor
-/// programming (a NIC TX descriptor can point at `paddr` directly).
+/// programming.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UIoSlice {
     pub paddr: u64,
     pub len: u32,
 }
 
-/// A user VA range pinned for the lifetime of this handle. Accessed only
-/// through volatile byte-copy; holds one owning frame ref per backing page.
+/// A user VA range pinned for the lifetime of this handle.
 pub struct PinnedUserBuffer {
-    /// Byte offset of the pinned range within its first page.
     base_off: usize,
-    /// Pinned byte length.
     len: usize,
-    /// One owning ref per backing page, in range order. `Drop` releases all.
+    /// One owning ref per backing page, in range order.
     frames: KVec<UFrame<AnonymousMeta>>,
-    /// The pinned bytes, charged to the ring owner.
-    ///
-    /// A tier-2 charge: the amount is the byte count, carried rather than
-    /// recomputed at the refund site, and refunded by this struct's own `Drop`
-    /// with exactly the number it holds. Pinned memory is the only genuinely
-    /// unbounded resource here — a pin holds frames against reclaim for as
-    /// long as the handle lives, and nothing else caps how many a process may
-    /// take.
+    /// Charged to the ring owner and refunded by this struct's own `Drop` with
+    /// exactly the number it holds.
     #[expect(dead_code, reason = "held for ownership; dropping it is the refund")]
     pin_charge: Charge<PinnedBytesAxis>,
 }
 
 impl PinnedUserBuffer {
-    /// Pin `[va, va + len)` in process `pid`'s address space. Every page must
-    /// be present, user-accessible, and anonymous; the whole range is pinned
-    /// atomically (on any per-page failure, the refs taken so far are released
-    /// as the partial `frames` vec drops).
+    /// Pin `[va, va + len)` in `process`'s address space. Every page must be
+    /// present, user-accessible and anonymous; the range is all-or-nothing —
+    /// on a per-page failure the partial `frames` vec drops the refs taken.
     pub fn pin(
         process: slopos_ostd::process::ProcessId,
         va: u64,
@@ -105,13 +85,11 @@ impl PinnedUserBuffer {
         }
         va.checked_add(len as u64).ok_or(PinError::InvalidRange)?;
 
-        // Charged in **pages**, not bytes: `MAX_PIN_BYTES` is 1 GiB, which
-        // does not fit the arena's `u32` amount, and pages are what a pin
-        // actually holds against reclaim — a byte count would also let a
-        // thousand sub-page pins look cheap while each holds a whole frame.
+        // Charged in **pages**, not bytes: `MAX_PIN_BYTES` does not fit the
+        // arena's `u32` amount, and a byte count would let a thousand sub-page
+        // pins look cheap while each holds a whole frame.
         let pinned_pages = ((va & PAGE_MASK) as usize + len).div_ceil(PAGE_SIZE);
-        // Charged before a single frame is pinned, so a refusal costs nothing
-        // to unwind.
+        // Charged before any frame is pinned, so a refusal costs nothing to unwind.
         let pin_charge = Charge::commit(
             try_charge::<PinnedBytesAxis>(account, pinned_pages as u32)
                 .map_err(|_| PinError::OutOfMemory)?,

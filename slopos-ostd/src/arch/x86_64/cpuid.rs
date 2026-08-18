@@ -1,18 +1,8 @@
-//! CPU feature detection via CPUID instruction.
-//!
-//! This module provides the CPUID instruction wrapper and constants for
-//! feature flags used to detect hardware capabilities like APIC, x2APIC,
-//! XSAVE, and other CPU features.
+//! CPU feature detection via the CPUID instruction.
 //!
 //! Only flags actually referenced by kernel code are defined here.
-//! Add new constants as needed when implementing feature detection.
 
-// =============================================================================
-// CPUID Instruction Wrapper
-// =============================================================================
-
-/// Execute CPUID with the given leaf (subleaf defaults to 0).
-/// Returns (eax, ebx, ecx, edx).
+/// Execute CPUID with the given leaf; returns `(eax, ebx, ecx, edx)`.
 #[inline(always)]
 #[allow(unused_unsafe)]
 pub fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {

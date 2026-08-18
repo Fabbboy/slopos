@@ -1,11 +1,8 @@
 //! Per-pair connection state for connected AF_UNIX socket pairs.
 //!
-//! Buffer ownership lives here, not on the slot.  Each connected pair
-//! holds its FIFOs and ancillary queues exactly once; both slots
-//! reference the same pair via a [`PairHandle`].  Refcount lives on
-//! the pair: it is `2` while both endpoints are connected, dropped to
-//! `1` when one side closes, and dropped to `0` (freeing the pair) when
-//! the second side closes.
+//! Buffer ownership lives here, not on the slot: each connected pair holds its
+//! FIFOs and ancillary queues exactly once, and both slots reference it via a
+//! [`PairHandle`].
 
 use slopos_abi::quota::CustodyAxis;
 use slopos_fs::FileRef;

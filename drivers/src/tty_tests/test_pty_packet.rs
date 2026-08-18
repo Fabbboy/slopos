@@ -234,12 +234,10 @@ pub fn test_poll_packet_events_pollin() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Trigger a packet event.
     let mut t = tty::get_termios(slave).unwrap();
     t.c_iflag |= InputFlags::IXON;
     tty::set_termios(slave, &t).unwrap();
 
-    // Now POLLIN should be set.
     let revents = tty::poll_events(master, slopos_abi::syscall::POLLIN);
     if (revents & slopos_abi::syscall::POLLIN) == 0 {
         klog_info!("TTY_TEST: BUG - POLLIN should be set with pending packet events");
@@ -248,11 +246,9 @@ pub fn test_poll_packet_events_pollin() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Consume the event.
     let mut buf = [0u8; 16];
     let _ = tty::read(master, &mut buf, true);
 
-    // POLLIN should no longer be set.
     let revents = tty::poll_events(master, slopos_abi::syscall::POLLIN);
     if (revents & slopos_abi::syscall::POLLIN) != 0 {
         klog_info!("TTY_TEST: BUG - POLLIN should not be set after consuming events");
@@ -266,7 +262,6 @@ pub fn test_poll_packet_events_pollin() -> TestResult {
     TestResult::Pass
 }
 
-/// set_packet_mode on non-master returns error.
 pub fn test_set_packet_mode_non_master() -> TestResult {
     tty::table::tty_table_init();
 
@@ -280,7 +275,6 @@ pub fn test_set_packet_mode_non_master() -> TestResult {
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
 
-    // set_packet_mode on the slave should fail.
     match tty::set_packet_mode(slave, true) {
         Err(TtyError::NotAllocated) => {}
         other => {
@@ -292,7 +286,7 @@ pub fn test_set_packet_mode_non_master() -> TestResult {
         }
     }
 
-    // set_packet_mode on the console (TtyIndex(0)) should also fail.
+    // TtyIndex(0) is the console.
     match tty::set_packet_mode(TtyIndex(0), true) {
         Err(TtyError::NotAllocated) => {}
         other => {

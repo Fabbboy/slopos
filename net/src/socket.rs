@@ -1601,7 +1601,6 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
             return errno_i32(ERRNO_EAGAIN);
         }
 
-        // Wait for accept queue to become non-empty.
         match wait_socket_event(
             sock_accept_ev(sock_idx),
             || {
@@ -1630,11 +1629,9 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
 
 /// How a socket family handles `connect`.
 enum ConnectFamily {
-    /// TCP: a SYN handshake that may complete later.
     Tcp,
-    /// UDP/ICMP: "connect" just records the peer and completes inline.
+    /// UDP/ICMP: `connect` just records the peer and completes inline.
     Datagram,
-    /// Raw/Unix: connect is not supported via this entry point.
     Unsupported,
 }
 
@@ -1646,13 +1643,9 @@ fn socket_connect_family(inner: &SocketInner) -> ConnectFamily {
     }
 }
 
-/// Run the locked half of a fresh TCP connect: resolve the local IP, allocate
-/// the ephemeral port + PCB via [`tcp::connect`], stamp the socket's
-/// local/remote address, conn id, and `Connecting` state, and return the data
-/// the caller needs to emit the SYN **after dropping the table lock** (the RX
-/// path also takes the table lock, so sending under it would deadlock). The
-/// caller owns the `EISCONN`-on-already-connecting guard. Shared by the blocking
-/// [`socket_connect`] and the non-blocking [`socket_connect_nonblock`].
+/// Locked half of a fresh TCP connect. The caller emits the returned SYN only
+/// **after dropping the table lock** — the RX path takes it too, so sending
+/// under it would deadlock — and owns the `EISCONN`-on-already-connecting guard.
 fn connect_initiate_tcp_locked(
     sock: &mut Socket,
     sock_idx: u32,
@@ -1709,8 +1702,6 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             ConnectFamily::Unsupported => return errno_i32(ERRNO_EPROTONOSUPPORT),
         }
     };
-    // Table lock released — send the SYN without holding the socket table lock,
-    // so the NAPI RX path can call socket_notify_tcp_activity without deadlocking.
     let send_rc = socket_send_tcp_segment(&syn_seg, &[]);
     if send_rc != 0 {
         let _ = tcp::abort(tcp_idx);
@@ -1768,32 +1759,18 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         }
 
         slopos_kernel_services::driver_runtime::sleep_current_task_ms(50);
-        // Sync-drain on the connecting task's CPU so the next retry
-        // observes the most recent committed used-ring state without
-        // waiting for the netpoll kthread to be scheduled.
         crate::napi::kick();
     }
 }
 
-/// Idempotent, non-blocking connect for the ring's async connect probe.
-///
-/// Initiates the connection on the first call (socket `Unbound`/`Bound`) and
-/// polls the handshake on every subsequent re-probe (socket `Connecting`), so it
-/// is safe to call repeatedly without re-sending a SYN or re-allocating a port.
-/// Returns:
-///   * `0` — connected (TCP `Established`, or UDP/ICMP peer recorded);
-///   * `-EAGAIN` — handshake in flight (the ring records an in-flight row and
-///     re-probes); **never `-EINPROGRESS`** — the ring has no `-EINPROGRESS`
-///     handling and would post it as an inline failed completion;
-///   * another negated errno — a real error (`-ECONNREFUSED`, `-ENOTSOCK`, …).
-///
-/// Never blocks: the SYN is emitted once (outside the table lock, like
-/// [`socket_connect`]) and the handshake is observed via [`tcp::get_state`].
+/// Idempotent, non-blocking connect for the ring's async connect probe: safe to
+/// call repeatedly without re-sending a SYN or re-allocating a port. Returns
+/// `0` when connected, `-EAGAIN` while the handshake is in flight — **never
+/// `-EINPROGRESS`**, which the ring would post as an inline failed completion —
+/// or another negated errno on a real error.
 pub fn socket_connect_nonblock(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     enum Action {
-        /// First probe: emit this SYN (after dropping the lock), then defer.
         Syn(tcp::ConnId, TcpOutSegment),
-        /// Re-probe: poll this connection's handshake state.
         Poll(tcp::ConnId),
     }
 
@@ -1824,8 +1801,6 @@ pub fn socket_connect_nonblock(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         }
     };
 
-    // Table lock dropped: emit the SYN / poll handshake state without holding it
-    // (the NAPI RX path takes the same lock).
     match action {
         Action::Syn(tcp_idx, syn) => {
             let rc = socket_send_tcp_segment(&syn, &[]);
@@ -1860,9 +1835,8 @@ pub fn socket_connect_nonblock(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
 }
 
 /// The resolved transport target of a send, after validation + UDP/ICMP
-/// auto-bind. Shared by the slice path ([`socket_send`]) and the
-/// single-direct-copy pinned path ([`socket_send_pinned`]) so the load-bearing
-/// auto-bind / ephemeral-port-rollback / state-check logic exists once.
+/// auto-bind. Shared by [`socket_send`] and [`socket_send_pinned`] so the
+/// auto-bind / port-rollback / state-check logic exists once.
 enum SendTarget {
     Udp {
         local: SockAddr,
@@ -1880,10 +1854,9 @@ enum SendTarget {
     },
 }
 
-/// Validate the socket, perform UDP/ICMP auto-bind (with ephemeral-port
-/// rollback on bind failure), and resolve the transport target. `payload_len`
-/// is the would-be datagram length (for the UDP datagram-size check). On any
-/// error returns the negated errno already widened to `i64`.
+/// Validate the socket, perform UDP/ICMP auto-bind (rolling the ephemeral port
+/// back on bind failure), and resolve the transport target. On error returns
+/// the negated errno already widened to `i64`.
 fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, i64> {
     let (is_udp, is_icmp) = {
         let table = NEW_SOCKET_TABLE.lock();

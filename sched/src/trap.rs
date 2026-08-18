@@ -28,9 +28,8 @@ pub fn trap_running_on_exception_stack() -> bool {
 
 /// Save the interrupted user-mode frame into the running task's context.
 ///
-/// Takes the `CurrentTask` guard because the task being written is the one this
-/// CPU is running, so the guard the caller already holds is exactly the witness
-/// the register write needs.
+/// The `Current` guard is the witness the register write needs: the task
+/// written is the one this CPU is running.
 pub fn save_task_context_from_interrupt_frame(
     current: &crate::task_struct::Current,
     frame: &InterruptFrame,
@@ -52,25 +51,19 @@ pub fn scheduler_request_reschedule_from_interrupt() {
 }
 
 pub fn scheduler_handle_timer_interrupt(frame: *mut InterruptFrame) {
-    // Ahead of `scheduler_timer_tick` so the heartbeat is recorded before
-    // any lock is taken, and here rather than inside it so the tests that
-    // call `scheduler_timer_tick` synthetically do not drive the detector's
-    // sample counter with no wall time elapsed.
+    // Ahead of `scheduler_timer_tick` so the heartbeat is recorded before any
+    // lock is taken, and outside it so synthetic test calls to that function do
+    // not drive the detector's sample counter with no wall time elapsed.
     slopos_ostd::watchdog::tick();
-    // Invalidate locally and ack an open epoch. Waits on nothing, which is why
-    // it is safe from an interrupt handler.
     slopos_mm::mmu::quiesce::tick();
-    // Two relaxed loads. `bh::raise` marks only the calling CPU, so a console
-    // request made from the keyboard IRQ would otherwise be answerable solely
-    // by the CPU that took it — the one most likely to be the wedged one.
     slopos_ostd::kconsole::poll_from_timer();
     save_preempt_context(frame);
     scheduler_timer_tick();
 }
 
 pub fn save_preempt_context(frame: *mut InterruptFrame) {
-    // The frame lives for exactly this handler invocation, so a frame-local
-    // is the honest anchor for a borrow of it.
+    // The frame lives for exactly this handler invocation, so a frame-local is
+    // the honest anchor for a borrow of it.
     let frame_anchor = ();
     let Some(frame_ref) = InterruptFrame::from_ptr(&frame_anchor, frame) else {
         return;
@@ -102,14 +95,9 @@ pub fn scheduler_handoff_on_trap_exit(source: TrapExitSource) {
         return;
     }
 
-    // SM_PREEMPT discipline, IRQ-exit flavour (see
-    // `deferred_reschedule_callback` for the full rationale): an IRQ that
-    // lands between a wait primitive's `Running → Blocked` commit and its
-    // voluntary yield must not deschedule the task from the trap exit —
-    // doing so parks it before the condition recheck ran or a timeout was
-    // armed, losing any wake that fired in the gap. Leave the pending flag
-    // set; the task's own `schedule()` follows within the protocol and a
-    // later trap exit re-checks the flag once a Running task is current.
+    // A task that has committed `Running → Blocked` but not yet yielded must
+    // not be descheduled from the trap exit: it would park with no wake armed
+    // and no timeout. The pending flag stays set for a later trap exit.
     if crate::task_struct::Current::get()
         .is_some_and(|current| current.task().status() == TaskStatus::Blocked)
     {
