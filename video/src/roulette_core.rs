@@ -1,13 +1,7 @@
 //! Roulette wheel animation for the Wheel of Fate.
 //!
-//! Draws a spinning roulette wheel on the framebuffer and reveals the fate
-//! number that determines the boot outcome. Odd numbers are wins (colored
-//! segments), even numbers are losses (blank segments).
-//!
-//! All drawing is performed through the [`Canvas`] trait, which the kernel's
-//! [`GraphicsContext`] already implements for volatile MMIO framebuffer writes.
-//! No vtable, no `*mut c_void`, no `Option<fn(...)>` indirection — just
-//! monomorphised generic calls.
+//! Reveals the fate number that determines the boot outcome: odd numbers are
+//! wins (colored segments), even numbers are losses (blank segments).
 
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::video_traits::{VideoError, VideoResult};
@@ -17,10 +11,6 @@ use slopos_ostd::numfmt;
 
 use crate::graphics::GraphicsContext;
 use crate::kernel_font;
-
-// ---------------------------------------------------------------------------
-// Color palette
-// ---------------------------------------------------------------------------
 
 const BLANK_COLOR: Color32 = Color32(0x2A31_3BFF);
 const BLANK_HIGHLIGHT: Color32 = Color32(0x5660_70FF);
@@ -41,10 +31,6 @@ const EVEN_COLOR: Color32 = Color32(0x3B45_54FF);
 
 const RESULT_DELAY_MS: u32 = 1700;
 
-// ---------------------------------------------------------------------------
-// Wheel geometry constants
-// ---------------------------------------------------------------------------
-
 const SEGMENT_COUNT: i32 = 12;
 const TRIG_SCALE: i32 = 1024;
 const WHEEL_RADIUS: i32 = 120;
@@ -54,10 +40,6 @@ const SEGMENT_DEGREES: i32 = DEGREE_STEPS / SEGMENT_COUNT;
 const SPIN_LOOPS: i32 = 4;
 const SPIN_DURATION_MS: i32 = 7200;
 const SPIN_FRAME_DELAY_MS: i32 = 12;
-
-// ---------------------------------------------------------------------------
-// Text constants (null-terminated for atlas byte-string rendering)
-// ---------------------------------------------------------------------------
 
 const TEXT_UNKNOWN: &[u8] = b"Hidden\0";
 const TEXT_WIN: &[u8] = b"Win\0";
@@ -76,10 +58,6 @@ const TEXT_REBOOT_TITLE: &[u8] = b"Rebooting\0";
 const TEXT_REBOOT_SUB: &[u8] = b"Preparing next spin\0";
 const TEXT_REBOOT_DETAIL: &[u8] = b"Please wait\0";
 const SPINNER_FRAMES: [&[u8]; 4] = [b"|\0", b"/\0", b"-\0", b"\\\0"];
-
-// ---------------------------------------------------------------------------
-// Precomputed trigonometry (scaled by TRIG_SCALE = 1024)
-// ---------------------------------------------------------------------------
 
 const COS_TABLE: [i16; (SEGMENT_COUNT + 1) as usize] = [
     1024, 887, 512, 0, -512, -887, -1024, -887, -512, 0, 512, 887, 1024,
@@ -140,10 +118,6 @@ const SIN360: [i16; DEGREE_STEPS as usize] = [
     -54, -36, -18,
 ];
 
-// ---------------------------------------------------------------------------
-// Trigonometry helpers
-// ---------------------------------------------------------------------------
-
 fn normalize_angle(degrees: i32) -> i32 {
     let mut angle = degrees % DEGREE_STEPS;
     if angle < 0 {
@@ -164,10 +138,6 @@ fn scale(value: i16, radius: i32) -> i32 {
     (value as i32 * radius) / TRIG_SCALE
 }
 
-// ---------------------------------------------------------------------------
-// Segment helpers
-// ---------------------------------------------------------------------------
-
 const fn is_colored_segment(index: i32) -> bool {
     (index % 2) == 0
 }
@@ -186,10 +156,6 @@ fn choose_landing_segment(fate_number: u32, need_colored: bool) -> i32 {
     }
     start
 }
-
-// ---------------------------------------------------------------------------
-// Layout computation
-// ---------------------------------------------------------------------------
 
 struct WheelLayout {
     radius: i32,
@@ -217,10 +183,6 @@ impl WheelLayout {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Text drawing helpers
-// ---------------------------------------------------------------------------
-
 fn even_px(x: i32) -> i32 {
     x & !1
 }
@@ -231,10 +193,6 @@ fn draw_text_centered<T: Canvas>(ctx: &mut T, cx: i32, y: i32, text: &[u8], fg: 
         atlas.draw_bytes(ctx, x, y, text, fg, Color32(0));
     }
 }
-
-// ---------------------------------------------------------------------------
-// Panel drawing (fill + border)
-// ---------------------------------------------------------------------------
 
 fn draw_panel<T: Canvas>(
     ctx: &mut T,
@@ -251,10 +209,6 @@ fn draw_panel<T: Canvas>(
     canvas_ops::line(ctx, x, y, x, y + h, border);
     canvas_ops::line(ctx, x + w, y, x + w, y + h, border);
 }
-
-// ---------------------------------------------------------------------------
-// Wheel segment drawing
-// ---------------------------------------------------------------------------
 
 fn draw_segment_wedge<T: Canvas>(
     ctx: &mut T,
@@ -325,10 +279,6 @@ fn draw_roulette_wheel<T: Canvas>(
     canvas_ops::circle_filled(ctx, cx, cy, inner_radius, BG_COLOR);
 }
 
-// ---------------------------------------------------------------------------
-// Pointer drawing
-// ---------------------------------------------------------------------------
-
 fn draw_pointer_for_angle<T: Canvas>(
     ctx: &mut T,
     cx: i32,
@@ -392,10 +342,6 @@ fn draw_pointer_ticks<T: Canvas>(
     );
 }
 
-// ---------------------------------------------------------------------------
-// Fate number card
-// ---------------------------------------------------------------------------
-
 fn draw_fate_number<T: Canvas>(ctx: &mut T, cx: i32, y_pos: i32, fate_number: u32, revealed: bool) {
     let card_x = cx - 136;
     let card_w = 272;
@@ -425,10 +371,6 @@ fn draw_fate_number<T: Canvas>(ctx: &mut T, cx: i32, y_pos: i32, fate_number: u3
         atlas.draw_bytes(ctx, text_x, number_y, num_text, CARD_TEXT, Color32(0));
     }
 }
-
-// ---------------------------------------------------------------------------
-// Result banner
-// ---------------------------------------------------------------------------
 
 fn draw_result_banner<T: Canvas>(ctx: &mut T, cx: i32, y_pos: i32, fate_number: u32) {
     let is_win = fate_number & 1 == 1;
@@ -460,10 +402,6 @@ fn draw_result_banner<T: Canvas>(ctx: &mut T, cx: i32, y_pos: i32, fate_number: 
     draw_text_centered(ctx, cx + 110, y_pos + 74, currency_text, TEXT_COLOR);
 }
 
-// ---------------------------------------------------------------------------
-// Frame parameters
-// ---------------------------------------------------------------------------
-
 struct FrameParams {
     highlight_segment: i32,
     pointer_angle_deg: i32,
@@ -472,10 +410,6 @@ struct FrameParams {
     clear_background: bool,
     draw_wheel: bool,
 }
-
-// ---------------------------------------------------------------------------
-// Single-frame renderer
-// ---------------------------------------------------------------------------
 
 fn render_wheel_frame<T: Canvas>(
     ctx: &mut T,
@@ -489,9 +423,6 @@ fn render_wheel_frame<T: Canvas>(
 ) {
     let region = layout.radius + 80;
 
-    // Pause before painting if the kernel log is shown (ESC). On resume the log
-    // covered the whole screen, so fully repaint this frame rather than do an
-    // incremental (region-only) update that would leave log fragments behind.
     let force = fblog_pause_before_draw();
     if force {
         canvas_ops::fill_rect(ctx, 0, 0, screen_w, screen_h, BG_COLOR);
@@ -549,10 +480,6 @@ fn render_wheel_frame<T: Canvas>(
     *last_pointer_angle = params.pointer_angle_deg;
 }
 
-// ---------------------------------------------------------------------------
-// Transition spinner (post-result screen)
-// ---------------------------------------------------------------------------
-
 fn draw_transition_spinner(ctx: &mut GraphicsContext, screen_w: i32, screen_h: i32, is_win: bool) {
     let panel_w = (screen_w - 120)
         .max(260)
@@ -581,8 +508,6 @@ fn draw_transition_spinner(ctx: &mut GraphicsContext, screen_w: i32, screen_h: i
     };
 
     for tick in 0..16i32 {
-        // Pause before painting if the kernel log is shown (ESC); on resume the
-        // log covered the whole screen, so repaint the background first.
         if fblog_pause_before_draw() {
             canvas_ops::fill_rect(ctx, 0, 0, screen_w, screen_h, BG_COLOR);
         }
@@ -629,17 +554,11 @@ fn draw_transition_spinner(ctx: &mut GraphicsContext, screen_w: i32, screen_h: i
     }
 }
 
-// ---------------------------------------------------------------------------
-// Flush-and-sleep helper
-// ---------------------------------------------------------------------------
-
-/// Pause the wheel while the on-screen kernel log is shown via an ESC peek.
+/// Block while the on-screen kernel log is shown via an ESC peek.
 ///
-/// Called BEFORE each wheel draw so the wheel never paints over the log (no
-/// bleed for the log renderer to chase). ESC only PEEKS: the wheel freezes
-/// here and resumes when the log is dismissed, then resolves its real outcome —
-/// a loss still reboots, so ESC can't bypass the Wheel of Fate gate. Returns
-/// `true` if it paused, so the caller fully repaints on resume.
+/// Must run before each draw so the wheel never paints over the log. The
+/// outcome is still resolved afterwards, so ESC cannot bypass the gate.
+/// Returns `true` if it paused, meaning the caller must fully repaint.
 fn fblog_pause_before_draw() -> bool {
     if !slopos_ostd::fblog::is_active() {
         return false;
@@ -654,10 +573,6 @@ fn flush_and_sleep(ctx: &GraphicsContext, ms: u32) {
     ctx.flush();
     hpet::delay_ms(ms);
 }
-
-// ---------------------------------------------------------------------------
-// Main animation driver
-// ---------------------------------------------------------------------------
 
 fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
     let width = ctx.width() as i32;
@@ -691,7 +606,6 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
 
     let mut last_pointer_angle = -1i32;
 
-    // Phase 1: Initial frame
     render_wheel_frame(
         ctx,
         width,
@@ -710,7 +624,7 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
         },
     );
 
-    // Phase 2: Spinning animation (ease-out: p * (2 - p))
+    // Ease-out p * (2 - p) in Q16; 131072 is 2.0.
     let total_frames = (SPIN_DURATION_MS / SPIN_FRAME_DELAY_MS).max(1);
     for frame in 1..=total_frames {
         let p_q16 = ((frame as u32) << 16) / (total_frames as u32);
@@ -737,7 +651,6 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
         flush_and_sleep(ctx, SPIN_FRAME_DELAY_MS as u32);
     }
 
-    // Phase 3: Land on target segment
     let final_angle = start_angle + total_rotation;
     render_wheel_frame(
         ctx,
@@ -758,7 +671,6 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
     );
     flush_and_sleep(ctx, 900);
 
-    // Phase 4: Flash the landing segment
     for flash in 0..5 {
         render_wheel_frame(
             ctx,
@@ -800,7 +712,6 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
         }
     }
 
-    // Phase 5: Final reveal
     render_wheel_frame(
         ctx,
         width,
@@ -820,7 +731,6 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
     );
     flush_and_sleep(ctx, 600);
 
-    // Phase 6: Result banner
     let fate_box_y = center_y + layout.radius + 22;
     let fate_box_h = 88;
     let info_y = (fate_box_y + fate_box_h + 10).clamp(0, height);
@@ -830,15 +740,10 @@ fn run_animation(ctx: &mut GraphicsContext, fate_number: u32) -> VideoResult {
     draw_result_banner(ctx, center_x, banner_y, fate_number);
     flush_and_sleep(ctx, RESULT_DELAY_MS);
 
-    // Phase 7: Transition spinner
     draw_transition_spinner(ctx, width, height, (fate_number & 1) == 1);
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 pub fn roulette_draw_kernel(fate_number: u32) -> VideoResult {
     let mut ctx = GraphicsContext::new()?;
