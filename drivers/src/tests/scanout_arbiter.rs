@@ -90,9 +90,8 @@ pub fn test_lower_and_equal_priority_lose() -> TestResult {
     }
 }
 
-/// A live reservation (a winner that has not yet committed) blocks later claims,
-/// proving reserve-before-reset: a loser learns to stay passive before any
-/// hardware is touched.
+/// Reserve-before-reset: a loser learns to stay passive before any hardware is
+/// touched.
 pub fn test_reservation_blocks_before_commit() -> TestResult {
     static A: SingletonResource<DummyProvider> = SingletonResource::new(
         "test-reserve",
@@ -102,7 +101,6 @@ pub fn test_reservation_blocks_before_commit() -> TestResult {
     if A.claim(30) != ClaimOutcome::Won {
         return fail!("first claim should win the empty arbiter");
     }
-    // No commit yet — the reservation alone must repel competitors.
     if A.claim(30) != ClaimOutcome::LostTie {
         return fail!("equal claim must lose to a live reservation");
     }
@@ -112,8 +110,6 @@ pub fn test_reservation_blocks_before_commit() -> TestResult {
     pass!()
 }
 
-/// `abort_claim` (a winner whose bring-up failed) clears the reservation and
-/// leaves the prior owner intact, and a fresh claim can win afterwards.
 pub fn test_abort_claim_restores_prior_owner() -> TestResult {
     static A: SingletonResource<DummyProvider> = SingletonResource::new(
         "test-abort",
@@ -138,15 +134,12 @@ pub fn test_abort_claim_restores_prior_owner() -> TestResult {
     if A.current().map(|p| p.id) != Some(1) {
         return fail!("prior owner must survive an aborted claim");
     }
-    // The reservation must be cleared, so a fresh claim can win again.
     if A.claim(30) != ClaimOutcome::Won {
         return fail!("reservation must be cleared after abort");
     }
     pass!()
 }
 
-/// Committing a higher-priority provider evicts the displaced one exactly once;
-/// the first commit (no prior owner) evicts nothing.
 pub fn test_eviction_calls_displaced_evict_once() -> TestResult {
     static A: SingletonResource<DummyProvider> = SingletonResource::new(
         "test-evict",

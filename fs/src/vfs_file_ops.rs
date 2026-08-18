@@ -15,10 +15,9 @@ use crate::vfs::{FileSystem, InodeId};
 
 /// Open vnodes system-wide — this kernel's `fs.file-max`.
 ///
-/// Must stay well above the per-process descriptor limit. At parity, one
+/// Must stay well above the per-process descriptor limit: at parity, one
 /// process opening its full allowance exhausts the table for every other
-/// process on the machine, which turns a per-process bound into a
-/// system-wide denial. `SLOT_BITS` caps it at 1024.
+/// process on the machine.
 const MAX_OPEN_VNODES: usize = 1024;
 
 /// Slot-index bit width in the packed fd handle; the remaining bits hold the
@@ -30,9 +29,9 @@ const _: () = assert!(
     "MAX_OPEN_VNODES exceeds what SLOT_BITS can address in a packed handle"
 );
 
-/// One open vnode: the filesystem it lives on and its inode. The slot index
-/// and generation are owned by the [`HandleTable`], so a handle left over
-/// from a closed file whose slot was recycled resolves to a typed miss.
+/// One open vnode. The slot index and generation are owned by the
+/// [`HandleTable`], so a handle whose slot has been recycled resolves to a
+/// typed miss.
 struct OpenVnode {
     fs: &'static dyn FileSystem,
     inode: InodeId,
@@ -96,10 +95,8 @@ impl Drop for VnodeBacking {
 }
 
 /// Wrap a handle from [`vfs_open_handle_flags`] into its owning backing,
-/// charged to `account` — the opener.
-///
-/// On allocation failure or a refused charge the vnode entry is removed before
-/// returning, so the table row never outlives the attempt to own it.
+/// charged to `account`. On allocation failure or a refused charge the vnode
+/// entry is removed, so the table row never outlives the attempt to own it.
 pub(crate) fn vnode_backing(handle: usize, account: AccountId) -> Option<KArc<dyn FileBacking>> {
     let release = || {
         let h = Handle::<OpenVnode>::unpack(handle, SLOT_BITS);
@@ -136,9 +133,8 @@ impl FileOps for VfsFileOps {
         if buf.is_empty() {
             return 0;
         }
-        // Sized to the request, capped at the staging bound: a shell reading a
-        // script one byte at a time must not cost a 4 KiB kernel allocation per
-        // byte. Larger requests still iterate the loop below at IO_STAGING_SIZE.
+        // Sized to the request, capped at the staging bound: a one-byte read
+        // must not cost a 4 KiB kernel allocation.
         let mut staging = match slopos_ostd::KVec::<u8>::zeroed(buf.len().min(IO_STAGING_SIZE)) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),

@@ -2,14 +2,9 @@
 //!
 //! The i8042 controller, with its hardware translation bit enabled (the SlopOS
 //! default), delivers the keyboard's set-2 codes already translated to set 1.
-//! [`Set1Decoder`] is a byte-at-a-time state machine that owns the `0xE0`
-//! extended-key latch, swallows the multi-byte `0xE1` Pause sequence, and
-//! filters the PS/2 "fake shift" wrappers (`E0 2A` / `E0 AA`) around extended
-//! keys — turning the raw stream into clean `(usage, pressed)` steps.
-//!
-//! Keeping the set abstracted behind this decoder is the seam for a future
-//! `Set2Decoder` drop-in; the rest of the keyboard stack speaks only canonical
-//! usages.
+//! [`Set1Decoder`] owns the `0xE0` extended-key latch, swallows the multi-byte
+//! `0xE1` Pause sequence, and filters the PS/2 "fake shift" wrappers
+//! (`E0 2A` / `E0 AA`) around extended keys.
 
 use slopos_abi::input::keycode::*;
 
@@ -42,9 +37,8 @@ impl Set1Decoder {
     /// Feed one raw scancode byte. Returns `Some(step)` once a full key
     /// transition is decoded, or `None` for prefix/filtered/unknown bytes.
     pub fn feed(&mut self, byte: u8) -> Option<DecodeStep> {
-        // Swallow the E1-prefixed Pause sequence: make `E1 1D 45`, break
-        // `E1 9D C5` — two trailing bytes either way. Pause is out of scope, so
-        // we consume it without emitting (rather than mis-decoding 1D/45).
+        // Pause is `E1 1D 45` / `E1 9D C5` — two trailing bytes either way, which
+        // must be consumed rather than mis-decoded as 1D/45.
         if self.e1_remaining > 0 {
             self.e1_remaining -= 1;
             return None;
@@ -65,9 +59,8 @@ impl Set1Decoder {
                 let pressed = byte & 0x80 == 0;
                 let make = byte & 0x7F;
 
-                // PS/2 "fake shift" wrappers around extended keys (E0 2A / E0 AA
-                // and the right-shift variants E0 36 / E0 B6) must not touch real
-                // shift state and produce no key.
+                // PS/2 "fake shift" wrappers around extended keys (E0 2A / E0 AA,
+                // E0 36 / E0 B6) must not touch real shift state and produce no key.
                 if extended && (make == 0x2A || make == 0x36) {
                     return None;
                 }
@@ -162,7 +155,6 @@ fn base_usage(make: u8) -> Option<u16> {
         0x44 => KEY_F10,
         0x45 => KEY_NUMLOCK,
         0x46 => KEY_SCROLLLOCK,
-        // Keypad block.
         0x47 => KEY_KP_7,
         0x48 => KEY_KP_8,
         0x49 => KEY_KP_9,
@@ -176,9 +168,8 @@ fn base_usage(make: u8) -> Option<u16> {
         0x51 => KEY_KP_3,
         0x52 => KEY_KP_0,
         0x53 => KEY_KP_DOT,
-        // PrintScreen with Alt held. The keyboard reports it as its own bare
-        // make code rather than as PrintScreen's `E0 2A E0 37` sequence, so it
-        // decodes here and not in `ext_usage`.
+        // Alt+PrintScreen is reported as its own bare make code, not as
+        // PrintScreen's `E0 2A E0 37`, so it decodes here and not in `ext_usage`.
         0x54 => KEY_SYSRQ,
         0x56 => KEY_NONUS_BACKSLASH,
         0x57 => KEY_F11,
@@ -193,8 +184,7 @@ fn ext_usage(make: u8) -> Option<u16> {
         0x1C => KEY_KP_ENTER,
         0x1D => KEY_RIGHTCTRL,
         0x35 => KEY_KP_SLASH,
-        // PrintScreen press is `E0 2A E0 37`; the leading fake-shift (E0 2A) is
-        // filtered in `feed`, leaving E0 37 to decode here.
+        // PrintScreen press is `E0 2A E0 37`; the fake shift is filtered in `feed`.
         0x37 => KEY_PRINTSCREEN,
         0x38 => KEY_RIGHTALT,
         0x46 => KEY_PAUSE, // Ctrl+Break (E0 46) — best-effort Pause.
@@ -244,7 +234,6 @@ mod tests {
 
     #[test]
     fn keypad_block_decodes_distinctly_from_nav() {
-        // Non-extended keypad codes.
         assert_eq!(one(0x47).unwrap().usage, KEY_KP_7);
         assert_eq!(one(0x48).unwrap().usage, KEY_KP_8);
         assert_eq!(one(0x49).unwrap().usage, KEY_KP_9);
@@ -266,7 +255,7 @@ mod tests {
     fn extended_nav_keys() {
         let mut d = Set1Decoder::new();
         assert_eq!(d.feed(0xE0), None);
-        assert_eq!(d.feed(0x48).unwrap().usage, KEY_UP); // E0 48 = Up arrow
+        assert_eq!(d.feed(0x48).unwrap().usage, KEY_UP);
         assert_eq!(d.feed(0xE0), None);
         assert_eq!(d.feed(0x4B).unwrap().usage, KEY_LEFT);
         // E0 53 = Delete (distinct from KP_DOT's 0x53).
@@ -286,20 +275,18 @@ mod tests {
     #[test]
     fn extended_right_modifiers_distinct_from_left() {
         let mut d = Set1Decoder::new();
-        assert_eq!(d.feed(0x1D).unwrap().usage, KEY_LEFTCTRL); // 0x1D = LCtrl
+        assert_eq!(d.feed(0x1D).unwrap().usage, KEY_LEFTCTRL);
         assert_eq!(d.feed(0xE0), None);
-        assert_eq!(d.feed(0x1D).unwrap().usage, KEY_RIGHTCTRL); // E0 1D = RCtrl
+        assert_eq!(d.feed(0x1D).unwrap().usage, KEY_RIGHTCTRL);
         assert_eq!(d.feed(0xE0), None);
-        assert_eq!(d.feed(0x38).unwrap().usage, KEY_RIGHTALT); // E0 38 = RAlt
+        assert_eq!(d.feed(0x38).unwrap().usage, KEY_RIGHTALT);
     }
 
     #[test]
     fn fake_shift_wrappers_filtered() {
-        // E0 2A (fake shift press) and E0 AA (fake shift release) emit nothing
-        // and must not leave the extended latch set.
         let mut d = Set1Decoder::new();
         assert_eq!(d.feed(0xE0), None);
-        assert_eq!(d.feed(0x2A), None); // filtered
+        assert_eq!(d.feed(0x2A), None);
         // The very next real key decodes from the BASE table, not extended.
         assert_eq!(d.feed(0x1E).unwrap().usage, KEY_A);
     }
@@ -309,7 +296,7 @@ mod tests {
         // Real PrintScreen press: E0 2A E0 37.
         let mut d = Set1Decoder::new();
         assert_eq!(d.feed(0xE0), None);
-        assert_eq!(d.feed(0x2A), None); // fake shift filtered
+        assert_eq!(d.feed(0x2A), None);
         assert_eq!(d.feed(0xE0), None);
         assert_eq!(
             d.feed(0x37),
@@ -322,8 +309,7 @@ mod tests {
 
     #[test]
     fn sysrq_is_a_bare_make_code() {
-        // Alt+PrintScreen: the keyboard reports SysRq as bare 0x54 / 0xD4, with
-        // no E0 prefix and no fake-shift wrapper.
+        // Alt+PrintScreen: SysRq is bare 0x54 / 0xD4, no E0 prefix, no fake shift.
         let mut d = Set1Decoder::new();
         assert_eq!(
             d.feed(0x54),
@@ -343,15 +329,13 @@ mod tests {
 
     #[test]
     fn sysrq_does_not_shadow_the_keypad_asterisk() {
-        // Bare 0x37 is the keypad `*`; only the E0-prefixed form is
-        // PrintScreen, and neither is SysRq.
+        // Bare 0x37 is the keypad `*`; only the E0-prefixed form is PrintScreen.
         let mut d = Set1Decoder::new();
         assert_eq!(d.feed(0x37).unwrap().usage, KEY_KP_ASTERISK);
     }
 
     #[test]
     fn pause_sequence_swallowed() {
-        // E1 1D 45 emits nothing and leaves the decoder ready for the next key.
         let mut d = Set1Decoder::new();
         assert_eq!(d.feed(0xE1), None);
         assert_eq!(d.feed(0x1D), None);
@@ -362,6 +346,6 @@ mod tests {
     #[test]
     fn unknown_codes_return_none() {
         assert_eq!(one(0x00), None);
-        assert_eq!(one(0x7F), None); // no make 0x7F mapping
+        assert_eq!(one(0x7F), None);
     }
 }

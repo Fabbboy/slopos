@@ -163,9 +163,8 @@ impl FileOps for PipeReadOps {
         }
         let h = PipeHandle::from_usize(handle);
         let is_nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
-        // Sized to the request, capped at the staging bound: a shell reading a
-        // script one byte at a time must not cost a 4 KiB kernel allocation per
-        // byte. Larger requests still iterate the loop below at IO_STAGING_SIZE.
+        // Sized to the request, capped at the staging bound: a one-byte read
+        // must not cost a 4 KiB kernel allocation.
         let mut local = match slopos_ostd::KVec::<u8>::zeroed(buf.len().min(IO_STAGING_SIZE)) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
@@ -174,8 +173,6 @@ impl FileOps for PipeReadOps {
         let mut remaining = buf.len();
 
         loop {
-            // Snapshot under the table lock: try to consume data and
-            // observe writer count.
             let (consumed, no_writers, slot_gone) = pipe::with_pipe_mut(h, |slot| {
                 let consumed = if remaining > 0 && slot.len > 0 {
                     let chunk = remaining.min(local.len());
@@ -228,24 +225,17 @@ impl FileOps for PipeReadOps {
                 return Errno::EAGAIN.as_isize();
             }
 
-            // Block via wait_event so the queue's SpinLock pairs with
-            // the producer's wake_one and the Running→Blocked CAS
-            // happens under the same lock the wake side acquires —
-            // closing the lost-wakeup window without any consumer-side
-            // ad-hoc state CAS. The closure re-checks data/EOF under
-            // the slot lock so the wake-up condition is observed
-            // atomically with respect to the producer's slot store.
             if BUS
                 .subscribe(read_ev(h))
                 .wait_event(|| {
-                    // Slot evaporated under us → fall out of the wait so the
-                    // next iteration's lookup reports EBADF.
+                    // A vanished slot falls out of the wait so the next
+                    // iteration's lookup reports EBADF.
                     pipe::with_pipe(h, |slot| slot.len > 0 || slot.writers == 0).unwrap_or(true)
                 })
                 .is_err()
             {
-                // Nothing has been transferred — the short-count return above
-                // already took that case.
+                // Nothing transferred: the short-count return above already
+                // took that case.
                 return Errno::EINTR.as_isize();
             }
         }
@@ -257,7 +247,7 @@ impl FileOps for PipeReadOps {
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
         let h = PipeHandle::from_usize(handle);
-        // Register FIRST, then check readiness (Linux pattern).
+        // Register FIRST, then check readiness.
         let registered = BUS.subscribe_current(read_ev(h));
         let revents =
             pipe::with_pipe(h, |slot| slot.revents(true, false, events)).unwrap_or(POLLERR);
@@ -304,10 +294,8 @@ impl FileOps for PipeWriteOps {
             Err(_) => return Errno::ENOMEM.as_isize(),
         };
 
-        // The wait condition is "buffer has room OR peer is gone": we
-        // can make forward progress in either case (push more bytes,
-        // or report EPIPE). Used by both the pre-stage block (buffer
-        // full) and the post-stage block (buffer filled mid-write).
+        // "Room OR peer gone": either allows forward progress — push more
+        // bytes, or report EPIPE.
         let drain_or_close = || {
             pipe::with_pipe(h, |slot| {
                 slot.len < pipe::PIPE_BUFFER_SIZE || slot.readers == 0
@@ -316,7 +304,6 @@ impl FileOps for PipeWriteOps {
         };
 
         loop {
-            // Snapshot under the table lock.
             let (can_write, no_readers, slot_gone) = pipe::with_pipe(h, |slot| {
                 (slot.len < pipe::PIPE_BUFFER_SIZE, slot.readers == 0)
             })
@@ -385,29 +372,9 @@ impl FileOps for PipeWriteOps {
                 return total as isize;
             }
 
-            // Push the staged bytes under the slot lock, *release the
-            // slot lock*, and only then call `wake_one()` on the reader
-            // wait-queue.
-            //
-            // The order matters: `wake_one()` acquires the wait-queue's
-            // internal SpinLock, and `PipeReadOps::read`'s waiter goes
-            // through `wait_event` whose closure (re-)acquires this
-            // same pipe slot lock under the wait-queue's SpinLock.
-            // If we called `wake_one()` while still holding the slot
-            // lock here, the two paths would form a classical AB-BA
-            // pair (PS → WQ here, WQ → PS in the waiter), and on TCG /
-            // any sufficiently spread-out interleaving two CPUs would
-            // ticket-lock each other into a permanent freeze with
-            // interrupts disabled.
-            //
-            // Note: the kernel relies on the WaitQueue protocol calling
-            // `condition()` outside its internal SpinLock (see
-            // `slopos_ostd::sync::wait_queue::WaitQueue::wait_event`),
-            // so even if a future change were to add another
-            // wake-under-data-lock site, the AB-BA would no longer be
-            // expressible. This release-before-wake here is defence
-            // in depth: producers must not retain the data lock across
-            // a wake call.
+            // Push under the slot lock, release it, and only then wake: the
+            // reader's `wait_event` closure takes this slot lock under the
+            // wait-queue lock, so waking while holding it is an AB-BA pair.
             enum PushOutcome {
                 Wrote {
                     written: usize,
@@ -468,8 +435,6 @@ impl FileOps for PipeWriteOps {
             if scheduler_is_enabled() == 0 {
                 return Errno::EAGAIN.as_isize();
             }
-            // Buffer drained partially but the whole staged batch
-            // didn't fit — wait for room and resume the loop.
             if BUS
                 .subscribe(write_ev(h))
                 .wait_event(drain_or_close)
@@ -486,7 +451,6 @@ impl FileOps for PipeWriteOps {
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
         let h = PipeHandle::from_usize(handle);
-        // Register FIRST, then check readiness (Linux pattern).
         let registered = BUS.subscribe_current(write_ev(h));
         let revents = pipe::with_pipe(h, |slot| slot.revents(false, true, events))
             .unwrap_or(POLLERR | POLLHUP);

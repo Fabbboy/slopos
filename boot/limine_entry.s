@@ -51,7 +51,11 @@ _start:
     mov al, SERIAL_MARKER_S
     out dx, al
 
-    # Enable SSE/FXSR so Rust-generated memcpy instructions don't #UD
+    # Clear CR0.EM and set CR4.OSFXSR: the `fninit` below is an x87
+    # instruction that #UDs with EM set, and the context switch's FPU
+    # save/restore needs OSFXSR. The kernel itself is +soft-float
+    # (targets/x86_64-slos.json) -- this state exists for the user tasks
+    # whose FPU registers it saves, not for kernel-generated code.
     mov rax, cr0
     or rax, 1 << 1          # CR0.MP
     and rax, ~(1 << 2)      # clear CR0.EM

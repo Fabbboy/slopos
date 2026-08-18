@@ -12,11 +12,8 @@ use crate::vfs::{
     vfs_set_mode, vfs_stat, vfs_unlink,
 };
 
-/// Test helper: mount an in-memory image over an owned, stack-local
-/// [`BlockCache`] and bind a [`Ext2Fs`] handle. Mirrors how the production VFS
-/// bridge borrows a persistent cache, but here the cache is owned by the test
-/// frame. `$device` must outlive `$fs`. Returns `TestResult::Fail` early if the
-/// superblock is invalid.
+/// Mount an in-memory image over a stack-local [`BlockCache`]. `$device` must
+/// outlive `$fs`; returns `TestResult::Fail` early on an invalid superblock.
 macro_rules! mount_ext2 {
     ($device:expr, $cache:ident, $fs:ident) => {
         let (sb, bs, is) = match Ext2Fs::mount_params(&$device) {
@@ -102,13 +99,9 @@ pub fn test_vfs_list() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression: every directory that shows up in `ls /` must be `cd`-able.
-///
-/// `ls` reports directory entries via `readdir` (which only reads the *parent*
-/// directory block), while `cd` resolves the child path and `stat`s the child
-/// inode. This test mirrors that exact sequence — list `/`, then `vfs_stat`
-/// each listed directory by its full path — so a divergence between "listed"
-/// and "resolvable" is caught here instead of only surfacing interactively.
+/// Every directory that shows up in `ls /` must be `cd`-able: `ls` reports
+/// entries from the *parent* directory block via `readdir`, while `cd` resolves
+/// the child path and `stat`s the child inode, and the two can diverge.
 pub fn test_vfs_cd_into_listed_dirs() -> TestResult {
     use slopos_abi::fs::FS_TYPE_DIRECTORY;
 
@@ -133,7 +126,6 @@ pub fn test_vfs_cd_into_listed_dirs() -> TestResult {
             continue;
         }
 
-        // Build "/<name>" exactly as the shell does for an absolute `cd`.
         let mut path = [0u8; 256];
         path[0] = b'/';
         let nb = name.as_bytes();
@@ -154,7 +146,6 @@ pub fn test_vfs_cd_into_listed_dirs() -> TestResult {
     }
 
     if dirs_seen == 0 {
-        // No subdirectories to exercise (e.g. ramfs root): nothing to assert.
         return TestResult::Skipped;
     }
     TestResult::Pass
@@ -332,8 +323,8 @@ fn write_superblock(sb: &mut [u8], inodes: u32, blocks: u32, inode_size: u16) {
     sb[16..20].copy_from_slice(&8u32.to_le_bytes());
     sb[20..24].copy_from_slice(&1u32.to_le_bytes());
     sb[24..28].copy_from_slice(&0u32.to_le_bytes());
-    sb[32..36].copy_from_slice(&blocks.to_le_bytes()); // blocks_per_group == blocks
-    sb[40..44].copy_from_slice(&inodes.to_le_bytes()); // inodes_per_group == inodes
+    sb[32..36].copy_from_slice(&blocks.to_le_bytes());
+    sb[40..44].copy_from_slice(&inodes.to_le_bytes());
     sb[56..58].copy_from_slice(&0xEF53u16.to_le_bytes());
     sb[76..80].copy_from_slice(&1u32.to_le_bytes());
     sb[84..88].copy_from_slice(&11u32.to_le_bytes());
@@ -414,7 +405,7 @@ fn build_ext2_image(spec: Ext2ImageSpec<'_>) -> Option<MemoryBlockDevice> {
     let size_bytes = (spec.blocks as usize).saturating_mul(block_size as usize);
     let device = MemoryBlockDevice::allocate(size_bytes)?;
 
-    let _ = (blocks_per_group, inodes_per_group); // values inlined into helpers
+    let _ = (blocks_per_group, inodes_per_group);
     device.with_buffer_mut(|buf| {
         let sb_offset = 1024usize;
         write_superblock(
@@ -603,9 +594,8 @@ pub fn test_ext2_device_write_error_on_metadata() -> TestResult {
     };
     let mut fs = Ext2Fs::new(&failing, &mut cache, sb, bs, is);
 
-    // With write-back caching, the metadata mutations from `create_directory`
-    // land in the cache and the operation itself succeeds — the device error
-    // surfaces only when those dirty blocks are written back at `sync`.
+    // Write-back caching: the mutations land in the cache and the create
+    // succeeds; the device error surfaces only at `sync`.
     if fs.create_directory(2, b"faildir").is_err() {
         return TestResult::Fail;
     }
@@ -671,10 +661,9 @@ pub fn test_ext2_read_file_data_roundtrip() -> TestResult {
     TestResult::Pass
 }
 
-// Regression + durability: `sync` must persist a write to the backing device
-// such that a brand-new handle with its OWN cache reads it back. Overwrites a
-// pre-existing file inode (no allocation) so the test isolates cache-writeback,
-// not the on-disk layout of the hand-built minimal image.
+// `sync` must persist a write such that a brand-new handle with its own cache
+// reads it back. Overwrites a pre-existing inode (no allocation) so the test
+// isolates cache writeback from the hand-built image's on-disk layout.
 pub fn test_ext2_write_persists_across_handles() -> TestResult {
     let spec = Ext2ImageSpec {
         blocks: 64,
@@ -697,13 +686,11 @@ pub fn test_ext2_write_persists_across_handles() -> TestResult {
         if fs.write_file(ino, 0, payload).is_err() {
             return TestResult::Fail;
         }
-        // Durability barrier: ordered writeback to the device.
         if fs.sync().is_err() {
             return TestResult::Fail;
         }
     }
 
-    // Fresh handle, fresh cache: must see the persisted bytes on disk.
     mount_ext2!(device, _c2, fs2);
     let ino = match fs2.resolve_path(b"/persist.txt") {
         Ok(ino) => ino,
@@ -720,9 +707,8 @@ pub fn test_ext2_write_persists_across_handles() -> TestResult {
     TestResult::Pass
 }
 
-// Write-back semantics: a write only DIRTIES the cache; the device is not
-// touched until `sync`. We prove this by writing through one handle WITHOUT
-// syncing, then confirming a fresh handle (own cache) does NOT see the change.
+// Write-back semantics: a write only dirties the cache; the device is not
+// touched until `sync`.
 pub fn test_ext2_writeback_is_deferred_until_sync() -> TestResult {
     let spec = Ext2ImageSpec {
         blocks: 64,
@@ -744,17 +730,13 @@ pub fn test_ext2_writeback_is_deferred_until_sync() -> TestResult {
         if fs.write_file(ino, 0, b"NEW").is_err() {
             return TestResult::Fail;
         }
-        // The write must be visible as dirty in the cache...
         if fs.dirty_count() == 0 {
             return TestResult::Fail;
         }
-        // ...but we deliberately drop the handle WITHOUT syncing. Because the
-        // cache is stack-local to this scope it is discarded — modelling a
-        // crash before writeback. (In production the cache is persistent, so
-        // the data would survive in-memory; here we test the device path.)
+        // Dropped without syncing: the stack-local cache is discarded, which
+        // models a crash before writeback.
     }
 
-    // Fresh handle reading the device must still see the OLD bytes.
     mount_ext2!(device, _c2, fs2);
     let ino = match fs2.resolve_path(b"/defer.txt") {
         Ok(ino) => ino,
@@ -771,9 +753,8 @@ pub fn test_ext2_writeback_is_deferred_until_sync() -> TestResult {
     TestResult::Pass
 }
 
-// Cross-call cache reuse: two operations on the SAME persistent cache see each
-// other's writes immediately (write-back coherency), and a clean read leaves
-// no dirty blocks.
+// Two operations on the same cache must see each other's writes before any
+// sync, and `sync` must leave no dirty blocks.
 pub fn test_ext2_cache_reuse_within_handle() -> TestResult {
     let spec = Ext2ImageSpec {
         blocks: 64,
@@ -795,7 +776,6 @@ pub fn test_ext2_cache_reuse_within_handle() -> TestResult {
     if fs.write_file(ino, 0, payload).is_err() {
         return TestResult::Fail;
     }
-    // Read back through the SAME cache before any sync — must observe the write.
     let mut buf = [0u8; 16];
     let n = match fs.read_file(ino, 0, &mut buf) {
         Ok(n) => n,
@@ -804,7 +784,6 @@ pub fn test_ext2_cache_reuse_within_handle() -> TestResult {
     if &buf[..n.min(payload.len())] != payload {
         return TestResult::Fail;
     }
-    // After sync, the cache is clean.
     if fs.sync().is_err() {
         return TestResult::Fail;
     }
@@ -848,9 +827,8 @@ fn ext2_tests_init() -> bool {
     true
 }
 
-// VFS initialisation is performed once on first test invocation; lex sort
-// of test names guarantees `test_ext2_aaa_init` runs before any other
-// `test_ext2_*` / `test_vfs_*` entry in this file.
+// Lex order of test names is what guarantees `test_ext2_aaa_init` runs before
+// any other `test_ext2_*` / `test_vfs_*` entry in this file.
 static EXT2_VFS_READY: slopos_ostd::sync::StateFlag = slopos_ostd::sync::StateFlag::new();
 
 fn ensure_ext2_vfs_ready() -> bool {
@@ -872,14 +850,9 @@ fn test_ext2_aaa_init() -> TestResult {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Block-integrity (verity) tests — see fs/src/verity.rs
-// ---------------------------------------------------------------------------
-
-/// Build an in-memory image with a verity trailer (`n` blocks of `bs` bytes)
-/// and wrap it in a `VerifiedBlockDevice`. If `corrupt_block` is set, that
-/// block's data is flipped AFTER its hash is recorded, so the stored hash no
-/// longer matches the on-disk bytes (simulating corruption/drift).
+/// Build an image with a verity trailer (`n` blocks of `bs` bytes) behind a
+/// `VerifiedBlockDevice`. `corrupt_block` is flipped *after* its hash is
+/// recorded, so the stored hash no longer matches the bytes on disk.
 fn build_verity_device(
     bs: usize,
     n: usize,
@@ -928,14 +901,12 @@ fn test_verity_crc32_known_vectors() -> TestResult {
     }
 }
 
-/// A clean (untampered) image verifies on read.
 fn test_verity_clean_read_passes() -> TestResult {
     let bs = 512usize;
     let Some(dev) = build_verity_device(bs, 4, None) else {
         return TestResult::Fail;
     };
     let mut buf = [0u8; 512];
-    // Every block reads back successfully through the verifier.
     for b in 0..4u64 {
         if dev.read_at(b * bs as u64, &mut buf).is_err() {
             return TestResult::Fail;
@@ -944,15 +915,14 @@ fn test_verity_clean_read_passes() -> TestResult {
     TestResult::Pass
 }
 
-/// A corrupted block fails the read loudly with `IntegrityFailure` instead of
-/// returning bad bytes — the structural defense against the io_capture class.
+/// A corrupted block fails the read loudly instead of returning bad bytes —
+/// the structural defense against the io_capture class.
 fn test_verity_corruption_detected() -> TestResult {
     let bs = 512usize;
     let Some(dev) = build_verity_device(bs, 4, Some(2)) else {
         return TestResult::Fail;
     };
     let mut buf = [0u8; 512];
-    // Block 0 and 1 are clean → ok; block 2 is corrupted → IntegrityFailure.
     if dev.read_at(0, &mut buf).is_err() || dev.read_at(bs as u64, &mut buf).is_err() {
         return TestResult::Fail;
     }
@@ -962,20 +932,17 @@ fn test_verity_corruption_detected() -> TestResult {
     }
 }
 
-/// After a block is written, it is "re-blessed" (the FS owns its mutable
-/// blocks) and no longer verified — so a subsequent read of a corrupted-but-
-/// written block does not fail.
+/// A written block is re-blessed — the FS owns its mutable blocks — so a
+/// corrupted-but-written block no longer fails verification.
 fn test_verity_written_block_skips_verification() -> TestResult {
     let bs = 512usize;
     let Some(dev) = build_verity_device(bs, 4, Some(2)) else {
         return TestResult::Fail;
     };
-    // Write block 2 (marks it written / re-blesses it).
     let payload = [0xABu8; 512];
     if dev.write_at(2 * bs as u64, &payload).is_err() {
         return TestResult::Fail;
     }
-    // Now reading block 2 must NOT fail integrity (it's owned/mutable).
     let mut buf = [0u8; 512];
     if dev.read_at(2 * bs as u64, &mut buf).is_err() {
         return TestResult::Fail;
@@ -983,9 +950,8 @@ fn test_verity_written_block_skips_verification() -> TestResult {
     TestResult::Pass
 }
 
-/// Only blocks FULLY contained in a read are verified. A sub-block read of a
-/// corrupted block must NOT fail (it never fully covers the block) — this is
-/// the property the sub-block superblock read relies on.
+/// Only blocks fully contained in a read are verified, which is the property
+/// the sub-block superblock read relies on.
 fn test_verity_partial_read_skips() -> TestResult {
     let bs = 512usize;
     let Some(dev) = build_verity_device(bs, 4, Some(2)) else {
@@ -1000,7 +966,7 @@ fn test_verity_partial_read_skips() -> TestResult {
 }
 
 /// A multi-block read spanning a clean→corrupt boundary catches the corrupt
-/// block mid-buffer (verifies the loop iterates over every covered block).
+/// block mid-buffer: the loop covers every block the read touches.
 fn test_verity_multiblock_span_detects() -> TestResult {
     let bs = 512usize;
     let Some(dev) = build_verity_device(bs, 4, Some(2)) else {
@@ -1014,12 +980,9 @@ fn test_verity_multiblock_span_detects() -> TestResult {
     }
 }
 
-/// A registered process with an empty descriptor table, released on drop.
-///
-/// A table lives in its process's own registry slot, so there is no table to
-/// be had without a process. These tests used to mint one against a made-up
-/// pid; that is precisely how a table ends up bound to an id nothing owns,
-/// which is the confusion the re-key removes.
+/// A registered process with an empty descriptor table, released on drop. A
+/// table lives in its process's own registry slot, so there is no table to be
+/// had without a process.
 struct ScratchProcess {
     process: slopos_ostd::KArc<slopos_ostd::process::Process>,
 }
@@ -1036,7 +999,6 @@ impl ScratchProcess {
         Some(Self { process })
     }
 
-    /// The descriptor table this process owns.
     fn table(&self) -> crate::fileio::FdTable {
         crate::fileio::FdTable::of(&self.process).expect("a registered process has a table")
     }
@@ -1058,9 +1020,9 @@ pub fn test_fileio_open_at_fd() -> TestResult {
     use crate::fileio::{file_close_fd, fileio_open_at_fd};
     use slopos_abi::fs::O_RDONLY;
 
-    // The writable ext2 root is mounted by `test_ext2_aaa_init` (lex-first);
-    // this test runs after it. Use a private directory so it never collides
-    // with `test_vfs_*`, whose `mkdir` asserts first-creation.
+    // Runs after `test_ext2_aaa_init` (lex-first) mounts the writable root. A
+    // private directory, so it never collides with `test_vfs_*`, whose `mkdir`
+    // asserts first-creation.
     let _ = vfs_mkdir(b"/fileio_test");
     let handle = match vfs_open(b"/fileio_test/open_at.txt", true) {
         Ok(h) => h,
@@ -1111,13 +1073,11 @@ pub fn test_fileio_file_ref_move() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Clone fd 2 → install a shared alias at fd 7.
     let outcome = (|| {
         let cloned = fileio_clone_file_ref(table, 2)?;
         if fileio_install_file_ref_at(table, 7, cloned, false) != 7 {
             return None;
         }
-        // Move fd 2 → fd 9; fd 2 is emptied by the take.
         let taken = fileio_take_file_ref(table, 2)?;
         if fileio_install_file_ref_at(table, 9, taken, false) != 9 {
             return None;
@@ -1169,8 +1129,6 @@ slopos_testing::stest!(name = test_ext2_writeback_is_deferred_until_sync);
 slopos_testing::stest!(name = test_ext2_cache_reuse_within_handle);
 slopos_testing::stest!(name = test_ext2_path_resolution_not_found);
 slopos_testing::stest!(name = test_ext2_remove_path_not_file);
-
-// --- initramfs cpio (newc) parser -----------------------------------------
 
 const T_S_IFMT: u32 = 0o170000;
 const T_S_IFDIR: u32 = 0o040000;
@@ -1309,11 +1267,9 @@ slopos_testing::stest!(name = test_cpio_truncated_header);
 slopos_testing::stest!(name = test_cpio_bad_magic);
 slopos_testing::stest!(name = test_cpio_truncated_data);
 
-/// A process may hold `FILEIO_MAX_OPEN_FILES` descriptors and no more.
-///
-/// The bound is the length of the table the process was given, so this also
-/// pins that the heap-backed array is built at its full size rather than
-/// growing under whatever lock happens to be held when a descriptor arrives.
+/// A process may hold `FILEIO_MAX_OPEN_FILES` descriptors and no more, which
+/// also pins that the heap-backed table is built at its full size rather than
+/// grown under whatever lock happens to be held when a descriptor arrives.
 pub fn test_fileio_open_file_limit() -> TestResult {
     use crate::fileio::{FILEIO_MAX_OPEN_FILES, file_open_for_process};
     use slopos_abi::fs::O_RDONLY;
@@ -1364,12 +1320,9 @@ pub fn test_fileio_open_file_limit() -> TestResult {
 
 slopos_testing::stest!(name = test_fileio_open_file_limit);
 
-/// The account row is what refuses, and the errno is the one the call site
-/// already returned for a full table.
-///
-/// Drives a process to its `FdSlot` ceiling with the ceiling set *below* the
-/// table length, so the refusal provably comes from the quota rather than from
-/// running out of array.
+/// The account row is what refuses, with the errno a full table already
+/// returns. The ceiling is set *below* the table length, so the refusal
+/// provably comes from the quota rather than from running out of array.
 pub fn test_quota_fdslot_drive_to_full() -> TestResult {
     use crate::fileio::file_open_for_process;
     use slopos_abi::fs::O_RDONLY;
@@ -1435,11 +1388,7 @@ pub fn test_quota_fdslot_drive_to_full() -> TestResult {
 slopos_testing::stest!(name = test_quota_fdslot_drive_to_full);
 
 /// A refused open refunds exactly once, and closing gives every unit back.
-///
-/// The failure this exists to catch is the one the token design is built
-/// around: a mint that fails after the debit, leaving the row permanently
-/// short and the process permanently denied. `used` returning to its exact
-/// pre-test value is the observable form of "refunded exactly once" — an
+/// `used` returning to its exact pre-test value is the observable form: an
 /// under-refund leaves it high, a double refund leaves it low.
 pub fn test_quota_fdslot_refusal_refunds_once() -> TestResult {
     use crate::fileio::{file_close_fd, file_open_for_process};
@@ -1476,8 +1425,8 @@ pub fn test_quota_fdslot_refusal_refunds_once() -> TestResult {
         }
     }
 
-    // Refuse repeatedly: a refusal that under-refunds shows up as a row that
-    // drifts, which one refusal could hide.
+    // Repeat: a refusal that under-refunds drifts the row, which a single
+    // refusal could hide.
     for _ in 0..16 {
         if file_open_for_process(table, path, O_RDONLY as u32) >= 0 {
             set_quota_mode(restore);
@@ -1513,12 +1462,9 @@ pub fn test_quota_fdslot_refusal_refunds_once() -> TestResult {
 
 slopos_testing::stest!(name = test_quota_fdslot_refusal_refunds_once);
 
-/// One process at its ceiling does not deny another.
-///
-/// The property the whole subsystem exists for, and the one a global table
-/// bound cannot provide: with a shared array, the first process to fill it
-/// denies everyone. Here the exhausted process is refused and its neighbour —
-/// whose account is a sibling row — opens normally.
+/// One process at its ceiling does not deny another — the property a global
+/// table bound cannot provide, where the first process to fill the shared
+/// array denies everyone.
 pub fn test_quota_fdslot_cross_process_isolation() -> TestResult {
     use crate::fileio::file_open_for_process;
     use slopos_abi::fs::O_RDONLY;
@@ -1568,14 +1514,10 @@ pub fn test_quota_fdslot_cross_process_isolation() -> TestResult {
 
 slopos_testing::stest!(name = test_quota_fdslot_cross_process_isolation);
 
-/// The ledger agrees with itself immediately after an exhaustion run.
-///
-/// Named `zzz` so it sorts after the three tests above: the audit is only
-/// interesting on a ledger that has just been driven to its ceilings and
-/// unwound, which is what those leave behind. This is the runtime form of the
-/// equality invariant and the only mechanism that can see a forgotten or
-/// unwinder-skipped charge — the type system guarantees the token is unique,
-/// never that the number matches reality.
+/// The ledger agrees with itself immediately after an exhaustion run. Named
+/// `zzz` so it sorts after the tests that drive the ceilings and unwind them.
+/// The type system guarantees a charge token is unique, never that the number
+/// matches reality, so only this audit can see a forgotten or skipped charge.
 pub fn test_zzz_quota_ledger_is_consistent_after_exhaustion() -> TestResult {
     use slopos_ostd::process::quota::{LedgerFault, ledger_audit};
 
@@ -1606,11 +1548,9 @@ fn scratch_file(path: &'static [u8]) -> Option<&'static [u8]> {
     Some(path)
 }
 
-/// A sealed inode refuses every mutation, and an unsealed one in the same
-/// mount refuses none of them.
-///
-/// Both files live in `/tmp`, one filesystem instance, so this cannot pass by
-/// accident on a per-filesystem flag.
+/// A sealed inode refuses every mutation, and an unsealed one in the same mount
+/// refuses none of them. Both files live in `/tmp`, one filesystem instance, so
+/// this cannot pass on a per-filesystem flag.
 pub fn test_sealed_inode_refuses_mutation() -> TestResult {
     use crate::vfs::{VfsError, VfsOpenFlags, vfs_open_flags, vfs_set_sealed};
 
@@ -1641,7 +1581,6 @@ pub fn test_sealed_inode_refuses_mutation() -> TestResult {
         return slopos_testing::fail!("sealing failed");
     }
 
-    // Every mutator refuses on the sealed inode.
     if !matches!(sealed.write(0, b"x"), Err(VfsError::PermissionDenied)) {
         return slopos_testing::fail!("a sealed inode accepted a write");
     }
@@ -1666,7 +1605,6 @@ pub fn test_sealed_inode_refuses_mutation() -> TestResult {
     if !matches!(vfs_rename(PLAIN, SEALED), Err(VfsError::PermissionDenied)) {
         return slopos_testing::fail!("a sealed inode accepted being renamed over");
     }
-    // The open that would have produced a writable handle never returns one.
     if !matches!(
         vfs_open_flags(SEALED, writable()),
         Err(VfsError::PermissionDenied)
@@ -1679,7 +1617,6 @@ pub fn test_sealed_inode_refuses_mutation() -> TestResult {
         return slopos_testing::fail!("a sealed inode stopped being readable");
     }
 
-    // The unsealed neighbour in the same mount accepts all of it.
     if plain.write(0, b"y").is_err() {
         return slopos_testing::fail!("the seal reached an unsealed neighbour's write");
     }
@@ -1709,15 +1646,10 @@ pub fn test_set_sealed_defaults_closed() -> TestResult {
 slopos_testing::stest!(name = test_sealed_inode_refuses_mutation);
 slopos_testing::stest!(name = test_set_sealed_defaults_closed);
 
-/// A process at its `ObjectRow` ceiling is refused with `ENFILE`, and every
-/// row it held comes back on close.
-///
-/// `ObjectRow` counts registry rows and their backing objects — the vnode, the
-/// socket endpoint, the pipe — which are the system-wide tables an
-/// unprivileged process could previously fill on its own. The errno is
-/// deliberately `ENFILE` ("too many open files in *system*") rather than
-/// `EMFILE`: what has been exhausted is an object table, not this process's
-/// descriptor numbers, and userland backs off differently for each.
+/// A process at its `ObjectRow` ceiling is refused with `ENFILE`, and every row
+/// it held comes back on close. `ENFILE` deliberately, not `EMFILE`: what is
+/// exhausted is a system-wide object table (vnode, socket endpoint, pipe), not
+/// this process's descriptor numbers, and userland backs off differently.
 pub fn test_quota_objectrow_drive_to_full() -> TestResult {
     use crate::fileio::file_open_for_process;
     use slopos_abi::fs::O_RDONLY;
@@ -1779,7 +1711,6 @@ pub fn test_quota_objectrow_drive_to_full() -> TestResult {
 
 slopos_testing::stest!(name = test_quota_objectrow_drive_to_full);
 
-/// One process at its `ObjectRow` ceiling does not deny another.
 pub fn test_quota_objectrow_cross_process_isolation() -> TestResult {
     use crate::fileio::file_open_for_process;
     use slopos_abi::fs::O_RDONLY;
@@ -1825,17 +1756,11 @@ pub fn test_quota_objectrow_cross_process_isolation() -> TestResult {
 
 slopos_testing::stest!(name = test_quota_objectrow_cross_process_isolation);
 
-/// Reclaiming from the block cache leaves every surviving block findable.
-///
-/// The index maps block number to slot, and reclaim moves slots — so a repair
-/// that missed an entry would leave a live cached block unreachable under its
-/// own number, and the next read of it would fault in a second copy while the
-/// first sat pinned and invisible. Worse, a *stale* entry would hand back
-/// another block's bytes under the number that was asked for.
-///
-/// Written against the cache directly rather than through the VFS: the failure
-/// is in the index, and a read through the VFS would silently re-fault the
-/// block and report success.
+/// Reclaiming from the block cache leaves every surviving block findable: the
+/// index maps block number to slot and reclaim moves slots, so a missed repair
+/// leaves a live block unreachable under its own number and a *stale* entry
+/// hands back another block's bytes. Written against the cache directly — a
+/// read through the VFS would silently re-fault the block and report success.
 pub fn test_block_cache_reclaim_keeps_the_index_coherent() -> TestResult {
     use crate::blockdev::MemoryBlockDevice;
     use crate::ext2::cache::BlockCache;
@@ -1865,11 +1790,9 @@ pub fn test_block_cache_reclaim_keeps_the_index_coherent() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Re-dirty the *last* block, so the scan (which walks from the end) has to
-    // skip it and the entries it does release come from the middle. That is
-    // what makes `swap_remove` actually move a surviving entry into a lower
-    // slot -- without it every removal is a pop, nothing moves, and the index
-    // repair this test exists for is never exercised.
+    // Re-dirty the *last* block so the scan, which walks from the end, skips it
+    // and releases from the middle -- that is what makes `swap_remove` move a
+    // survivor into a lower slot instead of every removal being a pop.
     {
         let Ok(mut tail) = cache.get(BlockNum(BLOCKS), &device) else {
             return TestResult::Fail;
@@ -1877,17 +1800,15 @@ pub fn test_block_cache_reclaim_keeps_the_index_coherent() -> TestResult {
         tail.data_mut()[0] = BLOCKS as u8;
     }
 
-    // Reclaim nearly everything. The cache pre-allocates `CACHE_ENTRIES`
-    // slots, so a small request is satisfied entirely from the empty trailing
-    // ones and never disturbs a live block -- the case that must work is the
-    // one where the scan reaches the populated slots and has to move them.
+    // Reclaim nearly everything: a small request is satisfied from the
+    // pre-allocated empty trailing slots and never disturbs a live block.
     let before = cache.reclaimable();
     slopos_testing::assert_test!(before > 0, "a flushed cache reported nothing reclaimable");
     let released = cache.shrink_clean(before);
     slopos_testing::assert_test!(released > 0, "shrink_clean released nothing");
 
-    // Every block must still read back its own stamp: a survivor through the
-    // index, an evicted one through a re-read from the device.
+    // A survivor answers through the index, an evicted block through a re-read
+    // from the device.
     for b in 1..=BLOCKS {
         let Ok(guard) = cache.get(BlockNum(b), &device) else {
             return TestResult::Fail;

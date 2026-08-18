@@ -199,7 +199,6 @@ impl VirtAddr {
         self.0 < 0x0000_8000_0000_0000
     }
 
-    /// Returns true if the raw address is canonical on x86_64.
     #[inline]
     pub const fn is_canonical(addr: u64) -> bool {
         let sign = (addr >> 47) & 1;

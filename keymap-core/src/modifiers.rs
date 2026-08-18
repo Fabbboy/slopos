@@ -1,9 +1,8 @@
 //! Modifier + lock state tracking.
 //!
-//! [`ModTracker`] folds the eight HID modifier usages (0xE0..=0xE7) and the
-//! three lock keys (Caps/Num/Scroll) into a snapshot. The `mods` byte uses the
-//! ABI `MODIFIER_*` bit layout verbatim, so it drops straight into an
-//! `InputEvent` and matches what the compositor already expects.
+//! [`ModTracker`] folds the eight HID modifier usages (0xE0..=0xE7) and the three
+//! lock keys into a snapshot whose `mods` byte uses the ABI `MODIFIER_*` bit
+//! layout verbatim, so it drops straight into an `InputEvent`.
 
 use slopos_abi::input::keycode::*;
 use slopos_abi::input::{
@@ -13,11 +12,8 @@ use slopos_abi::input::{
 
 use crate::keymap::{Locks, Mods};
 
-/// Caps Lock active (in `ModSnapshot::locks`).
 pub const LOCK_CAPS: u8 = 1 << 0;
-/// Num Lock active.
 pub const LOCK_NUM: u8 = 1 << 1;
-/// Scroll Lock active.
 pub const LOCK_SCROLL: u8 = 1 << 2;
 
 /// A point-in-time snapshot of modifier + lock state.
@@ -29,7 +25,6 @@ pub struct ModSnapshot {
     pub locks: u8,
 }
 
-/// Tracks the live state of all modifier and lock keys.
 #[derive(Debug, Clone, Copy)]
 pub struct ModTracker {
     lshift: bool,
@@ -46,8 +41,7 @@ pub struct ModTracker {
 }
 
 impl ModTracker {
-    /// New tracker. Num Lock starts **on** to match typical firmware state, so a
-    /// laptop's numeric keypad produces digits out of the box.
+    /// Num Lock starts **on**, matching typical firmware state.
     pub const fn new() -> Self {
         Self {
             lshift: false,
@@ -64,9 +58,8 @@ impl ModTracker {
         }
     }
 
-    /// Apply a decoded key transition. Returns `true` if `usage` was a modifier
-    /// or lock key (its only effect is state — it produces no text). Lock keys
-    /// toggle on press and ignore release.
+    /// Apply a decoded key transition. Returns `true` if `usage` was a modifier or
+    /// lock key. Lock keys toggle on press and ignore release.
     pub fn update(&mut self, usage: u16, pressed: bool) -> bool {
         match usage {
             KEY_LEFTSHIFT => self.lshift = pressed,
@@ -126,8 +119,7 @@ impl ModTracker {
         self.scroll
     }
 
-    /// Modifier view for the keymap layer. `altgr` is the right Alt key alone
-    /// (AltGr), which selects a layout's level-3/4 glyph columns.
+    /// Modifier view for the keymap layer.
     pub fn mods(&self) -> Mods {
         Mods {
             shift: self.shift(),
@@ -160,7 +152,7 @@ impl ModTracker {
             mods |= MODIFIER_ALT;
         }
         if self.ralt {
-            // AltGr (right Alt) — also keeps MODIFIER_ALT set above.
+            // AltGr also keeps MODIFIER_ALT set above.
             mods |= MODIFIER_ALTGR;
         }
         if self.meta() {
@@ -195,11 +187,8 @@ impl Default for ModTracker {
     }
 }
 
-/// Reconstruct [`Mods`] + [`Locks`] from an ABI `MODIFIER_*` snapshot byte (the
-/// modifier field of a key `InputEvent`).
-///
-/// Lets a downstream consumer (e.g. a GUI toolkit) re-run the shared [`Layout`]
-/// off a forwarded key event without tracking modifier/lock state itself.
+/// Reconstruct [`Mods`] + [`Locks`] from an ABI `MODIFIER_*` snapshot byte, so a
+/// downstream consumer can re-run the shared [`Layout`] off a forwarded event.
 ///
 /// [`Layout`]: crate::keymap::Layout
 pub fn mods_locks_from_raw(raw: u8) -> (Mods, Locks) {
@@ -252,9 +241,9 @@ mod tests {
         assert!(!m.caps_lock());
         m.update(KEY_CAPSLOCK, true);
         assert!(m.caps_lock());
-        m.update(KEY_CAPSLOCK, false); // release: no change
+        m.update(KEY_CAPSLOCK, false);
         assert!(m.caps_lock());
-        m.update(KEY_CAPSLOCK, true); // press again: toggle off
+        m.update(KEY_CAPSLOCK, true);
         assert!(!m.caps_lock());
     }
 

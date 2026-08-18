@@ -253,8 +253,7 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
 
     cpu::disable_interrupts();
     // One-way, and before the reporter runs: everything below acquires locks
-    // while this CPU still holds whatever it held at the fault, so a cycle
-    // report here would panic inside the panic.
+    // while this CPU still holds whatever it held at the fault.
     slopos_ostd::sync::enter_fatal_bypass();
 
     // A non-zero prior depth means the fatal path itself faulted, so the
@@ -291,7 +290,6 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
     slopos_ostd::panic::run_on_emergency_stacks(emergency_report)
 }
 
-/// Proceeds on timeout so a stuck CPU can never block the report.
 fn wait_for_peer_stop() {
     let expected = (slopos_arch::pcr::get_pcr_count() as u32).saturating_sub(1);
     if expected == 0 {
@@ -346,7 +344,6 @@ extern "sysv64" fn emergency_report() -> ! {
         panic_serial_write(hex_buf.format_labeled("CR0", cr0));
     }
     {
-        // CR2 holds the faulting linear address of a #PF.
         let mut hex_buf = HexBuffer::new();
         panic_serial_write(hex_buf.format_labeled("CR2", cr2));
     }

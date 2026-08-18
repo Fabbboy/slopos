@@ -28,8 +28,7 @@ pub fn test_page_alloc_until_oom() -> TestResult {
         return pass!();
     }
 
-    // PhysAddr is repr(transparent) over u64 and Zeroable; all-zero
-    // == PhysAddr::NULL.
+    // PhysAddr is repr(transparent) over u64: all-zero == PhysAddr::NULL.
     let mut allocated: KBox<[PhysAddr; 1024]> = KBox::zeroed().expect("alloc");
     let mut count = 0usize;
 
@@ -218,13 +217,11 @@ pub fn test_heap_alloc_one_gib() -> TestResult {
     pass!()
 }
 
-/// Process creation keeps working, and keeps producing usable ids, past
-/// the point where every id has been issued once.
-///
-/// One process is live at a time: what is under pressure here is the id
-/// space, not the slot table. The id is checked per cycle rather than
-/// collected — an array of `MAX_PROCESSES + 64` ids would be 1280 bytes
-/// of stack frame against a 2 KiB budget.
+/// Process creation keeps producing usable ids past the point where every id
+/// has been issued once. One process is live at a time, so the id space is
+/// what is under pressure, not the slot table. Ids are checked per cycle
+/// rather than collected: an array of `MAX_PROCESSES + 64` would be 1280
+/// bytes of stack frame against a 2 KiB budget.
 pub fn test_process_vm_creation_pressure() -> TestResult {
     init_process_vm();
 

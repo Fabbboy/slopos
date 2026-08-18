@@ -1,8 +1,7 @@
 //! Per-test execution thunk.
 //!
-//! `execute_test` wraps a kernel-test function in `catch_panic!` and
-//! recovers the test's intended outcome through a side-channel atomic.
-//! The harness is serial on CPU0, so a single global is sound.
+//! The test's intended outcome comes back through a side-channel atomic; the
+//! harness is serial on CPU0, so a single global is sound.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 

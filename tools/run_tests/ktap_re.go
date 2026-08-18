@@ -12,8 +12,8 @@ const KtapPrefix = "KTAP\t"
 // BailKey introduces a `Bail out!` line; matched after the prefix.
 const BailKey = "Bail out!"
 
-// MaxLogEmit mirrors the kernel-side per-failure captured-log cap; the
-// parser records it rather than enforcing it.
+// MaxLogEmit mirrors the kernel-side per-failure captured-log cap; it is
+// documented here, not enforced.
 const MaxLogEmit = 4096
 
 // KlogTailLines is the rolling buffer of non-KTAP klog lines attached to the

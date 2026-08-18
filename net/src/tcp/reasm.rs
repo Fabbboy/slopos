@@ -1,27 +1,17 @@
-//! Interval-merging OOO reassembly tracker (Phase 5).
+//! Interval-merging out-of-order reassembly tracker.
 //!
-//! The [`Assembler`] records which byte ranges of the receive window have
-//! arrived out of order.  It stores up to [`ASSEMBLER_MAX_RANGES`] disjoint
-//! `(start_seq, end_seq)` intervals, sorted by start sequence number.
-//! Overlapping or adjacent inserts are merged in-place.
-//!
-//! Payload bytes are written directly into the connection's receive ring
-//! buffer at their final offset by the caller — the Assembler never touches
-//! payload data, only tracks coverage.
+//! The [`Assembler`] tracks coverage only; payload bytes are written into the
+//! connection's receive ring buffer at their final offset by the caller.
 
 use super::seq::{seq_ge, seq_gt, seq_le, seq_lt};
 
-/// Maximum number of disjoint byte ranges tracked per connection.
 pub const ASSEMBLER_MAX_RANGES: usize = 16;
 
 /// Interval-merging tracker for out-of-order received byte ranges.
 ///
-/// Each entry is an `(start_seq, end_seq)` half-open interval in absolute
-/// TCP sequence-number space.  The array is kept sorted by `start_seq`
-/// (wrapping-aware) with the invariant that no two entries overlap or are
-/// adjacent — `insert` merges eagerly.
-///
-/// Size: 16 × 8 + 8 = 136 bytes (down from 11 696 bytes for `TcpOooQueue`).
+/// Each entry is an `(start_seq, end_seq)` half-open interval in absolute TCP
+/// sequence-number space, sorted by `start_seq` (wrapping-aware); no two
+/// entries overlap or are adjacent, because `insert` merges eagerly.
 #[derive(Clone, Copy)]
 pub struct Assembler {
     ranges: [(u32, u32); ASSEMBLER_MAX_RANGES],
@@ -48,17 +38,15 @@ impl Assembler {
         self.count == 0
     }
 
-    /// Number of tracked disjoint intervals (exposed for tests).
     pub fn range_count(&self) -> usize {
         self.count
     }
 
     /// Record that bytes `[seq, seq+len)` have been received.
     ///
-    /// Merges with any overlapping or adjacent existing intervals.  If the
-    /// table is full and the new range does not merge with anything, the
-    /// highest-sequence interval is evicted (keeps segments closest to the
-    /// reassembly frontier).
+    /// When the table is full and the new range merges with nothing, the
+    /// highest-sequence interval is evicted, keeping segments closest to the
+    /// reassembly frontier.
     pub fn insert(&mut self, seq: u32, len: usize) {
         if len == 0 {
             return;
@@ -66,20 +54,16 @@ impl Assembler {
         let mut new_start = seq;
         let mut new_end = seq.wrapping_add(len as u32);
 
-        // Scan for overlapping or adjacent intervals and merge.
         let mut i = 0;
         while i < self.count {
             let (s, e) = self.ranges[i];
-            // Overlap or adjacent: s <= new_end && new_start <= e
             if seq_le(s, new_end) && seq_le(new_start, e) {
-                // Merge.
                 if seq_lt(s, new_start) {
                     new_start = s;
                 }
                 if seq_gt(e, new_end) {
                     new_end = e;
                 }
-                // Remove entry i by swapping with last and shrinking.
                 self.count -= 1;
                 if i < self.count {
                     self.ranges[i] = self.ranges[self.count];
@@ -90,16 +74,13 @@ impl Assembler {
             i += 1;
         }
 
-        // Evict if full (no merge happened that freed a slot).
         if self.count >= ASSEMBLER_MAX_RANGES {
-            // Evict the highest-seq interval to favour ranges near the gap.
             let mut evict = 0;
             for j in 1..self.count {
                 if seq_gt(self.ranges[j].0, self.ranges[evict].0) {
                     evict = j;
                 }
             }
-            // Only evict if the new range is closer to the gap.
             if seq_ge(new_start, self.ranges[evict].0) {
                 return;
             }
@@ -109,11 +90,9 @@ impl Assembler {
             }
         }
 
-        // Insert the merged interval and restore sorted order.
         self.ranges[self.count] = (new_start, new_end);
         self.count += 1;
 
-        // Insertion-sort the last element into place (n ≤ 16).
         let mut j = self.count - 1;
         while j > 0 && seq_gt(self.ranges[j - 1].0, self.ranges[j].0) {
             self.ranges.swap(j - 1, j);

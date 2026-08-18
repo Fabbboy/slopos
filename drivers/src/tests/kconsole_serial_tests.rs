@@ -1,12 +1,11 @@
 //! Kernel-side tests for the diagnostic console's serial trigger.
 //!
-//! The trigger is a break condition followed by one key. A break cannot be
-//! produced by any byte pattern, which is the whole reason it is the trigger:
-//! a console reachable from the data stream would be reachable by anything
-//! that can write to the line.
+//! The trigger is a break condition followed by one key: a break cannot be
+//! produced by any byte pattern, so nothing that merely writes to the line can
+//! reach the console.
 //!
-//! Driven through the classifier rather than through a UART, because a break
-//! is not something the test harness can make QEMU's stdio serial produce.
+//! Driven through the classifier rather than a UART, because the harness cannot
+//! make QEMU's stdio serial produce a break.
 
 use slopos_testing::TestResult;
 use slopos_testing::fail;
@@ -18,7 +17,6 @@ const DATA: u8 = 0x01;
 /// LSR with data ready and the break flag set.
 const DATA_BREAK: u8 = 0x11;
 
-/// Ordinary bytes reach the line discipline untouched.
 pub fn test_kcon_serial_passes_data_through() -> TestResult {
     let mut armed = false;
     for byte in [b'a', 0x00, 0x03, 0xFF] {
@@ -33,11 +31,9 @@ pub fn test_kcon_serial_passes_data_through() -> TestResult {
     TestResult::Pass
 }
 
-/// A break arms, and the next byte becomes a command rather than input.
 pub fn test_kcon_serial_break_arms_and_selects() -> TestResult {
     let mut armed = false;
 
-    // The break's framing byte is not input.
     match serial_console_step(DATA_BREAK, 0x00, &mut armed, true) {
         SerialAction::Consumed => {}
         other => return fail!("the break's framing byte was not consumed: {:?}", other),
@@ -56,8 +52,6 @@ pub fn test_kcon_serial_break_arms_and_selects() -> TestResult {
     TestResult::Pass
 }
 
-/// The window is exactly one byte.
-///
 /// An operator who sends a break and then changes their mind loses one
 /// keystroke, not every keystroke until they remember to disarm.
 pub fn test_kcon_serial_arm_lasts_one_byte() -> TestResult {
@@ -73,10 +67,8 @@ pub fn test_kcon_serial_arm_lasts_one_byte() -> TestResult {
     }
 }
 
-/// A disabled serial trigger consumes the break but arms nothing.
-///
-/// The framing byte is still not input — it never was — but no subsequent
-/// keystroke is diverted.
+/// Even disabled, the framing byte is consumed rather than delivered as input;
+/// no subsequent keystroke is diverted.
 pub fn test_kcon_serial_trigger_can_be_disabled() -> TestResult {
     let mut armed = false;
     match serial_console_step(DATA_BREAK, 0x00, &mut armed, false) {
@@ -95,7 +87,6 @@ pub fn test_kcon_serial_trigger_can_be_disabled() -> TestResult {
     }
 }
 
-/// Back-to-back breaks leave exactly one arm.
 pub fn test_kcon_serial_repeated_breaks_arm_once() -> TestResult {
     let mut armed = false;
     for _ in 0..4 {

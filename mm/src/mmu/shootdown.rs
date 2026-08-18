@@ -1,10 +1,4 @@
-//! Shootdown façade.
-//!
-//! Re-exports the `mm::tlb` public surface under the
-//! `mm::mmu::shootdown` path so callers can depend on the modern
-//! address without being tied to the legacy module. The underlying
-//! implementation (Amit-style early ACK + concurrent local flush)
-//! lives in `mm::tlb`.
+//! Re-export façade for the `mm::tlb` shootdown surface.
 
 pub use crate::tlb::{
     SendIpiFn, TLB_SHOOTDOWN_VECTOR, TlbFlushBatch, enter_lazy_tlb, exit_lazy_tlb, flush_all,

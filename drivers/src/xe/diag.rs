@@ -1,12 +1,6 @@
-//! Read-only display-engine diagnostics.
-//!
-//! This dump identifies the silicon and decodes the live display state the
-//! firmware left behind: the enabled pipes, the active pipe's source geometry
-//! and scanline progress, the primary plane's format/tiling/surface, the
-//! transcoder/DDI/panel-power/power-well control words, and the GGTT entry that
-//! backs the firmware framebuffer. It reads only — never writes a display
-//! register, so the firmware scanout keeps driving the panel. Every value is
-//! logged on its own short line to keep each function's stack frame small.
+//! Read-only display-engine diagnostics: never writes a display register, so
+//! the firmware scanout keeps driving the panel. Every value is logged on its
+//! own short line to keep each function's stack frame small.
 
 use slopos_mm::mmio::MmioRegion;
 use slopos_ostd::klog_info;
@@ -17,8 +11,6 @@ use crate::xe_logic::plane_config::PlaneConfig;
 use crate::xe_logic::platform::XePlatform;
 use crate::xe_logic::regs::{self, Pipe};
 
-/// Log the identified platform and a full read-only sample of the live display
-/// state. Reads only; commits nothing.
 pub fn dump(mmio: &MmioRegion, info: &PciDeviceInfo, platform: XePlatform) {
     log_identity(info, platform);
 
@@ -34,7 +26,6 @@ pub fn dump(mmio: &MmioRegion, info: &PciDeviceInfo, platform: XePlatform) {
     log_ggtt_extent(mmio, plane.surf_ggtt);
 }
 
-/// Log the platform identity and the BAR0 (GTTMMADR) window extent.
 fn log_identity(info: &PciDeviceInfo, platform: XePlatform) {
     klog_info!("XE-DIAG: platform {}", platform.name);
     klog_info!("XE-DIAG:   vendor id 0x{:04x}", info.vendor_id);
@@ -49,8 +40,7 @@ fn log_identity(info: &PciDeviceInfo, platform: XePlatform) {
     klog_info!("XE-DIAG:   bar0 size 0x{:x}", bar0.size);
 }
 
-/// Report each pipe's PIPECONF enable/active state and return the first enabled
-/// pipe (the one driving live output), or `None` if every pipe is disabled.
+/// Returns the first enabled pipe — the one driving live output.
 fn scan_pipes(mmio: &MmioRegion) -> Option<Pipe> {
     let mut active = None;
     for pipe in Pipe::ALL {
@@ -66,7 +56,6 @@ fn scan_pipes(mmio: &MmioRegion) -> Option<Pipe> {
     active
 }
 
-/// Read PIPESRC for the active pipe and report its source resolution.
 fn log_pipe_geometry(mmio: &MmioRegion, pipe: Pipe) {
     let src = mmio.read::<u32>(regs::pipe_src(pipe));
     let width = (src >> 16) + 1;
@@ -87,8 +76,6 @@ fn log_scanline(mmio: &MmioRegion, pipe: Pipe) {
     klog_info!("XE-DIAG:   scanline advancing {}", advancing);
 }
 
-/// Read and decode the active pipe's primary-plane registers, log the decode,
-/// and return the assembled configuration for the GGTT lookup.
 fn log_plane(mmio: &MmioRegion, pipe: Pipe) -> PlaneConfig {
     let ctl = mmio.read::<u32>(regs::plane_ctl(pipe));
     let size = mmio.read::<u32>(regs::plane_size(pipe));
@@ -112,8 +99,6 @@ fn log_plane(mmio: &MmioRegion, pipe: Pipe) -> PlaneConfig {
     plane
 }
 
-/// Log the transcoder, DDI buffer, panel-power, and power-well control words for
-/// the active pipe. Raw values only — decode lands in a later phase.
 fn log_diag_registers(mmio: &MmioRegion, pipe: Pipe) {
     let ddi_func = mmio.read::<u32>(regs::trans_ddi_func_ctl(pipe));
     let ddi_buf = mmio.read::<u32>(regs::DDI_BUF_CTL_A);
@@ -128,8 +113,6 @@ fn log_diag_registers(mmio: &MmioRegion, pipe: Pipe) {
     klog_info!("XE-DIAG: PWR_WELL_CTL2 0x{:08x}", pwr_well);
 }
 
-/// Derive the GGTT entry that backs the firmware framebuffer surface and log the
-/// surface address alongside the page-table entry that maps it.
 fn log_ggtt_extent(mmio: &MmioRegion, surf_ggtt: u32) {
     let index = ggtt_pte::entry_index(surf_ggtt as u64);
     let pte_offset = regs::GTTMMADR_GGTT_OFFSET + (index as usize) * regs::GGTT_PTE_BYTES;

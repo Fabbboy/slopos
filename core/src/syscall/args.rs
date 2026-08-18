@@ -173,8 +173,7 @@ impl SyscallArg for WaitTarget {
     fn from_raw(regs: &[u64], _ctx: &SyscallContext) -> Result<Self, Errno> {
         // Narrow to 32 bits before taking the sign: wait-any arrives either
         // zero-extended (`0xFFFF_FFFF`, from the `u32` wrapper) or
-        // sign-extended, and reading the register as `i64` would reject the
-        // first.
+        // sign-extended, and reading the register as `i64` rejects the first.
         let signed = regs[0] as u32 as i32;
         if signed == -1 {
             return Ok(WaitTarget::Any);

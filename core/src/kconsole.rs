@@ -1,7 +1,6 @@
 //! The diagnostic console's own command.
 //!
-//! `h` describes the registry rather than any one subsystem, so it has no
-//! natural owner among the crates that contribute commands. It lives here
+//! `h` describes the registry rather than any one subsystem. It lives here
 //! because registration must happen in a crate only the kernel links: OSTD
 //! defines the registry but is also linked into userland binaries, whose
 //! linker script brackets no kernel section.
@@ -51,11 +50,9 @@ fn run_probe(kc: &mut KConsole<'_>) {
     slopos_ostd::kconsole::probe::fan_out(kc);
 }
 
-/// The watchdog's view: who has been stalled, and who is waiting on whom now.
-///
-/// Both halves matter and answer different questions. `max_stall` is history —
-/// the worst this machine has ever been — and the wait-for chain is the
-/// present, which is the half that names a deadlock while it is happening.
+/// The watchdog's view: `max_stall` is history — the worst this machine has
+/// ever been — and the wait-for chain is the present, the half that names a
+/// deadlock while it is happening.
 fn run_stalls(kc: &mut KConsole<'_>) {
     kline!(
         kc,
@@ -115,8 +112,7 @@ fn run_stalls(kc: &mut KConsole<'_>) {
 ///
 /// Emitted through the console rather than by calling `kdiag_dump_lock_graph`,
 /// which writes at a level the boot may have filtered out and which a CI gate
-/// parses — a diagnostic an operator asked for should not depend on the log
-/// level, and should not put a second copy of a gated line on the wire.
+/// parses.
 fn run_locks(kc: &mut KConsole<'_>) {
     let classes = lg::class_count();
     let state = if !lg::tracking_enabled() {
@@ -165,7 +161,7 @@ fn run_locks(kc: &mut KConsole<'_>) {
 
     // The class table is the resource that overflows first, and a *run of
     // contiguous addresses* is what identifies the array-of-locks static that
-    // ate it — which a single name cannot show. Bounded by the line budget.
+    // ate it — which a single name cannot show.
     for idx in 0..classes {
         if kc.budget_left() == 0 {
             return;

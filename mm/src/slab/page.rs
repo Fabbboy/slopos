@@ -1,17 +1,11 @@
-//! Slab- and large-alloc-page primitives.
+//! Slab- and large-alloc-page primitives. Each slab page and each large-alloc
+//! region carries a header at offset 0 (HHDM-addressed) whose leading `u32`
+//! magic names the owning tier, so `kfree` discriminates without a side table.
 //!
-//! Each slab page and each large-alloc region carries a small header
-//! at offset 0 (HHDM-addressed). The header's leading `u32` is a magic
-//! constant that identifies which tier owns the page — `SLAB_MAGIC` for
-//! a slab page, `LARGE_MAGIC` for an active large alloc, `LARGE_FREE_MAGIC`
-//! for a free large region awaiting reuse. The `kfree` path peeks at
-//! that magic to discriminate without consulting a side table.
-//!
-//! Slab and large-alloc pages are owned by raw `PhysAddr`s (via
-//! `alloc_kernel_page` / `free_page_frame`) rather than typed
-//! `Frame<KernelMeta>` handles: the slab tier's own bookkeeping must
-//! stay heap-free, and wrapping pages as `Frame` would require a
-//! `KVec` (heap allocation) that re-enters the slab during init.
+//! Those pages are owned by raw `PhysAddr`s rather than typed
+//! `Frame<KernelMeta>` handles: the slab tier's bookkeeping must stay
+//! heap-free, and wrapping a page as a `Frame` needs a `KVec` whose allocation
+//! re-enters the slab during init.
 
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -32,9 +26,8 @@ pub(crate) const SLAB_MAGIC: u32 = 0x534C_4142;
 pub(crate) const LARGE_MAGIC: u32 = 0x4C_4152_47;
 pub(crate) const LARGE_FREE_MAGIC: u32 = 0x4C_4652_45;
 
-/// In-page slab header. Lives at offset 0 of a slab page (HHDM
-/// address). Accessed via OSTD `ptr_buf` helpers — never via raw
-/// `&mut SlabHeader` from outside the helpers.
+/// In-page slab header. Accessed via OSTD `ptr_buf` helpers — never as a raw
+/// `&mut SlabHeader` from outside them.
 #[repr(C)]
 pub(crate) struct SlabHeader {
     pub magic: u32,
@@ -49,24 +42,20 @@ pub(crate) struct SlabHeader {
 }
 
 const _: () = {
-    // SlabHeader must fit comfortably in the first part of a 4 KiB
-    // page; SIZE_CLASSES is bounded so the body still holds plenty of
-    // objects. This isn't a hard ABI assertion — just a guardrail
-    // against bloat that would shrink the per-slab object count.
+    // Not an ABI constraint — a guardrail against header bloat that would
+    // shrink the per-slab object count.
     assert!(core::mem::size_of::<SlabHeader>() <= 64);
 };
 
 impl SlabHeader {
-    /// Byte offset where the object array starts inside a slab page.
     #[inline]
     pub(crate) fn object_start_offset() -> usize {
         let raw = core::mem::size_of::<SlabHeader>();
         (raw + 15) & !15
     }
 
-    /// Pointer to object `idx` inside a slab page whose header lives
-    /// at `slab_base` (HHDM-addressed). Returns `None` if the object
-    /// would extend past the page.
+    /// Pointer to object `idx` in the slab page headed at `slab_base`
+    /// (HHDM-addressed), or `None` if the object would extend past the page.
     #[inline]
     pub(crate) fn object_at(
         slab_base: NonNull<u8>,
@@ -85,12 +74,12 @@ impl SlabHeader {
         ))
     }
 
-    /// Run `f` over object `obj`'s body region (the bytes after the inline
-    /// link slot). Caller owns the slab page exclusively.
+    /// Run `f` over object `obj`'s body (the bytes after the inline link slot).
+    /// Caller owns the slab page exclusively.
     ///
     /// Scoped rather than returning the slice: the caller has only an address,
-    /// so a returned `&mut [u8]` would carry a lifetime the caller picks — and
-    /// two picks is two mutable views of one object.
+    /// so a returned `&mut [u8]` would carry a lifetime it picks — and two
+    /// picks is two mutable views of one object.
     #[inline]
     pub(crate) fn with_body_slice_mut<R>(
         obj: NonNull<u8>,
@@ -106,8 +95,7 @@ impl SlabHeader {
     }
 }
 
-/// In-page large-allocation header. Same role as `SlabHeader` for
-/// allocations > 2048 bytes.
+/// In-page header for allocations past 2048 bytes; `SlabHeader`'s counterpart.
 #[repr(C)]
 pub(crate) struct LargeAllocHeader {
     pub magic: u32,
@@ -118,30 +106,22 @@ pub(crate) struct LargeAllocHeader {
 }
 
 impl LargeAllocHeader {
-    /// Byte offset of the user-visible body within a large-alloc
-    /// region.
     #[inline]
     pub(crate) fn body_offset() -> usize {
         let raw = core::mem::size_of::<LargeAllocHeader>();
         (raw + 15) & !15
     }
 
-    /// Body pointer for a header `header`.
-    ///
-    /// The bound is one page rather than the region's real `pages * 4 KiB`:
-    /// the large tier only ever hands out whole pages, so a page is the
-    /// region's structural minimum, and reading `header.pages` to tighten it
-    /// would mean dereferencing the very pointer being validated. What the
-    /// assertion then catches is a `LargeAllocHeader` grown past a page — the
-    /// only way the body could land outside the allocation.
+    /// The bound is one page rather than the region's real `pages * 4 KiB`: the
+    /// large tier only ever hands out whole pages, and reading `header.pages`
+    /// to tighten it would dereference the very pointer being validated. What
+    /// the assertion catches is a `LargeAllocHeader` grown past a page.
     #[inline]
     pub(crate) fn body_ptr(header: NonNull<LargeAllocHeader>) -> NonNull<u8> {
         let base = header.cast::<u8>();
         ptr_buf::nonnull_byte_offset_in(base, Self::body_offset(), PAGE_SIZE_4KB as usize)
     }
 
-    /// Mutable byte view spanning `len` bytes starting at the body of
-    /// a large-alloc header.
     #[inline]
     pub(crate) fn with_body_view_mut<R>(
         header: NonNull<LargeAllocHeader>,
@@ -153,26 +133,23 @@ impl LargeAllocHeader {
     }
 }
 
-/// Outcome of [`page_kind_for`]: which tier owns the page containing a
-/// `kfree`-supplied pointer.
+/// Which tier owns the page containing a `kfree`-supplied pointer.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PageKind {
     Slab { class_idx: u8 },
     Large,
 }
 
-/// Peek the leading bytes of the 4 KiB-aligned base of `ptr` and
-/// determine which tier (slab or large) owns the allocation. Returns
-/// `None` if the magic is neither `SLAB_MAGIC` nor `LARGE_MAGIC` (in
-/// which case the pointer is a wild free or double free).
+/// Determine which tier owns `ptr`'s allocation from the magic at its
+/// 4 KiB-aligned base. `None` means neither magic matched, so the pointer is a
+/// wild free or a double free.
 #[inline]
 pub(crate) fn page_kind_for(ptr: NonNull<u8>) -> Option<PageKind> {
     let base_addr = align_down_u64(ptr.as_ptr() as u64, PAGE_SIZE_4KB);
     let base = NonNull::new(base_addr as *mut u8)?;
     let magic = read_u32_at(base, 0);
     if magic == SLAB_MAGIC {
-        // `object_size` field follows magic; resolve to a class index
-        // via the SIZE_CLASSES table.
+        // `object_size` follows the magic at offset 4.
         let object_size = read_u32_at(base, 4);
         let class_idx = class_idx_of_size(object_size as usize)?;
         Some(PageKind::Slab { class_idx })
@@ -198,42 +175,27 @@ fn class_idx_of_size(size: usize) -> Option<u8> {
 
 #[inline]
 fn read_u32_at(base: NonNull<u8>, off: usize) -> u32 {
-    // Word-aligned read of an immutable header field. Goes through
-    // OSTD's safe `borrow_at_mut::<u32>` over a single-element slice
-    // so the residual `unsafe` stays inside OSTD; the page is held
-    // exclusively by the owning class's lock holder during writes,
-    // and `kfree` only reads after the writer published the header
-    // via `Release` magic stores.
+    // The page is held exclusively by the owning class's lock holder during
+    // writes, and `kfree` only reads after the writer published the header via
+    // its `Release` magic store.
     ptr_buf::with_at_mut::<u32, _>(base, off, 1, |slice| slice[0])
 }
 
 /// The kernel heap's own page charge, held against the root account.
 ///
-/// # Why the root, and why one slot
+/// These are the pages backing *every* kernel allocation, charged so the root's
+/// `KernelMeta` row reconciles against the buddy's own allocated count. They go
+/// to the root and **not** to whoever allocated, because the slab is shared;
+/// per-object attribution is what the tier-1 object charges are for.
 ///
-/// These are the pages the size-class slabs and the large-alloc tier take from
-/// the buddy to back *every* kernel allocation. They are charged so the root's
-/// `KernelMeta` row can be reconciled against the buddy's own allocated count
-/// — without them the tree is not total at the top, and a discrepancy between
-/// the ledger and reality reads as a known gap rather than as a bug.
-///
-/// Charged to the root and **not** to whoever happened to allocate. Giving an
-/// account its own slab is the thing to avoid: per-cgroup caches measured
-/// 45-65 % utilisation upstream, and moving to shared-slab accounting
-/// recovered ~40 % of kernel memory. The slab is shared, so its backing is the
-/// root's; per-object attribution is what the tier-1 object charges are for.
-///
-/// A `.bss` slot rather than a `Charge` field on the page header: a slab
-/// header is `#[repr(C)]`, is written through raw pointers, and sits at a
-/// fixed offset the free path reads back — exactly the placement the design
-/// prohibits for a token.
+/// A `.bss` slot rather than a `Charge` field on the page header: that header
+/// is `#[repr(C)]`, written through raw pointers, and sits at a fixed offset
+/// the free path reads back — the placement the design prohibits for a token.
 static HEAP_PAGES: ChargeSlot<KernelMetaAxis> = ChargeSlot::empty();
 
-/// Charge `pages` of kernel-heap backing to the root, or refuse.
-///
-/// Refusing here is what makes the ceiling real rather than advisory: the
-/// caller propagates `None` as an allocation failure, which every slab and
-/// large-alloc path already handles.
+/// Charge `pages` of kernel-heap backing to the root, or refuse. Refusing is
+/// what makes the ceiling real rather than advisory: the caller propagates it
+/// as an allocation failure, which every slab and large-alloc path handles.
 fn charge_heap_pages(pages: u32) -> bool {
     match try_charge::<KernelMetaAxis>(root(), pages) {
         Ok(reservation) => {
@@ -244,9 +206,8 @@ fn charge_heap_pages(pages: u32) -> bool {
     }
 }
 
-/// Allocate a fresh, zero-initialised 4 KiB kernel page and return
-/// its HHDM-addressed base pointer + paddr. Returns `None` on
-/// allocation failure.
+/// A fresh zero-initialised 4 KiB kernel page, as an HHDM-addressed base
+/// pointer and its paddr.
 #[inline]
 pub(crate) fn alloc_slab_page() -> Option<(NonNull<u8>, PhysAddr)> {
     let paddr = alloc_kernel_page();
@@ -265,14 +226,12 @@ pub(crate) fn alloc_slab_page() -> Option<(NonNull<u8>, PhysAddr)> {
     Some((base, paddr))
 }
 
-/// Allocate `pages` contiguous zeroed kernel pages and return the
-/// HHDM-addressed base pointer + paddr. Returns `None` on failure.
+/// `pages` contiguous zeroed kernel pages, as an HHDM-addressed base pointer
+/// and its paddr.
 ///
-/// This is where the AF_UNIX connection FIFOs land: 16 KiB each, well past
-/// `MAX_SLAB_CLASS_BYTES`, so a connecting client's two FIFOs are two
-/// large-tier allocations and are charged here rather than at the call site.
-/// Charging them twice is the thing to avoid — it would make the root's row
-/// mean two different quantities and stop it reconciling against the buddy.
+/// Large-tier allocations are charged here and never again at the call site: a
+/// second charge would make the root's row mean two different quantities and
+/// stop it reconciling against the buddy.
 #[inline]
 pub(crate) fn alloc_large_pages(pages: u32) -> Option<(NonNull<u8>, PhysAddr)> {
     if pages == 0 {
@@ -294,7 +253,6 @@ pub(crate) fn alloc_large_pages(pages: u32) -> Option<(NonNull<u8>, PhysAddr)> {
     Some((base, paddr))
 }
 
-/// Pages of kernel-heap backing currently charged to the root.
 pub fn charged_heap_pages() -> u32 {
     HEAP_PAGES.amount()
 }
@@ -308,8 +266,8 @@ pub(crate) fn paddr_for_page(base: NonNull<u8>) -> PhysAddr {
     virt.to_phys_hhdm()
 }
 
-/// Free a slab page by HHDM-addressed base. Returns the underlying
-/// paddr to the buddy and its charge to the root.
+/// Free a slab page by HHDM-addressed base, returning its paddr to the buddy
+/// and its charge to the root.
 #[inline]
 pub(crate) fn free_kernel_page(base: NonNull<u8>) {
     let paddr = paddr_for_page(base);
@@ -317,15 +275,8 @@ pub(crate) fn free_kernel_page(base: NonNull<u8>) {
     HEAP_PAGES.shrink(1);
 }
 
-// ---------------------------------------------------------------------------
-// Counters — read-only stats for the `stats` module's snapshot path.
-// ---------------------------------------------------------------------------
-
-/// Total slab pages currently held by the slab tier. Incremented when
-/// `SlabAllocator::build_slab_page` claims a fresh page from the buddy.
 pub(crate) static SLAB_PAGE_COUNT: AtomicU32 = AtomicU32::new(0);
 
-/// Total large-alloc regions currently in flight.
 pub(crate) static LARGE_ALLOC_COUNT: AtomicU32 = AtomicU32::new(0);
 
 #[inline]

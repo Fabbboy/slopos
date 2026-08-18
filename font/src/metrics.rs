@@ -4,8 +4,7 @@ use crate::ttf_parser::TtfFont;
 
 /// Measure the width and height of a text string at a given pixel size.
 ///
-/// Returns `(width, height)` in pixels. Multi-line text is not handled;
-/// this measures a single line.
+/// Returns `(width, height)` in pixels; multi-line text is not handled.
 pub fn measure_text(font: &TtfFont<'_>, text: &str, size_px: u16) -> (i32, i32) {
     let upem = font.units_per_em() as f32;
     if upem == 0.0 {

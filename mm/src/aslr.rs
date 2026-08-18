@@ -1,7 +1,5 @@
-//! Address Space Layout Randomization (ASLR) for SlopOS.
-//!
-//! Randomizes stack (1MB range) and heap (16MB range) to mitigate exploitation.
-//! Uses TSC-seeded LFSR64 RNG.
+//! Address-space layout randomization: shifts the stack and heap bases of a
+//! process memory layout by an RDRAND-derived, page-granular offset.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -33,9 +31,7 @@ impl AslrConfig {
         }
     }
 
-    /// Pack into a `u32` for storage in a single atomic slot.
-    ///
-    /// Layout: bits 0..8 = stack_entropy_bits, 8..16 = heap_entropy_bits,
+    /// Bits 0..8 = stack_entropy_bits, 8..16 = heap_entropy_bits,
     /// 16 = enabled flag, 17..32 = reserved (must be zero).
     #[inline(always)]
     const fn pack(self) -> u32 {
@@ -62,11 +58,9 @@ impl Default for AslrConfig {
 
 const ENABLED_BIT: u32 = 1 << 16;
 
-/// All ASLR knobs packed into a single `AtomicU32` so `get_config` issues
-/// exactly one atomic load — matching the single-load characteristic of
-/// the legacy `SyncUnsafeCell<AslrConfig>` and avoiding three chained
-/// non-inlined `Atomic::load` calls in dev builds (each reserving its
-/// own stack frame).
+/// All knobs in one `AtomicU32` so `get_config` is a single load: three
+/// chained non-inlined `Atomic::load` calls each reserve a stack frame in
+/// dev builds.
 static ASLR_CONFIG: AtomicU32 = AtomicU32::new(AslrConfig::default_config().pack());
 
 #[inline(always)]
@@ -88,11 +82,9 @@ pub fn is_enabled() -> bool {
 }
 
 fn get_random() -> u64 {
-    // Use hardware RDRAND directly — no lock contention, per-core, no init dependency.
     if let Some(val) = slopos_arch::cpu::rdrand::RdRand::probe().and_then(|rd| rd.next()) {
         return val;
     }
-    // TSC fallback with mixing
     let a = tsc::rdtsc();
     let b = tsc::rdtsc();
     a.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(b)

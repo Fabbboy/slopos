@@ -1,11 +1,9 @@
-//! Kernel-half address translation.
+//! Kernel-half address translation: a lock-free, allocation-free page-table
+//! walker plus the translation queries built on it.
 //!
-//! The read side of the kernel master's page tables: a lock-free,
-//! allocation-free walker plus the translation queries built on it.
-//! Every write goes through `slopos_mm::kernel_mappings`, which drives
-//! OSTD's `VmSpace` cursor under the `KERNEL_VM_SPACE` lock — the
-//! single writer of the kernel half, in every address space, at every
-//! point after boot priority memory/7.
+//! Every write goes through `slopos_mm::kernel_mappings` under the
+//! `KERNEL_VM_SPACE` lock — the single writer of the kernel half, in every
+//! address space, after boot priority memory/7.
 
 pub mod page_table_defs;
 pub(crate) mod tables;

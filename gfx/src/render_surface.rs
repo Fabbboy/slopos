@@ -6,7 +6,6 @@
 use crate::DrawBuffer;
 use slopos_abi::pixel::PixelFormat;
 
-/// Error from render surface operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderError {
     /// Zero width/height, or a pitch that overflows `usize`.

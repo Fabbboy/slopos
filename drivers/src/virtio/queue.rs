@@ -41,7 +41,6 @@ const AVAIL_RING_OFFSET: usize = 4;
 const USED_IDX_OFFSET: usize = 2;
 const USED_RING_OFFSET: usize = 4;
 
-/// Sentinel for "no descriptor" in the driver-side free chain.
 const DESC_NONE: u16 = u16::MAX;
 
 pub struct Virtqueue {
@@ -153,9 +152,8 @@ impl Virtqueue {
         avail.write_volatile_at::<u16>(AVAIL_IDX_OFFSET, avail_idx.wrapping_add(1));
     }
 
-    /// Lock-free peek with the same comparison as `try_pop_used` and no
-    /// mutation: used post-burst to catch an IRQ that lands between the last
-    /// drain and the `wait` re-park.
+    /// Non-mutating peek: catches an IRQ landing between the last drain and the
+    /// `wait` re-park.
     #[inline]
     pub fn has_pending(&self) -> bool {
         if self.size == 0 {
@@ -184,11 +182,10 @@ impl Virtqueue {
     }
 }
 
-/// Writes driver-side state directly into `out`: a `Virtqueue` is ~200 bytes
-/// living in heap-allocated device state, so it must never round-trip through a
-/// probe's stack frame. `msix_vector` is an MSI-X table index, or
-/// [`VIRTIO_MSI_NO_VECTOR`] when MSI-X is not in use. On failure `out` is left
-/// inert and empty.
+/// Writes driver-side state directly into `out`: a `Virtqueue` is ~200 bytes and
+/// must never round-trip through a probe's stack frame. `msix_vector` is an
+/// MSI-X table index, or [`VIRTIO_MSI_NO_VECTOR`] when MSI-X is not in use. On
+/// failure `out` is left inert and empty.
 pub fn setup_queue_into(
     common_cfg: &MmioRegion,
     queue_index: u16,
@@ -212,9 +209,8 @@ pub fn setup_queue_into(
     let size = device_max_size.min(max_size);
     common_cfg.write::<u16>(COMMON_CFG_QUEUE_SIZE, size);
 
-    // Raw-physical frames published straight to the device, deliberately not via
-    // `DmaCoherent`: under the boot identity mapper IOVA == phys, so the mapper
-    // buys nothing here. Revisit only for a real VT-d mapper.
+    // Raw-physical frames, deliberately not `DmaCoherent`: under the boot
+    // identity mapper IOVA == phys. Revisit for a real VT-d mapper.
     let Some(desc_frame) = OwnedPageFrame::alloc_zeroed() else {
         return false;
     };

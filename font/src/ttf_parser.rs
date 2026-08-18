@@ -167,8 +167,7 @@ impl<'a> TtfFont<'a> {
         &self.hhea
     }
 
-    /// Map a Unicode codepoint to a glyph index. Only Format 4 (BMP) cmap
-    /// subtables are supported.
+    /// Only Format 4 (BMP) cmap subtables are supported.
     pub fn glyph_index(&self, codepoint: u32) -> Option<u16> {
         if codepoint > 0xFFFF {
             return None;
@@ -426,7 +425,7 @@ impl<'a> TtfFont<'a> {
         })
     }
 
-    /// Parse a compound glyph (glyph made of references to other glyphs).
+    /// A compound glyph is built from references to other glyphs.
     fn parse_compound_glyph(
         &self,
         glyph_off: usize,

@@ -570,9 +570,9 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     }
 
-    // `quota=warn` grants and counts an over-limit charge, the only tier a real
-    // high-water mark can be measured on; `quota=off` keeps the counters moving
-    // but consults no ceiling, so attribution survives without enforcement.
+    // `quota=warn` is the only tier a real high-water mark can be measured on;
+    // `quota=off` still moves the counters, so attribution survives without
+    // enforcement.
     for token in cmdline.split_whitespace() {
         if let Some(value) = token.strip_prefix("quota=") {
             match value {
@@ -703,9 +703,8 @@ pub fn kernel_main_impl() {
         let pcr = slopos_arch::pcr::get_pcr_mut_via_token(0).expect("BSP PCR not initialized");
         pcr.bsp_init_gdt_and_install(token);
 
-        // Only now, with the PCR live, is `get_current_cpu()` callable, so this
-        // is the earliest point the held-lock walker panic recovery reads can
-        // start tracking acquisitions.
+        // The earliest point acquisitions can be tracked: `get_current_cpu()`
+        // only becomes callable once the PCR is live.
         slopos_ostd::sync::enable_lock_tracking();
 
         // Mask the low CR3 bits before handing the value over as a table base:

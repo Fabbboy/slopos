@@ -5,16 +5,13 @@ pub enum BlockDeviceError {
     OutOfBounds,
     InvalidBuffer,
     /// A block read back with contents that do not match its trusted
-    /// build-time integrity hash (see [`crate::verity`]). The read is failed
-    /// loudly rather than returning corrupt bytes.
+    /// build-time integrity hash (see [`crate::verity`]).
     IntegrityFailure,
 }
 
-/// Stable, enumeration-order identity for a block device. `disk0` is the
-/// first device claimed during PCI probe (by convention the root filesystem
-/// image); `disk1` the second (a scratch device for destructive tests), etc.
-/// Assigned by the driver at probe time and used to look a device up in the
-/// driver's registry without naming a raw bus address.
+/// Stable, enumeration-order identity for a block device, assigned at probe
+/// time: `disk0` is the first device claimed (by convention the root filesystem
+/// image), `disk1` the second (a scratch device for destructive tests).
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockDeviceIndex(pub u16);
 
@@ -24,12 +21,8 @@ pub trait BlockDevice {
     fn capacity(&self) -> u64;
 
     /// Force every previously-acknowledged write out of any volatile device
-    /// cache onto non-volatile media — a durability barrier.
-    ///
-    /// On a write-back device, `write_at` returning `Ok` only means the bytes
-    /// reached the device's (possibly volatile) cache; a power failure can
-    /// still lose them. The filesystem calls `flush` to order metadata after
-    /// the data it references and to make `sync`/shutdown durable.
+    /// cache onto non-volatile media: on a write-back device, `write_at`
+    /// returning `Ok` only means the bytes reached that cache.
     ///
     /// The default is a no-op for devices that are inherently durable on write
     /// (e.g. [`MemoryBlockDevice`], or a virtio-blk backend that did not
@@ -110,8 +103,3 @@ impl BlockDevice for MemoryBlockDevice {
         self.buffer.lock().len() as u64
     }
 }
-
-// `CallbackBlockDevice` (bare fn-pointer adapter) was removed with the ambient
-// virtio-blk read/write free functions: the filesystem now holds an owned
-// `dyn BlockDevice` capability (a virtio-blk `BlockWriteToken`) instead of
-// fn pointers into a global device. See `ext2_vfs::ext2_vfs_init_with_device`.

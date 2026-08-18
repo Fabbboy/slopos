@@ -324,11 +324,7 @@ pub fn triangle_filled<T: Canvas>(
     emit(target, damage)
 }
 
-// ---------------------------------------------------------------------------
-// Anti-aliased drawing primitives (integer-only arithmetic)
-// ---------------------------------------------------------------------------
-
-/// Integer square root via Newton's method. Returns floor(sqrt(n)).
+/// Returns floor(sqrt(n)).
 fn isqrt(n: u32) -> u32 {
     if n == 0 {
         return 0;
@@ -342,39 +338,32 @@ fn isqrt(n: u32) -> u32 {
     x
 }
 
-/// Compute coverage for a circle boundary pixel using integer math.
-///
-/// Given (x, y) relative to the circle center and radius r, computes how
-/// much of this pixel is "on the circle outline". Uses the distance error
-/// from the ideal radius in 8.8 fixed-point space.
-///
-/// Returns 0-255 coverage value.
+/// Coverage (0–255) of the pixel at `(x, y)` relative to a circle centre, from
+/// its distance error against `r_x256` in 8.8 fixed point. Integer-only.
 #[inline]
 fn circle_coverage(x: i32, y: i32, r_x256: i32) -> u8 {
-    // dist * 256 ≈ isqrt(dist_sq * 65536)
     let dist_sq = x * x + y * y;
+    // The << 16 is the 8.8 scaling: isqrt(d² · 65536) = dist · 256.
     let dist_x256 = isqrt((dist_sq as u32) << 16) as i32;
-    // err_x256 = dist*256 - r*256
     let err_x256 = dist_x256 - r_x256;
-    // coverage = clamp(256 - err_x256, 0, 256) * 255 / 256
     let cov = (256 - err_x256).clamp(0, 256);
     ((cov * 255 + 128) >> 8) as u8
 }
 
-/// Compute inner-pixel coverage (for the pixel one step inside the circle).
+/// Coverage for the pixel one step inside the circle.
 #[inline]
 fn circle_coverage_inner(x: i32, y: i32, r_x256: i32) -> u8 {
     let dist_sq = x * x + y * y;
     let dist_x256 = isqrt((dist_sq as u32) << 16) as i32;
-    // err = r - dist (positive when inside)
+    // Sign is inverted against `circle_coverage`: positive means inside.
     let err_x256 = r_x256 - dist_x256;
     let cov = (256 - err_x256).clamp(0, 256);
     ((cov * 255 + 128) >> 8) as u8
 }
 
 /// Should the midpoint circle stepper move y inward?
-/// Uses integer comparison: (x+1)^2 + y^2 > (r + 0.5)^2
-/// Scaled by 4 to avoid fractions: (2x+2)^2 + (2y)^2 > (2r+1)^2
+///
+/// Tests (x+1)² + y² > (r + 0.5)², scaled by 4 to keep it integral.
 #[inline]
 fn circle_should_step_y(x: i32, y: i32, r: i32) -> bool {
     let a = 2 * (x + 1);
@@ -383,10 +372,7 @@ fn circle_should_step_y(x: i32, y: i32, r: i32) -> bool {
     a * a + b * b > c * c
 }
 
-/// Xiaolin Wu's anti-aliased line algorithm.
-///
-/// Draws a smooth line from `(x0, y0)` to `(x1, y1)` by blending pixels
-/// at fractional boundaries. Uses integer fixed-point arithmetic.
+/// Xiaolin Wu's anti-aliased line algorithm, in integer fixed point.
 pub fn line_aa<T: Canvas>(
     target: &mut T,
     x0: i32,
@@ -432,7 +418,7 @@ pub fn line_aa<T: Canvas>(
     let dx_f = px1 - px0;
     let dy_f = py1 - py0;
 
-    // Gradient in 8.8 fixed point
+    // 8.8 fixed point.
     let gradient = if dx_f == 0 {
         256i32
     } else {
@@ -447,15 +433,12 @@ pub fn line_aa<T: Canvas>(
         }
     };
 
-    // First endpoint
     plot(target, px0, py0, 255);
 
     let mut intery = py0 * 256 + gradient;
 
-    // Second endpoint
     plot(target, px1, py1, 255);
 
-    // Main loop
     for x in (px0 + 1)..px1 {
         let y_int = intery / 256;
         let frac = (intery & 0xFF) as u8;
@@ -484,7 +467,7 @@ pub fn line_aa<T: Canvas>(
     emit(target, damage)
 }
 
-/// Anti-aliased circle outline using integer-only distance computation.
+/// Anti-aliased circle outline.
 pub fn circle_aa<T: Canvas>(
     target: &mut T,
     cx: i32,
@@ -563,7 +546,7 @@ pub fn circle_aa<T: Canvas>(
     emit(target, damage)
 }
 
-/// Draw a rounded rectangle outline with anti-aliased corners (integer-only).
+/// Rounded-rectangle outline with anti-aliased corners.
 pub fn rounded_rect<T: Canvas>(
     target: &mut T,
     x: i32,
@@ -585,13 +568,11 @@ pub fn rounded_rect<T: Canvas>(
 
     let px = target.pixel_format().encode(color);
 
-    // Straight edges (between corner arcs)
     target.hline(x + r, x + w - 1 - r, y, px);
     target.hline(x + r, x + w - 1 - r, y + h - 1, px);
     target.vline(x, y + r, y + h - 1 - r, px);
     target.vline(x + w - 1, y + r, y + h - 1 - r, px);
 
-    // Corner arcs
     let corners = [
         (x + r, y + r, -1i32, -1i32),
         (x + w - 1 - r, y + r, 1, -1),
@@ -662,7 +643,7 @@ pub fn rounded_rect<T: Canvas>(
     emit(target, damage)
 }
 
-/// Draw a filled rounded rectangle with anti-aliased corners (integer-only).
+/// Filled rounded rectangle with anti-aliased corners.
 pub fn rounded_rect_filled<T: Canvas>(
     target: &mut T,
     x: i32,
@@ -683,12 +664,10 @@ pub fn rounded_rect_filled<T: Canvas>(
         return fill_rect(target, x, y, w, h, color);
     }
 
-    // Fill three rectangular regions (non-corner areas)
     target.fill_rect_encoded(x, y + r, w, h - 2 * r, px);
     target.fill_rect_encoded(x + r, y, w - 2 * r, r, px);
     target.fill_rect_encoded(x + r, y + h - r, w - 2 * r, r, px);
 
-    // Fill corner regions with AA at the boundary
     let tl_cx = x + r;
     let tr_cx = x + w - 1 - r;
     let tl_cy = y + r;
@@ -704,7 +683,6 @@ pub fn rounded_rect_filled<T: Canvas>(
         let row_top = tl_cy - cj;
         let row_bot = bl_cy + cj;
 
-        // Fill interior of this row in both corners, then AA boundary pixel
         if ci > 0 {
             target.hline(tl_cx - ci + 1, tl_cx - 1, row_top, px);
             target.hline(tr_cx + 1, tr_cx + ci - 1, row_top, px);
@@ -716,7 +694,6 @@ pub fn rounded_rect_filled<T: Canvas>(
         put_pixel_coverage(target, tl_cx - ci, row_bot, color, cov);
         put_pixel_coverage(target, tr_cx + ci, row_bot, color, cov);
 
-        // Swapped axis row
         if ci != cj {
             let row_top2 = tl_cy - ci;
             let row_bot2 = bl_cy + ci;

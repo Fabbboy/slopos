@@ -14,10 +14,8 @@ pub struct DrawBuffer<'a> {
     bytes_pp: u8,
     pixel_format: PixelFormat,
     damage: DamageTracker,
-    /// Active scissor (clip) region. When `Some`, every primitive confines its
-    /// writes to this rect, so a partial-region repaint cannot paint outside
-    /// the region currently being composited (e.g. a window's title text
-    /// spilling over a window stacked above it).
+    /// Set during a partial-region repaint so no primitive can paint outside
+    /// the region being composited.
     scissor: Option<damage::DamageRect>,
 }
 
@@ -97,17 +95,14 @@ impl<'a> DrawBuffer<'a> {
         self.damage.clear();
     }
 
-    /// Set (or clear with `None`) the scissor region. While set, every drawing
-    /// primitive — solid fills, glyph blits, anti-aliased lines and circles —
-    /// confines its writes to this rect, so partial-region repaints cannot
-    /// over-paint pixels outside the region being composited.
+    /// Confine every subsequent primitive to `scissor`; `None` lifts the clip.
     #[inline]
     pub fn set_scissor(&mut self, scissor: Option<damage::DamageRect>) {
         self.scissor = scissor;
     }
 
-    /// Run `f` with the scissor narrowed to `clip` (intersected with any
-    /// scissor already set), restoring the previous scissor afterwards.
+    /// Run `f` with the scissor narrowed to `clip` intersected with the current
+    /// one, restoring the previous scissor afterwards.
     pub fn with_scissor<F: FnOnce(&mut Self)>(&mut self, clip: damage::DamageRect, f: F) {
         let prev = self.scissor;
         let next = match prev {
@@ -196,8 +191,7 @@ impl<'a> DrawBuffer<'a> {
         self.add_damage(dst_x0, dst_y0, dst_x1, dst_y1);
     }
 
-    /// Scroll contents upward by `pixels` rows, filling the vacated bottom
-    /// region with `fill_color`.
+    /// Scroll up by `pixels` rows, filling the vacated bottom with `fill_color`.
     pub fn scroll_up(&mut self, pixels: i32, fill_color: Color32) {
         if pixels <= 0 {
             return;
@@ -217,8 +211,7 @@ impl<'a> DrawBuffer<'a> {
         crate::canvas_ops::fill_rect(self, 0, height - pixels, width, pixels, fill_color);
     }
 
-    /// Scroll contents downward by `pixels` rows, filling the vacated top
-    /// region with `fill_color`.
+    /// Scroll down by `pixels` rows, filling the vacated top with `fill_color`.
     pub fn scroll_down(&mut self, pixels: i32, fill_color: Color32) {
         if pixels <= 0 {
             return;
@@ -270,10 +263,8 @@ impl Canvas for DrawBuffer<'_> {
         self.scissor
     }
 
-    /// Clip a horizontal span to the buffer bounds and the active scissor.
-    /// All span-fill primitives (`fill_row_span`, `fill_rect_encoded`,
-    /// `hline`, filled circles/rounded-rect interiors) route through here, so
-    /// the scissor confines every one of them.
+    /// Clip a horizontal span to the buffer bounds and the active scissor;
+    /// every span-fill primitive routes through here.
     #[inline]
     fn clip_row_span(&self, row: i32, x0: i32, x1: i32) -> Option<(usize, usize, usize)> {
         if row < 0 || row >= self.height as i32 {
@@ -294,9 +285,7 @@ impl Canvas for DrawBuffer<'_> {
         Some((row as usize, x0 as usize, x1 as usize))
     }
 
-    /// Write a single opaque pixel, honoring the active scissor. Glyph blits,
-    /// circle outlines and `vline` route through here, so the scissor confines
-    /// text and shape edges as well as solid spans.
+    /// Write a single opaque pixel, honoring the active scissor.
     #[inline]
     fn put_pixel(&mut self, x: i32, y: i32, pixel: EncodedPixel) {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
@@ -455,9 +444,6 @@ mod scissor_tests {
         buf.read_encoded_at(off)
     }
 
-    // A solid span fill (the fill_row_span / clip_row_span funnel) must not
-    // write a single pixel outside the scissor, even when the requested rect
-    // covers the whole buffer.
     #[test]
     fn scissor_confines_fill_rect() {
         let mut data = alloc::vec![0u8; (W * H * 4) as usize];
@@ -477,8 +463,6 @@ mod scissor_tests {
         assert_eq!(raw_at(&buf, 8, 16), 0, "below scissor untouched");
     }
 
-    // Opaque single pixels (the glyph-blit path, plus circle outlines and
-    // vline) route through put_pixel, which must honor the scissor.
     #[test]
     fn scissor_confines_put_pixel() {
         let mut data = alloc::vec![0u8; (W * H * 4) as usize];
@@ -496,9 +480,6 @@ mod scissor_tests {
         assert_eq!(raw_at(&buf, 5, 5), 0, "outside scissor untouched");
     }
 
-    // The anti-aliased coverage path (line_aa, AA circle / rounded corners)
-    // writes via blend::put_pixel_coverage, which must honor the scissor — this
-    // is the path the title-bar signal glyphs use on hover.
     #[test]
     fn scissor_confines_line_aa() {
         let mut data = alloc::vec![0u8; (W * H * 4) as usize];
@@ -522,8 +503,6 @@ mod scissor_tests {
         assert_ne!(raw_at(&buf, 0, 0), 0, "AA line drew inside scissor");
     }
 
-    // The semi-transparent fill path writes pixels directly (read-modify-write)
-    // and must clamp itself to the scissor.
     #[test]
     fn scissor_confines_fill_rect_blended() {
         let mut data = alloc::vec![0u8; (W * H * 4) as usize];
@@ -541,8 +520,6 @@ mod scissor_tests {
         assert_eq!(raw_at(&buf, 20, 20), 0, "outside scissor untouched");
     }
 
-    // Clearing the scissor restores whole-buffer drawing (the full-repaint
-    // path relies on this).
     #[test]
     fn scissor_none_draws_everywhere() {
         let mut data = alloc::vec![0u8; (W * H * 4) as usize];
@@ -558,7 +535,6 @@ mod scissor_tests {
         assert_ne!(raw_at(&buf, 31, 31), 0, "no scissor → whole buffer drawn");
     }
 
-    // with_scissor narrows to the intersection and restores the prior scissor.
     #[test]
     fn with_scissor_intersects_and_restores() {
         let mut data = alloc::vec![0u8; (W * H * 4) as usize];
@@ -577,7 +553,6 @@ mod scissor_tests {
                 y1: 31,
             },
             |b| {
-                // Effective scissor is the intersection [10,10]..[15,15].
                 canvas_ops::fill_rect(b, 0, 0, W as i32, H as i32, Color32::WHITE);
             },
         );
@@ -585,7 +560,6 @@ mod scissor_tests {
         assert_ne!(raw_at(&buf, 15, 15), 0, "intersection drawn");
         assert_eq!(raw_at(&buf, 9, 10), 0, "outside intersection untouched");
         assert_eq!(raw_at(&buf, 16, 16), 0, "outside intersection untouched");
-        // Prior scissor restored: [0,0]..[15,15] still active.
         let white = buf.pixel_format().encode(Color32::WHITE);
         buf.put_pixel(0, 0, white);
         buf.put_pixel(20, 20, white);

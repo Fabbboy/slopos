@@ -2,8 +2,7 @@
 //!
 //! Each TTY has at most one controlling session, and within it one foreground
 //! process group. Both are held as [`KWeak`] handles, so a terminal can never
-//! pin a dead session and a reused pid can never be mistaken for the old
-//! group; a dead handle reads as id `0` — "no session / no foreground group".
+//! pin a dead session and a reused pid can never be mistaken for the old group.
 //!
 //! `focused_task_id` is compositor window focus and is independent of the
 //! foreground group.
@@ -14,15 +13,13 @@ use slopos_ostd::{KArc, KWeak};
 use super::MAX_TTYS;
 use super::table::TTY_SLOTS;
 
-/// Per-TTY session and foreground process-group state.
 pub struct TtySession {
     session: KWeak<Session>,
     fg_pgrp: KWeak<ProcessGroup>,
-    /// Compositor input focus; `0` = none. Not a POSIX session/pgrp id.
+    /// `0` = none. Not a POSIX session/pgrp id.
     pub(crate) focused_task_id: u32,
 }
 
-/// Result of a foreground access check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForegroundCheck {
     Allowed,
@@ -83,8 +80,6 @@ impl TtySession {
         self.fg_pgrp = fg;
     }
 
-    /// Check whether a process with the given pgid and sid may **read** from
-    /// this TTY.
     pub fn check_read(&self, caller_pgid: u32, caller_sid: u32) -> ForegroundCheck {
         let sid = self.session_id();
         if sid == 0 {
@@ -113,9 +108,8 @@ impl TtySession {
         ForegroundCheck::BackgroundRead
     }
 
-    /// Check whether a process with the given pgid and sid may **write** to
-    /// this TTY. Foreground enforcement applies only when `TOSTOP` is set in
-    /// `c_lflag`; a cross-session write is denied either way.
+    /// Foreground enforcement applies only when `TOSTOP` is set in `c_lflag`;
+    /// a cross-session write is denied either way.
     pub fn check_write(&self, caller_pgid: u32, caller_sid: u32, tostop: bool) -> ForegroundCheck {
         let sid = self.session_id();
         let fg = self.fg_pgrp_id();
@@ -138,9 +132,8 @@ impl TtySession {
         ForegroundCheck::BackgroundWrite
     }
 
-    /// Set the foreground process group, with session validation: the caller
-    /// and the target group must both belong to the TTY's controlling session.
-    /// An empty `fg` clears it. Returns `true` if the operation was allowed.
+    /// The caller and the target group must both belong to the TTY's
+    /// controlling session. An empty `fg` clears it.
     pub fn set_fg_pgrp_checked(&mut self, fg: KWeak<ProcessGroup>, caller_sid: u32) -> bool {
         let sid = self.session_id();
         if sid == 0 {
@@ -163,8 +156,8 @@ impl TtySession {
     }
 }
 
-/// Test-only: install session/foreground handles directly, so a test can drive
-/// job control without a live task carrying the matching pgid/sid.
+/// Lets a test drive job control without a live task carrying the matching
+/// pgid/sid.
 #[cfg(feature = "test-hooks")]
 pub fn test_install_session(
     idx: super::TtyIndex,
@@ -181,8 +174,7 @@ pub fn test_install_session(
     }
 }
 
-/// Detach every TTY whose controlling session matches `session_id` (called
-/// when a session ends).
+/// Called when a session ends.
 pub fn detach_session_by_id(session_id: u32) {
     if session_id == 0 {
         return;

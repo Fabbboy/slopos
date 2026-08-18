@@ -208,9 +208,9 @@ fn boot_step_lapic_timer_start_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         1000 / LAPIC_TIMER_PERIOD_MS,
     );
 
-    // The quarantine needs something able to ack a quiesce epoch, and the tick
-    // is what does that; before this point freeing goes straight back to the
-    // free lists rather than parking memory nothing can release.
+    // The quarantine needs a tick to ack a quiesce epoch; before this point
+    // freeing goes straight back to the free lists rather than parking memory
+    // nothing can release.
     slopos_mm::mmu::quiesce::activate();
 
     // APs boot before calibration, so they defer their own timer start until
@@ -247,7 +247,7 @@ fn boot_step_register_spawner_fn(ctx: &mut BootCtx<'_, BspInit>) {
 
 fn boot_step_identity_dma_fn(ctx: &mut BootCtx<'_, BspInit>) {
     // Must precede any driver's DMA probe so `DmaCoherent`/`DmaStream` have a
-    // live mapper. A VT-d mapper would swap in at this same seam.
+    // live mapper.
     slopos_ostd::mm::register_identity_dma_mapper(&ctx.bsp_token());
     klog_debug!("OSTD: identity DMA mapper registered (IOVA == phys)");
 }
@@ -264,8 +264,7 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // DevIndex(0) by convention.
     slopos_net::loopback::init_loopback();
 
-    // The filter chain must be published before any NIC delivers a packet; this
-    // is the single auditable site where built-in filters would be registered.
+    // The filter chain must be published before any NIC delivers a packet.
     slopos_net::xdp::init();
 
     klog_debug!("Enumerating PCI devices...");
@@ -324,10 +323,9 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         return 0;
     }
 
-    // TTY tests write fixture strings into a fake TTY whose backend resolves to
-    // COM1 through this mirror, which would interleave them with the KTAP emit
-    // and corrupt the host parser. Never restored: nothing after this point
-    // wants the mirror either.
+    // TTY tests write fixture strings through this mirror to COM1, which would
+    // interleave them with the KTAP emit and corrupt the host parser. Never
+    // restored: nothing after this point wants the mirror either.
     slopos_drivers::tty::vconsole::set_serial_mirror(false);
 
     klog_info!("TESTS: Running orchestrated harness");
@@ -342,10 +340,9 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     let mut summary = TestRunSummary::default();
     let rc = tests_run_all(&test_config, &mut summary);
 
-    // Defense in depth: the mock clock overrides the monotonic source the
-    // production net stack reads, so a test that forgets its `MockClockGuard`
-    // would freeze every net timer for the userland phase. 0 passes through to
-    // the real `uptime_ms`.
+    // The mock clock overrides the monotonic source the production net stack
+    // reads, so a test that forgets its `MockClockGuard` would freeze every net
+    // timer for the userland phase.
     #[cfg(feature = "test-hooks")]
     slopos_net::clock::MockClock::clear();
 
@@ -360,8 +357,8 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         );
     }
 
-    // Counterpart to the priority-89 boot step: the delta between the two lines
-    // is what catches the suite itself exhausting a pool.
+    // Counterpart to the boot-time dump: the delta between the two lines is what
+    // catches the suite itself exhausting a pool.
     slopos_ostd::kdiag::kdiag_dump_lock_graph("post-kernel-tests");
     slopos_sched::quota_console::quota_report("post-kernel-tests");
 
@@ -526,8 +523,7 @@ crate::boot_init!(
     flags = boot_init_priority(82)
 );
 /// Runs immediately before the test step, by which point every driver has taken
-/// its locks once, so the counters read as boot steady state. This is what makes
-/// "the validator turned itself off during memory init" visible.
+/// its locks once, so the counters read as boot steady state.
 fn boot_step_lockdep_report_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     slopos_ostd::kdiag::kdiag_dump_lock_graph("boot");
     slopos_sched::quota_console::quota_report("boot");

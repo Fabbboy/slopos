@@ -35,9 +35,8 @@ pub(super) use slopos_ostd::task::{ProcessGroup, Session};
 
 pub(super) use slopos_ostd::{KArc, KWeak};
 
-/// Echo is staged in the discipline's queue, not returned from `receive_buf`,
-/// because the core emits it after the slot guard drops; a test asserts on it by
-/// draining it the same way the emitter does.
+/// Echo is staged in the discipline's queue rather than returned from
+/// `receive_buf`, so a test drains it the way the emitter does.
 pub(super) struct EchoScratch {
     buf: [u8; 512],
     len: usize,
@@ -60,10 +59,9 @@ impl EchoScratch {
 }
 
 /// Returns a TTY to service when it goes out of scope. A hangup is terminal for
-/// the slot, and TTY 0 carries the serial console every later test and the
-/// kernel log write through — a guard rather than a closing call so the failure
-/// paths restore it too. Termios goes back alongside the flag because a `B0`
-/// baud rate hangs the line up, so leaving the speed would hang it up again on
+/// the slot, and TTY 0 carries the serial console every later test writes
+/// through; a guard restores it on the failure paths too. Termios goes back
+/// alongside the flag because a `B0` baud rate would hang the line up again on
 /// the next `tcsetattr`.
 pub(super) struct HangupScope {
     idx: TtyIndex,
@@ -80,7 +78,6 @@ impl HangupScope {
         }
     }
 
-    /// Hang `idx` up for the lifetime of the returned guard.
     pub(super) fn hang_up(idx: TtyIndex) -> Self {
         let scope = Self::guard(idx);
         tty::hangup(idx);
@@ -105,7 +102,6 @@ pub(super) struct SessionScope {
 }
 
 impl SessionScope {
-    /// A live session `sid` whose foreground group is `pgid`.
     pub(super) fn new(sid: u32, pgid: u32) -> Self {
         let session =
             KArc::try_new(Session::new(sid).expect("nonzero sid")).expect("alloc session");
@@ -126,8 +122,8 @@ impl SessionScope {
         s.attach(self.session_weak(), self.pgrp_weak());
     }
 
-    /// Another foreground-group candidate in this session; the caller keeps the
-    /// returned handle alive.
+    /// Another foreground-group candidate in this session; the caller must keep
+    /// the returned handle alive.
     pub(super) fn extra_group(&self, pgid: u32) -> KArc<ProcessGroup> {
         KArc::try_new(ProcessGroup::new(pgid, self.session.clone()).expect("nonzero pgid"))
             .expect("alloc pgrp")
@@ -153,10 +149,9 @@ pub(super) fn boxed_vconsole_state() -> slopos_ostd::KBox<VConsoleState> {
     state
 }
 
-/// Leave `idx`'s input queue empty. The reads take what a reader would see, the
-/// flush what one would not: a canonical discipline hands back only complete
-/// lines, so an unterminated tail survives every read and reappears as the next
-/// test's phantom input the moment something clears `ICANON`.
+/// The flush is not redundant with the reads: a canonical discipline hands back
+/// only complete lines, so an unterminated tail survives every read and
+/// reappears as the next test's phantom input once something clears `ICANON`.
 pub(super) fn drain_tty_nonblock(idx: TtyIndex) {
     let mut scratch = [0u8; 64];
     loop {
@@ -168,12 +163,10 @@ pub(super) fn drain_tty_nonblock(idx: TtyIndex) {
     let _ = tty::tcflush(idx, slopos_abi::syscall::TCIFLUSH);
 }
 
-/// Drain `stage`, then take one byte off `peer`, expecting `byte`.
-///
-/// `tcdrain` is the barrier, but two things sit outside what it promises, so the
-/// pair is retried: a `TCOFLUSH` racing an emission zeroes an in-flight count
-/// that emission still owns, and the water-mark crossing producing the byte is a
-/// one-shot any CPU may consume. The bound keeps a lost byte a failure, not a hang.
+/// Two things sit outside what `tcdrain` promises, so the pair is retried: a
+/// `TCOFLUSH` racing an emission zeroes an in-flight count that emission still
+/// owns, and the water-mark crossing producing the byte is a one-shot any CPU
+/// may consume. The bound keeps a lost byte a failure, not a hang.
 pub(super) fn drain_then_read_byte(stage: TtyIndex, peer: TtyIndex, byte: u8) -> bool {
     const ROUNDS: usize = 64;
     for _ in 0..ROUNDS {
@@ -190,9 +183,8 @@ pub(super) fn drain_then_read_byte(stage: TtyIndex, peer: TtyIndex, byte: u8) ->
     false
 }
 
-/// A live PTY pair with both ends open. Dropping it closes both: the master drop
-/// hangs up the slave and frees the master slot, the last slave-open drop frees
-/// the slave slot. The master backing is declared first so it drops first.
+/// The master backing is declared first so it drops first: its drop hangs up
+/// the slave, and the last slave-open drop then frees the slave slot.
 pub(super) struct PtyPair {
     pub(super) master: TtyIndex,
     pub(super) slave: TtyIndex,
@@ -200,7 +192,6 @@ pub(super) struct PtyPair {
     pub(super) slave_backing: KArc<dyn FileBacking>,
 }
 
-/// Allocate a PTY pair, unlock the slave, and open it.
 pub(super) fn open_pty_pair() -> PtyPair {
     tty::table::tty_table_init();
     let (master, master_backing) =
@@ -217,7 +208,7 @@ pub(super) fn open_pty_pair() -> PtyPair {
 }
 
 /// The peer link from a PTY end's driver, for direct `master_write` /
-/// `slave_write` calls. It upgrades to `None` once the referent backing is gone.
+/// `slave_write` calls.
 pub(super) fn peer_link_of(idx: TtyIndex) -> KWeak<TtyBacking> {
     let guard = TTY_SLOTS[idx.0 as usize].lock();
     match guard.as_ref().map(|tty| &tty.driver) {
@@ -234,8 +225,7 @@ pub(super) struct PtyGuard {
     _slave_backing: KArc<dyn FileBacking>,
 }
 
-/// A PTY pair with the slave switched to raw, returning its saved termios and a
-/// guard that keeps both ends open.
+/// The slave is switched to raw; the returned termios is the saved original.
 pub(super) fn packet_mode_setup_pty() -> Option<(
     TtyIndex,
     TtyIndex,

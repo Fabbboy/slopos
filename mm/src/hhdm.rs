@@ -1,31 +1,7 @@
 //! Higher Half Direct Map (HHDM) translation.
 //!
-//! This module is the **SINGLE source of truth** for HHDM offset storage.
-//! All HHDM translation should go through this module.
-//!
-//! # Usage
-//!
-//! ```ignore
-//! use slopos_abi::addr::PhysAddr;
-//! use slopos_mm::hhdm::{self, PhysAddrHhdm};
-//!
-//! // Initialize once during boot
-//! hhdm::init(limine_hhdm_offset);
-//!
-//! // Convert physical to virtual
-//! let phys = PhysAddr::new(0x1000);
-//! let virt = phys.to_virt();  // Panics if HHDM not initialized
-//!
-//! // Or check availability first
-//! if let Some(virt) = phys.try_to_virt() {
-//!     // use virt
-//! }
-//!
-//! // Or with full validation (reservation checks, overflow detection)
-//! if let Some(virt) = phys.to_virt_checked() {
-//!     // use virt
-//! }
-//! ```
+//! Single source of truth for the HHDM offset; all HHDM translation goes
+//! through this module.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -48,8 +24,6 @@ pub fn is_available() -> bool {
     HHDM_INIT.is_set()
 }
 
-/// Get the raw HHDM offset value.
-///
 /// # Panics
 ///
 /// Debug-panics if HHDM has not been initialized. In release builds,
@@ -63,7 +37,6 @@ pub fn offset() -> u64 {
     HHDM_OFFSET.load(Ordering::Acquire)
 }
 
-/// Get the HHDM offset, returning None if not initialized.
 #[inline]
 pub fn try_offset() -> Option<u64> {
     if is_available() {
@@ -73,14 +46,7 @@ pub fn try_offset() -> Option<u64> {
     }
 }
 
-// =============================================================================
-// PhysAddr Extension Trait
-// =============================================================================
-
-/// Extension trait adding HHDM translation methods to `PhysAddr`.
 pub trait PhysAddrHhdm {
-    /// Convert physical address to virtual address via HHDM.
-    ///
     /// Returns `VirtAddr::NULL` for null physical addresses.
     ///
     /// # Panics
@@ -88,15 +54,11 @@ pub trait PhysAddrHhdm {
     /// Panics if HHDM has not been initialized.
     fn to_virt(self) -> VirtAddr;
 
-    /// Try to convert physical to virtual.
-    ///
     /// Returns `None` if:
     /// - Physical address is null
     /// - HHDM is not available
     fn try_to_virt(self) -> Option<VirtAddr>;
 
-    /// Convert with full validation.
-    ///
     /// Returns `None` if:
     /// - Physical address is null
     /// - HHDM is not available
@@ -136,10 +98,8 @@ impl PhysAddrHhdm for PhysAddr {
             return None;
         }
 
-        // Check HHDM availability
         let hhdm = try_offset()?;
 
-        // Check reservation database
         if let Some(region) = mm_reservations_find_option(self.as_u64()) {
             let allowed = region.flags
                 & (MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT | MM_RESERVATION_FLAG_MMIO);
@@ -157,25 +117,14 @@ impl PhysAddrHhdm for PhysAddr {
     }
 }
 
-// =============================================================================
-// VirtAddr Extension Trait
-// =============================================================================
-
-/// Extension trait adding HHDM reverse translation to `VirtAddr`.
 pub trait VirtAddrHhdm {
-    /// Convert virtual address back to physical assuming HHDM mapping.
-    ///
-    /// This is a simple arithmetic operation - it assumes the virtual address
-    /// was created via HHDM translation. For arbitrary virtual addresses,
-    /// use `to_phys_walk()` instead.
+    /// Arithmetic only: assumes the address came from HHDM translation. Use
+    /// `to_phys_walk()` for arbitrary virtual addresses.
     ///
     /// Returns `PhysAddr::NULL` for null virtual addresses.
     fn to_phys_hhdm(self) -> PhysAddr;
 
-    /// Convert virtual address to physical via page table walk.
-    ///
-    /// This performs an actual page table lookup and works for any mapped
-    /// virtual address, not just HHDM-translated ones.
+    /// Walks the page tables, so it works for any mapped virtual address.
     ///
     /// Returns `None` if:
     /// - Virtual address is null

@@ -1,51 +1,25 @@
 //! The connectivity classifier: what the stack can currently reach.
 //!
-//! One value, from [`NET_CONN_NONE`] to [`NET_CONN_FULL`], derived from state
-//! the stack already keeps. It is what a status indicator renders, and its
-//! whole purpose is to distinguish the four ways "the network is not working"
-//! can be true — no link, no address, no route, no answer — because a UI that
-//! collapses them tells a person nothing about what to fix.
+//! One value, from [`NET_CONN_NONE`] to [`NET_CONN_FULL`], distinguishing the
+//! four ways the network can be down — no link, no address, no route, no
+//! answer.
 //!
-//! # Evidence, not probing
+//! Reachability past the gateway is observed rather than configured: an ICMP
+//! echo *reply* from the gateway, a successful DNS resolution, a TCP connection
+//! to an off-link address reaching ESTABLISHED. There is deliberately **no
+//! periodic DNS probe** — unsolicited queries on a timer would widen the
+//! predictable-query-ID surface. Two ICMP probes cover stale passive evidence:
+//! one to the gateway after [`GATEWAY_STALE_MS`], one to an off-link resolver
+//! after [`WAN_FRESH_MS`].
 //!
-//! Reachability past the gateway cannot be derived from configuration; it has
-//! to be observed. This module observes it from traffic that was going to
-//! happen anyway: an ICMP echo *reply* from the gateway, a successful DNS
-//! resolution, a TCP connection to an off-link address reaching ESTABLISHED.
+//! [`NET_CONN_PORTAL`](slopos_abi::net::NET_CONN_PORTAL) exists in the ABI so
+//! the value space matches NetworkManager's, and is never produced here —
+//! deciding it needs an HTTP request. A userland daemon that wants to make that
+//! call sets [`Connectivity::set_enabled`] to `false` and drives the state.
 //!
-//! There is deliberately **no periodic DNS probe**. Emitting unsolicited
-//! queries on a timer would widen the predictable-query-ID surface for nothing,
-//! and a resolution the system performs anyway is strictly better evidence at
-//! zero cost in packets.
-//!
-//! Passive evidence alone is not enough, though, and pretending otherwise
-//! produces a specific lie: a machine that has just booted has observed nothing
-//! about the path beyond its gateway, and reporting that as "no internet" is
-//! reporting the absence of evidence as evidence of absence. So there are two
-//! active probes, both ICMP, both conditional on the answer being genuinely in
-//! doubt: one echo to the gateway while it has been quiet for
-//! [`GATEWAY_STALE_MS`], and one to the configured resolver — off-link only —
-//! while nothing beyond the gateway has answered within [`WAN_FRESH_MS`]. A
-//! working machine sends neither, because fresh passive evidence suppresses
-//! both; the worst case is a couple of packets a minute.
-//!
-//! # The kernel never reports a captive portal
-//!
-//! [`NET_CONN_PORTAL`](slopos_abi::net::NET_CONN_PORTAL) is defined by the ABI
-//! so the value space matches NetworkManager's, and it is never produced here.
-//! Deciding that a network is behind a portal requires an HTTP request and a
-//! body comparison; the kernel has no HTTP client and will not grow one to
-//! light an icon. A userland daemon that wants to make that call sets
-//! [`Connectivity::set_enabled`] to `false` and drives the state itself.
-//!
-//! # Locking
-//!
-//! Atomics only. That is what lets **evidence be recorded from anywhere** —
-//! the ICMP receive path, the TCP glue layer, the DNS resolver — including
-//! from under those subsystems' own locks, because recording touches nothing
-//! but atomics and never wakes anybody. Only *evaluation* posts an event, and
-//! evaluation runs from the timer or from an explicit recheck with nothing
-//! held. The two halves are split for exactly that reason.
+//! Atomics only, so evidence can be recorded from any receive path under that
+//! subsystem's own locks. Only *evaluation* posts an event, and it runs with
+//! nothing held.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
@@ -60,12 +34,9 @@ use crate::netmon::netmon_post;
 use crate::route::ROUTE_TABLE;
 use crate::types::{DevIndex, Ipv4Addr};
 
-/// How long evidence that something off-link answered stays good.
-///
-/// Two minutes is long enough that an idle desktop does not flap to
-/// [`NET_CONN_LIMITED`] between a person's actions, and short enough that a
-/// network which actually went away is reported within a couple of timer ticks
-/// of the next thing that tries to use it.
+/// How long evidence that something off-link answered stays good. Two minutes:
+/// long enough that an idle desktop does not flap to [`NET_CONN_LIMITED`],
+/// short enough that a network that went away is reported within a few ticks.
 pub const WAN_FRESH_MS: u64 = 120_000;
 
 /// How long the gateway may stay quiet before a `Limited` state is worth one
@@ -75,78 +46,52 @@ pub const GATEWAY_STALE_MS: u64 = 30_000;
 /// How often the classifier re-evaluates.
 pub const TICK_MS: u64 = 5_000;
 
-/// Identifier carried by the classifier's own echo requests.
-///
-/// A value no socket is likely to have bound, because the echo-reply path
-/// consults the ICMP demux by identifier and a collision would hand our reply
-/// to somebody else's `ping`.
+/// Identifier carried by the classifier's own echo requests. Unlikely to be
+/// bound by a socket: the echo-reply path demuxes by identifier, so a collision
+/// would hand our reply to somebody else's `ping`.
 const PROBE_IDENT: u16 = 0xC0DE;
 
-// =============================================================================
-// The ladder
-// =============================================================================
-
-/// Everything the classification depends on, gathered once.
-///
-/// A plain input struct rather than a set of table reads inside the decision,
-/// so the state machine is a pure function over five booleans and can be
-/// enumerated exhaustively by a test without a network existing at all.
+/// Everything the classification depends on, gathered once, so [`classify`] is
+/// a pure function over five booleans that a test can enumerate exhaustively.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Evidence {
     /// A realised, non-loopback interface has carrier.
     pub any_carrier: bool,
     /// One of those interfaces also has an address.
     pub has_address: bool,
-    /// A default route is installed.
     pub has_default_route: bool,
-    /// The default route's gateway is a `Reachable` neighbour — or the route
-    /// is directly connected, in which case there is no gateway to resolve.
+    /// The default route's gateway is a `Reachable` neighbour, or the route is
+    /// directly connected and has no gateway to resolve.
     pub gateway_reachable: bool,
     /// Something off-link has answered within [`WAN_FRESH_MS`].
     pub wan_fresh: bool,
 }
 
-/// The state `evidence` implies.
-///
-/// Ordered as a ladder, most-broken first, so each rung answers exactly one
-/// question and a reader can see which one a given state got stuck on.
+/// The state `evidence` implies, as a ladder ordered most-broken first.
 pub const fn classify(evidence: Evidence) -> u8 {
     if !evidence.any_carrier {
-        // No link at all: nothing to configure, nothing to reach.
         return NET_CONN_NONE;
     }
     if !evidence.has_address {
-        // A cable, but no identity on it. Still nothing reachable.
         return NET_CONN_NONE;
     }
     if !evidence.has_default_route {
-        // The local segment works and nothing beyond it is even addressable.
         return NET_CONN_LOCAL;
     }
     if evidence.wan_fresh {
-        // Something off-link answered, and it can only have been reached
-        // through the first hop — so this outranks the gateway rung. Asking
-        // about the gateway first would drop a machine with working internet to
-        // `Limited` whenever its gateway evidence ages out, because nothing
-        // refreshes that evidence while the state is already `Full`.
+        // Outranks the gateway rung: off-link can only have been reached
+        // through the first hop, and nothing refreshes gateway evidence while
+        // the state is already `Full`, so asking first would flap to `Limited`.
         return NET_CONN_FULL;
     }
-    // Nothing beyond the first hop has answered recently. Whether the gateway
-    // itself answers decides which probe is worth sending, not which state to
-    // report: the ABI has one word for both, and a person cannot act
-    // differently on them anyway.
+    // `gateway_reachable` decides which probe is worth sending, not which state
+    // to report: the ABI has one word for both.
     NET_CONN_LIMITED
 }
 
-// =============================================================================
-// The classifier
-// =============================================================================
-
-/// Connectivity state plus the evidence clocks behind it.
-///
-/// Addressable rather than global-only, following [`crate::iface::IfaceTable`]:
-/// a test drives a scratch instance with synthetic evidence instead of
-/// arranging a network condition on the machine it is running on.
+/// Connectivity state plus the evidence clocks behind it. Addressable rather
+/// than global-only so a test can drive a scratch instance with synthetic
+/// evidence.
 pub struct Connectivity {
     state: AtomicU8,
     since_ms: AtomicU64,

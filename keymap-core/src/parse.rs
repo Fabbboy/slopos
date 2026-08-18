@@ -1,12 +1,6 @@
-//! Text `*.layout` → [`LayoutTable`] parser.
-//!
-//! This is the **userland** half of the layout pipeline: a small, allocation-free
-//! parser that turns a human-authored `*.layout` text file into the validated
-//! binary [`LayoutTable`] POD that gets uploaded to the kernel. The kernel never
-//! runs this — it only ingests the already-validated binary — so the text grammar
-//! is not part of the kernel's attack surface.
-//!
-//! Being alloc-free, it is fully host-testable and reusable everywhere.
+//! Text `*.layout` → [`LayoutTable`] parser: the **userland** half of the layout
+//! pipeline. The kernel never runs it — it ingests only the already-validated
+//! binary — so this grammar is not part of the kernel's attack surface.
 //!
 //! # Grammar (line-oriented; `#` begins a comment to end of line)
 //!
@@ -29,15 +23,14 @@ use crate::layout_table::{
     MAX_COMPOSE, MAX_DEADKEYS, NUM_KEYS, NUM_LEVELS, validate,
 };
 
-/// Hard cap on source size before any work (defensive; layouts are tiny).
+/// Hard cap on source size, checked before any work.
 const MAX_SRC: usize = 64 * 1024;
 
 /// Max whitespace-separated tokens we read from one line.
 const MAX_TOKENS: usize = 12;
 
-/// Parse `src` into `out`, which is cleared first. On success `out` is a
-/// validated [`LayoutTable`]; on failure `out` is left partially written and the
-/// error describes the first problem.
+/// Parse `src` into `out`, which is cleared first and [`validate`]d on success;
+/// on failure `out` is left partially written.
 pub fn parse(src: &[u8], out: &mut LayoutTable) -> Result<(), LayoutError> {
     if src.len() > MAX_SRC {
         return Err(LayoutError::TooLarge);
@@ -45,12 +38,11 @@ pub fn parse(src: &[u8], out: &mut LayoutTable) -> Result<(), LayoutError> {
 
     clear(out);
 
-    // Declared dead-key names, in declaration order → index. Slices borrow `src`.
+    // Declared dead-key names, in declaration order → index.
     let mut dead_names: [&[u8]; MAX_DEADKEYS] = [b""; MAX_DEADKEYS];
     let mut dead_count: usize = 0;
 
     for raw_line in src.split(|&b| b == b'\n') {
-        // Strip an inline comment (`#` always begins a comment).
         let line = match raw_line.iter().position(|&b| b == b'#') {
             Some(i) => &raw_line[..i],
             None => raw_line,
@@ -99,7 +91,6 @@ fn clear(out: &mut LayoutTable) {
     }
 }
 
-/// Split a line into whitespace-separated token slices; returns the count.
 fn tokenize<'a>(line: &'a [u8], out: &mut [&'a [u8]]) -> usize {
     let mut n = 0;
     let mut i = 0;
@@ -162,7 +153,6 @@ fn parse_key(
     toks: &[&[u8]],
     dead_names: &[&[u8]],
 ) -> Result<(), LayoutError> {
-    // key <NAME> <caps> [base] [shift] [altgr] [shift+altgr]
     if toks.len() < 3 {
         return Err(LayoutError::Syntax);
     }
@@ -186,7 +176,6 @@ fn parse_compose(
     toks: &[&[u8]],
     dead_names: &[&[u8]],
 ) -> Result<(), LayoutError> {
-    // compose dead:<name> <base> -> <result>
     if toks.len() != 5 || toks[3] != b"->" {
         return Err(LayoutError::Syntax);
     }
@@ -208,7 +197,6 @@ fn parse_compose(
     Ok(())
 }
 
-/// Resolve a level token into a [`Cell`].
 fn resolve_cell(tok: &[u8], dead_names: &[&[u8]]) -> Result<Cell, LayoutError> {
     if tok == b"-" || tok == b"none" {
         return Ok(Cell::NONE);
@@ -242,14 +230,12 @@ fn parse_bool(tok: &[u8]) -> Result<bool, LayoutError> {
     }
 }
 
-/// Resolve a glyph token to a codepoint: a single literal character, or a keysym
-/// name from the table below.
+/// Resolve a glyph token to a codepoint: a single literal character or a keysym name.
 fn resolve_keysym(tok: &[u8]) -> Option<u32> {
     let s = core::str::from_utf8(tok).ok()?;
     let mut chars = s.chars();
     if let Some(c) = chars.next() {
         if chars.next().is_none() {
-            // Exactly one character: a literal glyph.
             return Some(c as u32);
         }
     }
@@ -329,13 +315,10 @@ fn dead_accent_by_name(name: &[u8]) -> Option<u32> {
     })
 }
 
-/// Keysym name → codepoint. Covers ASCII punctuation, common symbols, and the
-/// Latin-1/accented letters de/de_CH/fr_CH need (grows as layouts are added).
+/// Keysym name → codepoint: ASCII punctuation, common symbols, Latin-1 letters.
 fn keysym_by_name(s: &str) -> Option<u32> {
     Some(match s {
-        // whitespace / explicit
         "space" => 0x20,
-        // ASCII punctuation (named forms; useful where the literal is awkward)
         "exclam" => 0x21,
         "dquote" | "quotedbl" => 0x22,
         "numbersign" | "hash" => 0x23,
@@ -368,7 +351,6 @@ fn keysym_by_name(s: &str) -> Option<u32> {
         "bar" | "pipe" => 0x7C,
         "braceright" => 0x7D,
         "asciitilde" => 0x7E,
-        // symbols
         "euro" => 0x20AC,
         "cent" => 0x00A2,
         "sterling" | "pound" => 0x00A3,
@@ -391,7 +373,6 @@ fn keysym_by_name(s: &str) -> Option<u32> {
         "threequarters" => 0x00BE,
         "guillemotleft" => 0x00AB,
         "guillemotright" => 0x00BB,
-        // Latin-1 letters (lower then upper), German / Swiss / French
         "agrave" => 0x00E0,
         "Agrave" => 0x00C0,
         "aacute" => 0x00E1,
@@ -523,15 +504,12 @@ compose dead:acute  space -> acute
     #[test]
     fn parses_dead_key_and_composes() {
         let t = parse_ok(DE_CH);
-        // The '=' key base is a dead acute.
         assert_eq!(t.cell(KEY_EQUAL, 0).kind(), CellKind::Dead(0));
         let mut d = DeadKeyState::new();
         assert_eq!(
             resolve(&t, KEY_EQUAL, NONE, NUM_ON, &mut d).outcome,
             KeyOutcome::None
         );
-        // 'e' is defined in this layout (`key KEY_E ... e ...`) and has an acute
-        // compose rule → é.
         assert_eq!(
             resolve(&t, KEY_E, NONE, NUM_ON, &mut d).outcome,
             KeyOutcome::Text(0x00E9)
@@ -544,11 +522,9 @@ compose dead:acute  space -> acute
         assert_eq!(resolve_keysym(b"@"), Some('@' as u32));
         assert_eq!(resolve_keysym(b"euro"), Some(0x20AC));
         assert_eq!(resolve_keysym(b"sharp_s"), Some(0x00DF));
-        assert_eq!(resolve_keysym("ä".as_bytes()), Some(0x00E4)); // literal non-ASCII
+        assert_eq!(resolve_keysym("ä".as_bytes()), Some(0x00E4));
         assert_eq!(resolve_keysym(b"nonsense_keysym"), None);
     }
-
-    // --- malformed / hostile inputs reject cleanly ---
 
     fn parse_err(src: &[u8]) -> LayoutError {
         let mut t = LayoutTable::empty();
@@ -581,13 +557,11 @@ compose dead:acute  space -> acute
 
     #[test]
     fn rejects_missing_name() {
-        // No `name =` line ⇒ empty name ⇒ validate rejects.
         assert_eq!(parse_err(b"key KEY_A no a A - -\n"), LayoutError::BadName);
     }
 
     #[test]
     fn rejects_oversize_source() {
-        // A source larger than the cap is rejected before any work.
         let big = [b' '; MAX_SRC + 1];
         assert_eq!(parse_err(&big), LayoutError::TooLarge);
     }
@@ -597,8 +571,6 @@ compose dead:acute  space -> acute
         let src = b"name = x\ndeadkeys = acute\ncompose dead:acute a -> aacute\ncompose dead:acute a -> agrave\n";
         assert_eq!(parse_err(src), LayoutError::AmbiguousCompose);
     }
-
-    // --- the actual shipped layout files parse + resolve correctly ---
 
     const US_FILE: &str = include_str!("../../assets/keymaps/us.layout");
     const DE_CH_FILE: &str = include_str!("../../assets/keymaps/de_CH.layout");
@@ -632,7 +604,6 @@ compose dead:acute  space -> acute
         assert_eq!(t.name_str(), "de_CH");
         let mut d = DeadKeyState::new();
 
-        // QWERTZ: physical Y types z, physical Z types y.
         assert_eq!(
             resolve(&t, KEY_Y, NONE, NUM_ON, &mut d).outcome,
             KeyOutcome::Text('z' as u32)
@@ -642,7 +613,6 @@ compose dead:acute  space -> acute
             KeyOutcome::Text('y' as u32)
         );
 
-        // AltGr coding glyphs.
         assert_eq!(
             resolve(&t, KEY_2, ALTGR, NUM_ON, &mut d).outcome,
             KeyOutcome::Text('@' as u32)
@@ -668,7 +638,7 @@ compose dead:acute  space -> acute
             KeyOutcome::Text('{' as u32)
         );
 
-        // Umlaut keys: base umlaut, Shift = French accent (real Swiss layout).
+        // Base umlaut, Shift = French accent, as on the real Swiss layout.
         assert_eq!(
             resolve(&t, KEY_LEFTBRACE, NONE, NUM_ON, &mut d).outcome,
             KeyOutcome::Text(0x00FC) // ü

@@ -1,25 +1,10 @@
 //! XSAVE / FPU / SIMD regression tests.
 //!
-//! These tests verify:
-//! - XSAVE feature detection matches CPUID reality
-//! - CR4.OSXSAVE and XCR0 are configured correctly on the running CPU
-//! - SSE register state survives an XSAVE→XRSTOR round-trip
-//! - AVX register state (upper YMM halves) survives an XSAVE→XRSTOR round-trip
-//! - Multiple registers remain isolated through save/restore
-//! - The XSAVE area size reported at runtime is sane
-//!
-//! XSAVE is a hard boot requirement — the kernel panics during init if the
-//! CPU does not support it.  These tests therefore never need to skip due to
-//! XSAVE being unavailable; they run unconditionally.
-//!
-//! All tests run on the BSP in the test harness context (single CPU, no
-//! context switch).  The context-switch assembly macros use the same XSAVE
-//! codepath tested here, so regressions in the instruction encoding or
-//! component mask will be caught.
+//! XSAVE is a hard boot requirement, so nothing here skips on its absence.
 
 use crate::TestResult;
 use crate::{fail, pass};
-use slopos_arch::cpu::control_regs::{read_cr4, xcr0_read, Cr4Flags, Osxsave, Xcr0Flags};
+use slopos_arch::cpu::control_regs::{Cr4Flags, Osxsave, Xcr0Flags, read_cr4, xcr0_read};
 use slopos_arch::cpu::cpuid::XsaveFeatures;
 use slopos_arch::cpu::xsave;
 use slopos_ostd::KBox;
@@ -31,12 +16,6 @@ struct XsaveArea {
     data: [u8; 2688],
 }
 
-// =============================================================================
-// 1. XSAVE Detection Sanity
-// =============================================================================
-
-/// Verify that `xsave::is_enabled()` is always true (XSAVE is mandatory)
-/// and that CPUID agrees.
 pub fn test_xsave_enabled_matches_cpuid() -> TestResult {
     let features = XsaveFeatures::detect();
 
@@ -49,19 +28,14 @@ pub fn test_xsave_enabled_matches_cpuid() -> TestResult {
     pass!()
 }
 
-/// Verify area_size() returns a sane value (>= 512 for FXSAVE compat,
-/// and >= CPUID-reported current size).
 pub fn test_xsave_area_size_sane() -> TestResult {
     let size = xsave::area_size();
 
-    // Minimum: FXSAVE area is 512 bytes.
     if size < 512 {
         return fail!("area_size {} < 512 (FXSAVE minimum)", size);
     }
 
     let features = XsaveFeatures::detect();
-    // With XSAVE enabled and XCR0 set, the runtime size should match
-    // what CPUID reports for the currently-enabled features.
     if size < features.area_size_current {
         return fail!(
             "area_size {} < CPUID current size {}",
@@ -69,7 +43,6 @@ pub fn test_xsave_area_size_sane() -> TestResult {
             features.area_size_current
         );
     }
-    // Must not exceed the hardware maximum.
     if size > features.area_size_max {
         return fail!(
             "area_size {} > CPUID max size {}",
@@ -81,7 +54,6 @@ pub fn test_xsave_area_size_sane() -> TestResult {
     pass!()
 }
 
-/// Verify active_xcr0() has at least x87+SSE bits set (mandatory).
 pub fn test_xsave_xcr0_mandatory_bits() -> TestResult {
     let xcr0 = xsave::active_xcr0();
     let x87_sse = Xcr0Flags::X87.bits() | Xcr0Flags::SSE.bits();
@@ -96,16 +68,13 @@ pub fn test_xsave_xcr0_mandatory_bits() -> TestResult {
     pass!()
 }
 
-/// Verify that the XsaveFeatures struct is internally consistent.
 pub fn test_xsave_features_consistency() -> TestResult {
     let f = XsaveFeatures::detect();
 
-    // Supported XCR0 must include x87 (bit 0) — hardware enforces this.
     if (f.xcr0_supported & Xcr0Flags::X87.bits()) == 0 {
         return fail!("xcr0_supported 0x{:x} missing X87 bit", f.xcr0_supported);
     }
 
-    // Max area size must be >= current area size.
     if f.area_size_max < f.area_size_current {
         return fail!(
             "area_size_max {} < area_size_current {}",
@@ -114,7 +83,6 @@ pub fn test_xsave_features_consistency() -> TestResult {
         );
     }
 
-    // Current area size must be at least 512 (x87+SSE header).
     if f.area_size_current < 512 {
         return fail!(
             "area_size_current {} < 512 (x87+SSE minimum)",
@@ -125,11 +93,6 @@ pub fn test_xsave_features_consistency() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 2. CR4 / XCR0 Consistency on Current CPU
-// =============================================================================
-
-/// Verify CR4.OSXSAVE is set on the currently-running CPU.
 pub fn test_cr4_osxsave_set() -> TestResult {
     let cr4 = read_cr4();
     if (cr4 & Cr4Flags::OSXSAVE.bits()) == 0 {
@@ -138,11 +101,9 @@ pub fn test_cr4_osxsave_set() -> TestResult {
     pass!()
 }
 
-/// Verify that the live XCR0 register matches what xsave::active_xcr0() reports.
 pub fn test_xcr0_matches_active() -> TestResult {
     let expected = xsave::active_xcr0();
-    // Observe CR4.OSXSAVE rather than assuming it: reading XCR0 without it
-    // is a #UD, and this test must not be the thing that takes it.
+    // Reading XCR0 without CR4.OSXSAVE is a #UD.
     let Some(osxsave) = Osxsave::probe() else {
         return fail!("CR4.OSXSAVE is clear; XCR0 is not readable");
     };
@@ -158,8 +119,6 @@ pub fn test_xcr0_matches_active() -> TestResult {
     pass!()
 }
 
-/// If AVX is reported in active_xcr0, verify the AVX bit is in the
-/// CPU's supported set.
 pub fn test_xcr0_avx_consistent() -> TestResult {
     let xcr0 = xsave::active_xcr0();
     let features = XsaveFeatures::detect();
@@ -175,12 +134,6 @@ pub fn test_xcr0_avx_consistent() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 3. SSE Register State — XSAVE/XRSTOR Round-Trip
-// =============================================================================
-
-/// Write known patterns to XMM0-XMM3, xsave to a buffer, zero the
-/// registers, xrstor from the buffer, and verify the patterns survive.
 pub fn test_sse_xsave_xrstor_roundtrip() -> TestResult {
     let mut area: KBox<XsaveArea> = KBox::zeroed().expect("alloc");
 
@@ -188,7 +141,6 @@ pub fn test_sse_xsave_xrstor_roundtrip() -> TestResult {
     let xcr0_lo = xcr0 as u32;
     let xcr0_hi = (xcr0 >> 32) as u32;
 
-    // 4 x 128-bit patterns stored as contiguous memory (loaded via movdqu).
     #[repr(C, align(16))]
     struct Patterns {
         data: [[u64; 2]; 4],
@@ -225,17 +177,9 @@ pub fn test_sse_xsave_xrstor_roundtrip() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 4. AVX Register State — XSAVE/XRSTOR Round-Trip (Upper YMM)
-// =============================================================================
-
-/// Write known patterns to the upper 128 bits of YMM0-YMM1 (the part that
-/// FXSAVE cannot save), xsave, zero, xrstor, and verify.
-///
-/// This is THE critical regression test — if the context switch were still
-/// using FXSAVE, the upper halves would be silently lost.
+/// The upper YMM halves are what FXSAVE cannot save: a context switch that
+/// regressed to FXSAVE would lose them silently.
 pub fn test_avx_xsave_xrstor_roundtrip() -> TestResult {
-    // Check AVX is actually enabled in XCR0.
     let xcr0 = xsave::active_xcr0();
     if (xcr0 & Xcr0Flags::AVX.bits()) == 0 {
         return TestResult::Skipped;
@@ -246,9 +190,6 @@ pub fn test_avx_xsave_xrstor_roundtrip() -> TestResult {
     let xcr0_lo = xcr0 as u32;
     let xcr0_hi = (xcr0 >> 32) as u32;
 
-    // Two 256-bit patterns laid out as contiguous 128-bit halves in memory.
-    // ymm_patterns[0] = YMM0 lower 128, ymm_patterns[1] = YMM0 upper 128,
-    // ymm_patterns[2] = YMM1 lower 128, ymm_patterns[3] = YMM1 upper 128.
     #[repr(C, align(16))]
     struct YmmPatterns {
         data: [[u64; 2]; 4],
@@ -286,12 +227,6 @@ pub fn test_avx_xsave_xrstor_roundtrip() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 5. Multi-Register Isolation
-// =============================================================================
-
-/// Verify that XSAVE/XRSTOR preserves many SSE registers independently
-/// (XMM0 through XMM7 with distinct patterns).
 pub fn test_sse_multi_register_isolation() -> TestResult {
     let mut area: KBox<XsaveArea> = KBox::zeroed().expect("alloc");
 
@@ -299,8 +234,6 @@ pub fn test_sse_multi_register_isolation() -> TestResult {
     let xcr0_lo = xcr0 as u32;
     let xcr0_hi = (xcr0 >> 32) as u32;
 
-    // 8 distinct 128-bit patterns for XMM0-XMM7.
-    // Stored as contiguous memory, loaded via movdqu.
     #[repr(C, align(16))]
     struct MultiPatterns {
         data: [[u64; 2]; 8],
@@ -341,14 +274,7 @@ pub fn test_sse_multi_register_isolation() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 6. XSAVE Area Size Matches Enabled Features
-// =============================================================================
-
-/// Cross-check the runtime area size against what CPUID reports for the
-/// features currently enabled in XCR0.
 pub fn test_xsave_area_size_matches_cpuid() -> TestResult {
-    // CPUID.0Dh.0:EBX = size for currently-enabled XCR0 features.
     let cpuid_size = slopos_arch::cpu::cpuid::xsave_area_size();
     let runtime_size = xsave::area_size();
 
@@ -356,7 +282,7 @@ pub fn test_xsave_area_size_matches_cpuid() -> TestResult {
         return fail!("CPUID xsave_area_size() returned 0 with XSAVE enabled");
     }
 
-    // They should be equal — init() stores CPUID.0Dh.0:EBX directly.
+    // Equality holds because init() stores CPUID.0Dh.0:EBX directly.
     if runtime_size != cpuid_size {
         return fail!(
             "area_size mismatch: runtime={}, CPUID={}",
@@ -368,8 +294,6 @@ pub fn test_xsave_area_size_matches_cpuid() -> TestResult {
     pass!()
 }
 
-/// Verify the area size is large enough for AVX if AVX is enabled.
-/// AVX requires at least 832 bytes (512 legacy + 64 header + 256 YMM).
 pub fn test_xsave_area_size_covers_avx() -> TestResult {
     let xcr0 = xsave::active_xcr0();
     if (xcr0 & Xcr0Flags::AVX.bits()) == 0 {
@@ -385,7 +309,6 @@ pub fn test_xsave_area_size_covers_avx() -> TestResult {
     pass!()
 }
 
-/// Verify XSAVEC and XSAVEOPT flags match between XsaveFeatures and xsave module.
 pub fn test_xsave_variant_flags_consistent() -> TestResult {
     let features = XsaveFeatures::detect();
 
@@ -408,14 +331,8 @@ pub fn test_xsave_variant_flags_consistent() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 6. Image validation
-// =============================================================================
-
-/// The MXCSR mask read at boot must at least cover the kernel's own default.
-///
-/// If it did not, `validate_xsave_image` would reject the init image the kernel
-/// itself writes into every new task, and no signal return could ever succeed.
+/// The MXCSR mask read at boot must cover the kernel's own default, or
+/// `validate_xsave_image` rejects the init image written into every new task.
 pub fn test_mxcsr_feature_mask_covers_kernel_default() -> TestResult {
     let mask = xsave::mxcsr_feature_mask();
 
@@ -432,10 +349,8 @@ pub fn test_mxcsr_feature_mask_covers_kernel_default() -> TestResult {
     pass!()
 }
 
-/// The image `xsave64` itself produces must pass `validate_xsave_image`.
-///
-/// The validator gates every signal return, so a rule strict enough to reject
-/// the hardware's own output would break signal delivery rather than harden it.
+/// The image `xsave64` itself produces must pass `validate_xsave_image`: the
+/// validator gates every signal return.
 pub fn test_validate_accepts_live_xsave_image() -> TestResult {
     let mut area: KBox<XsaveArea> = KBox::zeroed().expect("alloc");
     let xcr0 = xsave::active_xcr0();
@@ -453,10 +368,8 @@ pub fn test_validate_accepts_live_xsave_image() -> TestResult {
     }
 }
 
-/// ...and must reject that same image once its XSTATE header is poisoned.
-///
-/// A validator that accepts everything would also accept a live image, so the
-/// test above proves nothing on its own.
+/// ...and must reject that same image once its XSTATE header is poisoned: a
+/// validator that accepts everything would pass the test above too.
 pub fn test_validate_rejects_poisoned_live_image() -> TestResult {
     let mut area: KBox<XsaveArea> = KBox::zeroed().expect("alloc");
     let xcr0 = xsave::active_xcr0();
@@ -473,31 +386,19 @@ pub fn test_validate_rejects_poisoned_live_image() -> TestResult {
     }
 }
 
-// =============================================================================
-// Suite Registration
-// =============================================================================
-
-// Detection sanity
 crate::stest!(name = test_xsave_enabled_matches_cpuid, suite = xsave);
 crate::stest!(name = test_xsave_area_size_sane, suite = xsave);
 crate::stest!(name = test_xsave_xcr0_mandatory_bits, suite = xsave);
 crate::stest!(name = test_xsave_features_consistency, suite = xsave);
-// CR4 / XCR0 consistency
 crate::stest!(name = test_cr4_osxsave_set, suite = xsave);
 crate::stest!(name = test_xcr0_matches_active, suite = xsave);
 crate::stest!(name = test_xcr0_avx_consistent, suite = xsave);
-// SSE round-trip
 crate::stest!(name = test_sse_xsave_xrstor_roundtrip, suite = xsave);
-// AVX round-trip (THE critical test)
 crate::stest!(name = test_avx_xsave_xrstor_roundtrip, suite = xsave);
-// Multi-register isolation
 crate::stest!(name = test_sse_multi_register_isolation, suite = xsave);
-// Area size verification
 crate::stest!(name = test_xsave_area_size_matches_cpuid, suite = xsave);
 crate::stest!(name = test_xsave_area_size_covers_avx, suite = xsave);
-// Variant flags
 crate::stest!(name = test_xsave_variant_flags_consistent, suite = xsave);
-// Image validation
 crate::stest!(
     name = test_mxcsr_feature_mask_covers_kernel_default,
     suite = xsave

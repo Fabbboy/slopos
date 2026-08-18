@@ -48,12 +48,10 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> KVec<u8> {
         let y = (sub_y as f32 + 0.5) * inv_ss;
         let pixel_row = sub_y / SUPERSAMPLE;
 
-        // Clear the fill-delta buffer.
         for d in scanline_fill.iter_mut() {
             *d = 0.0;
         }
 
-        // Process each edge that crosses this sub-scanline.
         for edge in edges {
             let (mut ey0, mut ey1, mut ex0, mut ex1) = (edge.y0, edge.y1, edge.x0, edge.x1);
 
@@ -70,7 +68,6 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> KVec<u8> {
                 continue;
             }
 
-            // Exact x-intercept on this sub-scanline.
             let t = (y - ey0) / (ey1 - ey0);
             let x = ex0 + t * (ex1 - ex0);
 
@@ -78,7 +75,6 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> KVec<u8> {
             let frac = x - libm::floorf(x); // 0..1 within pixel
 
             if xi >= 0 && (xi as usize) < width {
-                // Boundary pixel: analytical partial coverage.
                 // The edge enters at `frac` within the pixel, so the
                 // fraction to the RIGHT of the edge is `(1 - frac)`.
                 let row_off = pixel_row * width;
@@ -97,9 +93,7 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> KVec<u8> {
             // xi >= width: edge is past the right side, no visible effect.
         }
 
-        // Accumulate the fill-delta left-to-right and add to each
-        // pixel's area (one full sub-scanline contribution per pixel
-        // that is inside the glyph).
+        // One full sub-scanline contribution per pixel inside the glyph.
         let row_off = pixel_row * width;
         let mut fill = 0.0f32;
         for px in 0..width {
@@ -110,7 +104,6 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> KVec<u8> {
         }
     }
 
-    // Convert accumulated area to 0-255 coverage.
     let mut coverage = KVec::<u8>::zeroed(width * height).expect("rasterize: alloc");
     for (idx, &a) in area.iter().enumerate() {
         let cov = libm::fabsf(a);

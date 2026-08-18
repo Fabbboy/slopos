@@ -23,18 +23,11 @@ type ssize_t = isize;
 
 /// Install an FD entry in `process_id`'s table.
 ///
-/// **Ownership contract:** the caller hands over the owning `backing`
-/// reference for `handle` (its `Drop` is the subsystem teardown). This
-/// function binds it into the single owning [`KArc<OpenFile>`], so the
-/// backing lives exactly as long as the open-file description and its
-/// teardown runs exactly once, when the last alias drops. On any error
-/// path the backing (or the `OpenFile` owning it) is dropped here —
-/// callers must not tear the subsystem object down on their own error
-/// arm.
-///
-/// `fd_flags` is the inheritance policy for the new descriptor. Callers
-/// carrying POSIX open flags spell close-on-exec as `O_CLOEXEC` inside
-/// `flags` instead; both spellings set the same bit.
+/// Consumes the owning `backing` for `handle`, binding it into the single
+/// owning [`KArc<OpenFile>`]; on every error path it is dropped here, so
+/// callers must not tear the subsystem object down on their own error arm.
+/// `fd_flags` is the new descriptor's inheritance policy — callers carrying
+/// POSIX open flags spell close-on-exec as `O_CLOEXEC` inside `flags`.
 fn install_fd_entry(
     table: FdTable,
     ops: &'static dyn FileOps,
@@ -61,21 +54,17 @@ fn install_fd_entry(
     let cloexec = fd_flags.cloexec || (flags.bits() & O_CLOEXEC as u32) != 0;
     let close_on_fork = fd_flags.close_on_fork;
 
-    // Build the single owner up front; from here the backing is owned by
-    // `open_file` and torn down exactly once on its drop.
     let Some(open_file) = new_open_file(ops, handle, flags, position, backing) else {
         return Errno::ENFILE.raw();
     };
 
-    // Charged before the table lock is taken, so a refusal never unwinds
-    // under it. The reservation refunds on every early return below.
+    // Charged before the table lock is taken, so a refusal never unwinds under it.
     let Ok(reservation) = try_charge::<FdSlot>(table.account(), 1) else {
         drop(open_file);
         return Errno::EMFILE.raw();
     };
 
     let Some(mut inner) = lock_table_slot(table) else {
-        // `open_file` drops here → backing released once.
         return Errno::ESRCH.raw();
     };
 
@@ -106,8 +95,7 @@ fn install_fd_entry(
             fd
         }
         Err(open_file) => {
-            // Detach-then-drop: the slot lock is released above, so the
-            // backing teardown runs lock-free here.
+            // Detach-then-drop: teardown runs only after the slot lock is released.
             drop(open_file);
             Errno::EMFILE.raw()
         }
@@ -153,8 +141,7 @@ pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c
     }
 
     if path == b"/dev/ptmx" {
-        // The `/dev/ptmx` opener is the master, and the master is what pays
-        // for the pair's two slots.
+        // The `/dev/ptmx` opener is the master, and it pays for the pair's two slots.
         let (master_idx, backing) = match tty::alloc_pty(table.account()) {
             Ok(v) => v,
             Err(_) => return Errno::ENFILE.raw() as _,
@@ -216,10 +203,8 @@ pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c
     )
 }
 
-/// Map a TTY open failure to the errno the open syscall reports. Busy
-/// (exclusive-mode) opens keep their historical `EBUSY`; a locked PTY
-/// slave reports `EIO` (Linux devpts behaviour); anything else is a
-/// dead/unknown device.
+/// Map a TTY open failure to the errno the open syscall reports; a locked
+/// PTY slave reports `EIO`, following Linux devpts behaviour.
 fn tty_open_errno(e: TtyError) -> Errno {
     match e {
         TtyError::DeviceBusy => Errno::EBUSY,
@@ -244,9 +229,8 @@ pub fn file_read_fd(table: FdTable, fd: c_int, buf: &mut dyn IoBufWrite) -> ssiz
 
 /// The read core over an owned open-file description — shared by the
 /// fd-addressed path and the [`FileRef`]-addressed ring path. The held
-/// `KArc<OpenFile>` is the very object the fd points at, so advancing its
-/// shared offset is correct even if a concurrent close dropped the fd
-/// alias mid-read.
+/// `KArc<OpenFile>` is the object the fd points at, so advancing its shared
+/// offset stays correct if a concurrent close drops the fd alias mid-read.
 fn read_open_file(
     open_file: &KArc<OpenFile>,
     buf: &mut dyn IoBufWrite,
@@ -267,9 +251,6 @@ fn read_open_file(
     let mut socket_guard = None;
     if force_nonblock {
         flag_bits |= slopos_abi::syscall::O_NONBLOCK as u32;
-        // Sockets ignore the per-call flag and consult their *stored*
-        // nonblocking state (SLOPRING § 12 reality 1), so toggle it
-        // across the probe and restore it on drop.
         socket_guard =
             ForcedNonblockGuard::engage(ops, open_file.handle, open_file.status_flags().bits());
     }
@@ -281,9 +262,8 @@ fn read_open_file(
     rc
 }
 
-/// SlopRing non-blocking read against a held [`FileRef`] — the ring holds
-/// a real reference to the open file for the op's duration, so the read
-/// targets that description even after userland closed the fd.
+/// SlopRing non-blocking read against a held [`FileRef`]; the ring's own
+/// reference keeps the description addressable after userland closed the fd.
 pub fn file_read_ref_nonblock(file: &FileRef, buf: &mut dyn IoBufWrite) -> ssize_t {
     read_open_file(&file.open_file, buf, true)
 }
@@ -340,14 +320,13 @@ pub fn file_write_ref_nonblock(file: &FileRef, buf: &dyn IoBufRead) -> ssize_t {
     write_open_file(&file.open_file, buf, true)
 }
 
-/// RAII guard that forces a socket fd's *stored* nonblocking flag on for
-/// the duration of a SlopRing probe, then restores it. For non-socket
-/// fds (pipes/ttys/regular) it is a no-op — those honour the per-call
-/// `O_NONBLOCK` flag directly. (SLOPRING § 12 reality 1.)
+/// RAII guard forcing a socket fd's *stored* nonblocking flag on for the
+/// duration of a SlopRing probe, then restoring it. A no-op for non-socket
+/// fds, which honour the per-call `O_NONBLOCK` directly. (SLOPRING § 12
+/// reality 1.)
 struct ForcedNonblockGuard {
     ops: &'static dyn FileOps,
     handle: usize,
-    /// The status-flag bits to restore on drop.
     restore_bits: u32,
 }
 
@@ -356,10 +335,6 @@ impl ForcedNonblockGuard {
         if ops.kind() != FileKind::Socket {
             return None;
         }
-        // Set nonblocking for the probe; restore the *original* status
-        // bits on drop. The socket subsystem owns the bit; we round-trip
-        // it through `set_status_flags` (the same path `fcntl(F_SETFL)`
-        // uses), so no socket-internal invariant is bypassed.
         ops.set_status_flags(handle, slopos_abi::syscall::O_NONBLOCK as u32);
         Some(Self {
             ops,
@@ -376,9 +351,6 @@ impl Drop for ForcedNonblockGuard {
 }
 
 pub fn file_close_fd(table: FdTable, fd: c_int) -> c_int {
-    // Detach-then-drop: take the entry out of the slot under the table
-    // lock, release the lock, then drop the entry so the `OpenFile`
-    // teardown (last alias → backing release) runs lock-free.
     let taken = with_table_slot(table, |inner| {
         if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
             return Err(Errno::EBADF);
@@ -529,12 +501,8 @@ pub fn file_get_tty_index(table: FdTable, fd: c_int) -> Option<TtyIndex> {
     }
 }
 
-/// Open a file descriptor for a TTY device.
-///
-/// **Ownership contract:** the caller hands over the owning TTY backing
-/// for `tty_idx` (from `tty::open_tty` / `tty::open_pty_peer`); this
-/// consumes it via [`install_fd_entry`], so on failure the open is
-/// undone by the backing's drop.
+/// Open a file descriptor for a TTY device. Consumes the caller's owning
+/// TTY backing, so a failed open is undone by that backing's drop.
 pub fn file_open_tty_fd(
     table: FdTable,
     tty_idx: TtyIndex,
@@ -571,9 +539,8 @@ pub fn file_pipe_create(
         None => return Errno::ENOMEM.raw() as _,
     };
 
-    // Prime both ends before wrapping them: from here each backing owns
-    // one end's reference and the pair frees the slot when both drop —
-    // every error path below is a plain drop, never an explicit free.
+    // Prime both ends before wrapping them, so every error path below is a
+    // plain drop rather than an explicit free.
     if pipe::with_pipe_mut(pipe_handle, |slot| {
         slot.readers = 1;
         slot.writers = 1;
@@ -607,8 +574,6 @@ pub fn file_pipe_create(
         0,
         Some(read_backing),
     ) else {
-        // The read backing was consumed and dropped; `write_backing`
-        // drops here — together they retire the pair and free the slot.
         return Errno::ENFILE.raw() as _;
     };
     let Some(write_of) = new_open_file(
@@ -629,10 +594,8 @@ pub fn file_pipe_create(
         return Errno::ESRCH.raw() as _;
     };
 
-    // Find two free slots under the table lock. On any failure return
-    // `Err(errno)` carrying the still-owned `OpenFile`s out so they (and
-    // the pipe slot) are torn down *after* the lock drops
-    // (detach-then-drop). On success install both entries.
+    // Failures carry the still-owned `OpenFile`s out of the closure so their
+    // teardown runs after the lock drops.
     let result: Result<(c_int, c_int), Errno> = (|| {
         let read_res = try_charge::<FdSlot>(account, 1).map_err(|_| Errno::EMFILE)?;
         let write_res = try_charge::<FdSlot>(account, 1).map_err(|_| Errno::EMFILE)?;
@@ -669,14 +632,11 @@ pub fn file_pipe_create(
         Ok((r, w)) => {
             *out_read_fd = r;
             *out_write_fd = w;
-            // The slots hold clones; drop the originals (decrement only).
             drop(read_of);
             drop(write_of);
             0
         }
         Err(e) => {
-            // Last aliases: dropping them retires both ends and frees the
-            // pipe slot, lock-free.
             drop(read_of);
             drop(write_of);
             e.raw() as _
@@ -694,28 +654,15 @@ fn file_dup_fd_min(table: FdTable, old_fd: c_int, min_fd: usize) -> c_int {
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
         };
-        // Clone the shared open file (strong++). The two per-fd bits part
-        // company here, deliberately: a plain dup clears `cloexec`, but
-        // `close_on_fork` propagates to the alias. `cloexec` is a
-        // user-settable preference, so the new fd starts without one;
-        // `close_on_fork` is not settable at all and names the described
-        // object's affinity to the process that opened it, so an alias
-        // must not cross a process boundary its source would not.
-        // The alias is built before the free-slot scan so the immutable
-        // borrow of `src` ends here rather than spanning the mutable install.
         let Some(mut alias) = src.try_alias(account) else {
             return Errno::EMFILE.raw() as _;
         };
-        // A plain dup never copies the source's `cloexec`: it is a
-        // user-settable preference on the fd number, not a property of the
-        // description. `close_on_fork` does carry over — `try_alias` keeps it
-        // — because it is not settable and names the described object's
-        // affinity to the process that opened it.
+        // A dup never copies `cloexec`, a user-settable preference on the fd
+        // number; `close_on_fork` does carry over, since it is not settable and
+        // names the description's affinity to the process that opened it.
         alias.cloexec = false;
 
         let Some(new_idx) = find_free_slot_from(inner, min_fd) else {
-            // `alias` drops here under the lock — a decrement and a refund,
-            // no teardown (the source alias keeps the open file alive).
             return Errno::EMFILE.raw() as _;
         };
 
@@ -743,14 +690,9 @@ pub fn file_dup3_fd(table: FdTable, old_fd: c_int, new_fd: c_int, flags: u32) ->
 }
 
 /// Shared implementation of `dup2`/`dup3` into an explicit target fd.
-/// dup2 with `old_fd == new_fd` is a validity check (no-op success);
-/// dup3 forbids it (handled by the caller). `cloexec` is the bit to
-/// install on the new fd — a dup never copies the source's. `close_on_fork`
-/// does carry over from the source: it is not user-settable and names the
-/// described object's affinity to the process that opened it, so an alias
-/// must not cross a process boundary its source would not. Any
-/// pre-existing entry at `new_fd` is detached under the lock and dropped
-/// *after* the lock is released.
+/// dup2 with `old_fd == new_fd` is a validity check (no-op success); dup3
+/// forbids it (handled by the caller). Any pre-existing entry at `new_fd`
+/// is detached under the lock and dropped *after* the lock is released.
 fn dup_into(table: FdTable, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup3: bool) -> c_int {
     if new_fd < 0 || new_fd as usize >= FILEIO_MAX_OPEN_FILES {
         return Errno::EBADF.raw() as _;

@@ -1,12 +1,6 @@
 //! Layout-table logic: validation, binary (de)serialisation, and the built-in
 //! US-QWERTY layout. The POD wire types ([`LayoutTable`], [`Cell`],
-//! [`ComposeEntry`]) live in `slopos-abi` (re-exported here); this module owns
-//! everything *behind* the bytes.
-//!
-//! The kernel ingests an uploaded layout by [`deserialize`]-ing the blob into a
-//! zero-allocated [`LayoutTable`] (which runs [`validate`]); userland produces
-//! the blob with [`serialize`]. Both are pure, allocation-free, and host-tested,
-//! so the byte format can never silently desync between the two sides.
+//! [`ComposeEntry`]) live in `slopos-abi` and are re-exported here.
 
 use slopos_abi::input::keycode::*;
 pub use slopos_abi::input::layout::{
@@ -48,13 +42,9 @@ pub enum LayoutError {
     ForbiddenKey,
 }
 
-/// Is `cp` a codepoint a literal cell / compose result may hold?
-///
-/// Rejects `0` (the "absent" sentinel), the UTF-16 surrogate range, anything
-/// above the Unicode max, and control characters — C0, DEL, **and C1**
-/// (0x80..=0x9F) — since controls are layout-independent and never stored in
-/// the table (C1 values would also collide with the legacy TTY nav
-/// pseudo-codes 0x80..=0x88).
+/// Is `cp` a codepoint a literal cell / compose result may hold? Rejects `0` (the
+/// "absent" sentinel), surrogates, and controls — C0, DEL and C1, the last also
+/// colliding with the legacy TTY nav pseudo-codes 0x80..=0x88.
 fn is_valid_glyph(cp: u32) -> bool {
     cp != 0
         && cp <= UNICODE_MAX
@@ -64,21 +54,17 @@ fn is_valid_glyph(cp: u32) -> bool {
         && !(0x80..=0x9F).contains(&cp)
 }
 
-/// Is `usage` a key whose output legitimately varies by layout? Letters, the
-/// number row, the punctuation block (incl. NONUS_HASH), and NONUS_BACKSLASH —
-/// exactly the keys the text parser accepts. Everything else (Enter, Tab,
-/// navigation, keypad, F-keys, …) is layout-independent and resolved in code;
-/// [`validate`] rejects tables that try to override those, since the resolver
-/// consults the table before its layout-independent fallbacks.
+/// Is `usage` a key whose output legitimately varies by layout? [`validate`]
+/// rejects tables that set a cell on any other key, since the resolver consults
+/// the table before its layout-independent fallbacks.
 pub fn is_layout_dependent(usage: u16) -> bool {
     (KEY_A..=KEY_0).contains(&usage)
         || (KEY_MINUS..=KEY_SLASH).contains(&usage)
         || usage == KEY_NONUS_BACKSLASH
 }
 
-/// Validate a (parsed or uploaded) layout. Pure, alloc-free, bounds-checked —
-/// the single gate every untrusted [`LayoutTable`] passes through before the
-/// kernel installs it.
+/// Validate a (parsed or uploaded) layout: the single gate every untrusted
+/// [`LayoutTable`] passes through before the kernel installs it.
 pub fn validate(t: &LayoutTable) -> Result<(), LayoutError> {
     if t.magic != LAYOUT_MAGIC || t.version != LAYOUT_VERSION {
         return Err(LayoutError::BadHeader);
@@ -86,14 +72,11 @@ pub fn validate(t: &LayoutTable) -> Result<(), LayoutError> {
     if t.num_compose as usize > MAX_COMPOSE {
         return Err(LayoutError::TooManyCompose);
     }
-    // Name must be valid UTF-8 (up to the NUL) and non-empty.
     let end = t.name.iter().position(|&b| b == 0).unwrap_or(t.name.len());
     if end == 0 || core::str::from_utf8(&t.name[..end]).is_err() {
         return Err(LayoutError::BadName);
     }
 
-    // Every cell: only on layout-dependent keys; literal glyphs valid; dead
-    // references declared.
     for (usage, key) in t.levels.iter().enumerate() {
         let dependent = is_layout_dependent(usage as u16);
         if !dependent && t.caps[usage] != 0 {
@@ -118,14 +101,12 @@ pub fn validate(t: &LayoutTable) -> Result<(), LayoutError> {
         }
     }
 
-    // Declared dead-key accents must be valid glyphs.
     for &acc in &t.dead_accent {
         if acc != 0 && !is_valid_glyph(acc) {
             return Err(LayoutError::BadCodepoint);
         }
     }
 
-    // Compose entries: declared dead, valid base/result, no contradictory dup.
     let n = t.num_compose as usize;
     for (i, e) in t.compose[..n].iter().enumerate() {
         let d = e.dead as usize;
@@ -136,7 +117,6 @@ pub fn validate(t: &LayoutTable) -> Result<(), LayoutError> {
         if !(e.base == 0x20 || is_valid_glyph(e.base)) || !is_valid_glyph(e.result) {
             return Err(LayoutError::BadCompose);
         }
-        // A (dead, base) pair must be unique (prefix-free at single-base depth).
         for prev in &t.compose[..i] {
             if prev.dead == e.dead && prev.base == e.base {
                 return Err(LayoutError::AmbiguousCompose);
@@ -147,13 +127,8 @@ pub fn validate(t: &LayoutTable) -> Result<(), LayoutError> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Binary (de)serialisation — an explicit, padding-immune, little-endian byte
-// format shared by userland (`serialize`) and the kernel (`deserialize`). Field
-// order matches the struct; multi-byte values are little-endian. Driving it
-// explicitly (rather than reinterpreting struct bytes) keeps both sides in sync
-// across alignment padding and needs no `unsafe`.
-// ---------------------------------------------------------------------------
+// Explicit little-endian wire format in struct field order: driving it field by
+// field rather than reinterpreting struct bytes keeps padding out of the format.
 
 /// Exact byte length of a serialised [`LayoutTable`].
 pub const SERIALIZED_LEN: usize = 4
@@ -218,8 +193,7 @@ impl Reader<'_> {
     }
 }
 
-/// Serialise `t` into `buf` (must be at least [`SERIALIZED_LEN`] bytes). Returns
-/// the number of bytes written.
+/// Serialise `t` into `buf`, which must be at least [`SERIALIZED_LEN`] bytes.
 pub fn serialize(t: &LayoutTable, buf: &mut [u8]) -> Result<usize, LayoutError> {
     if buf.len() < SERIALIZED_LEN {
         return Err(LayoutError::TooLarge);
@@ -246,9 +220,8 @@ pub fn serialize(t: &LayoutTable, buf: &mut [u8]) -> Result<usize, LayoutError> 
     Ok(w.pos)
 }
 
-/// Deserialise a [`SERIALIZED_LEN`]-byte blob into `out` (filled in place — no
-/// large stack rvalue) and [`validate`] it. `out` should be a freshly-zeroed
-/// table (e.g. `KBox::zeroed()`); every field is overwritten regardless.
+/// Deserialise a [`SERIALIZED_LEN`]-byte blob into `out` in place (no large stack
+/// rvalue) and [`validate`] it; every field is overwritten.
 pub fn deserialize(buf: &[u8], out: &mut LayoutTable) -> Result<(), LayoutError> {
     if buf.len() != SERIALIZED_LEN {
         return Err(LayoutError::BadHeader);
@@ -276,12 +249,6 @@ pub fn deserialize(buf: &[u8], out: &mut LayoutTable) -> Result<(), LayoutError>
     validate(out)
 }
 
-// ---------------------------------------------------------------------------
-// The built-in US-QWERTY layout, built at compile time (no heap, no runtime
-// construction). Referenced by `&US_QWERTY` as the kernel boot default and by
-// the `keymap-core` compatibility shims used by existing call sites/tests.
-// ---------------------------------------------------------------------------
-
 /// The built-in US-QWERTY layout.
 pub static US_QWERTY: LayoutTable = us_qwerty();
 
@@ -293,8 +260,7 @@ const fn set_name(t: &mut LayoutTable, name: &[u8]) {
     }
 }
 
-/// Set a key with base/shift literals (`0` ⇒ that level is empty). AltGr levels
-/// are left empty.
+/// Set a key's base/shift literals (`0` ⇒ that level is empty); AltGr stays empty.
 const fn set2(t: &mut LayoutTable, usage: u16, caps: bool, base: u32, shift: u32) {
     let u = usage as usize;
     t.caps[u] = caps as u8;
@@ -310,13 +276,12 @@ const fn set2(t: &mut LayoutTable, usage: u16, caps: bool, base: u32, shift: u32
     };
 }
 
-/// Compile-time builder for US-QWERTY, reproducing the historical hardcoded map
-/// exactly (letters, number row, punctuation; no AltGr, no dead keys).
+/// Compile-time builder for US-QWERTY: letters, number row and punctuation; no
+/// AltGr, no dead keys.
 pub const fn us_qwerty() -> LayoutTable {
     let mut t = LayoutTable::empty();
     set_name(&mut t, b"us");
 
-    // Letters: base = lowercase, shift = uppercase, caps-affected.
     let mut u = KEY_A;
     while u <= KEY_Z {
         let lower = b'a' as u32 + (u - KEY_A) as u32;
@@ -324,7 +289,6 @@ pub const fn us_qwerty() -> LayoutTable {
         u += 1;
     }
 
-    // Number row (unshifted, shifted).
     set2(&mut t, KEY_1, false, b'1' as u32, b'!' as u32);
     set2(&mut t, KEY_2, false, b'2' as u32, b'@' as u32);
     set2(&mut t, KEY_3, false, b'3' as u32, b'#' as u32);
@@ -336,7 +300,6 @@ pub const fn us_qwerty() -> LayoutTable {
     set2(&mut t, KEY_9, false, b'9' as u32, b'(' as u32);
     set2(&mut t, KEY_0, false, b'0' as u32, b')' as u32);
 
-    // Punctuation (unshifted, shifted).
     set2(&mut t, KEY_MINUS, false, b'-' as u32, b'_' as u32);
     set2(&mut t, KEY_EQUAL, false, b'=' as u32, b'+' as u32);
     set2(&mut t, KEY_LEFTBRACE, false, b'[' as u32, b'{' as u32);
@@ -404,7 +367,6 @@ mod tests {
 
     #[test]
     fn deserialize_validates_payload() {
-        // A correctly-sized blob whose magic is wrong is rejected by validate.
         let mut buf = [0u8; SERIALIZED_LEN];
         serialize(&US_QWERTY, &mut buf).unwrap();
         buf[0] ^= 0xFF; // corrupt magic
@@ -436,8 +398,6 @@ mod tests {
 
     #[test]
     fn validate_rejects_cells_on_layout_independent_keys() {
-        // A hostile table must not override Enter (or nav/keypad/F-keys) with
-        // text — the resolver consults the table before its built-in handling.
         let mut t = US_QWERTY;
         t.levels[KEY_ENTER as usize][0] = Cell::literal(b'x' as u32);
         assert_eq!(validate(&t), Err(LayoutError::ForbiddenKey));

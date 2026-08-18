@@ -287,8 +287,7 @@ pub enum TaskExitReason {
 }
 
 impl TaskExitReason {
-    /// Widen to the storage type of the `AtomicU16` this lives in on
-    /// `TaskInner`.
+    /// Widen to the `AtomicU16` storage this lives in on `TaskInner`.
     #[inline]
     pub const fn as_u16(self) -> u16 {
         self as u16
@@ -317,10 +316,9 @@ pub enum TaskFaultReason {
     UserUd = 3,
     UserDeviceNa = 4,
     /// A demand fault that could not be serviced because memory ran out after
-    /// reclaim was asked. Distinct from [`UserPage`](Self::UserPage), a wild
-    /// pointer: both kill the task, but `waitpid` cannot tell "the machine was
-    /// short of memory" from "the program was wrong" if they share a reason.
-    /// Reported as `SIGBUS`.
+    /// reclaim was asked. Distinct from [`UserPage`](Self::UserPage) so
+    /// `waitpid` can tell "the machine was short of memory" from "the program
+    /// was wrong". Reported as `SIGBUS`.
     UserOom = 5,
 }
 

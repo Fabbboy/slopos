@@ -421,8 +421,8 @@ pub fn test_keyboard_press_release_single_char() -> TestResult {
     raw.c_lflag &= !LocalFlags::ICANON;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
-    crate::ps2::keyboard::handle_scancode(0x1E); // press
-    crate::ps2::keyboard::handle_scancode(0x9E); // release
+    crate::ps2::keyboard::handle_scancode(0x1E);
+    crate::ps2::keyboard::handle_scancode(0x9E);
 
     let mut out = [0u8; 8];
     let n = tty::read(TtyIndex(0), &mut out, true);
@@ -751,7 +751,6 @@ pub fn test_check_read_sole_gate_background() -> TestResult {
     scope.attach_to(&mut s);
     s.focused_task_id = 42;
 
-    // Compositor focus is not POSIX foreground.
     match s.check_read(99, 10) {
         ForegroundCheck::BackgroundRead => TestResult::Pass,
         other => {

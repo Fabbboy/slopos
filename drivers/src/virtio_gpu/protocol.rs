@@ -1,7 +1,6 @@
 //! VirtIO GPU 2D wire protocol. Every struct is `#[repr(C)]` + `Pod` so the
 //! driver crate can move it through DMA pages with no `unsafe`; explicit
-//! `padding` fields make each layout total, and backing pages are zeroed, so
-//! padding is zero on the wire.
+//! `padding` fields plus zeroed backing pages keep padding zero on the wire.
 //!
 //! Only the 2D command set is modelled. Responses with trailing arrays are read
 //! field-by-field, so only their fixed-size leading structs appear here.
@@ -188,8 +187,7 @@ pub struct VirtioGpuUpdateCursor {
     pub padding: u32,
 }
 
-/// Offsets into `virtio_gpu_resp_display_info`, whose trailing pmodes array is
-/// read field-by-field rather than modelled as a struct.
+/// Offsets into `virtio_gpu_resp_display_info`.
 pub const DISPLAY_INFO_PMODE0_RECT: usize = core::mem::size_of::<VirtioGpuCtrlHdr>();
 pub const DISPLAY_INFO_PMODE0_ENABLED: usize =
     DISPLAY_INFO_PMODE0_RECT + core::mem::size_of::<VirtioGpuRect>();

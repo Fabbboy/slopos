@@ -207,7 +207,6 @@ pub fn test_cross_session_write_no_tostop_still_denied() -> TestResult {
     }
 }
 
-/// A kernel task (pgid 0, sid 0) is exempt from cross-session denial.
 pub fn test_kernel_task_exempted_cross_session_read() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
@@ -240,7 +239,6 @@ pub fn test_kernel_task_exempted_cross_session_write() -> TestResult {
     }
 }
 
-/// Same session, background pgid: the SIGTTIN path, not cross-session denial.
 pub fn test_same_session_background_read_sigttin() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
@@ -257,9 +255,8 @@ pub fn test_same_session_background_read_sigttin() -> TestResult {
     }
 }
 
-/// A non-blocking probe must see WouldBlock, so the op stays armed and
-/// self-heals once the foreground handoff lands: EIO here permanently disables
-/// a freshly spawned job's stdin/signal branch.
+/// WouldBlock keeps the op armed so it self-heals on the foreground handoff;
+/// EIO would permanently disable a freshly spawned job's stdin/signal branch.
 pub fn test_background_read_nonblock_parks_as_wouldblock() -> TestResult {
     match tty::io::background_read_surface(true) {
         TtyError::WouldBlock => TestResult::Pass,
@@ -273,7 +270,6 @@ pub fn test_background_read_nonblock_parks_as_wouldblock() -> TestResult {
     }
 }
 
-/// A blocking reader keeps the POSIX BackgroundRead surface (SIGTTIN delivery).
 pub fn test_background_read_blocking_keeps_sigttin_surface() -> TestResult {
     match tty::io::background_read_surface(false) {
         TtyError::BackgroundRead => TestResult::Pass,
@@ -330,7 +326,7 @@ pub fn test_cross_session_denied_error_variant() -> TestResult {
     TestResult::Pass
 }
 /// pgid 99999 resolves to no living task, so the wrapper cannot pin a group
-/// handle for it.
+/// handle.
 pub fn test_set_fg_pgrp_checked_nonexistent_pgrp() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(600, 600);
@@ -353,7 +349,6 @@ pub fn test_set_fg_pgrp_checked_nonexistent_pgrp() -> TestResult {
     }
 }
 
-/// pgid 0 clears the foreground group and is always allowed.
 pub fn test_set_fg_pgrp_checked_clear_allowed() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(600, 600);
@@ -381,8 +376,8 @@ pub fn test_set_fg_pgrp_checked_clear_allowed() -> TestResult {
     TestResult::Pass
 }
 
-/// With no controlling session the checked setter installs any caller's group,
-/// mismatched sid included — the pre-session path.
+/// With no controlling session the setter installs any caller's group,
+/// mismatched sid included.
 pub fn test_set_fg_pgrp_checked_no_session_skips_validation() -> TestResult {
     let scope = SessionScope::new(50, 50);
     let mut s = TtySession::new();
@@ -433,8 +428,6 @@ pub fn test_detach_ctty_non_leader() -> TestResult {
     TestResult::Pass
 }
 
-/// A leader TIOCNOTTY clears the TTY's session state entirely; SIGHUP+SIGCONT
-/// would go to the foreground pgrp.
 pub fn test_detach_ctty_session_leader() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(600, 600);
@@ -464,7 +457,6 @@ pub fn test_detach_ctty_session_leader() -> TestResult {
     TestResult::Pass
 }
 
-/// A session leader from another session cannot detach someone else's TTY.
 pub fn test_detach_ctty_cross_session_denied() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(600, 600);
@@ -507,8 +499,8 @@ pub fn test_tiocnotty_constant() -> TestResult {
     }
     TestResult::Pass
 }
-/// A second open clones the one backing; its strong count is the live open
-/// count — the mechanism `/dev/tty` relies on.
+/// The backing's strong count is the live open count — the mechanism
+/// `/dev/tty` relies on.
 pub fn test_second_open_bumps_backing_strong_count() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -539,7 +531,6 @@ pub fn test_second_open_bumps_backing_strong_count() -> TestResult {
     TestResult::Pass
 }
 
-/// A `/dev/tty` FD is indistinguishable from one opened on the device path.
 pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -558,7 +549,6 @@ pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
             return TestResult::Fail;
         }
     };
-    // ICANON is set by default.
     if !termios.c_lflag.contains(LocalFlags::ICANON) {
         klog_info!("TTY_TEST: BUG - termios from console FD missing ICANON");
         return TestResult::Fail;
@@ -588,8 +578,8 @@ pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
     TestResult::Pass
 }
 
-/// Opening a TTY does NOT modify session state — opening `/dev/tty` only
-/// accesses an existing controlling terminal, never acquires one.
+/// Opening `/dev/tty` accesses an existing controlling terminal, never
+/// acquires one.
 pub fn test_open_tty_does_not_modify_session() -> TestResult {
     let idx = TtyIndex(0);
     let (sid_before, fg_before) = {
@@ -638,8 +628,7 @@ pub fn test_open_tty_does_not_modify_session() -> TestResult {
     TestResult::Pass
 }
 
-/// Opening an invalid TTY index returns `InvalidIndex`, matching the ENXIO
-/// semantics when `/dev/tty` resolution fails.
+/// `InvalidIndex` matches the ENXIO semantics when `/dev/tty` resolution fails.
 pub fn test_open_tty_invalid_index_returns_error() -> TestResult {
     let bad = TtyIndex(u8::MAX);
     match tty::open_tty(bad) {
@@ -659,12 +648,9 @@ pub fn test_open_tty_invalid_index_returns_error() -> TestResult {
     }
 }
 
-/// Dropping the last open releases the backing: the registry weak then fails
-/// to upgrade.
 pub fn test_last_close_releases_backing() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    // A freshly-initialised console has zero opens: nothing to upgrade.
     if crate::tty::table::TTY_BACKINGS[0]
         .lock()
         .upgrade()
@@ -793,7 +779,6 @@ pub fn test_tcsetattr_foreground_allowed() -> TestResult {
     }
 }
 
-/// No session attached is the bootstrap path: allowed.
 pub fn test_tcsetattr_no_session_allowed() -> TestResult {
     let s = TtySession::new();
     match s.check_write(50, 50, true) {
@@ -837,8 +822,6 @@ pub fn test_orphaned_pgrp_errno() -> TestResult {
     TestResult::Pass
 }
 
-/// The harness runs as task_id 0, which bypasses the foreground check, so
-/// `set_termios` succeeds against a session with a different foreground group.
 pub fn test_tcsetattr_kernel_task_bypass() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -851,9 +834,8 @@ pub fn test_tcsetattr_kernel_task_bypass() -> TestResult {
             return TestResult::Fail;
         }
     };
-    // Modify termios (kernel task_id=0 should bypass foreground check).
     let mut t = saved;
-    t.c_iflag ^= InputFlags::from_bits_retain(0x01); // toggle a bit
+    t.c_iflag ^= InputFlags::from_bits_retain(0x01);
     match tty::set_termios(idx, &t) {
         Ok(()) => {}
         Err(e) => {
@@ -865,13 +847,10 @@ pub fn test_tcsetattr_kernel_task_bypass() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Restore original termios.
     let _ = tty::set_termios(idx, &saved);
     TestResult::Pass
 }
 
-/// set_termios_wait and set_termios_flush also have the foreground
-/// check (kernel task bypass verifies the path doesn't crash).
 pub fn test_tcsetsw_tcsetsf_kernel_task_bypass() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -886,7 +865,6 @@ pub fn test_tcsetsw_tcsetsf_kernel_task_bypass() -> TestResult {
     };
     let mut t = saved;
     t.c_iflag ^= InputFlags::from_bits_retain(0x01);
-    // TCSETSW path
     match tty::set_termios_wait(idx, &t) {
         Ok(()) => {}
         Err(e) => {
@@ -898,7 +876,6 @@ pub fn test_tcsetsw_tcsetsf_kernel_task_bypass() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // TCSETSF path
     match tty::set_termios_flush(idx, &t) {
         Ok(()) => {}
         Err(e) => {
@@ -914,15 +891,11 @@ pub fn test_tcsetsw_tcsetsf_kernel_task_bypass() -> TestResult {
     TestResult::Pass
 }
 
-/// TOSTOP + background write with SIGTTOU blocked/ignored bypass.
-/// Exercises the check_write path with tostop=true, verifying the session-level
-/// check correctly identifies background writers. The signal bypass logic itself
-/// is tested at the driver_hooks level.
+/// The SIGTTOU-bypass logic itself is tested at the driver_hooks level.
 pub fn test_tostop_background_write_check() -> TestResult {
     let scope = SessionScope::new(20, 20);
     let mut s = TtySession::new();
-    scope.attach_to(&mut s); // session=20, fg_pgrp=20
-    // Background writer (pgid=30) with TOSTOP enabled.
+    scope.attach_to(&mut s);
     match s.check_write(30, 20, true) {
         ForegroundCheck::BackgroundWrite => {}
         other => {
@@ -933,7 +906,6 @@ pub fn test_tostop_background_write_check() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Same writer without TOSTOP — allowed.
     match s.check_write(30, 20, false) {
         ForegroundCheck::Allowed => {}
         other => {
@@ -947,8 +919,6 @@ pub fn test_tostop_background_write_check() -> TestResult {
     TestResult::Pass
 }
 
-/// Kernel task (pgid=0) is always allowed through check_write,
-/// even with tostop=true.
 pub fn test_kernel_task_check_write_allowed() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
@@ -964,11 +934,6 @@ pub fn test_kernel_task_check_write_allowed() -> TestResult {
         }
     }
 }
-// ===========================================================================
-// Controlling Terminal Lifecycle Integrity
-// ===========================================================================
-
-/// acquire_controlling_terminal succeeds for a fresh (no-session) TTY.
 pub fn test_acquire_ctty_fresh_tty() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -980,7 +945,6 @@ pub fn test_acquire_ctty_fresh_tty() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Verify session was attached.
     match tty::get_session_id(idx) {
         Ok(100) => TestResult::Pass,
         Ok(other) => {
@@ -994,18 +958,14 @@ pub fn test_acquire_ctty_fresh_tty() -> TestResult {
     }
 }
 
-/// acquire_controlling_terminal is a no-op when called by the same
-/// session that already owns the TTY (idempotent / TIOCSCTTY same-session).
 pub fn test_acquire_ctty_same_session_idempotent() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let scope = SessionScope::new(50, 50);
-    // First acquire.
     if let Err(e) = tty::acquire_controlling_terminal(idx, scope.pgrp_weak()) {
         klog_info!("TTY_TEST: BUG - first acquire failed: {:?}", e);
         return TestResult::Fail;
     }
-    // Second acquire from same session — should succeed (no-op).
     match tty::acquire_controlling_terminal(idx, scope.pgrp_weak()) {
         Ok(()) => TestResult::Pass,
         Err(e) => {
@@ -1018,19 +978,15 @@ pub fn test_acquire_ctty_same_session_idempotent() -> TestResult {
     }
 }
 
-/// acquire_controlling_terminal fails with PermissionDenied when a
-/// different session already owns the TTY.
 pub fn test_acquire_ctty_different_session_denied() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let scope_owner = SessionScope::new(10, 10);
     let scope_thief = SessionScope::new(20, 20);
-    // Session 10 owns the TTY.
     if let Err(e) = tty::acquire_controlling_terminal(idx, scope_owner.pgrp_weak()) {
         klog_info!("TTY_TEST: BUG - initial acquire failed: {:?}", e);
         return TestResult::Fail;
     }
-    // Session 20 tries to steal it.
     match tty::acquire_controlling_terminal(idx, scope_thief.pgrp_weak()) {
         Err(TtyError::PermissionDenied) => TestResult::Pass,
         Ok(()) => {
@@ -1044,7 +1000,6 @@ pub fn test_acquire_ctty_different_session_denied() -> TestResult {
     }
 }
 
-/// release_controlling_terminal succeeds for the owning session.
 pub fn test_release_ctty_owning_session() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1060,7 +1015,6 @@ pub fn test_release_ctty_owning_session() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Session should now be 0 (detached).
     match tty::get_session_id(idx) {
         Ok(0) => TestResult::Pass,
         Ok(sid) => {
@@ -1077,18 +1031,14 @@ pub fn test_release_ctty_owning_session() -> TestResult {
     }
 }
 
-/// release_controlling_terminal is a no-op (returns Ok(false)) when
-/// called by a session that does not own the TTY.
 pub fn test_release_ctty_wrong_session_noop() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let scope = SessionScope::new(10, 10);
-    // Session 10 owns the TTY.
     if let Err(e) = tty::acquire_controlling_terminal(idx, scope.pgrp_weak()) {
         klog_info!("TTY_TEST: BUG - acquire failed: {:?}", e);
         return TestResult::Fail;
     }
-    // Session 99 tries to release — should be a no-op.
     match tty::release_controlling_terminal(idx, 99) {
         Ok(false) => {}
         other => {
@@ -1099,7 +1049,6 @@ pub fn test_release_ctty_wrong_session_noop() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Original session should still be attached.
     match tty::get_session_id(idx) {
         Ok(10) => TestResult::Pass,
         Ok(sid) => {
@@ -1113,14 +1062,11 @@ pub fn test_release_ctty_wrong_session_noop() -> TestResult {
     }
 }
 
-/// hangup sets hung_up flag and detaches the session, verifying the
-/// session-leader exit → hangup → session detach chain.
 pub fn test_hangup_detaches_session() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let scope = SessionScope::new(40, 40);
     tty::session::test_install_session(idx, scope.session_weak(), scope.pgrp_weak());
-    // Pre-condition: session is attached.
     match tty::get_session_id(idx) {
         Ok(40) => {}
         other => {
@@ -1132,7 +1078,6 @@ pub fn test_hangup_detaches_session() -> TestResult {
         }
     }
     let _hangup = HangupScope::hang_up(idx);
-    // Post-condition: TTY is hung up and session is detached.
     if !tty::is_hung_up(idx) {
         klog_info!("TTY_TEST: BUG - TTY should be hung up after hangup()");
         return TestResult::Fail;
@@ -1156,22 +1101,16 @@ pub fn test_hangup_detaches_session() -> TestResult {
     }
 }
 
-/// O_NOCTTY suppresses auto-acquire — verifying that a session leader
-/// opening a TTY with O_NOCTTY does NOT become the controlling process.
-/// We verify this by calling acquire with an existing session and checking
-/// that a second session cannot steal it (i.e., the first acquire "stuck").
+/// O_NOCTTY is simulated rather than exercised: session 20 never calls acquire,
+/// standing in for the open path skipping `maybe_acquire_controlling_tty_on_open`.
 pub fn test_o_noctty_suppresses_acquire() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let scope = SessionScope::new(10, 10);
-    // A session that already owns the TTY.
     if let Err(e) = tty::acquire_controlling_terminal(idx, scope.pgrp_weak()) {
         klog_info!("TTY_TEST: BUG - initial acquire failed: {:?}", e);
         return TestResult::Fail;
     }
-    // Simulate O_NOCTTY: session 20 does NOT call acquire. Since O_NOCTTY
-    // means the open path skips maybe_acquire_controlling_tty_on_open,
-    // the TTY should still belong to session 10.
     match tty::get_session_id(idx) {
         Ok(10) => TestResult::Pass,
         Ok(sid) => {
@@ -1185,14 +1124,11 @@ pub fn test_o_noctty_suppresses_acquire() -> TestResult {
     }
 }
 
-/// detach_controlling_terminal for a non-leader returns Ok(false)
-/// and does NOT detach the session from the TTY.
 pub fn test_detach_ctty_non_leader_preserves_session() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let scope = SessionScope::new(60, 60);
     tty::session::test_install_session(idx, scope.session_weak(), scope.pgrp_weak());
-    // Non-leader (caller_is_session_leader = false).
     match tty::detach_controlling_terminal(idx, 60, false) {
         Ok(false) => {}
         other => {
@@ -1203,7 +1139,6 @@ pub fn test_detach_ctty_non_leader_preserves_session() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Session should still be intact.
     match tty::get_session_id(idx) {
         Ok(60) => TestResult::Pass,
         Ok(sid) => {
@@ -1217,8 +1152,6 @@ pub fn test_detach_ctty_non_leader_preserves_session() -> TestResult {
     }
 }
 
-/// detach_controlling_terminal for the session leader detaches the
-/// session and returns Ok(true).
 pub fn test_detach_ctty_session_leader_detaches() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1234,7 +1167,6 @@ pub fn test_detach_ctty_session_leader_detaches() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Session should now be detached.
     match tty::get_session_id(idx) {
         Ok(0) => TestResult::Pass,
         Ok(sid) => {
@@ -1251,19 +1183,15 @@ pub fn test_detach_ctty_session_leader_detaches() -> TestResult {
     }
 }
 
-/// Full lifecycle chain — acquire → release → re-acquire by a
-/// different session. Verifies that the TTY can be re-used after release.
 pub fn test_full_lifecycle_acquire_release_reacquire() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let scope1 = SessionScope::new(1, 1);
     let scope2 = SessionScope::new(2, 2);
-    // Session 1 acquires.
     if let Err(e) = tty::acquire_controlling_terminal(idx, scope1.pgrp_weak()) {
         klog_info!("TTY_TEST: BUG - session 1 acquire failed: {:?}", e);
         return TestResult::Fail;
     }
-    // Session 1 releases.
     match tty::release_controlling_terminal(idx, 1) {
         Ok(true) => {}
         other => {
@@ -1274,7 +1202,6 @@ pub fn test_full_lifecycle_acquire_release_reacquire() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Session 2 acquires the now-free TTY.
     if let Err(e) = tty::acquire_controlling_terminal(idx, scope2.pgrp_weak()) {
         klog_info!("TTY_TEST: BUG - session 2 re-acquire failed: {:?}", e);
         return TestResult::Fail;
@@ -1292,19 +1219,15 @@ pub fn test_full_lifecycle_acquire_release_reacquire() -> TestResult {
     }
 }
 
-/// Double acquire to the same TTY from two different sessions —
-/// the second must fail with PermissionDenied (race guard).
 pub fn test_double_acquire_race_guard() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let scope_a = SessionScope::new(100, 100);
     let scope_b = SessionScope::new(200, 200);
-    // Session A wins.
     if let Err(e) = tty::acquire_controlling_terminal(idx, scope_a.pgrp_weak()) {
         klog_info!("TTY_TEST: BUG - session A acquire failed: {:?}", e);
         return TestResult::Fail;
     }
-    // Session B loses.
     match tty::acquire_controlling_terminal(idx, scope_b.pgrp_weak()) {
         Err(TtyError::PermissionDenied) => TestResult::Pass,
         Ok(()) => {
@@ -1318,11 +1241,9 @@ pub fn test_double_acquire_race_guard() -> TestResult {
     }
 }
 
-/// hangup on a TTY with no session is a safe no-op.
 pub fn test_hangup_no_session_safe() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    // No session attached — hangup should not panic.
     let _hangup = HangupScope::hang_up(idx);
     if !tty::is_hung_up(idx) {
         klog_info!("TTY_TEST: BUG - TTY should be hung up even with no session");
@@ -1331,8 +1252,6 @@ pub fn test_hangup_no_session_safe() -> TestResult {
     TestResult::Pass
 }
 
-/// Rapid acquire/release stress — cycle through several sessions
-/// on the same TTY to verify no state leaks between owners.
 pub fn test_rapid_acquire_release_stress() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1378,7 +1297,6 @@ pub fn test_rapid_acquire_release_stress() -> TestResult {
     TestResult::Pass
 }
 
-/// acquire on an invalid TTY index returns InvalidIndex.
 pub fn test_acquire_invalid_index() -> TestResult {
     let bad_idx = TtyIndex(255);
     match tty::acquire_controlling_terminal(bad_idx, KWeak::new()) {
@@ -1393,7 +1311,6 @@ pub fn test_acquire_invalid_index() -> TestResult {
     }
 }
 
-/// release on an invalid TTY index returns InvalidIndex.
 pub fn test_release_invalid_index() -> TestResult {
     let bad_idx = TtyIndex(255);
     match tty::release_controlling_terminal(bad_idx, 1) {
@@ -1408,8 +1325,6 @@ pub fn test_release_invalid_index() -> TestResult {
     }
 }
 
-/// detach_controlling_terminal on an invalid TTY index returns
-/// InvalidIndex.
 pub fn test_detach_invalid_index() -> TestResult {
     let bad_idx = TtyIndex(255);
     match tty::detach_controlling_terminal(bad_idx, 1, true) {
@@ -1423,10 +1338,6 @@ pub fn test_detach_invalid_index() -> TestResult {
         }
     }
 }
-// ===========================================================================
-// POSIX Controlling Terminal Semantics
-// ===========================================================================
-
 pub fn test_ctty_can_be_ctty_serial() -> TestResult {
     use crate::tty::driver::{SerialConsoleDriver, TtyDriverKind};
     let driver = TtyDriverKind::SerialConsole(SerialConsoleDriver);
@@ -1447,7 +1358,6 @@ pub fn test_ctty_can_be_ctty_vconsole() -> TestResult {
 }
 
 pub fn test_ctty_can_be_ctty_pty_slave() -> TestResult {
-    // Peer identity is irrelevant to controlling-terminal eligibility.
     let driver = TtyDriverKind::PtySlave { peer: KWeak::new() };
     if !driver.can_be_controlling_terminal() {
         klog_info!("TTY_TEST: BUG - PtySlave should be a valid ctty");
@@ -1468,8 +1378,8 @@ pub fn test_ctty_cannot_be_ctty_pty_master() -> TestResult {
 pub fn test_ctty_acquire_ctty_pty_master_rejected() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(100, 100);
-    // The master backing is the sole open of the pair; holding it keeps both
-    // ends alive, and dropping it below closes them and frees both slots.
+    // The master backing is the sole open of the pair: holding it keeps both
+    // ends alive, dropping it frees both slots.
     let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
@@ -1495,7 +1405,6 @@ pub fn test_ctty_acquire_ctty_pty_master_rejected() -> TestResult {
 pub fn test_ctty_acquire_ctty_pty_slave_succeeds() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(200, 200);
-    // Hold the master backing so the slave slot stays alive for the acquire.
     let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
@@ -1510,7 +1419,6 @@ pub fn test_ctty_acquire_ctty_pty_slave_succeeds() -> TestResult {
             return TestResult::Fail;
         }
     };
-    // Unlock the slave first.
     let _ = tty::set_pty_lock(master, false);
     let acquired = tty::acquire_controlling_terminal(slave, scope.pgrp_weak());
     let sid = tty::get_session_id(slave);
@@ -1615,8 +1523,8 @@ pub fn test_ctty_set_fg_pgrp_completes_without_deadlock() -> TestResult {
     let idx = TtyIndex(0);
     let scope = SessionScope::new(500, 500);
     tty::session::test_install_session(idx, scope.session_weak(), scope.pgrp_weak());
-    // pgid 501 has no live task, so the wrapper installs an empty weak; the
-    // foreground group then reads back as 0 while the call still completes.
+    // pgid 501 has no live task, so the wrapper installs an empty weak and the
+    // foreground group reads back as 0.
     match tty::set_foreground_pgrp(idx, 501) {
         Ok(()) => {}
         Err(e) => {
@@ -1642,8 +1550,8 @@ pub fn test_ctty_set_fg_pgrp_checked_completes_without_deadlock() -> TestResult 
     let idx = TtyIndex(0);
     let scope = SessionScope::new(600, 600);
     tty::session::test_install_session(idx, scope.session_weak(), scope.pgrp_weak());
-    // Use pgid=0 (clear) since non-zero pgids are validated against
-    // the scheduler's task list, which has no real tasks in unit tests.
+    // Non-zero pgids are validated against the scheduler's task list, which
+    // has no real tasks here.
     match tty::set_foreground_pgrp_checked(idx, 0, 600) {
         Ok(()) => {}
         Err(e) => {
@@ -1704,11 +1612,6 @@ pub fn test_ctty_can_be_ctty_none_driver() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Advanced PTY & Session Control (EXTPROC, vhangup)
-// ===========================================================================
-
-/// EXTPROC flag constant has the expected value (0x10000).
 pub fn test_extproc_flag_value() -> TestResult {
     if LocalFlags::EXTPROC.bits() != 0x10000 {
         klog_info!(
@@ -1720,17 +1623,13 @@ pub fn test_extproc_flag_value() -> TestResult {
     TestResult::Pass
 }
 
-/// EXTPROC set → no echo, input goes directly to cooked buffer.
 pub fn test_extproc_no_echo() -> TestResult {
     let mut ld = LineDisc::new();
-    // Enable EXTPROC + ICANON + ECHO.
     let mut t = *ld.termios();
     t.c_lflag |= LocalFlags::EXTPROC;
     ld.set_termios(&t);
 
-    // Type a printable character.
     let action = ld.input_char(b'a');
-    // EXTPROC should suppress echo — action should be None.
     if !matches!(action, InputAction::None) {
         klog_info!(
             "TTY_TEST: BUG - EXTPROC should suppress echo, got {:?}",
@@ -1738,7 +1637,6 @@ pub fn test_extproc_no_echo() -> TestResult {
         );
         return TestResult::Fail;
     }
-    // But the character should be in the cooked buffer.
     if !ld.has_data() {
         klog_info!("TTY_TEST: BUG - character should be in cooked buffer under EXTPROC");
         return TestResult::Fail;
@@ -1752,24 +1650,18 @@ pub fn test_extproc_no_echo() -> TestResult {
     TestResult::Pass
 }
 
-/// EXTPROC set → canonical editing (VERASE/VKILL) is bypassed.
 pub fn test_extproc_no_canonical_editing() -> TestResult {
     let mut ld = LineDisc::new();
-    // Enable EXTPROC + ICANON + ECHO + ECHOE.
     let mut t = *ld.termios();
     t.c_lflag |= LocalFlags::EXTPROC;
     ld.set_termios(&t);
 
-    // Type 'a', then DEL (VERASE character).
     ld.input_char(b'a');
     let erase_char = t.c_cc[slopos_abi::syscall::CcIndex::Verase.as_usize()];
     ld.input_char(erase_char);
 
-    // Both bytes should be in the cooked buffer (no editing).
-    // Under EXTPROC, VERASE is NOT processed — it's passed through.
-    // Note: EXTPROC pushes to cooked directly, bypassing canonical mode,
-    // so has_data() may return true even without a newline since the
-    // data is not in canonical line-buffered mode.
+    // EXTPROC pushes to cooked directly, so `has_data()` can be true without a
+    // newline; read the bytes instead.
     let mut buf = [0u8; 16];
     let n = ld.read(&mut buf);
     if n != 2 {
@@ -1790,15 +1682,12 @@ pub fn test_extproc_no_canonical_editing() -> TestResult {
     TestResult::Pass
 }
 
-/// EXTPROC set + ISIG → signals are still delivered.
 pub fn test_extproc_signals_still_delivered() -> TestResult {
     let mut ld = LineDisc::new();
-    // Enable EXTPROC + ISIG.
     let mut t = *ld.termios();
     t.c_lflag |= LocalFlags::EXTPROC;
     ld.set_termios(&t);
 
-    // Ctrl+C should still deliver SIGINT.
     let vintr = t.c_cc[slopos_abi::syscall::CcIndex::Vintr.as_usize()];
     let action = ld.input_char(vintr);
     match action {
@@ -1812,7 +1701,6 @@ pub fn test_extproc_signals_still_delivered() -> TestResult {
         }
     }
 
-    // Ctrl+\\ should deliver SIGQUIT.
     let vquit = t.c_cc[slopos_abi::syscall::CcIndex::Vquit.as_usize()];
     let action = ld.input_char(vquit);
     match action {
@@ -1826,7 +1714,6 @@ pub fn test_extproc_signals_still_delivered() -> TestResult {
         }
     }
 
-    // Ctrl+Z should deliver SIGTSTP.
     let vsusp = t.c_cc[slopos_abi::syscall::CcIndex::Vsusp.as_usize()];
     let action = ld.input_char(vsusp);
     match action {
@@ -1842,19 +1729,15 @@ pub fn test_extproc_signals_still_delivered() -> TestResult {
     TestResult::Pass
 }
 
-/// EXTPROC cleared → normal canonical/echo behavior resumes.
 pub fn test_extproc_cleared_resumes_normal() -> TestResult {
     let mut ld = LineDisc::new();
-    // Enable EXTPROC first.
     let mut t = *ld.termios();
     t.c_lflag |= LocalFlags::EXTPROC;
     ld.set_termios(&t);
 
-    // Clear EXTPROC.
     t.c_lflag &= !LocalFlags::EXTPROC;
     ld.set_termios(&t);
 
-    // Now typing should echo normally.
     let action = ld.input_char(b'x');
     match action {
         InputAction::Echo { len, .. } if len > 0 => {}
@@ -1869,15 +1752,12 @@ pub fn test_extproc_cleared_resumes_normal() -> TestResult {
     TestResult::Pass
 }
 
-/// EXTPROC bypasses VLNEXT, VWERASE, VREPRINT.
 pub fn test_extproc_bypasses_iexten_editing() -> TestResult {
     let mut ld = LineDisc::new();
-    // Enable EXTPROC + ICANON + ECHO + IEXTEN.
     let mut t = *ld.termios();
     t.c_lflag |= LocalFlags::EXTPROC | LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
-    // VLNEXT (Ctrl+V) should be passed through, not trigger literal-next.
     let vlnext = t.c_cc[slopos_abi::syscall::CcIndex::Vlnext.as_usize()];
     let action = ld.input_char(vlnext);
     if !matches!(action, InputAction::None) {
@@ -1887,7 +1767,6 @@ pub fn test_extproc_bypasses_iexten_editing() -> TestResult {
         );
         return TestResult::Fail;
     }
-    // VLNEXT byte should be in the cooked buffer.
     let mut buf = [0u8; 4];
     let n = ld.read(&mut buf);
     if n != 1 || buf[0] != vlnext {
@@ -1895,7 +1774,6 @@ pub fn test_extproc_bypasses_iexten_editing() -> TestResult {
         return TestResult::Fail;
     }
 
-    // VWERASE (Ctrl+W) should be passed through, not trigger word erase.
     let vwerase = t.c_cc[slopos_abi::syscall::CcIndex::Vwerase.as_usize()];
     let action = ld.input_char(vwerase);
     if !matches!(action, InputAction::None) {
@@ -1914,16 +1792,13 @@ pub fn test_extproc_bypasses_iexten_editing() -> TestResult {
     TestResult::Pass
 }
 
-/// EXTPROC + IXON → flow control still works.
 pub fn test_extproc_flow_control_works() -> TestResult {
     let mut ld = LineDisc::new();
-    // Enable EXTPROC + IXON.
     let mut t = *ld.termios();
     t.c_lflag |= LocalFlags::EXTPROC;
     t.c_iflag |= InputFlags::IXON;
     ld.set_termios(&t);
 
-    // Ctrl+S (VSTOP) should stop output.
     let vstop = t.c_cc[slopos_abi::syscall::CcIndex::Vstop.as_usize()];
     ld.input_char(vstop);
     if !ld.is_stopped() {
@@ -1931,7 +1806,6 @@ pub fn test_extproc_flow_control_works() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Ctrl+Q (VSTART) should resume.
     let vstart = t.c_cc[slopos_abi::syscall::CcIndex::Vstart.as_usize()];
     ld.input_char(vstart);
     if ld.is_stopped() {
@@ -1941,7 +1815,6 @@ pub fn test_extproc_flow_control_works() -> TestResult {
     TestResult::Pass
 }
 
-/// EXTPROC with buffer full + IMAXBEL rings bell.
 pub fn test_extproc_imaxbel() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -1955,7 +1828,6 @@ pub fn test_extproc_imaxbel() -> TestResult {
         ld.input_char(b'x');
     }
 
-    // Next input should ring bell.
     let action = ld.input_char(b'y');
     if !matches!(action, InputAction::Bell) {
         klog_info!(
@@ -1967,7 +1839,6 @@ pub fn test_extproc_imaxbel() -> TestResult {
     TestResult::Pass
 }
 
-/// SYSCALL_VHANGUP constant has expected value.
 pub fn test_vhangup_syscall_constant() -> TestResult {
     if slopos_abi::syscall::SYSCALL_VHANGUP != 139 {
         klog_info!(
@@ -1979,22 +1850,18 @@ pub fn test_vhangup_syscall_constant() -> TestResult {
     TestResult::Pass
 }
 
-/// vhangup() on a TTY triggers hangup (reuses existing hangup infra).
 pub fn test_vhangup_triggers_hangup() -> TestResult {
     tty::table::tty_table_init();
 
-    // Verify TTY 0 is not hung up initially.
     let idx = TtyIndex(0);
     if tty::is_hung_up(idx) {
         klog_info!("TTY_TEST: BUG - TTY 0 should not be hung up initially");
         return TestResult::Fail;
     }
 
-    // Call vhangup.
     let _hangup = HangupScope::guard(idx);
     tty::vhangup(idx);
 
-    // TTY should now be hung up.
     if !tty::is_hung_up(idx) {
         klog_info!("TTY_TEST: BUG - TTY 0 should be hung up after vhangup()");
         return TestResult::Fail;
@@ -2005,8 +1872,6 @@ pub fn test_vhangup_triggers_hangup() -> TestResult {
     TestResult::Pass
 }
 
-/// EXTPROC does not affect raw (non-canonical) mode —
-/// both paths push to cooked without echo.
 pub fn test_extproc_raw_mode_same_behavior() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();

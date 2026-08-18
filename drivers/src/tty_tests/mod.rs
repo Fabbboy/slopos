@@ -1,14 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
-//! Regression tests for the TTY subsystem.
-//!
-//! Tests the `LineDisc`, `TtyDriverKind`, `TtyIndex`, TTY table, and
-//! the per-TTY public API (compositor focus, foreground pgrp, active TTY).
-//!
-//! Coverage includes input flag processing, output processing, signal
-//! generation, flow control, VLNEXT, VWERASE, ECHOCTL, compositor focus /
-//! fg_pgrp split, check_read() as sole read gate, TtyIndex type safety,
-//! and signal constant verification.
+//! Regression tests for the TTY subsystem: `LineDisc`, `TtyDriverKind`,
+//! `TtyIndex`, the TTY table, and the per-TTY public API.
 
 use slopos_abi::signal::{SIGCONT, SIGHUP, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGWINCH};
 use slopos_abi::syscall::{
@@ -52,13 +45,9 @@ pub(crate) fn boxed_vconsole_state() -> slopos_ostd::KBox<VConsoleState> {
     state
 }
 
-/// Leave `idx`'s input queue empty.
-///
-/// The reads take whatever a reader would see; the flush takes what one would
-/// not. A canonical discipline hands back only complete lines, so an
-/// unterminated tail survives every read and then reappears the moment
-/// something clears `ICANON` — which is how one test's half-typed line becomes
-/// the next test's phantom input.
+/// A canonical discipline hands back only complete lines, so an unterminated
+/// tail survives every read and reappears the moment something clears
+/// `ICANON` — hence the flush after the reads.
 pub(crate) fn drain_tty_nonblock(idx: TtyIndex) {
     let mut scratch = [0u8; 64];
     loop {
@@ -160,7 +149,6 @@ slopos_testing::stest!(
     name = test_session_check_write_tostop_background,
     suite = tty
 );
-// check_read replaces task_has_access
 slopos_testing::stest!(
     name = test_session_check_read_replaces_task_has_access_foreground,
     suite = tty
@@ -208,38 +196,27 @@ slopos_testing::stest!(
     name = test_keyboard_extended_up_arrow_reaches_tty,
     suite = tty
 );
-// Input flag processing
 slopos_testing::stest!(name = test_ldisc_icrnl, suite = tty);
 slopos_testing::stest!(name = test_ldisc_igncr, suite = tty);
 slopos_testing::stest!(name = test_ldisc_inlcr, suite = tty);
 slopos_testing::stest!(name = test_ldisc_istrip, suite = tty);
-// Output processing
 slopos_testing::stest!(name = test_ldisc_opost_onlcr, suite = tty);
 slopos_testing::stest!(name = test_ldisc_opost_ocrnl, suite = tty);
 slopos_testing::stest!(name = test_ldisc_output_raw, suite = tty);
-// Signal generation
 slopos_testing::stest!(name = test_ldisc_signal_ctrl_backslash, suite = tty);
 slopos_testing::stest!(name = test_ldisc_signal_ctrl_z, suite = tty);
-// Flow control
 slopos_testing::stest!(name = test_ldisc_flow_control_ixon, suite = tty);
-// ECHOCTL
 slopos_testing::stest!(name = test_ldisc_echoctl, suite = tty);
-// VLNEXT
 slopos_testing::stest!(name = test_ldisc_vlnext, suite = tty);
-// VWERASE
 slopos_testing::stest!(name = test_ldisc_vwerase, suite = tty);
-// edit_content / reprint
 slopos_testing::stest!(name = test_ldisc_edit_content, suite = tty);
-// Output processing via TTY write
 slopos_testing::stest!(name = test_tty_write_returns_input_len, suite = tty);
-// Input pipeline cleanup
 slopos_testing::stest!(name = test_keyboard_input_event_delivery, suite = tty);
 slopos_testing::stest!(name = test_keyboard_break_code_no_input, suite = tty);
 slopos_testing::stest!(name = test_keyboard_modifier_no_input, suite = tty);
 slopos_testing::stest!(name = test_keyboard_press_release_single_char, suite = tty);
 slopos_testing::stest!(name = test_vconsole_drain_via_drain_hw_input, suite = tty);
 slopos_testing::stest!(name = test_keyboard_multi_key_sequence, suite = tty);
-// FD integration
 slopos_testing::stest!(name = test_tty_write_output_processing, suite = tty);
 slopos_testing::stest!(name = test_tty_write_raw_passthrough, suite = tty);
 slopos_testing::stest!(name = test_tty_write_invalid_index, suite = tty);
@@ -249,7 +226,6 @@ slopos_testing::stest!(name = test_tty_per_tty_fg_pgrp_isolation, suite = tty);
 slopos_testing::stest!(name = test_tty_per_tty_has_data_isolation, suite = tty);
 slopos_testing::stest!(name = test_tty_per_tty_session_isolation, suite = tty);
 slopos_testing::stest!(name = test_tty_read_invalid_tty_returns_error, suite = tty);
-// Control-Plane Correctness
 slopos_testing::stest!(name = test_tty_index_abi_type, suite = tty);
 slopos_testing::stest!(name = test_signal_constants, suite = tty);
 slopos_testing::stest!(
@@ -286,7 +262,6 @@ slopos_testing::stest!(
     suite = tty
 );
 slopos_testing::stest!(name = test_hangup_read_returns_hung_up, suite = tty);
-// Per-TTY Locking & Performance
 slopos_testing::stest!(name = test_per_tty_lock_independence, suite = tty);
 slopos_testing::stest!(name = test_driver_id_round_trip, suite = tty);
 slopos_testing::stest!(name = test_split_write_returns_input_len, suite = tty);
@@ -294,7 +269,6 @@ slopos_testing::stest!(name = test_idle_cb_iterates_all_ttys, suite = tty);
 slopos_testing::stest!(name = test_merged_drain_read, suite = tty);
 slopos_testing::stest!(name = test_with_tty_per_slot, suite = tty);
 slopos_testing::stest!(name = test_driver_id_clonable, suite = tty);
-// Job Control Correctness
 slopos_testing::stest!(name = test_sigttou_constant, suite = tty);
 slopos_testing::stest!(
     name = test_check_write_tostop_blocks_background,
@@ -312,7 +286,6 @@ slopos_testing::stest!(name = test_check_read_cross_session_rejected, suite = tt
 slopos_testing::stest!(name = test_check_read_same_session_foreground, suite = tty);
 slopos_testing::stest!(name = test_check_read_kernel_task_allowed, suite = tty);
 slopos_testing::stest!(name = test_tty_write_foreground_with_tostop, suite = tty);
-// Non-Canonical Timing Fix
 slopos_testing::stest!(
     name = test_vmin_vtime_enough_data_returns_immediately,
     suite = tty
@@ -324,7 +297,6 @@ slopos_testing::stest!(
     suite = tty
 );
 slopos_testing::stest!(name = test_ldisc_vmin_vtime_helper, suite = tty);
-// Sane Defaults & Output Column Tracking
 slopos_testing::stest!(name = test_default_termios_has_icrnl, suite = tty);
 slopos_testing::stest!(name = test_default_termios_has_opost_onlcr, suite = tty);
 slopos_testing::stest!(name = test_default_termios_has_full_lflag, suite = tty);
@@ -335,7 +307,6 @@ slopos_testing::stest!(name = test_output_column_tracking_tab, suite = tty);
 slopos_testing::stest!(name = test_output_column_tracking_backspace, suite = tty);
 slopos_testing::stest!(name = test_onocr_at_column_zero, suite = tty);
 slopos_testing::stest!(name = test_default_onlcr_newline_expands, suite = tty);
-// ABI Signal Constant Unification
 slopos_testing::stest!(name = test_signal_values_from_signal_module, suite = tty);
 slopos_testing::stest!(name = test_ldisc_signal_uses_signal_module, suite = tty);
 slopos_testing::stest!(name = test_hangup_signals_from_signal_module, suite = tty);
@@ -343,7 +314,6 @@ slopos_testing::stest!(
     name = test_job_control_signals_from_signal_module,
     suite = tty
 );
-// Responsibility Split — PTY Foundation
 slopos_testing::stest!(name = test_session_id_zero_is_none, suite = tty);
 slopos_testing::stest!(name = test_session_id_round_trip, suite = tty);
 slopos_testing::stest!(name = test_pgrp_id_zero_is_none, suite = tty);
@@ -359,7 +329,6 @@ slopos_testing::stest!(name = test_ldisc_kind_raw_delegation, suite = tty);
 slopos_testing::stest!(name = test_pty_driver_id_variants, suite = tty);
 slopos_testing::stest!(name = test_pty_master_driver_kind, suite = tty);
 slopos_testing::stest!(name = test_pty_slave_driver_kind, suite = tty);
-// POSIX Quick Wins
 slopos_testing::stest!(name = test_canonical_one_line_per_read, suite = tty);
 slopos_testing::stest!(name = test_canonical_has_data_line_count, suite = tty);
 slopos_testing::stest!(name = test_canonical_eof_line_boundary, suite = tty);
@@ -398,7 +367,6 @@ slopos_testing::stest!(
     suite = tty
 );
 slopos_testing::stest!(name = test_pty_canonical_editing_on_slave, suite = tty);
-// Strict Session Gates & Foreground Outcomes
 slopos_testing::stest!(name = test_bootstrap_allowed_no_session_read, suite = tty);
 slopos_testing::stest!(name = test_bootstrap_allowed_no_fg_pgrp, suite = tty);
 slopos_testing::stest!(name = test_denied_cross_session_read, suite = tty);
@@ -425,7 +393,6 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_check_write_no_session_allowed, suite = tty);
 slopos_testing::stest!(name = test_cross_session_denied_error_variant, suite = tty);
-// PTY Pair Atomicity & Lifecycle Hardening
 slopos_testing::stest!(name = test_pty_alloc_pair_both_initialized, suite = tty);
 slopos_testing::stest!(name = test_pty_close_master_first_frees_pair, suite = tty);
 slopos_testing::stest!(name = test_pty_close_slave_first_frees_pair, suite = tty);
@@ -435,7 +402,6 @@ slopos_testing::stest!(name = test_pty_open_slave_prevents_free, suite = tty);
 slopos_testing::stest!(name = test_extra_slave_open_keeps_slave_alive, suite = tty);
 slopos_testing::stest!(name = test_rapid_alloc_free_realloc, suite = tty);
 slopos_testing::stest!(name = test_pty_open_slave_after_free, suite = tty);
-// Event-Driven Readiness & IXON Completion
 slopos_testing::stest!(name = test_poll_events_pollin_with_data, suite = tty);
 slopos_testing::stest!(name = test_poll_events_no_pollin_without_data, suite = tty);
 slopos_testing::stest!(
@@ -469,7 +435,6 @@ slopos_testing::stest!(
     name = test_vconsole_has_framebuffer_default_false,
     suite = tty
 );
-// Canonical EOF, ISIG Flush & Signal Integrity
 slopos_testing::stest!(name = test_canonical_eof_empty_no_phantom, suite = tty);
 slopos_testing::stest!(
     name = test_canonical_eof_with_pending_text_no_phantom,
@@ -481,7 +446,6 @@ slopos_testing::stest!(name = test_isig_ctrl_c_clears_edit_buffer, suite = tty);
 slopos_testing::stest!(name = test_isig_flush_sigquit, suite = tty);
 slopos_testing::stest!(name = test_isig_flush_sigtstp, suite = tty);
 slopos_testing::stest!(name = test_double_eof_no_phantom_accumulation, suite = tty);
-// Job Control & Controlling TTY Hardening
 slopos_testing::stest!(
     name = test_set_fg_pgrp_checked_nonexistent_pgrp,
     suite = tty
@@ -495,7 +459,6 @@ slopos_testing::stest!(name = test_detach_ctty_non_leader, suite = tty);
 slopos_testing::stest!(name = test_detach_ctty_session_leader, suite = tty);
 slopos_testing::stest!(name = test_detach_ctty_cross_session_denied, suite = tty);
 slopos_testing::stest!(name = test_tiocnotty_constant, suite = tty);
-// Real TCSETSW/TCSETSF Drain Semantics
 slopos_testing::stest!(name = test_is_output_idle_initially_true, suite = tty);
 slopos_testing::stest!(name = test_inflight_counter_initial_zero, suite = tty);
 slopos_testing::stest!(name = test_write_updates_inflight_counter, suite = tty);
@@ -509,7 +472,6 @@ slopos_testing::stest!(name = test_driver_kind_output_pending_dispatch, suite = 
 slopos_testing::stest!(name = test_pty_output_idle_immediate, suite = tty);
 slopos_testing::stest!(name = test_console_drain_immediate, suite = tty);
 slopos_testing::stest!(name = test_tcsets_now_skips_drain, suite = tty);
-// PTY Lifetime Safety & Scalable Capacity
 slopos_testing::stest!(name = test_max_ttys_is_32, suite = tty);
 slopos_testing::stest!(name = test_master_peer_link_targets_slave, suite = tty);
 slopos_testing::stest!(name = test_slave_peer_link_targets_master, suite = tty);
@@ -521,7 +483,6 @@ slopos_testing::stest!(name = test_rapid_alloc_free_backing_dies, suite = tty);
 slopos_testing::stest!(name = test_data_flow_through_peer_link, suite = tty);
 slopos_testing::stest!(name = test_dangling_peer_write_is_noop, suite = tty);
 slopos_testing::stest!(name = test_multiple_pty_pairs, suite = tty);
-// POSIX Completion Set (Rust-Idiomatic)
 slopos_testing::stest!(name = test_ignbrk_discards_break, suite = tty);
 slopos_testing::stest!(name = test_brkint_generates_sigint, suite = tty);
 slopos_testing::stest!(name = test_parmrk_inserts_marker, suite = tty);
@@ -538,7 +499,6 @@ slopos_testing::stest!(name = test_ldisc_kind_bytes_available, suite = tty);
 slopos_testing::stest!(name = test_fionread_constant, suite = tty);
 slopos_testing::stest!(name = test_kill_empty_line_no_echo, suite = tty);
 slopos_testing::stest!(name = test_ignbrk_takes_priority_over_brkint, suite = tty);
-// Type-Safe Termios Foundation
 slopos_testing::stest!(name = test_input_flags_from_bits, suite = tty);
 slopos_testing::stest!(name = test_output_flags_from_bits, suite = tty);
 slopos_testing::stest!(name = test_local_flags_from_bits, suite = tty);
@@ -552,7 +512,6 @@ slopos_testing::stest!(
     suite = tty
 );
 slopos_testing::stest!(name = test_control_flags_empty, suite = tty);
-// LdiscKind Dispatch Consolidation
 slopos_testing::stest!(name = test_from_id_still_works, suite = tty);
 slopos_testing::stest!(name = test_ldisc_ops_linedisc_trait_delegation, suite = tty);
 slopos_testing::stest!(name = test_ldisc_ops_rawdisc_trait_delegation, suite = tty);
@@ -560,7 +519,6 @@ slopos_testing::stest!(name = test_dispatch_macro_ntty_routing, suite = tty);
 slopos_testing::stest!(name = test_dispatch_macro_raw_routing, suite = tty);
 slopos_testing::stest!(name = test_process_output_byte_dispatch, suite = tty);
 slopos_testing::stest!(name = test_edit_content_dispatch, suite = tty);
-// /dev/tty Controlling Terminal Device
 slopos_testing::stest!(
     name = test_second_open_bumps_backing_strong_count,
     suite = tty
@@ -577,7 +535,6 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = test_last_close_releases_backing, suite = tty);
 slopos_testing::stest!(name = test_sequential_opens_share_backing, suite = tty);
 slopos_testing::stest!(name = test_dev_tty_winsize_matches_direct, suite = tty);
-// Background Write Protection (SIGTTOU on tcsetattr)
 slopos_testing::stest!(name = test_tcsetattr_background_blocked, suite = tty);
 slopos_testing::stest!(name = test_tcsetattr_foreground_allowed, suite = tty);
 slopos_testing::stest!(name = test_tcsetattr_no_session_allowed, suite = tty);
@@ -587,7 +544,6 @@ slopos_testing::stest!(name = test_tcsetattr_kernel_task_bypass, suite = tty);
 slopos_testing::stest!(name = test_tcsetsw_tcsetsf_kernel_task_bypass, suite = tty);
 slopos_testing::stest!(name = test_tostop_background_write_check, suite = tty);
 slopos_testing::stest!(name = test_kernel_task_check_write_allowed, suite = tty);
-// Controlling Terminal Lifecycle Integrity
 slopos_testing::stest!(name = test_acquire_ctty_fresh_tty, suite = tty);
 slopos_testing::stest!(
     name = test_acquire_ctty_same_session_idempotent,
@@ -616,7 +572,6 @@ slopos_testing::stest!(name = test_rapid_acquire_release_stress, suite = tty);
 slopos_testing::stest!(name = test_acquire_invalid_index, suite = tty);
 slopos_testing::stest!(name = test_release_invalid_index, suite = tty);
 slopos_testing::stest!(name = test_detach_invalid_index, suite = tty);
-// Post-Hangup I/O Hardening
 slopos_testing::stest!(name = test_hangup_read_returns_eof, suite = tty);
 slopos_testing::stest!(name = test_hangup_write_returns_eio, suite = tty);
 slopos_testing::stest!(name = test_hangup_poll_returns_pollhup_pollin, suite = tty);
@@ -631,7 +586,6 @@ slopos_testing::stest!(
     suite = tty
 );
 slopos_testing::stest!(name = test_hungup_errno_is_eio, suite = tty);
-// Extended Line Boundaries (VEOL, VEOL2)
 slopos_testing::stest!(name = test_veol_completes_line, suite = tty);
 slopos_testing::stest!(name = test_veol2_completes_line, suite = tty);
 slopos_testing::stest!(name = test_veol_disabled_no_effect, suite = tty);
@@ -641,7 +595,6 @@ slopos_testing::stest!(name = test_veol_no_echo, suite = tty);
 slopos_testing::stest!(name = test_veol2_cc_index, suite = tty);
 slopos_testing::stest!(name = test_veol_veol2_both_active, suite = tty);
 slopos_testing::stest!(name = test_veol_and_eof_coexist, suite = tty);
-// UTF-8 Aware Editing (IUTF8)
 slopos_testing::stest!(name = test_utf8_char_width, suite = tty);
 slopos_testing::stest!(name = test_iutf8_backspace_ascii, suite = tty);
 slopos_testing::stest!(name = test_iutf8_backspace_2byte, suite = tty);
@@ -652,7 +605,6 @@ slopos_testing::stest!(name = test_iutf8_insert_column_tracking, suite = tty);
 slopos_testing::stest!(name = test_iutf8_word_erase_mixed, suite = tty);
 slopos_testing::stest!(name = test_iutf8_word_erase_preserves_prefix, suite = tty);
 slopos_testing::stest!(name = test_iutf8_flag_value, suite = tty);
-// Input Buffer Policy (IMAXBEL, IXOFF, CREAD)
 slopos_testing::stest!(name = test_cread_enabled_input_processed, suite = tty);
 slopos_testing::stest!(name = test_cread_disabled_input_discarded, suite = tty);
 slopos_testing::stest!(name = test_cread_disabled_rawdisc, suite = tty);
@@ -675,7 +627,6 @@ slopos_testing::stest!(name = test_ixoff_low_water_sends_xon, suite = tty);
 slopos_testing::stest!(name = test_ixoff_not_set_no_flow_control, suite = tty);
 slopos_testing::stest!(name = test_cread_flag_value, suite = tty);
 slopos_testing::stest!(name = test_imaxbel_flag_value, suite = tty);
-// Deferred Reprint (PENDIN)
 slopos_testing::stest!(name = test_pendin_flag_value, suite = tty);
 slopos_testing::stest!(name = test_pendin_auto_set_on_echo_change, suite = tty);
 slopos_testing::stest!(name = test_pendin_one_shot, suite = tty);
@@ -684,7 +635,6 @@ slopos_testing::stest!(name = test_pendin_not_set_for_non_echo_flags, suite = tt
 slopos_testing::stest!(name = test_pendin_empty_edit_buffer, suite = tty);
 slopos_testing::stest!(name = test_flush_clears_pendin, suite = tty);
 slopos_testing::stest!(name = test_flush_input_clears_pendin, suite = tty);
-// PTY Namespace & Device Nodes
 slopos_testing::stest!(name = test_pty_lock_ioctl_constants, suite = tty);
 slopos_testing::stest!(name = test_slave_locked_by_default, suite = tty);
 slopos_testing::stest!(name = test_locked_slave_open_rejected, suite = tty);
@@ -696,7 +646,6 @@ slopos_testing::stest!(name = test_master_close_slave_hangup, suite = tty);
 slopos_testing::stest!(name = test_multiple_pairs_with_locks, suite = tty);
 slopos_testing::stest!(name = test_non_pty_not_locked, suite = tty);
 slopos_testing::stest!(name = test_get_lock_non_master_error, suite = tty);
-// PTY Packet Mode (TIOCPKT)
 slopos_testing::stest!(name = test_abi_constants, suite = tty);
 slopos_testing::stest!(name = test_tiocpkt_on_data_prefixed, suite = tty);
 slopos_testing::stest!(name = test_tiocpkt_off_normal_read, suite = tty);
@@ -705,7 +654,6 @@ slopos_testing::stest!(name = test_tiocpkt_ixon_toggle, suite = tty);
 slopos_testing::stest!(name = test_tiocpkt_disable_clears_events, suite = tty);
 slopos_testing::stest!(name = test_poll_packet_events_pollin, suite = tty);
 slopos_testing::stest!(name = test_set_packet_mode_non_master, suite = tty);
-// VT100/ANSI Terminal Emulation
 slopos_testing::stest!(name = test_parser_print_ascii, suite = tty);
 slopos_testing::stest!(name = test_parser_execute_control, suite = tty);
 slopos_testing::stest!(name = test_clear_screen, suite = tty);
@@ -724,7 +672,6 @@ slopos_testing::stest!(name = test_parser_fuzz_no_panic, suite = tty);
 slopos_testing::stest!(name = test_vconsole_erase_line, suite = tty);
 slopos_testing::stest!(name = test_cursor_movement_clamping, suite = tty);
 slopos_testing::stest!(name = test_vconsole_scroll_up, suite = tty);
-// Advanced PTY & Session Control (EXTPROC, vhangup)
 slopos_testing::stest!(name = test_extproc_flag_value, suite = tty);
 slopos_testing::stest!(name = test_extproc_no_echo, suite = tty);
 slopos_testing::stest!(name = test_extproc_no_canonical_editing, suite = tty);
@@ -736,15 +683,12 @@ slopos_testing::stest!(name = test_extproc_imaxbel, suite = tty);
 slopos_testing::stest!(name = test_vhangup_syscall_constant, suite = tty);
 slopos_testing::stest!(name = test_vhangup_triggers_hangup, suite = tty);
 slopos_testing::stest!(name = test_extproc_raw_mode_same_behavior, suite = tty);
-// Legacy Termios Completion (ECHOPRT, IUCLC, OLCUC)
 slopos_testing::stest!(name = test_echoprt_erase_format, suite = tty);
 slopos_testing::stest!(name = test_echoprt_close_on_input, suite = tty);
 slopos_testing::stest!(name = test_iuclc_maps_upper_to_lower, suite = tty);
 slopos_testing::stest!(name = test_iuclc_no_effect_non_alpha, suite = tty);
 slopos_testing::stest!(name = test_olcuc_maps_lower_to_upper, suite = tty);
 slopos_testing::stest!(name = test_flags_disabled_by_default, suite = tty);
-// Per-TTY Poll Notification
-// PTY Flow Control (Throttle Mechanism)
 slopos_testing::stest!(name = test_throttle_watermark_constants, suite = tty);
 slopos_testing::stest!(name = test_pty_initially_unthrottled, suite = tty);
 slopos_testing::stest!(name = test_throttle_activates_at_high_water, suite = tty);
@@ -759,15 +703,12 @@ slopos_testing::stest!(
     name = test_master_write_full_when_not_throttled,
     suite = tty
 );
-// Cooked Buffer Overflow Hardening
-// c_cflag ABI Completion
 slopos_testing::stest!(name = test_control_flag_values, suite = tty);
 slopos_testing::stest!(name = test_default_cflag, suite = tty);
 slopos_testing::stest!(name = test_cflag_roundtrip, suite = tty);
 slopos_testing::stest!(name = test_speed_fields_populated, suite = tty);
 slopos_testing::stest!(name = test_speed_follows_baud_change, suite = tty);
 slopos_testing::stest!(name = test_cread_value_preserved, suite = tty);
-// Missing Ioctls (TCFLSH, TCSBRK, TCXONC)
 slopos_testing::stest!(name = test_flush_flow_ioctl_constants, suite = tty);
 slopos_testing::stest!(name = test_tcflush_input, suite = tty);
 slopos_testing::stest!(name = test_tcflush_output, suite = tty);
@@ -776,11 +717,9 @@ slopos_testing::stest!(name = test_tcflush_invalid_arg, suite = tty);
 slopos_testing::stest!(name = test_tcsbrk_noop, suite = tty);
 slopos_testing::stest!(name = test_tcsbrk_drain, suite = tty);
 slopos_testing::stest!(name = test_tcxonc_all_actions, suite = tty);
-// Edit Buffer Expansion (1024 → 4096)
 slopos_testing::stest!(name = test_canonical_input_over_1024, suite = tty);
 slopos_testing::stest!(name = test_large_paste_canonical, suite = tty);
 slopos_testing::stest!(name = test_backspace_in_expanded_buffer, suite = tty);
-// Signal Restart Infrastructure (ERESTARTSYS)
 slopos_testing::stest!(name = test_restart_error_to_errno, suite = tty);
 slopos_testing::stest!(
     name = test_restart_distinct_from_signal_interrupt,
@@ -794,7 +733,6 @@ slopos_testing::stest!(name = test_signal_interrupt_still_eintr, suite = tty);
 slopos_testing::stest!(name = test_all_error_variants_preserved, suite = tty);
 slopos_testing::stest!(name = test_nonblock_empty_returns_wouldblock, suite = tty);
 slopos_testing::stest!(name = test_read_with_data_succeeds, suite = tty);
-// Review Fix Regression Tests
 slopos_testing::stest!(name = test_review_tcflush_unthrottles_pty, suite = tty);
 slopos_testing::stest!(name = test_review_tcflush_both_unthrottles_pty, suite = tty);
 slopos_testing::stest!(name = test_review_master_write_batch_boundary, suite = tty);
@@ -806,7 +744,6 @@ slopos_testing::stest!(name = test_review_speed_ispeed_fallback, suite = tty);
 slopos_testing::stest!(name = test_review_speed_unrecognised_noop, suite = tty);
 slopos_testing::stest!(name = test_review_pollerr_on_hangup, suite = tty);
 slopos_testing::stest!(name = test_review_pollerr_on_peer_closed, suite = tty);
-// Bug-fix regression tests (TTY review)
 slopos_testing::stest!(
     name = test_bugfix_flush_edit_preserves_remainder,
     suite = tty
@@ -835,7 +772,6 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = test_bugfix_rawdisc_input_full, suite = tty);
 slopos_testing::stest!(name = test_bugfix_slave_write_stops_on_full, suite = tty);
 slopos_testing::stest!(name = test_bugfix_linedisc_input_full, suite = tty);
-// Bug-fix regression tests (TTY architectural review)
 slopos_testing::stest!(name = test_bugfix_parmrk_atomic_full_insert, suite = tty);
 slopos_testing::stest!(
     name = test_bugfix_parmrk_drop_when_insufficient_space,
@@ -854,7 +790,6 @@ slopos_testing::stest!(
     suite = tty
 );
 slopos_testing::stest!(name = test_bugfix_tcxonc_boundary_values, suite = tty);
-// TCXONC Behavioral Completion
 slopos_testing::stest!(name = test_tcooff_blocks_nonblock_write, suite = tty);
 slopos_testing::stest!(name = test_tcoon_resumes_write, suite = tty);
 slopos_testing::stest!(name = test_tcooff_idempotent, suite = tty);
@@ -867,7 +802,6 @@ slopos_testing::stest!(name = test_tcooff_pty_slave_write, suite = tty);
 slopos_testing::stest!(name = test_output_stopped_independent_of_ixon, suite = tty);
 slopos_testing::stest!(name = test_tcxonc_unallocated_slot, suite = tty);
 slopos_testing::stest!(name = test_tcxonc_invalid_index, suite = tty);
-// Output Queue Visibility (TIOCOUTQ)
 slopos_testing::stest!(name = test_tiocoutq_abi_constant, suite = tty);
 slopos_testing::stest!(name = test_output_queued_zero_when_idle, suite = tty);
 slopos_testing::stest!(name = test_output_queued_reflects_inflight, suite = tty);
@@ -876,7 +810,6 @@ slopos_testing::stest!(name = test_output_queued_unallocated, suite = tty);
 slopos_testing::stest!(name = test_output_queued_invalid_index, suite = tty);
 slopos_testing::stest!(name = test_fionread_unchanged, suite = tty);
 slopos_testing::stest!(name = test_output_queued_vconsole, suite = tty);
-// Input Wake Batching (WAKEUP_CHARS)
 slopos_testing::stest!(name = test_wakeup_chars_constant, suite = tty);
 slopos_testing::stest!(name = test_canonical_wake_on_newline, suite = tty);
 slopos_testing::stest!(name = test_noncanonical_no_wake_per_byte, suite = tty);
@@ -887,7 +820,6 @@ slopos_testing::stest!(name = test_flush_all_resets_wake_counter, suite = tty);
 slopos_testing::stest!(name = test_rawdisc_wake_batching, suite = tty);
 slopos_testing::stest!(name = test_wake_resets_counter, suite = tty);
 slopos_testing::stest!(name = test_canonical_eof_wakes, suite = tty);
-// TABDLY/XTABS Output Compatibility
 slopos_testing::stest!(name = test_tabdly_abi_constants, suite = tty);
 slopos_testing::stest!(name = test_default_oflag_includes_xtabs, suite = tty);
 slopos_testing::stest!(name = test_xtabs_expands_tab_to_spaces, suite = tty);
@@ -897,7 +829,6 @@ slopos_testing::stest!(name = test_xtabs_column_tracking_mixed, suite = tty);
 slopos_testing::stest!(name = test_tabdly_termios_roundtrip, suite = tty);
 slopos_testing::stest!(name = test_no_opost_tab_passthrough, suite = tty);
 slopos_testing::stest!(name = test_existing_output_unaffected, suite = tty);
-// no_room-style Overflow Recovery
 slopos_testing::stest!(name = test_no_room_initially_false, suite = tty);
 slopos_testing::stest!(name = test_no_room_set_on_cooked_full, suite = tty);
 slopos_testing::stest!(name = test_no_room_not_set_before_full, suite = tty);
@@ -915,7 +846,6 @@ slopos_testing::stest!(name = test_rawdisc_no_room, suite = tty);
 slopos_testing::stest!(name = test_imaxbel_preserved_with_no_room, suite = tty);
 slopos_testing::stest!(name = test_rawdisc_recovery, suite = tty);
 slopos_testing::stest!(name = test_ldisc_kind_dispatch, suite = tty);
-// Output Drain Semantics Hardening
 slopos_testing::stest!(name = test_drain_idle_fast_path, suite = tty);
 slopos_testing::stest!(name = test_drain_hangup_vacuously_complete, suite = tty);
 slopos_testing::stest!(name = test_tcsbrk_hangup_returns_error, suite = tty);
@@ -931,7 +861,6 @@ slopos_testing::stest!(name = test_output_queued_uses_pending_bytes, suite = tty
 slopos_testing::stest!(name = test_tcsetsw_hangup_returns_error, suite = tty);
 slopos_testing::stest!(name = test_tcsetsf_hangup_returns_error, suite = tty);
 slopos_testing::stest!(name = test_inflight_accounting_round_trip, suite = tty);
-// Core Semantic Correctness (Gold Standard Audit)
 slopos_testing::stest!(name = test_input_event_normal_behavior, suite = tty);
 slopos_testing::stest!(name = test_input_event_break_brkint, suite = tty);
 slopos_testing::stest!(name = test_input_event_break_ignbrk, suite = tty);
@@ -947,7 +876,6 @@ slopos_testing::stest!(name = test_batched_ingress_no_data_loss, suite = tty);
 slopos_testing::stest!(name = test_batched_ingress_signal_in_middle, suite = tty);
 slopos_testing::stest!(name = test_background_read_sigttin_blocked_eio, suite = tty);
 slopos_testing::stest!(name = test_receive_buf_accumulates_echo, suite = tty);
-// VConsole Unicode & Broadened Xterm Emulation
 slopos_testing::stest!(name = test_utf8_2byte_renders_codepoint, suite = tty);
 slopos_testing::stest!(name = test_utf8_3byte_renders_codepoint, suite = tty);
 slopos_testing::stest!(name = test_utf8_4byte_renders_codepoint, suite = tty);
@@ -984,7 +912,6 @@ slopos_testing::stest!(name = test_parser_fuzz_utf8_no_panic, suite = tty);
 slopos_testing::stest!(name = test_vtparser_fuzz_no_panic, suite = tty);
 slopos_testing::stest!(name = test_replacement_glyph_exists, suite = tty);
 slopos_testing::stest!(name = test_get_glyph_for_codepoint_ascii, suite = tty);
-// mod.rs Module Decomposition
 slopos_testing::stest!(name = test_mod_reexports_io_functions, suite = tty);
 slopos_testing::stest!(name = test_mod_reexports_termios_functions, suite = tty);
 slopos_testing::stest!(name = test_mod_reexports_job_control_functions, suite = tty);
@@ -995,7 +922,6 @@ slopos_testing::stest!(name = test_tty_struct_fields_accessible, suite = tty);
 slopos_testing::stest!(name = test_tty_error_variants_unchanged, suite = tty);
 slopos_testing::stest!(name = test_max_ttys_constant, suite = tty);
 slopos_testing::stest!(name = test_existing_api_smoke_test, suite = tty);
-// POSIX Controlling Terminal Semantics
 slopos_testing::stest!(name = test_ctty_can_be_ctty_serial, suite = tty);
 slopos_testing::stest!(name = test_ctty_can_be_ctty_vconsole, suite = tty);
 slopos_testing::stest!(name = test_ctty_can_be_ctty_pty_slave, suite = tty);
@@ -1027,7 +953,6 @@ slopos_testing::stest!(
     suite = tty
 );
 slopos_testing::stest!(name = test_ctty_can_be_ctty_none_driver, suite = tty);
-// TIOCOUTQ Byte Accounting & Packet Mode Edge Fix
 slopos_testing::stest!(name = test_inflight_byte_granularity, suite = tty);
 slopos_testing::stest!(name = test_tiocoutq_returns_bytes_not_ops, suite = tty);
 slopos_testing::stest!(name = test_tiocoutq_zero_after_sync_write, suite = tty);
@@ -1042,7 +967,6 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_packet_mode_data_prefix_regression, suite = tty);
 slopos_testing::stest!(name = test_echo_inflight_byte_granularity, suite = tty);
-// Missing Ioctls (TIOCGSID, TIOCEXCL) & HUPCL Enforcement
 slopos_testing::stest!(name = test_excl_hupcl_tiocgsid_abi_constant, suite = tty);
 slopos_testing::stest!(name = test_excl_hupcl_tiocexcl_abi_constants, suite = tty);
 slopos_testing::stest!(name = test_excl_hupcl_errno_ebusy_value, suite = tty);
@@ -1096,7 +1020,6 @@ slopos_testing::stest!(name = test_slave_starts_locked, suite = tty);
 slopos_testing::stest!(name = test_ttyflags_set_method, suite = tty);
 slopos_testing::stest!(name = test_ttyflags_multi_flag_operations, suite = tty);
 slopos_testing::stest!(name = test_no_driver_kind_none, suite = tty);
-// Phase 21: Deferred Actions RAII & Boilerplate Reduction
 slopos_testing::stest!(name = test_p21_postlockwork_default_is_empty, suite = tty);
 slopos_testing::stest!(
     name = test_p21_postlockwork_signal_makes_nonempty,

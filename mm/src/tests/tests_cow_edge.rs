@@ -56,12 +56,6 @@ pub fn test_cow_not_present_not_cow() -> TestResult {
 }
 
 pub fn test_cow_dispatch_absent_for_a_reaped_process() -> TestResult {
-    // The dispatcher answers `None` for a process that no longer exists.
-    //
-    // This used to pass `INVALID_PROCESS_ID` — a number the caller could
-    // reach by omission. There is no such number now: the argument is a
-    // designator that only a live process mints, so the reachable failure is
-    // a *stale* one, which is what this drives.
     let Some(vm) = ProcessVmGuard::new() else {
         return fail!("could not create a process VM");
     };
@@ -140,9 +134,7 @@ pub fn test_cow_multi_ref_copy() -> TestResult {
 
     vm.mark_cow(test_addr);
 
-    // Bump META_SLOTS refcount directly via OSTD's `Frame::from_in_use`
-    // — equivalent to two extra processes mapping the same paddr.
-    // Hold the extra refs in a scope so they drop together below.
+    // Equivalent to two extra processes mapping the same paddr.
     let extra1 = Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64()))
         .expect("from_in_use 1 for COW multi-ref test");
     let extra2 = Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64()))

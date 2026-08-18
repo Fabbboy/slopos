@@ -1,10 +1,7 @@
-//! Split from test_ldisc.rs: test_ldisc_noncanon.rs
+//! Line-discipline tests for non-canonical VMIN/VTIME reads, the VEOL/VEOL2
+//! line terminators, and the expanded edit buffer.
 
 use super::fixtures::*;
-
-// ===========================================================================
-// Non-Canonical Timing Fix regression tests
-// ===========================================================================
 
 /// VMIN>0/VTIME>0 — returns immediately when VMIN bytes are
 /// already available (no timeout needed).
@@ -19,7 +16,6 @@ pub fn test_vmin_vtime_enough_data_returns_immediately() -> TestResult {
     raw.c_cc[5] = 1; // VTIME = 1 (100ms)
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
-    // Push exactly VMIN bytes.
     tty::push_input(TtyIndex(0), b'a');
     tty::push_input(TtyIndex(0), b'b');
     tty::push_input(TtyIndex(0), b'c');
@@ -53,11 +49,9 @@ pub fn test_vmin_vtime_partial_nonblock() -> TestResult {
     raw.c_cc[5] = 2; // VTIME = 2 (200ms)
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
-    // Push fewer than VMIN bytes.
     tty::push_input(TtyIndex(0), b'x');
     tty::push_input(TtyIndex(0), b'y');
 
-    // Nonblocking read: should return the 2 bytes we have (not block).
     let mut buf = [0u8; 8];
     let result = tty::read(TtyIndex(0), &mut buf, true);
     tty::set_termios(TtyIndex(0), &saved).unwrap();
@@ -114,10 +108,8 @@ pub fn test_vmin_vtime_no_data_nonblock() -> TestResult {
     }
 }
 
-/// VMIN>0/VTIME>0 — inter-byte timeout returns partial data.
-/// Push 1 byte (less than VMIN=3), then do a blocking read with a short
-/// VTIME.  The read should return the 1 byte after the inter-byte timeout
-/// expires (not block indefinitely waiting for VMIN).
+/// VMIN>0/VTIME>0 — the inter-byte timeout returns partial data rather than
+/// blocking indefinitely for VMIN.
 pub fn test_vmin_vtime_interbyte_timeout_returns_partial() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
@@ -129,11 +121,9 @@ pub fn test_vmin_vtime_interbyte_timeout_returns_partial() -> TestResult {
     raw.c_cc[5] = 1; // VTIME = 1 (100ms inter-byte timeout)
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
-    // Push 1 byte — less than VMIN but enough to start the inter-byte timer.
+    // One byte: below VMIN, but enough to start the inter-byte timer.
     tty::push_input(TtyIndex(0), b'z');
 
-    // Blocking read: should wait for VMIN=3 bytes but the inter-byte timer
-    // (VTIME=100ms) will expire after the first byte, returning what we have.
     let mut buf = [0u8; 8];
     let result = tty::read(TtyIndex(0), &mut buf, false);
     tty::set_termios(TtyIndex(0), &saved).unwrap();
@@ -160,11 +150,8 @@ pub fn test_vmin_vtime_interbyte_timeout_returns_partial() -> TestResult {
     }
 }
 
-/// Verify that the ldisc vmin_vtime() helper returns correct values
-/// after setting non-canonical parameters.
 pub fn test_ldisc_vmin_vtime_helper() -> TestResult {
     let mut ld = LineDisc::new();
-    // Default: VMIN=1, VTIME=0.
     let (vmin, vtime) = ld.vmin_vtime();
     if vmin != 1 || vtime != 0 {
         klog_info!(
@@ -175,7 +162,6 @@ pub fn test_ldisc_vmin_vtime_helper() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Set custom values.
     let mut t = *ld.termios();
     t.c_cc[6] = 5; // VMIN
     t.c_cc[5] = 3; // VTIME
@@ -191,39 +177,31 @@ pub fn test_ldisc_vmin_vtime_helper() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Extended Line Boundaries (VEOL, VEOL2)
-// ===========================================================================
 
 /// VEOL character completes a canonical line.
 pub fn test_veol_completes_line() -> TestResult {
     let mut ld = LineDisc::new();
-    // Enable canonical + echo, set VEOL to ';'.
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
     t.set_cc(CcIndex::Veol, b';');
     ld.set_termios(&t);
 
-    // Type "abc;".
     ld.input_char(b'a');
     ld.input_char(b'b');
     ld.input_char(b'c');
     let action = ld.input_char(b';');
 
-    // The VEOL character should produce an echo of ';'.
     let echoed = matches!(action, InputAction::Echo { buf, len } if buf[0] == b';' && len == 1);
     if !echoed {
         klog_info!("TTY_TEST: BUG - VEOL did not produce echo of ';'");
         return TestResult::Fail;
     }
 
-    // Data should be available (line_count > 0).
     if !ld.has_data() {
         klog_info!("TTY_TEST: BUG - VEOL did not complete canonical line");
         return TestResult::Fail;
     }
 
-    // Read should return "abc;".
     let mut buf = [0u8; 64];
     let n = ld.read(&mut buf);
     if n != 4 || &buf[..4] != b"abc;" {
@@ -241,7 +219,6 @@ pub fn test_veol2_completes_line() -> TestResult {
     t.set_cc(CcIndex::Veol2, b'|');
     ld.set_termios(&t);
 
-    // Type "xy|".
     ld.input_char(b'x');
     ld.input_char(b'y');
     ld.input_char(b'|');
@@ -265,8 +242,6 @@ pub fn test_veol_disabled_no_effect() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
-    // VEOL defaults to 0 (disabled).  Ensure typing a NUL doesn't
-    // accidentally trigger line completion.
     t.set_cc(CcIndex::Veol, POSIX_VDISABLE);
     t.set_cc(CcIndex::Veol2, POSIX_VDISABLE);
     ld.set_termios(&t);
@@ -274,7 +249,6 @@ pub fn test_veol_disabled_no_effect() -> TestResult {
     ld.input_char(b'a');
     ld.input_char(b'b');
 
-    // No line should be complete yet.
     if ld.has_data() {
         klog_info!("TTY_TEST: BUG - disabled VEOL produced a complete line");
         return TestResult::Fail;
@@ -290,15 +264,12 @@ pub fn test_veol_and_newline_coexist() -> TestResult {
     t.set_cc(CcIndex::Veol, b';');
     ld.set_termios(&t);
 
-    // First line terminated by VEOL.
     ld.input_char(b'a');
     ld.input_char(b';');
 
-    // Second line terminated by newline.
     ld.input_char(b'b');
     ld.input_char(b'\n');
 
-    // Both lines should be available.
     let mut buf = [0u8; 64];
     let n1 = ld.read(&mut buf);
     if n1 != 2 || &buf[..2] != b"a;" {
@@ -366,7 +337,6 @@ pub fn test_veol_no_echo() -> TestResult {
         }
     }
 
-    // Line should still be completed.
     if !ld.has_data() {
         klog_info!("TTY_TEST: BUG - VEOL without ECHO did not complete line");
         return TestResult::Fail;
@@ -395,11 +365,9 @@ pub fn test_veol_veol2_both_active() -> TestResult {
     t.set_cc(CcIndex::Veol2, b'|');
     ld.set_termios(&t);
 
-    // Line 1: terminated by VEOL.
     ld.input_char(b'a');
     ld.input_char(b';');
 
-    // Line 2: terminated by VEOL2.
     ld.input_char(b'b');
     ld.input_char(b'|');
 
@@ -426,16 +394,13 @@ pub fn test_veol_and_eof_coexist() -> TestResult {
     t.set_cc(CcIndex::Veol, b';');
     ld.set_termios(&t);
 
-    // VEOL-terminated line.
     ld.input_char(b'a');
     ld.input_char(b';');
 
-    // EOF-flushed line (Ctrl+D).
     ld.input_char(b'b');
     let veof = ld.termios().cc(CcIndex::Veof);
     ld.input_char(veof);
 
-    // Read VEOL line first.
     let mut buf = [0u8; 64];
     let n1 = ld.read(&mut buf);
     if n1 != 2 || &buf[..2] != b"a;" {
@@ -443,7 +408,7 @@ pub fn test_veol_and_eof_coexist() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Read EOF-flushed line (no delimiter in output).
+    // The EOF-flushed line carries no delimiter.
     let n2 = ld.read(&mut buf);
     if n2 != 1 || buf[0] != b'b' {
         klog_info!(
@@ -454,23 +419,17 @@ pub fn test_veol_and_eof_coexist() -> TestResult {
     }
     TestResult::Pass
 }
-// ---------------------------------------------------------------------------
-// Edit Buffer Expansion (1024 → 4096) tests
-// ---------------------------------------------------------------------------
 
-/// Canonical input longer than 1024 bytes works.
 pub fn test_canonical_input_over_1024() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Type 2000 characters then newline (canonical mode).
     for i in 0..2000u16 {
         tty::push_input(idx, b'a' + (i % 26) as u8);
     }
     tty::push_input(idx, b'\n');
 
-    // Read it back. Should get all 2000 + newline.
     let mut buf: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     let mut total = 0usize;
     loop {
@@ -480,7 +439,6 @@ pub fn test_canonical_input_over_1024() -> TestResult {
         }
     }
 
-    // We expect 2001 bytes (2000 chars + newline).
     if total != 2001 {
         klog_info!("TTY_TEST: BUG - read {} bytes, expected 2001", total);
         drain_tty_nonblock(idx);
@@ -491,20 +449,17 @@ pub fn test_canonical_input_over_1024() -> TestResult {
     TestResult::Pass
 }
 
-/// Large paste (~3000 bytes) in canonical mode.
 pub fn test_large_paste_canonical() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Simulate pasting 3000 bytes.
     let paste_len = 3000;
     for i in 0..paste_len {
         tty::push_input(idx, b'A' + (i % 26) as u8);
     }
     tty::push_input(idx, b'\n');
 
-    // Read back.
     let mut buf: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     let mut total = 0usize;
     loop {
@@ -514,7 +469,6 @@ pub fn test_large_paste_canonical() -> TestResult {
         }
     }
 
-    // Expect 3001 bytes (3000 chars + newline).
     if total != paste_len + 1 {
         klog_info!(
             "TTY_TEST: BUG - read {} bytes, expected {}",
@@ -529,13 +483,11 @@ pub fn test_large_paste_canonical() -> TestResult {
     TestResult::Pass
 }
 
-/// Backspace still works with expanded edit buffer.
 pub fn test_backspace_in_expanded_buffer() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Type 'abc', erase 'c', type 'd', newline -> expect 'abd\n'.
     tty::push_input(idx, b'a');
     tty::push_input(idx, b'b');
     tty::push_input(idx, b'c');
