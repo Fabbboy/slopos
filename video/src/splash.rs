@@ -8,9 +8,8 @@ use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::video_traits::VideoError;
 use slopos_gfx::canvas_ops;
 
-/// Splash background: opaque black.  Previous value 0x00000000 was
-/// transparent-black which broke anti-aliased text blending on the
-/// write-only MMIO framebuffer (read-back returns 0 → dark fringe).
+/// Must be opaque: the MMIO framebuffer is write-only, so a transparent alpha
+/// leaves anti-aliased text blending against a read-back of 0.
 const SPLASH_BG_COLOR: Color32 = Color32(0xFF00_0000);
 const SPLASH_TEXT_COLOR: Color32 = Color32(0xE6E6_E6FF);
 const SPLASH_SUBTEXT_COLOR: Color32 = Color32(0x9A9A_9AFF);
@@ -162,8 +161,7 @@ fn draw_text(ctx: &mut GraphicsContext, x: i32, y: i32, text: &str, color: Color
 }
 
 pub fn splash_show_boot_screen() -> GraphicsResult<()> {
-    // Yield to the on-screen kernel log: while fblog is shown, the splash must
-    // not paint over it. Track state but skip drawing (boot keeps going).
+    // Never paint over the on-screen kernel log; track state but skip drawing.
     if slopos_ostd::fblog::is_active() {
         let mut state = STATE.lock();
         state.active = true;
@@ -173,8 +171,8 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     let mut ctx = GraphicsContext::new()?;
 
     let mut state = STATE.lock();
-    // Repaint the full screen (logo + bar) at the current progress, so a
-    // backend upgrade keeps the bar where the boot has reached.
+    // Repaint at the current progress so a backend upgrade keeps the bar where
+    // the boot has reached.
     let progress = state.progress;
     let bg_px = ctx.pixel_format().encode(SPLASH_BG_COLOR);
     ctx.clear_canvas(bg_px);
@@ -226,9 +224,6 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
 }
 
 pub fn splash_update_progress(progress: i32, message: &[u8]) -> GraphicsResult<()> {
-    // Skip drawing while the on-screen kernel log is shown so the splash
-    // doesn't fight the log. The boot still progresses; the splash just isn't
-    // painted (and repaints on the next progress report once the log is gone).
     if slopos_ostd::fblog::is_active() {
         return Ok(());
     }
@@ -249,7 +244,6 @@ pub fn splash_update_progress(progress: i32, message: &[u8]) -> GraphicsResult<(
     );
 
     if !message.is_empty() {
-        // Convert &[u8] to &str (strip null terminator).
         let end = message
             .iter()
             .position(|&b| b == 0)
@@ -273,8 +267,7 @@ pub fn splash_update_progress(progress: i32, message: &[u8]) -> GraphicsResult<(
         layout.progress_h,
         progress,
     );
-    // Present the update: a no-op on a directly-scanned-out framebuffer, but on
-    // a GPU backend the draw only reaches the screen once flushed.
+    // A GPU backend only reaches the screen once flushed.
     framebuffer::framebuffer_flush(core::ptr::null(), 0);
     Ok(())
 }
