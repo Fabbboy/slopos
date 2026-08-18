@@ -235,7 +235,6 @@ pub(crate) fn dispatch(cpu_id: usize, task: &Task) {
         return;
     }
     let _ = task.sched_placement_compare_exchange(SchedPlacement::None, SchedPlacement::OnCpu);
-    // Went terminal between the gate above and here.
     if !task.set_status(TaskStatus::Running) {
         return;
     }
@@ -354,7 +353,6 @@ fn prepare_switch_to(
     };
     platform::gdt_set_kernel_rsp0(kernel_rsp);
 
-    // TODO(tech-debt): dead statement — `cpu_id` is already used above; delete it.
     let _ = cpu_id;
     if let Some(handle) = next_vm {
         // The handle fails to resolve if its slot was rebound to another process
@@ -416,16 +414,11 @@ fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task:
         return;
     }
 
-    // The switch span mutates current_task, PCR and per-task context as one
-    // transition; an unwind through it would leave scheduling state torn.
     let switch_abort_guard = slopos_ostd::panic::AbortOnUnwind::new();
     if let Some(current) = current {
         save_live_recovery_depth(current);
     }
 
-    // `dispatch` runs inside the window because publishing the incoming task
-    // also swaps the SafeStack data stack, and the window's own frame must be
-    // allocated before that happens.
     slopos_ostd::task::run_switch(
         current,
         idle_task,
@@ -480,10 +473,10 @@ fn task_has_durable_owner(task: &Task) -> bool {
     placement_is_durable_owner(task.sched_placement())
 }
 
+/// A task with no readable priority publishes `PRIORITY_NONE`, so a CPU parked
+/// on one always loses the preemption comparison.
 #[inline]
 fn published_priority(task: &Task) -> u8 {
-    // TODO(tech-debt): the `Some(..)` makes the `PRIORITY_NONE` arm unreachable —
-    // a `&Task` always has a priority; collapse to `task.priority.as_u8()`.
     Some(task.priority).map_or(slopos_arch::pcr::PRIORITY_NONE, |p| p.as_u8())
 }
 
@@ -970,19 +963,14 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
     let timestamp = kdiag_timestamp();
     task_record_context_switch(from_task, Some(to_task), timestamp);
 
-    // The switch span mutates current_task, PCR and per-task context as one
-    // transition; an unwind through it would leave scheduling state torn.
+    let switch_abort_guard = slopos_ostd::panic::AbortOnUnwind::new();
     // `on_cpu` is what makes a peer dispatcher requeue this task rather than
     // dispatch it a second time.
-    let switch_abort_guard = slopos_ostd::panic::AbortOnUnwind::new();
     to_task.set_on_cpu(true);
     if let Some(from_task) = from_task {
         save_live_recovery_depth(from_task);
     }
 
-    // `dispatch` runs inside the window because publishing the incoming task
-    // also swaps the SafeStack data stack, and the window's own frame must be
-    // allocated before that happens.
     slopos_ostd::task::run_switch(
         from_task,
         to_task,

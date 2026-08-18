@@ -1,12 +1,8 @@
 //! Userland test-binary registrations.
 //!
 //! Each [`utest!`](crate::utest) here corresponds to a binary in
-//! `userland/src/bin/tests/`. The same binary must also appear in the
-//! `test_userland_bins` list in `justfile` so it is packaged into
-//! `ext2-tests.img`. If the binary is missing at runtime, the kernel-side
-//! [runner](crate::exec::utest::run_thunk) emits a `not ok` line and
-//! continues — drift between this file and the build pipeline is detected
-//! at harness time, not at compile time.
+//! `userland/src/bin/tests/`, which must also be listed in the justfile's
+//! `test_userland_bins` to be packaged into `ext2-tests.img`.
 
 crate::utest!(
     name = utest_heap_allocator,
@@ -63,8 +59,6 @@ crate::utest!(name = utest_stdio_stream, bin = "/bin/stdio_stream_test");
 crate::utest!(name = utest_ip_e2e, bin = "/bin/ip_e2e_test");
 crate::utest!(name = utest_rlimit, bin = "/bin/rlimit_test");
 
-// Last deliberately. Tests run in link order, and this one exists to leave a
-// desktop-shaped resource population behind for the `post-userland-tests`
-// quota dump to measure. Registered earlier, its peak would be buried under
-// whatever ran after it.
+// Last deliberately: tests run in link order, and this one leaves a
+// desktop-shaped resource population for the `post-userland-tests` quota dump.
 crate::utest!(name = utest_session_smoke, bin = "/bin/session_smoke_test");

@@ -1,14 +1,10 @@
 //! TTY I/O paths — read, write, push_input, hardware drain, data queries,
 //! and the idle-loop input callback.
 //!
-//! # Echo serialisation
-//!
-//! The line discipline stages echo in its own queue while the slot lock is
-//! held; `super::output` drains it under `TTY_WRITE_LOCKS[slot]` once the
-//! guard drops.  User writes take the same per-slot write lock, so echo and
-//! user output never interleave at the byte level — that is the POSIX
-//! §11.1.9 serialisation guarantee.  The staging step is what keeps the write
-//! lock outside every slot lock, which a driver write for a PTY end requires.
+//! Echo is staged under the slot lock and drained by `super::output` under
+//! `TTY_WRITE_LOCKS[slot]` after the guard drops.  That staging is what keeps
+//! the write lock outside every slot lock, and it serialises echo against user
+//! output at the byte level (POSIX §11.1.9).
 
 use core::ffi::c_int;
 use core::sync::atomic::Ordering;
@@ -28,29 +24,18 @@ use slopos_kernel_services::driver_runtime::{
 };
 use slopos_ostd::sync::{BUS, WaitAbort};
 
-// ---------------------------------------------------------------------------
-// Tty helper method — hardware drain
-// ---------------------------------------------------------------------------
-
 impl Tty {
     /// Drain pending hardware input into the line discipline.
     ///
-    /// Called while holding the per-TTY lock.  Whatever the discipline echoes,
-    /// plus any IXOFF byte its water mark demands, is staged in the
-    /// discipline's queue and registered with `deferred` for emission once the
-    /// caller drops the slot guard.  A generated signal goes the same way, so
-    /// no caller can drop one.
+    /// Caller holds the per-TTY lock.  Echo, any IXOFF byte and any generated
+    /// signal are registered with `deferred` for emission once the caller drops
+    /// the slot guard.
     pub(crate) fn drain_hw_input_locked(&mut self, deferred: &mut PostLockWork) {
         let mut scratch = [0u8; 64];
         let count = self.driver.drain_input(&mut scratch);
         let mut events = [InputEvent::normal(0); 64];
-        // Feed raw hardware bytes directly to the line discipline.
-        // The ldisc handles all input mapping via c_iflag processing:
-        //   - CR→NL: handled by ICRNL in process_iflag()
-        //   - NL→CR: handled by INLCR in process_iflag()
-        //   - DEL (0x7F): matched against VERASE (default 0x7F) in canonical_input()
-        // Pre-mapping here would bypass POSIX input flag semantics (e.g.
-        // IGNCR could not discard CR if it was already mapped to NL).
+        // Raw bytes go straight to the ldisc: pre-mapping CR/NL/DEL here would
+        // bypass c_iflag semantics (IGNCR could not discard an already-mapped CR).
         for i in 0..count {
             events[i] = InputEvent::normal(scratch[i]);
         }
@@ -69,9 +54,6 @@ impl Tty {
     }
 
     /// Register any staged echo for emission after the slot guard drops.
-    ///
-    /// Registering inside the producer is what makes the flush unforgettable:
-    /// no call site has to know whether a drain or a push echoed.
     #[inline]
     pub(crate) fn queue_echo_flush(&self, deferred: &mut PostLockWork, nesting: WriteNesting) {
         if !self.ldisc.echo_is_empty() {
@@ -80,20 +62,11 @@ impl Tty {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PTY re-exports (public API surface)
-// ---------------------------------------------------------------------------
-
 pub use super::pty::{
     get_packet_mode, get_pty_lock, get_pty_number, is_pty_slave, is_slave_locked, pty_alloc,
     queue_packet_event, set_packet_mode, set_pty_lock,
 };
 
-// ---------------------------------------------------------------------------
-// Input push (from ISR / PTY master write)
-// ---------------------------------------------------------------------------
-
-/// Push a raw input byte to a specific TTY.
 pub fn push_input<E: Into<InputEvent>>(idx: TtyIndex, event: E) {
     let event = event.into();
     push_input_batch(idx, core::slice::from_ref(&event));
@@ -104,9 +77,9 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
     push_input_batch_nested(idx, events, WriteNesting::Toplevel);
 }
 
-/// [`push_input_batch`] for a PTY master write, which reaches the slave with
-/// the master's own write lock still held — so the slave's echo of these bytes
-/// is the acquisition [`WriteNesting::PeerNested`] names.
+/// [`push_input_batch`] for a PTY master write, which reaches the slave with the
+/// master's own write lock still held — the acquisition
+/// [`WriteNesting::PeerNested`] names.
 pub(crate) fn push_input_batch_nested(idx: TtyIndex, events: &[InputEvent], nesting: WriteNesting) {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS || events.is_empty() {
@@ -114,12 +87,10 @@ pub(crate) fn push_input_batch_nested(idx: TtyIndex, events: &[InputEvent], nest
     }
 
     let mut deferred = PostLockWork::new();
-    // ISIG output-flush request (NOFLSH clear): the slave's undelivered
-    // output lives in the peer master's read buffer; it is discarded after
-    // the slave lock drops (peer lock ordering) and before the caret echo
-    // is emitted, so `^C` lands in an empty buffer and is immediately
-    // visible even when a flooding foreground job had filled it. The held
-    // backing pins the master's slot until the flush lands.
+    // ISIG output flush (NOFLSH clear): the slave's undelivered output lives in
+    // the peer master's read buffer, discarded after the slave lock drops (peer
+    // lock ordering) and before the caret echo, so `^C` lands in an empty
+    // buffer. The held backing pins the master's slot until the flush lands.
     let mut signal_flush_master: Option<slopos_ostd::KArc<super::backing::TtyBacking>> = None;
     let wake = {
         let mut guard = TTY_SLOTS[slot].lock();
@@ -162,14 +133,10 @@ pub(crate) fn push_input_batch_nested(idx: TtyIndex, events: &[InputEvent], nest
             if let Some(pg) = tty.session.fg_pgrp_handle() {
                 deferred.add_signal(pg, sig);
             }
-            // A signal char discards the foreground job's pending I/O
-            // unless NOFLSH is set. The line discipline already flushed
-            // its input queues; clear input throttle here as part of the
-            // same flush, then flush the output side below after this lock
-            // drops. The signal is posted (and its wake fires) ahead of the
-            // output-event wakes in `deferred.execute()`, so a writer blocked
-            // on the flushed queue observes its pending signal the moment
-            // its wait predicate re-runs.
+            // Unless NOFLSH, a signal char discards the foreground job's pending
+            // I/O. The signal is posted ahead of the output-event wakes in
+            // `deferred.execute()`, so a writer blocked on the flushed queue
+            // observes it the moment its wait predicate re-runs.
             if flush {
                 if let TtyDriverKind::PtySlave { peer } = &tty.driver {
                     if let Some(master_pin) = peer.upgrade() {
@@ -197,16 +164,10 @@ pub(crate) fn push_input_batch_nested(idx: TtyIndex, events: &[InputEvent], nest
                     master.ldisc.flush_input();
                 }
             }
-            // Drop the slave's pending-output accounting alongside the
-            // buffer (TCOFLUSH semantics). PTY-only: synchronous backends
-            // (vconsole, serial) complete output inline, so for them a
-            // reset would be pure counter-corruption risk with nothing to
-            // flush. `InflightGuard::drop` saturates at 0, so racing a
-            // live writer's guard cannot wrap the counter.
+            // TCOFLUSH: drop the slave's inflight accounting with the buffer.
+            // PTY-only — synchronous backends (vconsole, serial) complete output
+            // inline, so a reset there would only corrupt the counter.
             TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
-            // Writers blocked on the full-master predicate in
-            // `wait_for_write_ready` (and poll waiters) re-evaluate now
-            // that the queue is empty.
             deferred.wake_output_and_poll(master_slot);
         }
     }
@@ -218,7 +179,6 @@ pub(crate) fn push_input_batch_nested(idx: TtyIndex, events: &[InputEvent], nest
     deferred.execute();
 }
 
-/// Wake one task blocked on input for a specific TTY.
 fn notify_input_ready(idx: TtyIndex) {
     if scheduler_is_enabled() == 0 {
         return;
@@ -227,8 +187,6 @@ fn notify_input_ready(idx: TtyIndex) {
     if slot >= MAX_TTYS {
         return;
     }
-    // Input arrival wakes readers and poll waiters alike — both park on
-    // the input event queue.
     BUS.publish(tty_input_event(slot));
 }
 
@@ -244,15 +202,10 @@ fn check_read_foreground(tty: &Tty, caller_pgid: u32, caller_sid: u32) -> Result
 
 /// Surface result of a *same-session* background read, by blocking mode.
 ///
-/// A reader that is not (yet) the foreground group is a transient
-/// job-control state: the foreground handoff of a freshly spawned job, or a
-/// later `tcsetpgrp`, resolves it.  A non-blocking probe (the slop-ring
-/// re-probes its in-flight `OP_READ` rows through this path) therefore
-/// parks as `WouldBlock` so the op stays armed and self-heals — surfacing
-/// `BackgroundRead` (-EIO) would poison the async op permanently, and
-/// raising SIGTTIN on every re-probe would spam the process.  A blocking
-/// read keeps the POSIX surface: `BackgroundRead`, which the caller turns
-/// into SIGTTIN (or `HungUp` for ignored/orphaned cases).
+/// Not-yet-foreground is transient, so a non-blocking probe parks as
+/// `WouldBlock` and self-heals — surfacing `BackgroundRead` (-EIO) would poison
+/// an armed slop-ring `OP_READ` permanently and re-raise SIGTTIN on every
+/// re-probe.  A blocking read keeps the POSIX `BackgroundRead` surface.
 pub(crate) fn background_read_surface(nonblock: bool) -> TtyError {
     if nonblock {
         TtyError::WouldBlock
@@ -265,19 +218,10 @@ pub(crate) fn background_read_surface(nonblock: bool) -> TtyError {
 /// wake whichever peer was blocked on this TTY being full.
 ///
 /// `master_was_full` is the PTY master's `input_full()` state captured *before*
-/// the read. Reading a PTY master frees space in its `RawDisc` buffer, but a
-/// slave writer (e.g. a flooding `cat`) blocked in `wait_for_write_ready`'s
-/// `peer_master` arm parks on `tty_output_event(<this master slot>)` until
-/// `!input_full()`. No other read-path wake covers that direction — the master
-/// never enters the `THROTTLED`/`no_room` states the arms below key on — so
-/// without this, large slave output stalled until an unrelated master write (a
-/// keystroke) happened to publish the event. Wake those writers on the
-/// full→not-full edge here.
-///
-/// The slave's own output queue parks on the same edge from the other side: a
-/// `tcdrain` on the slave waits for its staged echo to reach the master, and a
-/// full master is exactly what stops that echo leaving. So the edge wakes both
-/// slots, not only this one.
+/// the read.  Nothing else wakes a slave writer parked in
+/// `wait_for_write_ready`'s `peer_master` arm — the master never enters the
+/// `THROTTLED`/`no_room` states the arms below key on — and a slave `tcdrain`
+/// parks on the same edge, so the full→not-full edge wakes both slots.
 fn drain_and_recover(
     tty: &mut Tty,
     slot: usize,
@@ -359,26 +303,18 @@ fn try_read_packet_mode(
     Some(Ok(1 + got))
 }
 
-// ---------------------------------------------------------------------------
-// Read path
-// ---------------------------------------------------------------------------
-
 /// Read cooked data from a specific TTY.
 ///
-/// Uses `TtySession::check_read()` as the sole read-side gate.  Background
-/// processes receive `SIGTTIN` instead of silently blocking.
-///
-/// drain + foreground check + read are merged into a single per-TTY
-/// lock acquisition per loop iteration (previously 5–6 separate locks).
+/// `TtySession::check_read()` is the sole read-side gate; a background process
+/// receives `SIGTTIN` instead of silently blocking.
 #[must_use]
 pub fn read(idx: TtyIndex, buf: &mut [u8], nonblock: bool) -> Result<usize, TtyError> {
     read_with_attach(idx, buf, nonblock, true)
 }
 
-/// Note: `_auto_attach` is intentionally dead.  Durable read-side ownership
-/// mutation has been removed, so reads no longer claim controlling
-/// terminal regardless of this flag.  The parameter is preserved to maintain
-/// ABI compatibility with the kernel services trait (`read_cooked_with_attach`).
+/// `_auto_attach` is dead: a read never claims a controlling terminal.  The
+/// parameter stays for ABI compatibility with the kernel services trait
+/// (`read_cooked_with_attach`).
 
 pub fn read_with_attach(
     idx: TtyIndex,
@@ -425,10 +361,6 @@ pub fn read_with_attach(
                 match check_read_foreground(tty, caller_pgid, caller_sid) {
                     Err(TtyError::BackgroundRead) => {
                         drop(guard);
-                        // See `background_read_surface`: non-blocking probes
-                        // park as WouldBlock (transient state, self-healing);
-                        // blocking reads keep the POSIX SIGTTIN surface.
-                        // Cross-session denial stays a hard error above.
                         if background_read_surface(nonblock) == TtyError::WouldBlock {
                             return Err(TtyError::WouldBlock);
                         }
@@ -518,8 +450,7 @@ pub fn read_with_attach(
             }
 
             // Peer close and hangup end the read without discarding what this
-            // iteration collected, nor the signal, XON byte and wakes it
-            // staged — those still have to land.
+            // iteration collected or the work it staged.
             if (tty.flags.contains(TtyFlags::PEER_CLOSED) || tty.flags.contains(TtyFlags::HUNG_UP))
                 && !tty.ldisc.has_data()
             {
@@ -545,10 +476,8 @@ pub fn read_with_attach(
             };
         }
 
-        // `wait_core` releases the queue's own lock before calling this, so
-        // it may drain the hardware and emit the echo — per invocation, never
-        // accumulated across them. Single fall-through so no early exit can
-        // skip `wd.execute()`.
+        // `wait_core` releases the queue's own lock before calling this, so the
+        // predicate may take the slot lock and drain hardware.
         let wait_condition = || {
             let mut wd = PostLockWork::new();
             let result = {
@@ -587,7 +516,6 @@ pub fn read_with_attach(
         };
         match waited {
             Ok(()) => {}
-            // VTIME expiry, or no blocking surface at all: a short read.
             Err(WaitAbort::Timeout | WaitAbort::NoRuntime) => {
                 return if total > 0 { Ok(total) } else { Ok(0) };
             }
@@ -598,9 +526,8 @@ pub fn read_with_attach(
                     Err(TtyError::Restart)
                 };
             }
-            // Never Restart for a dying task: the killed bit is not
-            // deliverable, so handle_erestartsys would restart unconditionally
-            // and the syscall would loop forever.
+            // Never Restart for a dying task: the killed bit is not deliverable,
+            // so the restart would loop forever.
             Err(WaitAbort::Killed) => {
                 return if total > 0 {
                     Ok(total)
@@ -714,8 +641,6 @@ fn wait_for_write_ready(
                 }) {
                 Ok(()) | Err(WaitAbort::NoRuntime) => {}
                 Err(WaitAbort::Interrupted) => return Err(TtyError::Restart),
-                // Never Restart for a dying task: the killed bit is not
-                // deliverable, so the syscall would restart forever.
                 Err(WaitAbort::Killed) => return Err(TtyError::SignalInterrupt),
                 Err(WaitAbort::Timeout) => {}
             }
@@ -754,11 +679,8 @@ fn wait_for_write_ready(
                 return Err(TtyError::WouldBlock);
             }
         } else {
-            // Signal-interruptible like the slave arm above: a foreground
-            // job blocked here while flooding a full master MUST unwind on
-            // Ctrl-C — the wait predicate alone can stay false forever if
-            // the master side stops draining, and delivery only happens at
-            // syscall exit, which this wait would otherwise never reach.
+            // Interruptible: this predicate can stay false forever if the master
+            // stops draining, and delivery only happens at syscall exit.
             match BUS
                 .subscribe(tty_output_event(master_slot))
                 .wait_event_interruptible(|| {
@@ -774,8 +696,6 @@ fn wait_for_write_ready(
                 }) {
                 Ok(()) | Err(WaitAbort::NoRuntime) => {}
                 Err(WaitAbort::Interrupted) => return Err(TtyError::Restart),
-                // Never Restart for a dying task: the killed bit is not
-                // deliverable, so the syscall would restart forever.
                 Err(WaitAbort::Killed) => return Err(TtyError::SignalInterrupt),
                 Err(WaitAbort::Timeout) => {}
             }
@@ -813,8 +733,6 @@ fn wait_for_write_ready(
             }) {
             Ok(()) | Err(WaitAbort::NoRuntime) => {}
             Err(WaitAbort::Interrupted) => return Err(TtyError::Restart),
-            // Never Restart for a dying task: the killed bit is not
-            // deliverable, so the syscall would restart forever.
             Err(WaitAbort::Killed) => return Err(TtyError::SignalInterrupt),
             Err(WaitAbort::Timeout) => {}
         }
@@ -823,27 +741,12 @@ fn wait_for_write_ready(
     Ok(admission)
 }
 
-// ---------------------------------------------------------------------------
-// Write path
-// ---------------------------------------------------------------------------
-
 /// Write bytes to a specific TTY.
 ///
-/// Applies output processing (`c_oflag`) — e.g. OPOST + ONLCR converts
-/// `\n` to `\r\n` before sending to the driver.
-///
-/// split-write pattern — output is processed through the line
-/// discipline under the per-TTY lock into a local stack buffer, the lock is
-/// dropped, and the buffered bytes are written to the hardware without
-/// holding any TTY lock.  This prevents slow serial I/O from blocking
-/// operations on other TTYs.
-///
-/// write-side foreground check — when `TOSTOP` is set in the
-/// TTY's `c_lflag`, background processes receive `SIGTTOU` instead of
-/// being silently allowed to write.  This matches POSIX job control.
-///
-/// TOSTOP audit — added SIGTTOU blocked/ignored bypass and
-/// orphaned process group → EIO handling to match `tcsetattr` semantics.
+/// Output processing (`c_oflag`, e.g. OPOST + ONLCR) runs under the per-TTY
+/// lock into a stack buffer; the lock is dropped before the hardware write, so
+/// slow serial I/O cannot block other TTYs.  With `TOSTOP` set, a background
+/// process receives `SIGTTOU` rather than writing.
 #[must_use]
 pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyError> {
     let slot = idx.0 as usize;
@@ -851,8 +754,6 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         return Err(TtyError::InvalidIndex);
     }
 
-    // Post-hangup I/O hardening — writes to a hung-up TTY
-    // always return EIO.  The data has nowhere to go.
     {
         let guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_ref() {
@@ -864,16 +765,11 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
 
     check_write_foreground(slot)?;
 
-    // Maximum output bytes per chunk.  Each input byte can expand to at most
-    // 2 output bytes (e.g. NL → CR+NL with ONLCR).  256 bytes leaves room
-    // for expansion while keeping the stack buffer small.
+    // Each input byte can expand to two output bytes (NL → CR+NL under ONLCR).
     const OUT_BUF_CAP: usize = 256;
 
-    // Pin the PTY peer once — holding the backing keeps the peer's slot
-    // from being freed or reused for the whole write, so the cached slot
-    // indices below stay valid. A failed upgrade means the peer is gone:
-    // the write has nowhere to go (the master strongly holds its slave,
-    // so only the slave→master direction can observe this).
+    // Pinning the peer's backing keeps its slot from being freed or reused, so
+    // the cached slot indices below stay valid for the whole write.
     let (_peer_pin, peer_slave_slot, peer_master_slot): (
         Option<slopos_ostd::KArc<super::backing::TtyBacking>>,
         Option<usize>,
@@ -924,7 +820,6 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         let mut out_len = 0;
         let driver_id;
 
-        // Process output under per-TTY lock (fast — pure computation).
         {
             let mut guard = TTY_SLOTS[slot].lock();
             let tty = match guard.as_mut() {
@@ -955,14 +850,11 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
                     OutputAction::Suppress => {}
                 }
                 pos += 1;
-                // If buffer nearly full, break to flush.
                 if out_len >= OUT_BUF_CAP - 8 {
                     break;
                 }
             }
         }
-        // Slot lock dropped: the write lock is outside it, and the emission
-        // serialises against concurrent echo (POSIX §11.1.9).
         let driver_written =
             output::write_processed(slot, driver_id, &out_buf[..out_len], WriteNesting::Toplevel);
         if driver_written < out_len {

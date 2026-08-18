@@ -1,22 +1,15 @@
 //! Canonical keyboard keycodes — USB HID Keyboard/Keypad usage IDs (page 0x07).
 //!
-//! This is SlopOS's single, layout-independent keycode space. Every keyboard
-//! backend (i8042 PS/2 today; USB-HID / I²C-HID later) decodes its raw protocol
-//! into these usages, and a single keymap layer turns `(usage, modifiers, locks)`
-//! into text codepoints or [`NamedKey`]s. The kernel already speaks HID
-//! (`drivers::touchpad`), so this unifies all input under one vocabulary.
+//! SlopOS's single, layout-independent keycode space: every keyboard backend
+//! decodes its raw protocol into these usages. Values are the USB HID Usage
+//! Table v1.12 "Keyboard/Keypad Page (0x07)" ids, carried on the wire as the low
+//! 16 bits of an [`super::InputEvent`]'s `data1`.
 //!
-//! Values are the standard USB HID Usage Table v1.12, "Keyboard/Keypad Page
-//! (0x07)" usage IDs. They are carried on the wire as the low 16 bits of an
-//! [`super::InputEvent`]'s `data1`.
-//!
-//! These constants are intentionally **not** glob-re-exported at the crate root
-//! (`slopos_abi`) — reach them as `slopos_abi::input::keycode::KEY_A` so the ~100
-//! short names never collide with other ABI symbols.
+//! Intentionally **not** glob-re-exported at the crate root — reach them as
+//! `slopos_abi::input::keycode::KEY_A` so the short names cannot collide.
 
 #![allow(dead_code)]
 
-// --- Letters (0x04..=0x1D) ---------------------------------------------------
 pub const KEY_A: u16 = 0x04;
 pub const KEY_B: u16 = 0x05;
 pub const KEY_C: u16 = 0x06;
@@ -44,7 +37,6 @@ pub const KEY_X: u16 = 0x1B;
 pub const KEY_Y: u16 = 0x1C;
 pub const KEY_Z: u16 = 0x1D;
 
-// --- Number row (0x1E..=0x27): 1,2,3,4,5,6,7,8,9,0 ---------------------------
 pub const KEY_1: u16 = 0x1E;
 pub const KEY_2: u16 = 0x1F;
 pub const KEY_3: u16 = 0x20;
@@ -56,7 +48,6 @@ pub const KEY_8: u16 = 0x25;
 pub const KEY_9: u16 = 0x26;
 pub const KEY_0: u16 = 0x27;
 
-// --- Main control / punctuation ---------------------------------------------
 pub const KEY_ENTER: u16 = 0x28;
 pub const KEY_ESC: u16 = 0x29;
 pub const KEY_BACKSPACE: u16 = 0x2A;
@@ -76,7 +67,6 @@ pub const KEY_DOT: u16 = 0x37;
 pub const KEY_SLASH: u16 = 0x38;
 pub const KEY_CAPSLOCK: u16 = 0x39;
 
-// --- Function row (0x3A..=0x45) ---------------------------------------------
 pub const KEY_F1: u16 = 0x3A;
 pub const KEY_F2: u16 = 0x3B;
 pub const KEY_F3: u16 = 0x3C;
@@ -90,7 +80,6 @@ pub const KEY_F10: u16 = 0x43;
 pub const KEY_F11: u16 = 0x44;
 pub const KEY_F12: u16 = 0x45;
 
-// --- Navigation / editing cluster -------------------------------------------
 pub const KEY_PRINTSCREEN: u16 = 0x46;
 pub const KEY_SCROLLLOCK: u16 = 0x47;
 pub const KEY_PAUSE: u16 = 0x48;
@@ -105,7 +94,6 @@ pub const KEY_LEFT: u16 = 0x50;
 pub const KEY_DOWN: u16 = 0x51;
 pub const KEY_UP: u16 = 0x52;
 
-// --- Keypad (0x53..=0x63) — distinct from the navigation cluster above -------
 pub const KEY_NUMLOCK: u16 = 0x53;
 pub const KEY_KP_SLASH: u16 = 0x54;
 pub const KEY_KP_ASTERISK: u16 = 0x55;
@@ -124,16 +112,13 @@ pub const KEY_KP_9: u16 = 0x61;
 pub const KEY_KP_0: u16 = 0x62;
 pub const KEY_KP_DOT: u16 = 0x63;
 
-// --- Misc -------------------------------------------------------------------
 pub const KEY_NONUS_BACKSLASH: u16 = 0x64;
 pub const KEY_APPLICATION: u16 = 0x65; // "menu" / context key
 pub const KEY_MENU: u16 = 0x76;
-/// System Request / Attention. On an AT keyboard this is what PrintScreen
-/// reports while Alt is held, and it is distinct from [`KEY_PRINTSCREEN`]:
-/// the hardware sends a different make code, not PrintScreen plus a modifier.
+/// System Request. An AT keyboard sends a distinct make code for Alt+PrintScreen,
+/// so this is not [`KEY_PRINTSCREEN`] plus a modifier.
 pub const KEY_SYSRQ: u16 = 0x9A;
 
-// --- Modifier keys (0xE0..=0xE7) --------------------------------------------
 pub const KEY_LEFTCTRL: u16 = 0xE0;
 pub const KEY_LEFTSHIFT: u16 = 0xE1;
 pub const KEY_LEFTALT: u16 = 0xE2;
@@ -143,9 +128,8 @@ pub const KEY_RIGHTSHIFT: u16 = 0xE5;
 pub const KEY_RIGHTALT: u16 = 0xE6;
 pub const KEY_RIGHTMETA: u16 = 0xE7; // Right GUI / Super / Logo
 
-/// A keyboard key that does not directly produce a text codepoint (or whose
-/// non-text meaning the consumer wants explicitly). Emitted by the keymap layer
-/// alongside text codepoints.
+/// A keyboard key that produces no text codepoint (or whose non-text meaning the
+/// consumer wants explicitly). Emitted by the keymap layer alongside text.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NamedKey {

@@ -1,9 +1,5 @@
-//! The lockup detector's wiring into live per-CPU state.
-//!
-//! The sample state machine is pinned host-side in
-//! `slopos-ostd/tests/watchdog.rs`. What only a booted kernel can show is
-//! that the heartbeat actually moves on a timer interrupt, that eligibility
-//! tracks the LAPIC timer, and that suppression is honoured.
+//! The lockup detector's wiring into live per-CPU state. The sample state
+//! machine itself is pinned host-side in `slopos-ostd/tests/watchdog.rs`.
 
 use slopos_arch::pcr;
 use slopos_drivers::{apic, hpet};
@@ -11,13 +7,11 @@ use slopos_ostd::lock_class;
 use slopos_ostd::watchdog;
 use slopos_testing::{TestResult, assert_test};
 
-/// The timer interrupt advances this CPU's progress counter.
 pub fn test_heartbeat_advances_on_timer_tick() -> TestResult {
     let cpu = pcr::get_current_cpu();
     let before = pcr::heartbeat_for_cpu(cpu);
 
-    // Three periodic tick intervals, polled against a clock the LAPIC does
-    // not drive.
+    // Three tick periods, timed by a clock the LAPIC does not drive.
     hpet::delay_ms(30);
 
     let after = pcr::heartbeat_for_cpu(cpu);
@@ -28,8 +22,7 @@ pub fn test_heartbeat_advances_on_timer_tick() -> TestResult {
     TestResult::Pass
 }
 
-/// `touch()` records progress without a timer interrupt — the property the
-/// long bounded loops depend on.
+/// The property the long bounded loops depend on: progress without a tick.
 pub fn test_touch_advances_heartbeat() -> TestResult {
     let cpu = pcr::get_current_cpu();
     let flags = slopos_arch::cpu::save_flags_cli();
@@ -42,9 +35,8 @@ pub fn test_touch_advances_heartbeat() -> TestResult {
     TestResult::Pass
 }
 
-/// A `Suppress` token takes this CPU out of the watched set and puts it
-/// back, leaving the heartbeat moved so the first sample after the scope
-/// is not stale by construction.
+/// Leaving a `Suppress` scope must also move the heartbeat, so the first sample
+/// after it is not stale by construction.
 pub fn test_suppress_scopes_eligibility() -> TestResult {
     let cpu = pcr::get_current_cpu();
     assert_test!(
@@ -72,12 +64,8 @@ pub fn test_suppress_scopes_eligibility() -> TestResult {
     TestResult::Pass
 }
 
-/// Eligibility follows the hardware: a CPU whose LAPIC timer is masked
-/// cannot tick, so it must not be watched for not ticking.
-///
-/// This is what keeps the LAPIC timer suite from being reported: those
-/// tests stop and mask the timer on purpose, and leave it stopped across
-/// the tests that follow.
+/// A CPU whose LAPIC timer is masked cannot tick, so it must not be watched for
+/// not ticking — the LAPIC timer suite masks it on purpose and leaves it masked.
 pub fn test_masked_timer_is_not_watchable() -> TestResult {
     if !apic::timer::is_calibrated() {
         return TestResult::Skipped;
@@ -119,8 +107,7 @@ pub fn test_miss_threshold_rejects_zero() -> TestResult {
 pub fn test_probe_admits_one_at_a_time() -> TestResult {
     use watchdog::NmiDisposition;
 
-    // A CPU index no machine this runs on has, so a real detection cannot
-    // collide with the assertions.
+    // An index no machine this runs on has, so a real detection cannot collide.
     const SPARE: usize = slopos_arch::MAX_CPUS - 1;
     watchdog::release_probe(SPARE);
 
@@ -150,12 +137,8 @@ pub fn test_probe_admits_one_at_a_time() -> TestResult {
     TestResult::Pass
 }
 
-/// A lock names its holder only while it is held.
-///
-/// `holder` is written on acquisition and never cleared, so both halves of
-/// the validation carry weight: an untaken lock's zeroed field would
-/// otherwise decode as "CPU 0, ticket 0", and a released one would keep
-/// naming whoever had it last.
+/// `holder` is written on acquisition and never cleared, so both halves of the
+/// check carry weight: a zeroed field would otherwise decode as "CPU 0".
 pub fn test_holder_is_named_only_while_held() -> TestResult {
     use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 
@@ -193,11 +176,8 @@ pub fn test_holder_is_named_only_while_held() -> TestResult {
     TestResult::Pass
 }
 
-/// A force-unlock releases one holder, not the whole queue.
-///
-/// Storing `next_ticket` would jump past every ticket already taken, and
-/// each of those waiters would spin forever on a number that is never
-/// served — manufacturing the lockup the detector exists to report.
+/// Storing `next_ticket` would jump past every ticket already taken, leaving
+/// those waiters spinning forever on a number that is never served.
 pub fn test_force_unlock_releases_exactly_one() -> TestResult {
     use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 
@@ -206,8 +186,7 @@ pub fn test_force_unlock_releases_exactly_one() -> TestResult {
         lock_class!("test.watchdog_force_unlock", LOCK_LEVEL_UNORDERED),
     );
 
-    // A holder plus one queued waiter. Storing `next_ticket` would free the
-    // lock in one step and leave the waiter's ticket unreachable forever.
+    // A holder plus one queued waiter.
     lock.abandon_for_test();
     lock.abandon_for_test();
     assert_test!(lock.is_locked(), "two tickets taken but lock reads free");
@@ -221,8 +200,7 @@ pub fn test_force_unlock_releases_exactly_one() -> TestResult {
     lock.release_leaked_guard_for_test();
     assert_test!(!lock.is_locked(), "the queue did not drain");
 
-    // Idempotent: a release on a free lock must not run `now_serving` ahead
-    // of `next_ticket`, which would wedge every future acquirer.
+    // A release on a free lock must not run `now_serving` past `next_ticket`.
     lock.release_leaked_guard_for_test();
     assert_test!(!lock.is_locked(), "a free lock was over-released");
 
@@ -231,13 +209,8 @@ pub fn test_force_unlock_releases_exactly_one() -> TestResult {
     TestResult::Pass
 }
 
-/// A real wedge is detected, reported, and survived.
-///
-/// This CPU stops taking timer interrupts for long enough that its watcher
-/// must report it. The machine reaching the end of this function is the
-/// assertion that matters: before the escalation ladder existed, every
-/// detection ended in `panic!`, which is the force that made both of the
-/// old thresholds grow until they stopped detecting anything.
+/// This CPU stops taking timer interrupts long enough that its watcher must
+/// report it; reaching the end of the function is the assertion that matters.
 pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
     if slopos_arch::pcr::get_online_cpu_count() < 2 {
         // Nobody is watching, so there is nothing to observe.
@@ -248,9 +221,7 @@ pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
     let original = watchdog::miss_threshold();
 
     // Three samples, so the stall need only outlast ~30 ms of the watcher's
-    // ticks rather than the full second the default asks for. The delay
-    // lets the watcher take at least one sample under the new threshold —
-    // it latches the report point when the heartbeat last moved.
+    // ticks; the delay lets it take one sample under the new threshold.
     watchdog::set_miss_threshold(3);
     hpet::delay_ms(50);
 

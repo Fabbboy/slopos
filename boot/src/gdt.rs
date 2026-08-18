@@ -49,15 +49,8 @@ pub fn gdt_set_kernel_rsp0_for_cpu(cpu_id: usize, rsp0: u64) {
 
 /// Bind an IST slot on the current CPU to a real kernel stack.
 ///
-/// `slot` is the typed IST slot enum (1..7); `stack_top` is a borrowed
-/// `KernelStackTop` whose lifetime is tied to the backing allocation.
-/// Both replace earlier `u8` / `u64` parameters whose runtime checks
-/// (zero index, overflow index, fake address) become compile-time
-/// errors.
-///
-/// `&mut BootCtx<'_, K: CpuInitKind>` gates the call: BSP-init,
-/// AP-init, and hermetic test scopes all need to bind IST slots, so
-/// the surface is kind-polymorphic over [`slopos_hermetic::CpuInitKind`].
+/// The `&mut BootCtx` gates the call to a CPU-init scope; BSP-init, AP-init and
+/// hermetic test scopes all bind IST slots, hence the kind-polymorphism.
 pub fn gdt_set_ist<'b, K: slopos_hermetic::CpuInitKind>(
     _ctx: &mut slopos_hermetic::BootCtx<'b, K>,
     slot: IstSlot,
@@ -84,12 +77,8 @@ pub fn gdt_set_ist_for_cpu<'b, K: slopos_hermetic::CpuInitKind>(
     }
 }
 
-/// Program the SYSCALL/SYSRET MSRs (`STAR`, `LSTAR`, `SFMASK`) and
-/// initialise the per-CPU GS_BASE syscall-scratch wiring.
-///
-/// Both BSP-init and per-AP bringup paths call this, so it accepts
-/// any `CpuInitWitness` (`BspToken` or `ApToken`); the witness simply
-/// gates the call to a boot-init scope.
+/// Program the SYSCALL/SYSRET MSRs (`STAR`, `LSTAR`, `SFMASK`) and the per-CPU
+/// GS_BASE syscall-scratch wiring. The witness gates it to a boot-init scope.
 pub fn syscall_msr_init<W: slopos_ostd::sync::CpuInitWitness>(witness: &W) {
     use slopos_arch::arch::gdt::SegmentSelector;
 
@@ -99,16 +88,9 @@ pub fn syscall_msr_init<W: slopos_ostd::sync::CpuInitWitness>(witness: &W) {
     let lstar_value = slopos_ostd::user::mode::user_return_trampoline_addr();
     let sfmask_value: u64 = 0x0000_0000_0004_7700;
 
-    // Inv. 2: __ostd_user_return is the LSTAR target — see
-    // `slopos_ostd::user::asm::user_return.s`.  The STAR selectors
-    // match the GDT layout already loaded by gdt_init_for_cpu /
-    // PCR::install.  The trampoline expects `pcr.user_ctx_ptr` and
-    // `pcr.kernel_return_ctx` to have been populated by the OSTD
-    // user-mode backend (registered inline from the boot path in
-    // `kernel_main_impl`) before any user-mode SYSCALL fires; per-task
-    // entry rides through `user_task_first_run` / `user_task_loop`
-    // (see `core::syscall::user_loop`). `install_syscall_msrs` itself
-    // is safe — it takes the CpuInitWitness as its soundness gate.
+    // Inv. 2: the LSTAR trampoline requires `pcr.user_ctx_ptr` and
+    // `pcr.kernel_return_ctx` to be populated before any user-mode SYSCALL
+    // fires, and the STAR selectors must match the GDT already loaded.
     install_syscall_msrs(witness, star_value, lstar_value, sfmask_value);
 
     klog_debug!(

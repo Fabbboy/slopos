@@ -1,28 +1,22 @@
-//! Minimal AML value model used by the focused I²C-HID enumeration
-//! interpreter. We only need integers, strings, and (mutable) buffers —
-//! enough to run a touchpad device's `_INI` and read back the resource
-//! template it patches.
+//! Minimal AML value model for the focused I²C-HID enumeration interpreter:
+//! enough to run a touchpad's `_INI` and read back the resource template it
+//! patches.
 
 use slopos_ostd::KVec;
 
-/// An AML runtime value.
 pub enum AmlVal {
-    /// Integer (AML integers are 64-bit on revision ≥ 2).
+    /// AML integers are 64-bit on revision >= 2.
     Int(u64),
-    /// ASCII string (no trailing NUL).
+    /// ASCII, no trailing NUL.
     Str(KVec<u8>),
-    /// Byte buffer (e.g. a `ResourceTemplate`).
     Buf(KVec<u8>),
-    /// Package (ordered list of values, e.g. a GPIO pad-info table).
     Package(KVec<AmlVal>),
-    /// Declared but unset.
     Uninit,
 }
 
 impl AmlVal {
-    /// Coerce to an integer where the AML rules allow it (`Uninit`/other
-    /// → 0). Buffers/strings are not numerically coerced here (the
-    /// touchpad methods never do that on the enumeration path).
+    /// Non-integers yield 0; buffers and strings are deliberately not coerced,
+    /// as the enumeration path never relies on it.
     pub fn as_int(&self) -> u64 {
         match self {
             AmlVal::Int(v) => *v,
@@ -49,8 +43,8 @@ impl AmlVal {
     }
 }
 
-/// Clone a byte vector (best-effort; an allocation failure yields an
-/// empty vector — the caller treats that as a parse failure downstream).
+/// Best-effort: an allocation failure truncates the copy, which callers
+/// surface as a parse failure downstream.
 pub fn clone_bytes(src: &KVec<u8>) -> KVec<u8> {
     let mut out = KVec::new();
     for &b in src.iter() {
@@ -61,7 +55,7 @@ pub fn clone_bytes(src: &KVec<u8>) -> KVec<u8> {
     out
 }
 
-/// Build a [`KVec<u8>`] from a slice (best-effort).
+/// Best-effort: an allocation failure truncates the copy.
 pub fn bytes_from_slice(src: &[u8]) -> KVec<u8> {
     let mut out = KVec::new();
     for &b in src {
@@ -72,9 +66,7 @@ pub fn bytes_from_slice(src: &[u8]) -> KVec<u8> {
     out
 }
 
-/// Pack a 4-byte ACPI NameSeg into a `u32` key (little-endian, the
-/// natural in-memory order). Used as a map key for method arg-counts and
-/// device/field lookups.
+/// Little-endian, so the key preserves the NameSeg's in-memory byte order.
 #[inline]
 pub fn nameseg_key(seg: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*seg)

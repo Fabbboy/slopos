@@ -48,11 +48,8 @@ define_syscall!(syscall_mmap
         process, addr, length, prot, flags, fd.raw() as i64, offset,
     );
     if result == 0 {
-        // One bounded reclaim-and-retry, here rather than inside `try_charge`:
-        // the account arena takes no locks by construction, so a reclaim hook
-        // there would give it an inbound edge from every charge site at once.
-        // A syscall boundary is where blocking is legal and where a refusal
-        // has an errno to travel back on.
+        // Reclaim-and-retry lives here, not in `try_charge`: the account arena
+        // takes no locks, and a syscall boundary is where blocking is legal.
         let want = length.div_ceil(4096).try_into().unwrap_or(u32::MAX);
         if slopos_mm::reclaim_pages(want) != 0 {
             result = slopos_mm::process_vm::process_vm_mmap(
@@ -72,8 +69,8 @@ define_syscall!(syscall_munmap
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
-    // Each page was invalidated locally as it went, and the freed frames cannot
-    // be reallocated until every CPU has quiesced.
+    // No shootdown here: pages are invalidated locally as they go, and freed
+    // frames cannot be reallocated until every CPU has quiesced.
     let rc = slopos_mm::process_vm::process_vm_munmap(process_id.process().ok_or(Errno::ESRCH)?, addr, length);
     if rc < 0 {
         Err(Errno::from_raw(rc).unwrap_or(Errno::EINVAL))
@@ -134,6 +131,5 @@ define_syscall!(syscall_ftruncate
     }
 });
 
-// Suppress unused warning for the SyscallResult import.
 #[allow(dead_code)]
 type _Unused = SyscallResult;

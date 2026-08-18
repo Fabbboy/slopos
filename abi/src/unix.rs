@@ -1,6 +1,5 @@
 //! ABI types for AF_UNIX (Unix domain) sockets.
 
-/// Maximum path length for Unix socket abstract namespace addresses.
 pub const UNIX_PATH_MAX: usize = 108;
 
 /// Unix domain socket address — mirrors POSIX `sockaddr_un` layout.

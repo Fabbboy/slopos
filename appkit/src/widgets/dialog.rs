@@ -9,10 +9,8 @@ use crate::traits::{
     FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
 };
 
-/// Modal dialog rendered as a centered card over a dimming backdrop.
-///
-/// The widget itself fills its parent so the backdrop covers everything and no
-/// click reaches the tree underneath; the card is centered within that.
+/// A centered card over a dimming backdrop. The widget fills its parent, so the
+/// backdrop covers everything and no click reaches the tree underneath.
 pub struct DialogWidget {
     core: WidgetCore,
     title: String,
@@ -20,12 +18,9 @@ pub struct DialogWidget {
     actions: Vec<Box<dyn Widget>>,
     on_dismiss: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     card_rect: Rect,
-    /// Which action a keyboard activation would fire.
-    ///
-    /// `None` until the user names one with Tab or an arrow key. A confirm
-    /// dialog's first action is typically the destructive one, so defaulting
-    /// to it would let a stray Enter — from the keystroke that opened the
-    /// dialog — carry out the thing the dialog exists to ask about.
+    /// `None` until Tab or an arrow key names one: a confirm dialog's first
+    /// action is typically the destructive one, and a stray Enter must not fire
+    /// the thing the dialog exists to ask about.
     focused_action: Option<usize>,
 }
 
@@ -66,7 +61,6 @@ impl DialogWidget {
         self.card_rect
     }
 
-    /// Card width for a given available width.
     fn card_width(&self, available: i32) -> i32 {
         CARD_MAX_WIDTH.min(available)
     }
@@ -76,7 +70,7 @@ impl DialogWidget {
         (self.card_width(available) - CARD_PADDING * 2).max(0)
     }
 
-    /// Total width of the action row, including the gaps between buttons.
+    /// Action row width, gaps included.
     fn actions_width(&self) -> i32 {
         let mut total = 0;
         for (i, action) in self.actions.iter().enumerate() {
@@ -110,9 +104,7 @@ impl DialogWidget {
     }
 }
 
-/// Internal padding inside the card.
 const CARD_PADDING: i32 = 16;
-/// Spacing between action buttons.
 const ACTION_SPACING: i32 = 8;
 /// Preferred card width; narrower only when the window is.
 const CARD_MAX_WIDTH: i32 = 300;
@@ -259,8 +251,8 @@ impl Widget for DialogWidget {
                     return EventResponse::Consumed;
                 }
 
-                // Only the action under the pointer gets the event. Handing it
-                // to each in turn is how "Cancel" used to fire "Kill".
+                // Only the action under the pointer gets the event; offering it
+                // to each in turn would let "Cancel" fire "Kill".
                 for action in &mut self.actions {
                     if action.layout_rect().contains(*x, *y) {
                         let resp = action.event(event, EventPhase::Target, sink);

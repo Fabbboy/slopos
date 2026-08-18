@@ -20,9 +20,8 @@ pub const CURSOR_SHAPE_SE_RESIZE: u8 = 10;
 pub const CURSOR_SHAPE_GRAB: u8 = 11;
 pub const CURSOR_SHAPE_GRABBING: u8 = 12;
 
-/// Fixed-size application identifier following the Wayland `set_app_id()` convention.
-/// Apps declare their identity (e.g. "org.slopos.shell") and the compositor uses
-/// this for window-to-dock matching instead of the window title.
+/// Fixed-size app identifier, following Wayland's `set_app_id()` convention.
+/// The compositor matches windows to dock entries on this, not on the title.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct AppId(pub [u8; 32]);
@@ -64,16 +63,12 @@ pub struct WindowInfo {
     pub state: u8,
     pub damage_count: u8,
     pub cursor_shape: u8,
-    /// Currently-committed double-buffer slot (0 or 1). Pairs with `shm_token`
-    /// (the slot's fd) so the compositor's surface cache keys buffers by the
-    /// stable slot id rather than the recyclable fd number.
+    /// Currently-committed double-buffer slot (0 or 1). Pairs with `shm_token` so
+    /// the surface cache keys on the stable slot id, not the recyclable fd.
     pub buffer_id: u8,
     pub shm_token: u32,
-    /// Monotonic surface-incarnation id. `task_id` is a recyclable surface-slot
-    /// index, so it alone cannot distinguish a destroyed surface from the next
-    /// one to reuse its slot; the cache folds this generation into its key so a
-    /// recycled `(task_id, buffer_id)` can never alias the prior surface's
-    /// (possibly another client's) mapping.
+    /// Monotonic surface-incarnation id. `task_id` is a recyclable slot index, so
+    /// the cache folds this in to stop a reused slot aliasing the prior mapping.
     pub buffer_generation: u32,
     pub damage_regions: [DamageRect; MAX_WINDOW_DAMAGE_REGIONS],
     pub title: [u8; 32],

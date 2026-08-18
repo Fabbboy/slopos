@@ -25,20 +25,17 @@ pub const ROOT_VIRTIO: u8 = 2;
 
 static ROOT_MODE: AtomicU8 = AtomicU8::new(ROOT_AUTO);
 
-/// Set true once the initramfs has been unpacked into the RAM root, so
-/// [`boot_step_fs_init`] demotes the ext2 disk to a `/mnt` secondary instead of
-/// replacing `/`.
+/// Set once the initramfs is unpacked, so [`boot_step_fs_init`] demotes the ext2
+/// disk to a `/mnt` secondary instead of replacing `/`.
 static ROOTFS_IS_RAMFS: AtomicBool = AtomicBool::new(false);
 
-/// Record the `root=` selection parsed from the kernel cmdline.
 pub fn set_root_mode(mode: u8) {
     ROOT_MODE.store(mode, Ordering::Relaxed);
 }
 
 static FS_HOOKS_INIT: InitFlag = InitFlag::new();
 
-/// Register the filesystem-related task/file hooks exactly once, regardless of
-/// whether the initramfs or the virtio path brings the VFS up first.
+/// Idempotent: either the initramfs or the virtio path may reach the VFS first.
 fn register_fs_hooks() {
     if !FS_HOOKS_INIT.init_once() {
         return;
@@ -49,11 +46,8 @@ fn register_fs_hooks() {
 
 /// Bring up the RAM-resident root from a Limine-loaded initramfs (cpio) module.
 ///
-/// Runs before [`boot_step_fs_init`]. On the initramfs path it mounts the
-/// builtin filesystems (RamFs at `/`, ramfs `/tmp`, devfs `/dev`) and unpacks
-/// the cpio into `/`, so the whole userland boots from RAM with no storage
-/// driver — identical in QEMU and on real hardware. On the virtio path it is a
-/// no-op and `boot_step_fs_init` mounts the ext2 disk at `/` as before.
+/// Runs before [`boot_step_fs_init`]; a no-op on the virtio path, where that
+/// step mounts the ext2 disk at `/` instead.
 fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     let archive = crate::limine_protocol::initramfs();
     let use_initramfs = match ROOT_MODE.load(Ordering::Relaxed) {
@@ -75,10 +69,8 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
 
     register_fs_hooks();
 
-    // ext2 is not initialized at this priority, so this mounts RamFs at `/`
-    // plus ramfs `/tmp` and devfs `/dev`. (If the kernel-test phase already
-    // mounted the builtin filesystems, this is a no-op and the RamFs root is
-    // reused.)
+    // ext2 is not initialized at this priority, so this mounts RamFs at `/`; a
+    // no-op if the kernel-test phase already mounted the builtin filesystems.
     if vfs_init_builtin_filesystems().is_err() {
         klog_info!("ROOTFS: failed to mount builtin filesystems");
         return -1;
@@ -105,11 +97,9 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
 fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     register_fs_hooks();
 
-    // Initialize ext2 from disk0 (the first-probed virtio-blk device) if one is
-    // attached. The FS acquires an EXCLUSIVE write capability and holds the
-    // token for the kernel's lifetime, so nothing else can open a second writer
-    // to the device (Layer 1: ownership = exclusion). On real hardware there is
-    // no such disk — that's fine, the root came from the initramfs.
+    // The FS takes an exclusive write capability on disk0 and holds it for the
+    // kernel's lifetime, so nothing else can open a second writer. Absence is
+    // not an error: on real hardware the root came from the initramfs.
     if let Some(disk0) = virtio_blk::blk_device_by_index(BlockDeviceIndex(0)) {
         if virtio_blk::blk_is_ready(disk0) {
             match virtio_blk::open_writer(disk0) {
@@ -131,9 +121,8 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         }
     }
 
-    // Initramfs path: the RAM root is already mounted at `/`. Demote the ext2
-    // disk (if present) to a `/mnt` secondary — the future installer's target —
-    // and never touch `/`.
+    // Initramfs path: `/` is already the RAM root, so the ext2 disk becomes a
+    // `/mnt` secondary instead.
     if ROOTFS_IS_RAMFS.load(Ordering::Relaxed) {
         if ext2_vfs_is_initialized() {
             match mount(b"/mnt", &EXT2_VFS_STATIC, 0) {
@@ -144,16 +133,11 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         return 0;
     }
 
-    // Virtio path: mount the builtin filesystems and install ext2 at `/`.
     if vfs_init_builtin_filesystems().is_ok() {
         if ext2_vfs_is_initialized() {
-            // The kernel-test phase (drivers/90) runs before this step and
-            // may have called `vfs_init_builtin_filesystems` itself; with
-            // ext2 not yet ready, that call mounted RamFs at `/` and set
-            // the one-shot init flag, so this `vfs_init_builtin_filesystems`
-            // returned without mounting ext2. Force-replace any existing
-            // root mount with the live ext2 backing so init/utests can
-            // resolve `/sbin/init` and `/bin/*`.
+            // The kernel-test phase may already have mounted RamFs at `/` and
+            // tripped the one-shot init flag, so the call above returned without
+            // mounting ext2. Force-replace that root with the live ext2 backing.
             let _ = unmount(b"/");
             match mount(b"/", &EXT2_VFS_STATIC, 0) {
                 Ok(_) => {

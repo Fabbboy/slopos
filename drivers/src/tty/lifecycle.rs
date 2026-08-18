@@ -1,7 +1,6 @@
-//! TTY lifecycle management — hangup, vhangup, active TTY routing, and
-//! subsystem initialization. Open/close lifetime lives in
-//! [`super::backing`]: cloning and dropping `KArc<TtyBacking>` is the
-//! only open/close mechanism.
+//! Hangup, vhangup, active-TTY routing and subsystem init. Open/close lifetime
+//! is elsewhere: cloning and dropping `KArc<TtyBacking>` in [`super::backing`]
+//! is the only open/close mechanism.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -16,30 +15,20 @@ use super::table::{TTY_SLOTS, tty_input_event, tty_output_event};
 use super::{MAX_TTYS, TtyError, TtyFlags, TtyIndex};
 use slopos_ostd::sync::BUS;
 
-// ---------------------------------------------------------------------------
-// Active TTY tracking (for keyboard input routing)
-// ---------------------------------------------------------------------------
-
-/// The currently active TTY index (receives keyboard input).
-/// Defaults to 0 (serial console).
+/// The TTY receiving keyboard input; index 0 is the serial console.
 static ACTIVE_TTY: AtomicU8 = AtomicU8::new(0);
 static DEFAULT_CONSOLE_TTY: AtomicU8 = AtomicU8::new(0);
 
-/// Returns the TTY index that should receive keyboard input.
 pub fn active_tty() -> TtyIndex {
     TtyIndex(ACTIVE_TTY.load(Ordering::Relaxed))
 }
 
-/// Set the active TTY (the one receiving keyboard input).
 pub fn set_active_tty(idx: TtyIndex) {
     ACTIVE_TTY.store(idx.0, Ordering::Relaxed);
 }
 
-/// Switch keyboard routing to a specific active TTY.
-///
-/// This controls only the TTY input route (`active_tty`). It does not alter:
-/// - compositor focus (UI/window focus)
-/// - POSIX foreground process group/job control (`fg_pgrp`)
+/// Switches the TTY input route only — not compositor focus, not the POSIX
+/// foreground process group.
 #[must_use]
 pub fn switch_active_tty(idx: TtyIndex) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
@@ -71,18 +60,10 @@ pub fn default_console_tty() -> TtyIndex {
     TtyIndex(DEFAULT_CONSOLE_TTY.load(Ordering::Relaxed))
 }
 
-// ---------------------------------------------------------------------------
-// Subsystem initialisation
-// ---------------------------------------------------------------------------
-
-/// Initialise the TTY subsystem.  Call during early boot after serial is ready.
+/// Call during early boot, after serial is ready.
 pub fn init() {
     super::table::tty_table_init();
 }
-
-// ---------------------------------------------------------------------------
-// Hangup
-// ---------------------------------------------------------------------------
 
 pub fn hangup(idx: TtyIndex) {
     let Some(session_id) = hangup_mark(idx) else {
@@ -91,11 +72,10 @@ pub fn hangup(idx: TtyIndex) {
     hangup_notify(idx, session_id);
 }
 
-/// The locked half of a hangup: flush, detach the session, latch
-/// `HUNG_UP`. Returns the detached session id for [`hangup_notify`], or
-/// `None` when the slot is empty. Split from the notify half so a caller
-/// serialising against reopen can run this under its own outer lock while
-/// signals and wakeups stay outside every lock.
+/// The locked half of a hangup; returns the detached session id for
+/// [`hangup_notify`], or `None` when the slot is empty. Split so a caller
+/// serialising against reopen can hold its own outer lock across this half
+/// while signals and wakeups stay outside every lock.
 pub(crate) fn hangup_mark(idx: TtyIndex) -> Option<u32> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -105,26 +85,23 @@ pub(crate) fn hangup_mark(idx: TtyIndex) -> Option<u32> {
     let tty = guard.as_mut()?;
     let sid = tty.session.session_id();
     tty.ldisc.flush_all();
-    // full flush → both FLUSHREAD + FLUSHWRITE packet events.
-    // Deferred until after lock is dropped to avoid self-deadlock.
+    // The resulting packet events are deferred past the lock drop: emitting them
+    // here would self-deadlock.
     tty.session.detach();
     tty.mark_hung_up();
     Some(sid)
 }
 
-/// The unlocked half of a hangup: deliver the flush packet events, signal
-/// the session, and wake readers/writers/poll waiters.
+/// The unlocked half of a hangup, run once the slot lock is released.
 pub(crate) fn hangup_notify(idx: TtyIndex, session_id: u32) {
     let slot = idx.0 as usize;
 
-    // Deliver deferred packet events now that the slot lock is released.
     pty::queue_packet_event(
         idx,
         slopos_abi::syscall::TIOCPKT_FLUSHREAD | slopos_abi::syscall::TIOCPKT_FLUSHWRITE,
     );
 
-    // Signal the entire session (not just fg_pgrp) so that all
-    // processes in the session receive SIGHUP + SIGCONT on hangup.
+    // The whole session, not just fg_pgrp: every process in it gets the pair.
     if session_id != 0 {
         let _ = clear_session_controlling_tty(session_id, idx);
         let _ = signal_session(session_id, SIGHUP);
@@ -132,20 +109,16 @@ pub(crate) fn hangup_notify(idx: TtyIndex, session_id: u32) {
     }
 
     if scheduler_is_enabled() != 0 {
-        // A hangup wakes readers, writers, and poll waiters so they all
-        // observe POLLHUP. Poll waiters park on both queues.
+        // Poll waiters park on both queues; readers, writers and poll waiters
+        // must all get the chance to observe POLLHUP.
         BUS.publish(tty_input_event(slot));
         BUS.publish(tty_output_event(slot));
     }
 }
 
-/// Return a hung-up slot to service.
-///
-/// A hangup is terminal for the slot in production — a real terminal comes
-/// back by being reopened, and the kernel's own consoles are never closed — so
-/// the only caller is a test that hung one up and owes the rest of the boot a
-/// working console. Confined to the slot lock, which is what makes it safe to
-/// run while every idle CPU is sweeping the table.
+/// Return a hung-up slot to service. A hangup is terminal in production, so the
+/// only caller is a test that owes the rest of the boot a working console.
+/// Confined to the slot lock, so it is safe while idle CPUs sweep the table.
 #[cfg(feature = "test-hooks")]
 pub fn clear_hangup(idx: TtyIndex) {
     let slot = idx.0 as usize;
@@ -171,24 +144,11 @@ pub fn is_hung_up(idx: TtyIndex) -> bool {
     }
 }
 
-/// Revoke access to the caller's controlling terminal.
-///
-/// This is the kernel-side implementation of the `vhangup()` syscall.
-/// It reuses the existing hangup infrastructure to:
-/// - Flush buffers and detach the session
-/// - Mark the TTY as hung up so subsequent I/O returns EIO
-/// - Signal the session with SIGHUP + SIGCONT
-/// - Wake all blocked readers/writers
-///
-/// The caller must provide their controlling terminal index.  Permission
-/// checks (caller has a ctty) are enforced by the syscall handler.
+/// Kernel side of `vhangup()`. `idx` must be the caller's controlling terminal;
+/// the syscall handler is what checks that it has one.
 pub fn vhangup(idx: TtyIndex) {
     hangup(idx);
 }
-
-// ---------------------------------------------------------------------------
-// Exclusive mode (TIOCEXCL / TIOCNXCL / TIOCGEXCL)
-// ---------------------------------------------------------------------------
 
 #[must_use]
 pub fn set_exclusive(idx: TtyIndex, enable: bool) -> Result<(), TtyError> {

@@ -30,7 +30,6 @@ impl LabelWidget {
         self.text = text;
     }
 
-    /// Word-wrap `text` into lines that each fit within `max_width` pixels.
     fn wrap_lines(&self, text: &str, max_width: i32, ctx: &PaintContext) -> Vec<String> {
         let mut lines = Vec::new();
         for raw_line in text.split('\n') {
@@ -74,8 +73,6 @@ impl Widget for LabelWidget {
         let line_height = ctx.style.line_height;
 
         if !self.wrap {
-            // Single-line: measure natural text width.
-            // Use PaintContext::text_width indirectly via the font module.
             let text_w = crate::text::string_width(&self.text);
             let mut lines = 1i32;
             if self.text.contains('\n') {
@@ -97,7 +94,6 @@ impl Widget for LabelWidget {
                     line_height,
                 ));
             };
-            // Count wrapped lines using a lightweight pass.
             let mut line_count = 0u32;
             for raw_line in self.text.split('\n') {
                 if raw_line.is_empty() {
@@ -142,7 +138,6 @@ impl Widget for LabelWidget {
         let rect = self.layout_rect();
 
         if !self.wrap {
-            // Paint each hard-newline-separated line.
             let lines: Vec<&str> = self.text.split('\n').collect();
             let max = self
                 .max_lines

@@ -66,12 +66,10 @@ impl Widget for CheckboxWidget {
         let gap = style.checkbox_gap;
         let text_h = ctx.text_height();
 
-        // Vertically center the checkbox box within the rect.
         let box_y = rect.y + (rect.height - cb_size) / 2;
         let box_x = rect.x;
 
         if self.checked {
-            // Filled accent background.
             ctx.fill_rounded_rect(
                 box_x,
                 box_y,
@@ -84,12 +82,8 @@ impl Widget for CheckboxWidget {
                     style.text_disabled
                 },
             );
-            // Draw checkmark as two lines using small filled rects.
-            // Checkmark path scaled to cb_size: (3,8)->(7,12) and (7,12)->(13,4)
-            // For a 16x16 box, draw "V" using pixel strips.
             draw_checkmark(ctx, box_x, box_y, cb_size, Color32::WHITE);
         } else {
-            // Outline only.
             let border_color = if self.enabled {
                 style.border_default
             } else {
@@ -105,7 +99,6 @@ impl Widget for CheckboxWidget {
             );
         }
 
-        // Draw label text to the right.
         let text_x = rect.x + cb_size + gap;
         let text_y = rect.y + (rect.height - text_h) / 2;
         let fg = if self.enabled {
@@ -115,7 +108,7 @@ impl Widget for CheckboxWidget {
         };
         ctx.draw_text_transparent(text_x, text_y, &self.label, fg);
 
-        // Focus ring around the checkbox box (not the label).
+        // Ring the box, not the label.
         let box_rect = Rect::new(box_x, box_y, cb_size, cb_size);
         ctx.draw_focus_ring(box_rect);
     }
@@ -179,19 +172,16 @@ impl Widget for CheckboxWidget {
     }
 }
 
-/// Draw a simple checkmark inside a checkbox box using filled rectangles.
-/// Path: short leg (3,8)->(7,12), long leg (7,12)->(13,4), scaled to `size`.
+/// Checkmark path in 16x16 reference space, scaled to `size`: short leg
+/// (3,8)->(7,12), long leg (7,12)->(13,4).
 fn draw_checkmark(ctx: &mut PaintContext, bx: i32, by: i32, size: i32, color: Color32) {
-    // Scale factors relative to a 16x16 reference.
     let sx = |v: i32| -> i32 { bx + v * size / 16 };
     let sy = |v: i32| -> i32 { by + v * size / 16 };
     let t = (size / 8).max(1); // stroke thickness
 
-    // Short leg: (3,8) -> (7,12) — 4 steps diagonal down-right
     for i in 0..5 {
         ctx.fill_rect(sx(3 + i), sy(8 + i), t, t, color);
     }
-    // Long leg: (7,12) -> (13,4) — 6 steps diagonal up-right
     for i in 0..7 {
         ctx.fill_rect(sx(7 + i), sy(12 - i), t, t, color);
     }

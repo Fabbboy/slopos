@@ -10,26 +10,21 @@ const MADT_SIGNATURE: &[u8; 4] = b"APIC";
 const MADT_ENTRY_IOAPIC: u8 = 1;
 const MADT_ENTRY_INTERRUPT_OVERRIDE: u8 = 2;
 
-/// MADT Flags bit 0: PC-AT-compatible dual-8259 PIC present.
-///
-/// ACPI 6.5 §5.2.12 says the 8259 vectors must be disabled (masked)
-/// when enabling ACPI APIC operation if this bit is set.
+/// PC-AT-compatible dual-8259 present; ACPI 6.5 §5.2.12 requires masking the
+/// 8259 vectors before enabling APIC operation when it is set.
 pub const MADT_FLAG_PCAT_COMPAT: u32 = 1 << 0;
 
-/// Offset of the first variable-length entry within the MADT payload
-/// (after `lapic_address: u32` + `flags: u32`).
+/// Past the fixed `lapic_address: u32` + `flags: u32`.
 const MADT_ENTRIES_OFFSET: usize = 8;
 
-/// Per-entry header: `entry_type: u8`, `length: u8`.
+/// `entry_type: u8`, `length: u8`.
 const ENTRY_HEADER_SIZE: usize = 2;
 
-/// Layout of the MADT type-1 IOAPIC entry (12 bytes total).
 const IOAPIC_ENTRY_LEN: usize = 12;
 const IOAPIC_OFF_ID: usize = 2;
 const IOAPIC_OFF_ADDRESS: usize = 4;
 const IOAPIC_OFF_GSI_BASE: usize = 8;
 
-/// Layout of the MADT type-2 Interrupt Source Override entry (10 bytes total).
 const ISO_ENTRY_LEN: usize = 10;
 const ISO_OFF_BUS_SOURCE: usize = 2;
 const ISO_OFF_IRQ_SOURCE: usize = 3;
@@ -43,41 +38,21 @@ pub struct IoapicInfo {
     pub gsi_base: u32,
 }
 
-// =============================================================================
-// MADT Interrupt Source Override flag parsing
-// =============================================================================
-
-/// Polarity of an interrupt source override (MADT flags bits [1:0]).
-///
-/// Per ACPI spec, §5.2.12.5:
-/// - 0b00 = conforms to bus specifications
-/// - 0b01 = active high
-/// - 0b10 = reserved
-/// - 0b11 = active low
+/// Override flags bits [1:0], ACPI §5.2.12.5: 0 bus default, 1 active high,
+/// 3 active low, 2 reserved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Polarity {
-    /// Conforms to the specifications of the bus.
     BusDefault,
-    /// Active high.
     ActiveHigh,
-    /// Active low.
     ActiveLow,
 }
 
-/// Trigger mode of an interrupt source override (MADT flags bits [3:2]).
-///
-/// Per ACPI spec, §5.2.12.5:
-/// - 0b00 = conforms to bus specifications
-/// - 0b01 = edge-triggered
-/// - 0b10 = reserved
-/// - 0b11 = level-triggered
+/// Override flags bits [3:2], ACPI §5.2.12.5: 0 bus default, 1 edge, 3 level,
+/// 2 reserved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TriggerMode {
-    /// Conforms to the specifications of the bus.
     BusDefault,
-    /// Edge-triggered.
     Edge,
-    /// Level-triggered.
     Level,
 }
 
@@ -90,7 +65,6 @@ pub struct InterruptOverride {
 }
 
 impl InterruptOverride {
-    /// Parse the polarity field from the MADT flags word.
     #[inline]
     pub fn polarity(&self) -> Polarity {
         match self.flags & 0x3 {
@@ -101,7 +75,6 @@ impl InterruptOverride {
         }
     }
 
-    /// Parse the trigger mode field from the MADT flags word.
     #[inline]
     pub fn trigger_mode(&self) -> TriggerMode {
         match (self.flags >> 2) & 0x3 {
@@ -120,7 +93,6 @@ pub enum MadtEntry {
     Unknown { entry_type: u8 },
 }
 
-/// Parsed handle to the MADT, supporting iteration over its entries.
 pub struct Madt {
     table: AcpiTable<'static>,
 }

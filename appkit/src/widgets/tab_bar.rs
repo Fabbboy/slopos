@@ -7,9 +7,7 @@ use crate::traits::{
     FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
 };
 
-/// Tab header bar with panel switching.
-///
-/// Displays a row of tab labels at the top and the active panel's content below.
+/// A row of tab labels above the active panel's content.
 pub struct TabBarWidget {
     core: WidgetCore,
     tabs: Vec<String>,
@@ -51,14 +49,12 @@ impl TabBarWidget {
         )
     }
 
-    /// Compute the X ranges for each tab label in the tab row.
-    /// Returns Vec of (x_start, width) pairs.
+    /// Returns `(x_start, width)` per tab.
     fn tab_layout(&self, total_width: i32) -> Vec<(i32, i32)> {
         let count = self.tabs.len();
         if count == 0 {
             return Vec::new();
         }
-        // Divide available width equally among tabs.
         let tab_w = total_width / count as i32;
         let mut result = Vec::with_capacity(count);
         for i in 0..count {
@@ -124,7 +120,6 @@ impl Widget for TabBarWidget {
         let tab_height = self.tab_height;
         let underline_height = 3;
 
-        // Tab row background.
         ctx.fill_rect(
             rect.x,
             rect.y,
@@ -133,7 +128,6 @@ impl Widget for TabBarWidget {
             ctx.style.bg_secondary,
         );
 
-        // Draw each tab label.
         let layout = self.tab_layout(rect.width);
         let text_h = ctx.text_height();
 
@@ -141,10 +135,8 @@ impl Widget for TabBarWidget {
             let abs_x = rect.x + tab_x;
 
             if i == self.active {
-                // Active tab: opaque background.
                 ctx.fill_rect(abs_x, rect.y, *tab_w, tab_height, ctx.style.bg_primary);
 
-                // Accent underline.
                 ctx.fill_rect(
                     abs_x,
                     rect.y + tab_height - underline_height,
@@ -154,7 +146,6 @@ impl Widget for TabBarWidget {
                 );
             }
 
-            // Label text, centered in the tab cell.
             let label = &self.tabs[i];
             let text_w = ctx.text_width(label);
             let tx = abs_x + (*tab_w - text_w) / 2;
@@ -168,7 +159,6 @@ impl Widget for TabBarWidget {
             ctx.draw_text_transparent(tx, ty, label, fg);
         }
 
-        // Separator line below tab row.
         ctx.fill_rect(
             rect.x,
             rect.y + tab_height,
@@ -177,14 +167,13 @@ impl Widget for TabBarWidget {
             ctx.style.border_divider,
         );
 
-        // Paint active panel content, clipped to its own area so a panel that
-        // measured taller than the strip left it cannot draw over the tabs.
+        // Clipped to the panel area: a panel that measured taller than the strip
+        // left it must not draw over the tabs.
         if let Some(panel) = self.content.get(self.active) {
             let panel_rect = self.panel_rect();
             ctx.with_clip(panel_rect, |ctx| panel.paint(ctx));
         }
 
-        // Focus ring.
         if self.focused {
             let tab_row = Rect::new(rect.x, rect.y, rect.width, tab_height);
             ctx.draw_focus_ring(tab_row);
@@ -205,14 +194,12 @@ impl Widget for TabBarWidget {
             WidgetEvent::PointerDown { x, y, .. } => {
                 let rect = self.layout_rect();
                 if *y < rect.y || *y >= rect.y + self.tab_height {
-                    // Forward to active panel content.
                     if let Some(panel) = self.content.get_mut(self.active) {
                         return panel.event(event, phase, sink);
                     }
                     return EventResponse::Ignored;
                 }
 
-                // Determine which tab was clicked.
                 let layout = self.tab_layout(rect.width);
                 let rel_x = *x - rect.x;
                 for (i, (tab_x, tab_w)) in layout.iter().enumerate() {
@@ -252,9 +239,8 @@ impl Widget for TabBarWidget {
                         EventResponse::Ignored
                     }
                 }
-                // Every other key belongs to the panel: the tab strip only
-                // owns Left/Right. Swallowing the rest here left the active
-                // panel's own keyboard handling unreachable.
+                // The tab strip owns only Left/Right; every other key belongs to
+                // the panel.
                 _ => {
                     if let Some(panel) = self.content.get_mut(self.active) {
                         panel.event(event, phase, sink)
@@ -273,7 +259,6 @@ impl Widget for TabBarWidget {
                 EventResponse::Ignored
             }
 
-            // Forward all other events (Scroll, PointerMove, etc.) to active panel.
             _ => {
                 if let Some(panel) = self.content.get_mut(self.active) {
                     panel.event(event, phase, sink)

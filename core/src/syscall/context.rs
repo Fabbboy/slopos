@@ -1,13 +1,10 @@
 //! Per-syscall context.
 //!
-//! Built once by [`crate::syscall::dispatch::syscall_handle`] when a
-//! syscall enters the kernel. Handler bodies receive `&SyscallContext`
-//! and never touch raw register state for argument parsing — typed
-//! arguments are decoded by the macro from `ctx.regs()`. The context
-//! also exposes the active task, the calling process's
-//! [`slopos_ostd::mm::vm_space::VmSpace`], and the full
-//! [`UserContext`] for the few handlers that perform whole-frame
-//! manipulation (`exec`, `fork`, `clone`, `rt_sigreturn`).
+//! Built once by [`crate::syscall::dispatch::syscall_handle`] at syscall entry.
+//! Handler bodies receive `&SyscallContext` and never touch raw register state;
+//! typed arguments are decoded by the macro from `ctx.regs()`. The full
+//! [`UserContext`] is exposed for the handlers that manipulate the whole frame
+//! (`exec`, `fork`, `clone`, `rt_sigreturn`).
 
 use slopos_abi::Errno;
 use slopos_abi::task::{
@@ -24,60 +21,35 @@ use slopos_sched::task_struct::{Current, Task};
 
 use crate::syscall::result::SyscallResult;
 
-/// Six-register argument payload, snapshotted at syscall entry.
-///
-/// Index conventions (System V AMD64, with `R10` standing in for
-/// `RCX`, which the `syscall` instruction clobbers):
-///
-/// | Index | Register |
-/// |-------|----------|
-/// | 0     | `rdi`    |
-/// | 1     | `rsi`    |
-/// | 2     | `rdx`    |
-/// | 3     | `r10`    |
-/// | 4     | `r8`     |
-/// | 5     | `r9`     |
+/// Six-register argument payload, snapshotted at syscall entry: `rdi`, `rsi`,
+/// `rdx`, `r10`, `r8`, `r9` — System V AMD64 with `r10` standing in for `rcx`,
+/// which the `syscall` instruction clobbers.
 pub type SyscallRegs = [u64; 6];
 
 /// The calling task, its arguments, and its user-mode frame, for the duration
-/// of one syscall.
-///
-/// The task is a **borrow**, not a pointer and not an owning handle. A pointer
-/// carried no lifetime, so every accessor had to re-derive a reference and hope;
-/// an owning handle would be worse, because SlopOS tears a blocked task down
-/// from another CPU without unwinding, so a `KArc` left on this frame would
-/// never be dropped and would pin the task, its stacks and its address space
-/// forever. A borrow is exactly the claim the syscall path can honestly make:
-/// the task is alive because it is the one executing this code.
+/// of one syscall. The task is a **borrow** — exactly the claim the syscall
+/// path can honestly make: it is alive because it is executing this code.
 pub struct SyscallContext<'a> {
     task: &'a Task,
     task_id: u32,
     user_ctx: &'a UserContext,
     regs: SyscallRegs,
-    /// A context describes one syscall on one CPU, and both borrows it
-    /// holds are that CPU's. Dropping the raw pointer this struct used to
-    /// carry would otherwise have made it auto-`Send + Sync`.
+    /// Both borrows belong to one CPU; without this the context would be
+    /// auto-`Send + Sync`.
     _not_send: core::marker::PhantomData<*const ()>,
 }
 
 impl<'a> SyscallContext<'a> {
-    /// Build a context for the task this CPU is running. The production
-    /// dispatch path.
-    ///
-    /// The guard is borrowed rather than stored: `CurrentTask` is `!Send` and
-    /// carries its own meaning (this CPU is running this task), whereas what a
-    /// handler needs is just the task. Taking `&'a Current` ties the context's
-    /// lifetime to the guard, which is what makes the borrow inside sound.
+    /// Build a context for the task this CPU is running. Borrowing the guard
+    /// rather than storing it ties the context's lifetime to it, which is what
+    /// makes the borrow inside sound.
     pub fn from_current(current: &'a Current, ctx: &'a UserContext) -> Self {
         Self::new(current.task(), current.id(), ctx)
     }
 
-    /// Build a context from a registry guard. Tests only.
-    ///
-    /// Not a convenience: the kernel test fixture parks the BSP on a
-    /// pre-heap bootstrap stub, so `Current::get()` returns `None` there and
-    /// the production constructor is unusable. That, rather than any staleness
-    /// concern, is why a witness cannot simply be stored in this struct.
+    /// Build a context from a registry guard. Tests only: the fixture parks the
+    /// BSP on a pre-heap stub where `Current::get()` returns `None`, so the
+    /// production constructor is unusable there.
     #[doc(hidden)]
     pub fn from_task_ref(task: &'a TaskRef, ctx: &'a UserContext) -> Self {
         Self::new(task, task.task_id, ctx)
@@ -85,9 +57,8 @@ impl<'a> SyscallContext<'a> {
 
     #[inline]
     fn new(task: &'a Task, task_id: u32, ctx: &'a UserContext) -> Self {
-        // Snapshot the argument registers once: a handler reads them
-        // through `SyscallArg::from_raw` long after the user context may
-        // have been rewritten by signal delivery or a restart decision.
+        // Snapshot the argument registers once: signal delivery or a restart
+        // decision may rewrite the user context before a handler reads them.
         Self {
             task,
             task_id,
@@ -97,38 +68,27 @@ impl<'a> SyscallContext<'a> {
         }
     }
 
-    // ── Raw argument payload (macro-internal) ─────────────────────────
-
-    /// The macro-internal hook used by `define_syscall!` to thread
-    /// argument parsing across `SyscallArg::from_raw` calls. Not for
-    /// hand-written handler bodies — bodies never reach for raw
-    /// register slots; typed args flow through `SyscallArg::from_raw`.
+    /// Macro-internal hook for `define_syscall!`. Handler bodies never reach
+    /// for raw register slots; typed args flow through `SyscallArg::from_raw`.
     #[inline]
     pub fn regs(&self) -> &SyscallRegs {
         &self.regs
     }
 
-    // ── Task / process / VM space accessors ───────────────────────────
-
-    /// The calling task. Infallible: a context cannot exist without one.
     #[inline]
     pub fn task(&self) -> &'a Task {
         self.task
     }
 
-    /// The calling task's registry id.
     #[inline]
     pub fn task_id(&self) -> u32 {
         self.task_id
     }
 
     /// The calling task's process id, or `INVALID_PROCESS_ID` for a task bound
-    /// to no process.
-    ///
-    /// Display and ABI only — `getpid` returns this. A handler that needs to
-    /// *act* on the caller's process wants
-    /// [`require_process`](Self::require_process), which cannot be confused
-    /// with a recycled number.
+    /// to no process. ABI only — acting on the caller's process needs
+    /// [`require_process`](Self::require_process), which recycling cannot
+    /// confuse.
     #[inline]
     pub fn process_id(&self) -> u32 {
         self.task.process_id
@@ -139,13 +99,10 @@ impl<'a> SyscallContext<'a> {
         Ok(self.task_id)
     }
 
-    /// The calling process's descriptor table.
-    ///
-    /// Read from the task's own `process_handle`, never resolved from its id:
-    /// the task holds the authoritative generation-checked designator, so
-    /// there is no lookup here to get wrong. `ESRCH` for a kernel task, which
-    /// belongs to no process — and never [`FdTable::Kernel`], which would hand
-    /// a user process the descriptors every kernel task shares.
+    /// The calling process's descriptor table, read from the task's own
+    /// generation-checked handle rather than resolved from its id. `ESRCH` for
+    /// a kernel task — never [`FdTable::Kernel`], whose descriptors every
+    /// kernel task shares.
     #[inline]
     pub fn require_process(&self) -> Result<FdTable, Errno> {
         self.task
@@ -155,14 +112,12 @@ impl<'a> SyscallContext<'a> {
             .ok_or(Errno::ESRCH)
     }
 
-    /// Resolve the caller's [`VmSpace`]. Returns `EFAULT` if the
-    /// caller is bound to no process or the process has no VM space.
+    /// Resolve the caller's [`VmSpace`], or an error when the caller is bound
+    /// to no process or the process has no VM space.
     pub fn vm_space(&self) -> Result<KArc<VmSpace>, Errno> {
         let vm_process = self.require_process()?.process().ok_or(Errno::ESRCH)?;
         slopos_mm::process_vm::process_vm_get_vm_space(vm_process).ok_or(Errno::EFAULT)
     }
-
-    // ── Permission checks ─────────────────────────────────────────────
 
     #[inline]
     pub fn has_flag(&self, flag: u16) -> bool {
@@ -179,27 +134,24 @@ impl<'a> SyscallContext<'a> {
         self.has_flag(TASK_FLAG_DISPLAY_EXCLUSIVE)
     }
 
-    /// Console-administration privilege — modelled on Linux's
+    /// Console-administration privilege, modelled on Linux's
     /// `capable(CAP_SYS_TTY_CONFIG)`. Conferred by path identity on
-    /// `/bin/keymap`; `TASK_FLAG_SYSTEM` implies it, the way root implies
-    /// every capability, so init still applies the persisted layout at boot.
+    /// `/bin/keymap`; `TASK_FLAG_SYSTEM` implies it.
     #[inline]
     pub fn is_console_admin(&self) -> bool {
         self.has_flag(TASK_FLAG_SYSTEM) || self.has_flag(TASK_FLAG_CONSOLE_ADMIN)
     }
 
-    /// Network-administration privilege — modelled on Linux's
-    /// `capable(CAP_NET_ADMIN)`. Conferred by path identity at spawn, so it
-    /// names the one program allowed to reconfigure the stack rather than a
-    /// class of callers.
+    /// Network-administration privilege, modelled on Linux's
+    /// `capable(CAP_NET_ADMIN)`. Conferred by path identity at spawn.
     #[inline]
     pub fn is_net_admin(&self) -> bool {
         self.has_flag(TASK_FLAG_NET_ADMIN)
     }
 
-    /// Whole-machine enumeration privilege — modelled on Linux's `hidepid`
+    /// Whole-machine enumeration privilege, modelled on Linux's `hidepid`
     /// bypass. Conferred by path identity on `/bin/sysmon`; `TASK_FLAG_SYSTEM`
-    /// implies it, as it does for console administration.
+    /// implies it.
     #[inline]
     pub fn is_proc_admin(&self) -> bool {
         self.has_flag(TASK_FLAG_SYSTEM) || self.has_flag(TASK_FLAG_PROC_ADMIN)
@@ -241,10 +193,6 @@ impl<'a> SyscallContext<'a> {
         }
     }
 
-    // ── Full user-context access (used by exec / fork / clone /
-    // rt_sigreturn — whole-frame manipulation, NOT argument parsing).
-    // ────────────────────────────────────────────────────────────────
-
     /// The user-mode register file this syscall entered from. Writes go
     /// through it directly — see the write contract on [`UserContext`].
     #[inline]
@@ -252,44 +200,36 @@ impl<'a> SyscallContext<'a> {
         self.user_ctx
     }
 
-    /// User-mode RSP at syscall entry. Convenience for `rt_sigreturn`
-    /// (and any future handler that needs to peek the user stack
-    /// pointer without rebuilding the whole frame view).
     #[inline]
     pub fn user_rsp(&self) -> u64 {
         self.user_ctx().rsp()
     }
 
-    // ── Dispatcher-only return-value writers ──────────────────────────
-    //
-    // These are the **only** sites that write `rax`. The dispatcher
-    // matches on `SyscallResult` and calls one of these; handler
-    // bodies never invoke them directly.
+    // The only sites that write `rax`: the dispatcher matches on
+    // `SyscallResult` and calls one; handler bodies never invoke them.
 
-    /// Write a successful return value to user `rax`. Bumps the
-    /// `wl_currency` balance, mirroring the pre-Phase-2D
-    /// `ctx.ok(value)` accounting.
+    /// Write a successful return value to user `rax`, bumping the
+    /// `wl_currency` balance.
     pub fn write_ok(&self, value: u64) {
         wl_currency::adjust_balance(WL_DELTA);
         self.user_ctx.set_rax(value);
     }
 
-    /// Write an errno return value to user `rax`. Decrements the
+    /// Write an errno return value to user `rax`, decrementing the
     /// `wl_currency` balance.
     pub fn write_err(&self, errno: Errno) {
         wl_currency::adjust_balance(-WL_DELTA);
         self.user_ctx.set_rax(errno.as_u64());
     }
 
-    /// Write a raw u64 (used for the `ERRNO_ERESTARTSYS` sentinel that
-    /// is outside the `[-4095, -1]` `Errno` range).
+    /// Write a raw u64, for the `ERRNO_ERESTARTSYS` sentinel that lies outside
+    /// the `[-4095, -1]` `Errno` range.
     pub fn write_err_u64(&self, raw: u64) {
         wl_currency::adjust_balance(-WL_DELTA);
         self.user_ctx.set_rax(raw);
     }
 
-    /// Convenience: write the post-handler `SyscallResult` directly.
-    /// `NoReturn` leaves `rax` untouched.
+    /// Write the post-handler `SyscallResult`; `NoReturn` leaves `rax` alone.
     pub fn write_result(&self, result: SyscallResult) {
         match result {
             SyscallResult::Ok(v) => self.write_ok(v),

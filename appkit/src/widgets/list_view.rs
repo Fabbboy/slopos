@@ -5,10 +5,8 @@ use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, Widget
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, place_widget};
 
-/// Virtualized list with fixed item height.
-///
-/// Only items in the visible range are painted, keeping performance
-/// constant regardless of total item count.
+/// Fixed-height rows; only the visible range is painted, so paint cost is
+/// independent of the item count.
 pub struct ListViewWidget {
     core: WidgetCore,
     item_height: i32,
@@ -61,7 +59,6 @@ impl ListViewWidget {
         last.min(self.items.len())
     }
 
-    /// Position every item row at the current scroll offset.
     fn place_items(&mut self) {
         let rect = self.layout_rect();
         for (i, item) in self.items.iter_mut().enumerate() {
@@ -73,7 +70,6 @@ impl ListViewWidget {
         }
     }
 
-    /// Ensure the selected item is visible by adjusting scroll_offset.
     fn scroll_to_selected(&mut self) {
         if let Some(sel) = self.selected {
             let item_top = sel as i32 * self.item_height;
@@ -125,13 +121,11 @@ impl Widget for ListViewWidget {
         let first = self.first_visible();
         let last = self.last_visible().min(self.items.len());
 
-        // Clip to our viewport.
         ctx.with_clip(rect, |ctx| {
             for i in first..last {
                 let y = rect.y + i as i32 * self.item_height - self.scroll_offset;
                 let item_rect = Rect::new(rect.x, y, rect.width, self.item_height);
 
-                // Draw selection highlight.
                 if self.selected == Some(i) {
                     ctx.fill_rect(
                         item_rect.x,
@@ -142,12 +136,10 @@ impl Widget for ListViewWidget {
                     );
                 }
 
-                // Paint item widget.
                 self.items[i].paint(ctx);
             }
         });
 
-        // Focus ring.
         if self.focused {
             ctx.draw_focus_ring(rect);
         }

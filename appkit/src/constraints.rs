@@ -1,6 +1,6 @@
 use slopos_abi::damage::DamageRect;
 
-/// Pixel dimensions (integer, matching DrawBuffer coordinate space).
+/// Pixel dimensions in the DrawBuffer coordinate space.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Size {
     pub width: i32,
@@ -18,7 +18,6 @@ impl Size {
     }
 }
 
-/// Position + size in parent-local coordinates.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
@@ -70,7 +69,6 @@ impl Rect {
     }
 }
 
-/// Edge insets for padding.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct EdgeInsets {
     pub top: i32,
@@ -125,23 +123,17 @@ impl EdgeInsets {
 
 /// The extent that stands in for "unbounded" in a constraint or a rect.
 ///
-/// Finite on purpose. `i32::MAX` here means any container that adds padding to
-/// a child's reported extent wraps to a negative number, which is how a card
-/// once measured 62px tall and put its buttons at y = -2^31. 16M px is past
-/// any surface this will ever draw to, and small enough that summing a
-/// handful of extents stays inside `i32`.
+/// Finite on purpose: with `i32::MAX`, any container that adds padding to a
+/// child's reported extent wraps negative. 16M px is past any surface this will
+/// draw to, and small enough that summing a few extents stays inside `i32`.
 pub const MAX_EXTENT: i32 = 1 << 24;
 
-/// Whether an extent denotes "as much as you like" rather than a real bound.
 pub const fn is_unbounded(extent: i32) -> bool {
     extent >= MAX_EXTENT
 }
 
-/// Constraint box passed top-down during the measure phase.
-///
-/// Uses `i32` for pixel-perfect layout matching the DrawBuffer coordinate space.
-/// A `max_width` / `max_height` of [`MAX_EXTENT`] represents unbounded (e.g.
-/// inside a scroll view); see [`is_unbounded`].
+/// Constraint box passed top-down during the measure phase. A `max_width` or
+/// `max_height` of [`MAX_EXTENT`] means unbounded; see [`is_unbounded`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct BoxConstraints {
     pub min_width: i32,
@@ -176,12 +168,10 @@ impl BoxConstraints {
         }
     }
 
-    /// Whether the width axis carries a real upper bound.
     pub const fn is_width_bounded(&self) -> bool {
         !is_unbounded(self.max_width)
     }
 
-    /// Whether the height axis carries a real upper bound.
     pub const fn is_height_bounded(&self) -> bool {
         !is_unbounded(self.max_height)
     }
@@ -204,7 +194,6 @@ impl BoxConstraints {
         }
     }
 
-    /// Clamp a size to satisfy these constraints.
     pub fn constrain(&self, size: Size) -> Size {
         Size {
             width: size.width.clamp(self.min_width, self.max_width),
@@ -222,8 +211,6 @@ impl BoxConstraints {
         }
     }
 
-    /// Deflate by edge insets (e.g. for padding).
-    ///
     /// An unbounded axis stays exactly [`MAX_EXTENT`], so [`is_unbounded`] on
     /// the result still answers the question the parent asked.
     pub fn deflate(&self, insets: EdgeInsets) -> Self {
@@ -249,13 +236,13 @@ impl BoxConstraints {
         self.min_width == self.max_width && self.min_height == self.max_height
     }
 
-    /// Return maximum available size. Unbounded axes report [`MAX_EXTENT`].
+    /// Unbounded axes report [`MAX_EXTENT`].
     pub fn max_size(&self) -> Size {
         Size::new(self.max_width, self.max_height)
     }
 }
 
-/// How a widget (or slot in a layout container) participates in space distribution.
+/// How a widget participates in space distribution.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SizePolicy {
     /// Use exactly the intrinsic content size. Do not grow or shrink.
@@ -272,40 +259,31 @@ impl Default for SizePolicy {
     }
 }
 
-/// Declarative sizing intent. Replaces raw i32 in user-facing APIs.
-///
-/// Use `Length::Px(n)` for fixed pixel sizes and `Length::Fill(weight)` for
-/// proportional space distribution, so "fill the parent" is stated rather
-/// than encoded as a sentinel extent the caller has to recognise.
+/// Declarative sizing intent, so "fill the parent" is stated rather than
+/// encoded as a sentinel extent the caller has to recognise.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Length {
-    /// Fixed pixel size.
     Px(i32),
     /// Fill remaining space proportionally. Weight 0 = shrink to content.
     Fill(u16),
 }
 
 impl Length {
-    /// Shrink to intrinsic content size.
     pub const SHRINK: Self = Length::Fill(0);
-    /// Fill all remaining space (weight 1).
     pub const FILL: Self = Length::Fill(1);
 
-    /// Resolve this length against a constraint range, returning a pixel value.
     pub fn resolve(&self, min: i32, max: i32) -> i32 {
         match self {
             Length::Px(px) => (*px).clamp(min, max),
-            Length::Fill(0) => min, // shrink: use minimum
-            Length::Fill(_) => max, // fill: use maximum (parent distributes)
+            Length::Fill(0) => min,
+            Length::Fill(_) => max, // the parent distributes the remainder
         }
     }
 
-    /// Whether this length is flexible (Fill with weight > 0).
     pub fn is_fill(&self) -> bool {
         matches!(self, Length::Fill(w) if *w > 0)
     }
 
-    /// The flex weight (0 for Px and Fill(0)).
     pub fn flex_weight(&self) -> u16 {
         match self {
             Length::Fill(w) => *w,
@@ -320,7 +298,6 @@ impl Default for Length {
     }
 }
 
-/// Cross-axis alignment for stack layouts.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum CrossAxisAlignment {
     #[default]
@@ -330,7 +307,6 @@ pub enum CrossAxisAlignment {
     Stretch,
 }
 
-/// Text alignment within a label or text widget.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum TextAlignment {
     #[default]
@@ -339,14 +315,12 @@ pub enum TextAlignment {
     End,
 }
 
-/// Axis orientation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Orientation {
     Horizontal,
     Vertical,
 }
 
-/// Scroll direction for scroll views.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum ScrollDirection {
     #[default]
@@ -355,7 +329,6 @@ pub enum ScrollDirection {
     Both,
 }
 
-/// Scrollbar visibility mode.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum ScrollbarVisibility {
     Always,
@@ -364,7 +337,6 @@ pub enum ScrollbarVisibility {
     Never,
 }
 
-/// Image scaling mode.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum ImageScale {
     /// Scale to fit within constraints preserving aspect ratio.

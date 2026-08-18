@@ -12,7 +12,6 @@ pub struct DamageRect {
 }
 
 impl DamageRect {
-    /// Create an invalid (empty) damage rect
     #[inline]
     pub const fn invalid() -> Self {
         Self {
@@ -23,13 +22,11 @@ impl DamageRect {
         }
     }
 
-    /// Check if this rect is valid (non-empty)
     #[inline]
     pub fn is_valid(&self) -> bool {
         self.x0 <= self.x1 && self.y0 <= self.y1
     }
 
-    /// Calculate the area of this rect
     #[inline]
     pub fn area(&self) -> i32 {
         if !self.is_valid() {
@@ -50,13 +47,11 @@ impl DamageRect {
         }
     }
 
-    /// Calculate what the area would be if merged with another rect
     #[inline]
     pub fn combined_area(&self, other: &Self) -> i32 {
         self.union(other).area()
     }
 
-    /// Clip this rect to buffer bounds
     #[inline]
     pub fn clip(&self, width: i32, height: i32) -> Self {
         Self {
@@ -67,7 +62,6 @@ impl DamageRect {
         }
     }
 
-    /// Check if this rect intersects with another
     #[inline]
     pub fn intersects(&self, other: &Self) -> bool {
         self.x0 <= other.x1 && self.x1 >= other.x0 && self.y0 <= other.y1 && self.y1 >= other.y0

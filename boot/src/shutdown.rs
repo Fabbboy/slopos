@@ -40,9 +40,8 @@ fn flush_filesystems_for_shutdown() {
 fn ensure_shutdown_mmio_mapped() {
     activate_post_user_fault();
 }
-/// Parse the FADT (+ DSDT `\_S5`) for the platform's power-management
-/// registers. Parsed on demand (pure HHDM reads) rather than cached, since
-/// the firmware tables live for the kernel's lifetime and shutdown is rare.
+/// Platform power-management registers from the FADT (+ DSDT `\_S5`). Parsed on
+/// demand rather than cached: the firmware tables outlive the kernel.
 fn acpi_power_config() -> Option<PowerConfig> {
     if !platform::is_rsdp_available() {
         return None;
@@ -51,10 +50,8 @@ fn acpi_power_config() -> Option<PowerConfig> {
     PowerConfig::from_tables(&tables)
 }
 
-/// Request firmware power-off / reset via UEFI Runtime Services
-/// `ResetSystem` — the most reliable path on modern UEFI hardware, where
-/// the firmware performs the chipset-correct sequence internally. No-op on
-/// a BIOS boot (no system table). Returns if the firmware ignored it.
+/// Firmware power-off / reset via UEFI Runtime Services `ResetSystem`. No-op on
+/// a BIOS boot (no system table); returns if the firmware ignored it.
 fn try_uefi_reset(reset_type: EfiResetType) {
     let system_table = crate::limine_protocol::efi_system_table_addr();
     if system_table != 0 {
@@ -72,12 +69,8 @@ fn reboot_via_uefi() {
 }
 
 fn poweroff_hardware() {
-    // First choice: firmware power-off via UEFI ResetSystem(Shutdown).
-    // Falls through on a BIOS boot or if the firmware does not support it.
     try_uefi_reset(EfiResetType::Shutdown);
 
-    // Fallback: ACPI S5 (soft-off) via the FADT PM1 control registers with
-    // the DSDT/SSDT `\_S5` sleep type.
     match acpi_power_config() {
         Some(cfg) => {
             klog_info!(
@@ -103,8 +96,8 @@ fn poweroff_hardware() {
         None => klog_info!("ACPI poweroff: FADT unavailable; using fallback ports"),
     }
 
-    // Fallback: the hypervisor-specific ACPI PM1A_CNT ports (QEMU 0x604,
-    // Bochs 0xB004, VirtualBox 0x4004). Harmless no-ops on bare metal.
+    // Hypervisor-specific PM1A_CNT ports (QEMU 0x604, Bochs 0xB004, VirtualBox
+    // 0x4004); harmless no-ops on bare metal.
     ostd_power::acpi_poweroff_broadcast();
 }
 pub fn kernel_quiesce_interrupts() {
@@ -120,9 +113,8 @@ pub fn kernel_quiesce_interrupts() {
     slopos_ostd::watchdog::report_max_stalls();
 
     if apic::is_available() {
-        // Send shutdown IPIs to all processors before disabling APIC
         apic::send_ipi_halt_all();
-        // Small delay to allow IPIs to be delivered
+        // Let the IPIs land before the APIC goes away.
         for _ in 0..100 {
             cpu::pause();
         }
@@ -141,14 +133,10 @@ pub fn kernel_drain_serial_output() {
 pub fn kernel_shutdown(reason: *const c_char) -> ! {
     ensure_shutdown_mmio_mapped();
     // Before anything below perturbs the machine: the summary characterises
-    // steady-state kernel behaviour, and everything from here on is a path
-    // that runs once and never again.
+    // steady-state kernel behaviour.
     slopos_ostd::watchdog::snapshot_max_stalls();
-    // Flush filesystem write-back caches to disk while interrupts are STILL
-    // ENABLED — the virtio-blk completion path needs IRQs + the scheduler to
-    // post the used-buffer event. Doing this before `disable_interrupts` is
-    // load-bearing for durability; once interrupts are off a device flush
-    // would only time out. Best-effort, runs once, no-op if ext2 unmounted.
+    // Must precede `disable_interrupts`: the virtio-blk completion path needs
+    // IRQs and the scheduler to post the used-buffer event.
     flush_filesystems_for_shutdown();
 
     if !SHUTDOWN_IN_PROGRESS.enter() {
@@ -162,26 +150,18 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
         klog_info!("Reason: {}", cstr_to_str_lossy(reason));
     }
 
-    // Terminate all tasks while the scheduler is still enabled so that APs
-    // whose current task is destroyed can schedule() to idle normally, and with
-    // interrupts still ENABLED: a task's destructor returns its kernel stack,
-    // unsafe stack and address space to the buddy allocator, whose reuse path
-    // waits on synchronous cross-CPU TLB drains. Running that with interrupts
-    // off is the slab/buddy deadlock, and `Task`'s destructor asserts against
-    // it rather than hanging.
-    // Before the task sweep and before the APs park: a thread parked on a
-    // paused CPU never reaches its own exit point, and these threads have work
-    // to finish on the way out.
+    // Tasks are torn down with the scheduler and interrupts still enabled: a
+    // destructor frees to the buddy allocator, whose reuse path waits on
+    // synchronous cross-CPU TLB drains. The I/O threads stop first — a thread
+    // parked on a paused CPU never reaches its own exit point.
     stop_kernel_io_tasks();
 
     if task_shutdown_all() != 0 {
         klog_info!("Warning: Failed to terminate one or more tasks");
     }
 
-    // This CPU stops ticking here and never ticks again, and `timer_is_armed`
-    // does not move on a `cli` — so without leaving the set first, the APs go
-    // on watching a CPU that left on purpose, and every instruction below
-    // counts against a threshold it was never meant to be measured by.
+    // This CPU never ticks again and `timer_is_armed` does not move on a `cli`,
+    // so leave first or the APs go on watching a CPU that stopped on purpose.
     slopos_ostd::watchdog::leave_watched_set();
     cpu::disable_interrupts();
 
@@ -199,13 +179,8 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     halt();
 }
 
-/// Terminal halt: attempt ACPI power-off, then spin forever.
-///
-/// All quiescing (IPI broadcast, APIC teardown, serial drain) must be
-/// performed *before* calling this function — it exists solely to cut
-/// the power and park the BSP.  Callers are `kernel_shutdown` and
-/// `kernel_reboot`, both of which route through `kernel_quiesce_interrupts`
-/// first.
+/// Terminal halt: attempt ACPI power-off, then spin forever. All quiescing
+/// (IPI broadcast, APIC teardown, serial drain) must already have happened.
 fn halt() -> ! {
     poweroff_hardware();
 
@@ -215,9 +190,8 @@ fn reboot_via_cf9() {
     ostd_power::cf9_reset_pulse(|| hpet::delay_ms(1));
 }
 
-/// Issue the firmware-advertised ACPI reset (FADT `RESET_REG`) when the
-/// platform provides one (on Intel PCH this is typically the `0xCF9` port).
-/// Returns if no reset register is advertised or the platform ignored it.
+/// Firmware-advertised ACPI reset (FADT `RESET_REG`; typically port `0xCF9` on
+/// Intel PCH). Returns if none is advertised or the platform ignored it.
 fn reboot_via_acpi() {
     if let Some((reg, value)) = acpi_power_config().and_then(|c| c.reset) {
         klog_info!(
@@ -232,10 +206,8 @@ fn reboot_via_acpi() {
     }
 }
 
-/// Recoverable platform resets, tried in order of decreasing likelihood
-/// on modern hardware. Each returns only if it did not reset the machine,
-/// so the next is attempted; the terminal triple fault (resets every sane
-/// x86 — but notably *not* every UEFI platform) is the final fallback.
+/// Recoverable platform resets, tried in order of decreasing likelihood on
+/// modern hardware. Each returns only if it did not reset the machine.
 const REBOOT_METHODS: &[(&str, fn())] = &[
     ("UEFI ResetSystem", reboot_via_uefi),
     ("ACPI RESET_REG", reboot_via_acpi),

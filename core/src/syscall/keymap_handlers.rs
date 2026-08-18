@@ -1,19 +1,11 @@
 //! Keyboard-layout syscall handlers.
 //!
-//! Thin forwarders to the keymap service the keyboard driver registers (the
-//! active layout lives in the driver, which `core` cannot depend on directly).
-//! `keymap_load` installs a validated `LayoutTable` blob; `keymap_get_name`
-//! queries the active layout's name.
+//! Thin forwarders to the keymap service the keyboard driver registers; the
+//! active layout lives in the driver, which `core` cannot depend on directly.
 //!
-//! Loading needs console administration. There is one layout table in the
-//! keyboard driver, and it feeds every TTY and the compositor's input path —
-//! so this is `loadkeys` writing the kernel console keymap, which Linux gates
-//! on `CAP_SYS_TTY_CONFIG`, not `setxkbmap` rearranging one client's own view
-//! of a seat. The binary validator answers integrity, which is a different
-//! question: a blob can be well-formed and still not be this machine's
-//! operator's idea of where the keys are.
-//!
-//! Reading the name is unprivileged.
+//! Loading is console administration: the single layout table feeds every TTY
+//! and the compositor's input path, so this is `loadkeys` writing the kernel
+//! console keymap, not `setxkbmap` rearranging one client's view of a seat.
 
 use slopos_abi::Errno;
 use slopos_abi::input::layout::LAYOUT_NAME_LEN;
@@ -33,8 +25,6 @@ define_syscall!(syscall_keymap_get_name
     (ctx, buf_ptr: u64, buf_len: u64)
     -> Result<u64, Errno>
 {
-    // The service fills a kernel buffer; we copy it out to user memory through
-    // the SMAP-safe path (never write user pages directly).
     let mut name = [0u8; LAYOUT_NAME_LEN];
     let n = keymap::current_name(&mut name);
     let want = (n as u64).min(buf_len) as usize;

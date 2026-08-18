@@ -1,14 +1,8 @@
-//! Focused AML namespace walk for **I²C-HID device enumeration**.
-//!
-//! Not a general AML interpreter (see `interp` for the deliberately narrow
-//! scope). It answers one question from the DSDT: *which I²C controller +
-//! slave address + HID descriptor register is the touchpad at?* — by running
-//! the device's own `_STA`/`_INI` and reading back the resource template
-//! they patch, with no per-machine constants.
-//!
-//! Robustness is a hard requirement: it runs at boot on whatever firmware is
-//! present. Every step returns `Option` and never panics; a DSDT it can't
-//! fully parse yields "no touchpad found" and boot proceeds.
+//! Focused AML namespace walk for I²C-HID and platform-device enumeration —
+//! not a general interpreter. It runs a device's own `_STA`/`_INI` and reads
+//! back the resource template they patch, so there are no per-machine
+//! constants. Every step returns `Option` and never panics: a DSDT it cannot
+//! parse yields "not found" and boot proceeds.
 
 pub mod interp;
 pub mod object;
@@ -24,22 +18,19 @@ use interp::{FieldLoc, Interp, Overlay};
 use object::{AmlVal, bytes_from_slice, nameseg_key};
 use parse::*;
 
-/// Physical-memory backend for the interpreter's `SystemMemory` field
-/// reads. Abstracted so the walker is testable against scripted memory.
+/// `SystemMemory` backend, abstracted so the walker is testable against
+/// scripted memory.
 pub trait AmlHost {
-    /// Fill `out` with `SystemMemory` bytes starting at physical `phys`
-    /// (zero-filled on failure).
+    /// Zero-fills `out` on failure.
     fn read_phys(&self, phys: u64, out: &mut [u8]);
 }
 
-/// Default host: reads physical memory through the HHDM mapping used for
-/// all other ACPI table access.
+/// Reads through the HHDM mapping used for all other ACPI table access.
 pub struct HhdmHost;
 
 impl AmlHost for HhdmHost {
     fn read_phys(&self, phys: u64, out: &mut [u8]) {
-        // Default to zero; we never leave `out` partially garbage and we
-        // never fault, regardless of whether the region is mappable.
+        // Never leave `out` partially garbage, and never fault.
         for b in out.iter_mut() {
             *b = 0;
         }
@@ -55,17 +46,14 @@ impl AmlHost for HhdmHost {
         let Some(end) = virt.checked_add(out.len() as u64) else {
             return;
         };
-        // The kernel HHDM covers usable RAM only; a SystemMemory
-        // OperationRegion can point at a BIOS-NVS / reserved area that isn't
-        // mapped. Map any missing page on demand (read-only) and bail to
-        // zero if that fails — never dereference unmapped memory.
+        // The HHDM covers usable RAM only, yet a SystemMemory OperationRegion
+        // can name BIOS-NVS or a reserved aperture: map any missing page
+        // read-only, and bail to zero rather than touch an unmapped one.
         let mut page = virt & !0xfff;
         while page < end {
             if slopos_mm::paging::is_mapped(VirtAddr::new(page)) == 0 {
-                // Firmware memory, not allocator memory: an
-                // OperationRegion can name BIOS-NVS or a reserved
-                // aperture, neither of which the buddy has ever owned
-                // and neither of which it may be handed.
+                // Firmware memory the buddy has never owned and must never be
+                // handed, hence the IO mapping rather than an allocation.
                 let _ = slopos_mm::kernel_mappings::kernel_map_io_4kb(
                     VirtAddr::new(page),
                     PhysAddr::new(page.wrapping_sub(off)),
@@ -86,43 +74,34 @@ impl AmlHost for HhdmHost {
     }
 }
 
-/// The enumeration result for one I²C-HID device.
 #[derive(Clone, Copy, Debug)]
 pub struct AcpiI2cHid {
-    /// I²C controller index parsed from the resource's controller path
-    /// (`\_SB.PC00.I2Cn` → `n`).
+    /// `n` from the resource's `\_SB.PC00.I2Cn` controller path.
     pub controller_index: u8,
-    /// 7-bit slave address.
+    /// 7-bit.
     pub slave_addr: u16,
-    /// HID descriptor register (the `_DSM` fn-1 value, i.e. `HID2`).
+    /// The `_DSM` fn-1 value, i.e. `HID2`.
     pub hid_desc_reg: u16,
-    /// Bus speed in Hz.
     pub speed_hz: u32,
-    /// GpioInt pin number from the device's `_CRS` (the controller-global
-    /// GPIO line), if it declares one. `None` ⇒ no GPIO interrupt
-    /// (driver falls back to polling).
+    /// Controller-global GPIO line from `_CRS`; `None` ⇒ the driver polls.
     pub gpio_int_pin: Option<u16>,
-    /// GpioInt trigger: `true` = edge, `false` = level.
     pub gpio_int_edge: bool,
-    /// GpioInt polarity: `true` = active-low.
     pub gpio_int_active_low: bool,
 }
 
-/// EISA-packed id for `"PNP0C50"` (the generic I²C-HID `_CID`).
+/// EISA-packed `"PNP0C50"`, the generic I²C-HID `_CID`.
 const EISAID_PNP0C50: u64 = 0x500C_D041;
 
 const HEADER_LEN: usize = core::mem::size_of::<SdtHeader>();
 
-/// Scan the ACPI namespace for the first present I²C-HID device and
-/// resolve its bus location. Returns `None` if the tables are missing or no
-/// such device is found. `debug` emits step-by-step `klog` diagnostics.
+/// `None` if the tables are missing or no present I²C-HID device is found.
 pub fn scan_i2c_hid(tables: &AcpiTables, host: &dyn AmlHost, debug: bool) -> Option<AcpiI2cHid> {
     let facp = tables.find_table(b"FACP")?;
     let fadt = Fadt::parse(facp.raw())?;
     let dsdt = tables::table_bytes_at(fadt.dsdt_phys)?;
     let dsdt_aml = dsdt.get(HEADER_LEN..)?;
 
-    // Collect the SSDT AML bodies (for method arg-counts / fields).
+    // SSDT bodies supply method arg-counts and field definitions.
     let mut ssdts: KVec<&[u8]> = KVec::new();
     tables.find_map_raw(b"SSDT", |bytes| {
         if let Some(aml) = bytes.get(HEADER_LEN..) {
@@ -134,17 +113,14 @@ pub fn scan_i2c_hid(tables: &AcpiTables, host: &dyn AmlHost, debug: bool) -> Opt
     scan_blobs(dsdt_aml, ssdts.as_slice(), host, debug)
 }
 
-/// Core of [`scan_i2c_hid`] operating on raw AML bodies (DSDT + SSDTs, each
-/// already stripped of its 36-byte SDT header). Exposed so it can be driven
-/// by a captured-DSDT fixture in the test harness.
+/// Raw AML bodies, each already stripped of its 36-byte SDT header. Public so
+/// the test harness can drive it from a captured-DSDT fixture.
 pub fn scan_blobs(
     dsdt_aml: &[u8],
     ssdts: &[&[u8]],
     host: &dyn AmlHost,
     debug: bool,
 ) -> Option<AcpiI2cHid> {
-    // Build the global symbol index (method arg-counts + SystemMemory
-    // fields) across the DSDT and every SSDT.
     let mut idx = Index::new();
     index_blob(dsdt_aml, &mut idx);
     for ssdt in ssdts {
@@ -166,7 +142,6 @@ pub fn scan_blobs(
         );
     }
 
-    // Find candidate devices in the DSDT and process the first I²C-HID one.
     let devices = collect_devices(dsdt_aml);
     let mut candidates = 0usize;
     for dev in devices.iter() {
@@ -191,16 +166,10 @@ pub fn scan_blobs(
     None
 }
 
-// ---------------------------------------------------------------------------
-// Global symbol index
-// ---------------------------------------------------------------------------
-
 struct Index {
     methods: KBTreeMap<u32, u8>,
-    /// Method name → body term-list range (for evaluating calls).
     method_bodies: KBTreeMap<u32, Range>,
-    /// Global `Name` → the position of its data object (for resolving
-    /// `Package` tables like a GPIO pad-info array).
+    /// `Name` → the position of its data object.
     names: KBTreeMap<u32, usize>,
     regions: KBTreeMap<u32, (u8, u64)>,
     fields: KBTreeMap<u32, FieldLoc>,
@@ -248,8 +217,7 @@ impl Visitor for IndexVisitor<'_> {
         self.0.methods.entry(nameseg_key(&seg)).or_insert(argc);
     }
     fn name(&mut self, seg: [u8; 4], value: Range) {
-        // First occurrence wins; we only resolve uniquely-named global
-        // tables (e.g. a GPIO pad-info `Package`).
+        // First occurrence wins: only uniquely-named global tables resolve.
         self.0.names.entry(nameseg_key(&seg)).or_insert(value.start);
     }
     fn op_region(&mut self, seg: [u8; 4], space: u8, base: u64, _len: u64) {
@@ -269,10 +237,6 @@ fn index_blob(aml: &[u8], idx: &mut Index) {
     let mut v = IndexVisitor(idx);
     walk_terms(aml, 0, aml.len(), &mut v);
 }
-
-// ---------------------------------------------------------------------------
-// Device discovery + member collection
-// ---------------------------------------------------------------------------
 
 struct DeviceCollector {
     devices: KVec<Range>,
@@ -373,7 +337,6 @@ fn process_device(
         );
     }
 
-    // Seed device-local objects and Create*Field overlays.
     for &(seg, range) in members.names.iter() {
         if let Some(val) = parse_value(aml, range.start) {
             interp.locals.insert(seg, val);
@@ -383,7 +346,7 @@ fn process_device(
         interp.overlays.insert(seg, ov);
     }
 
-    // Presence: run _STA if present; absent _STA ⇒ present.
+    // Per ACPI, an absent or unevaluable `_STA` means present.
     if let Some(sta) = members.sta {
         let present = interp
             .run(sta.start, sta.end)
@@ -397,7 +360,7 @@ fn process_device(
         }
     }
 
-    // Configure: run _INI (patches the slave address into the template).
+    // `_INI` patches the slave address into the resource template.
     if let Some(ini) = members.ini {
         interp.run(ini.start, ini.end);
     }
@@ -414,7 +377,6 @@ fn process_device(
         );
     }
 
-    // Find the buffer holding an I²C serial-bus descriptor (patched by `_INI`).
     let mut found_i2c: Option<resource::I2cResource> = None;
     for (_seg, val) in interp.locals.iter() {
         if let AmlVal::Buf(b) = val {
@@ -437,7 +399,7 @@ fn process_device(
         return None;
     };
 
-    // HID descriptor register = HID2 (the _DSM fn-1 value); default 0x0001.
+    // `HID2` is the `_DSM` fn-1 value; 0x0001 is the I²C-HID default register.
     let hid_desc_reg = interp
         .locals
         .get(&nameseg_key(b"HID2"))
@@ -445,9 +407,6 @@ fn process_device(
         .filter(|&v| v != 0)
         .unwrap_or(0x0001);
 
-    // GpioInt connection (interrupt pin + polarity), if the device declares
-    // one in the same resource templates. Drives the interrupt-driven path;
-    // its absence makes the touchpad fall back to polling.
     let mut gpio: Option<resource::GpioIntResource> = None;
     for (_seg, val) in interp.locals.iter() {
         if let AmlVal::Buf(b) = val {
@@ -469,8 +428,7 @@ fn process_device(
     })
 }
 
-/// Test-only: index `aml`, then invoke `method(args)` and return the integer
-/// it returns. Exercises the method-call / arithmetic / package machinery.
+/// Test-only entry point exercising the method-call machinery.
 #[doc(hidden)]
 pub fn eval_method_u64_for_test(
     aml: &[u8],
@@ -492,11 +450,6 @@ pub fn eval_method_u64_for_test(
     interp.invoke_for_test(method, args)
 }
 
-// ---------------------------------------------------------------------------
-// Value parsing helpers
-// ---------------------------------------------------------------------------
-
-/// Parse a Name's data object at `pos` into an [`AmlVal`].
 fn parse_value(aml: &[u8], pos: usize) -> Option<AmlVal> {
     match *aml.get(pos)? {
         OP_ZERO => Some(AmlVal::Int(0)),
@@ -525,8 +478,7 @@ fn parse_value(aml: &[u8], pos: usize) -> Option<AmlVal> {
     }
 }
 
-/// True if the data object at `pos` is the `"PNP0C50"` id (as a string or
-/// an EISA-packed integer).
+/// Matches either the string or the EISA-packed integer encoding.
 fn value_is_pnp0c50(aml: &[u8], pos: usize) -> bool {
     match parse_value(aml, pos) {
         Some(AmlVal::Str(s)) => s.as_slice() == b"PNP0C50",
@@ -535,30 +487,17 @@ fn value_is_pnp0c50(aml: &[u8], pos: usize) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Generic ACPI platform-device discovery (by _HID/_CID), for the platform bus.
-// ---------------------------------------------------------------------------
-
-/// A discovered ACPI platform device's presence + decoded `_CRS` resources.
-///
-/// Returned by [`find_device_by_ids`] for non-PCI devices the platform bus
-/// binds (e.g. the i8042 keyboard at `PNP0303`). `present` is `None` when the
-/// device has no `_STA` or its `_STA` could not be evaluated (commonly because
-/// it gates on an Embedded-Controller field the narrow interpreter cannot read,
-/// as the Lenovo keyboard's `P2MK` does) — callers must not treat that as
-/// "absent".
+/// A device's `_STA` bit 0 plus its `_CRS` resources, in descriptor order.
+/// `present` is `None` when `_STA` is absent or unevaluable — commonly it gates
+/// on an EC field this interpreter cannot read — and must not be read as absent.
 pub struct AcpiPlatformDevice {
-    /// `_STA` bit 0: `Some(true/false)` if evaluated, `None` if unknown.
     pub present: Option<bool>,
-    /// I/O-port windows from `_CRS`, in order.
     pub io_ports: KVec<resource::IoPortResource>,
-    /// IRQ descriptors from `_CRS`, in order.
     pub irqs: KVec<resource::IrqResource>,
 }
 
-/// Convenience over [`find_device_by_ids`] that extracts the DSDT + SSDT AML
-/// bodies from a validated [`AcpiTables`] (mirrors [`scan_i2c_hid`]). Used by
-/// the platform bus to discover non-PCI devices at boot.
+/// [`find_device_by_ids`] over the DSDT + SSDT bodies of a validated
+/// [`AcpiTables`].
 pub fn find_acpi_platform_device(
     tables: &AcpiTables,
     host: &dyn AmlHost,
@@ -581,12 +520,8 @@ pub fn find_acpi_platform_device(
     find_device_by_ids(dsdt_aml, ssdts.as_slice(), host, ids, debug)
 }
 
-/// Find the first DSDT device whose `_HID` or `_CID` matches any id in `ids`
-/// (each a 7-byte EISA id like `b"PNP0303"`), and decode its presence + `_CRS`
-/// I/O/IRQ resources. Returns `None` if no matching device exists.
-///
-/// Like [`scan_blobs`] this never panics; a DSDT it cannot fully parse yields
-/// `None` (or empty resource lists) and the caller proceeds.
+/// `ids` are 7-byte EISA ids such as `b"PNP0303"`, matched against the first
+/// DSDT device whose `_HID` or `_CID` names one.
 pub fn find_device_by_ids(
     dsdt_aml: &[u8],
     ssdts: &[&[u8]],
@@ -713,7 +648,6 @@ fn process_platform_device(
         interp.overlays.insert(seg, ov);
     }
 
-    // Presence: evaluate _STA if present. Unevaluable (EC-gated) ⇒ None.
     let present = match members.sta {
         None => None,
         Some(body) => interp
@@ -721,12 +655,12 @@ fn process_platform_device(
             .map(|v| v.as_int() & 0x01 != 0),
     };
 
-    // Configure: run _INI (may patch the resource template).
+    // `_INI` may patch the resource template.
     if let Some(ini) = members.ini {
         interp.run(ini.start, ini.end);
     }
 
-    // Resolve the _CRS resource template: a Name's Buffer, or a method's return.
+    // `_CRS` may be declared as a Name holding a Buffer or as a Method.
     let crs_val = if let Some(crs) = members.crs_name {
         parse_value(aml, crs.start)
     } else if let Some(crs) = members.crs_method {
@@ -750,8 +684,7 @@ fn process_platform_device(
     }
 }
 
-/// True if the data object at `pos` matches any 7-byte EISA id in `ids`,
-/// whether stored as a string or an EISA-packed integer.
+/// Matches either the string or the EISA-packed integer encoding.
 fn value_matches_any_id(aml: &[u8], pos: usize, ids: &[&[u8]]) -> bool {
     match parse_value(aml, pos) {
         Some(AmlVal::Str(s)) => ids.iter().any(|id| s.as_slice() == *id),
@@ -762,9 +695,7 @@ fn value_matches_any_id(aml: &[u8], pos: usize, ids: &[&[u8]]) -> bool {
     }
 }
 
-/// Pack a 7-character EISA/PNP id (`b"PNP0303"`) into its compressed DWORD form
-/// (matching the value an `EisaId(...)` term encodes in AML). Returns `None`
-/// for a malformed id.
+/// Compressed DWORD form, matching what an `EisaId(...)` term encodes in AML.
 #[doc(hidden)]
 pub fn eisa_pack(id: &[u8]) -> Option<u32> {
     if id.len() != 7 {
@@ -799,8 +730,7 @@ pub fn eisa_pack(id: &[u8]) -> Option<u32> {
     Some((b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24))
 }
 
-/// Parse `\_SB.PC00.I2Cn` (or similar) → `n`. Looks for the `I2C` token
-/// followed by a single decimal digit.
+/// `\_SB.PC00.I2Cn` → `n`.
 fn controller_index_from_path(path: &[u8]) -> Option<u8> {
     let n = path.len();
     let mut i = 0;

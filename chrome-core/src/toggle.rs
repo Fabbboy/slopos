@@ -1,21 +1,15 @@
 //! A two-position switch, as geometry.
 //!
-//! The knob's position is a function of one fixed-point parameter rather than
-//! a boolean, so the same code places it at rest and part-way through a
-//! transition. Today the shell only asks for the two endpoints; writing it
-//! this way means an eased transition is a change to what `t` is passed, not a
-//! second placement rule that has to agree with this one.
-//!
-//! The invariant: **the knob stays inside its track at every `t`**. Off-by-one
-//! at either end puts a knob half outside the control, so the test walks the
-//! whole range rather than the endpoints.
+//! The knob's position is a function of a fixed-point `t` rather than a bool,
+//! so an eased transition is a change to what `t` is passed and not a second
+//! placement rule. Invariant: the knob stays inside its track at every `t`.
 
 use crate::positioner::Rect;
 
 /// `t` at rest in the off position.
 pub const TOGGLE_OFF: i32 = 0;
-/// `t` at rest in the on position. Fixed point with 256 as one, so an eased
-/// transition needs no floating point in a kernel-adjacent crate.
+/// `t` at rest in the on position. Fixed point with 256 as one, so easing
+/// needs no floating point.
 pub const TOGGLE_ON: i32 = 256;
 
 /// Inset of the knob from the track's edge on every side.
@@ -30,15 +24,12 @@ pub struct ToggleGeometry {
 
 /// Place the knob in `track` for `t`, clamped to `TOGGLE_OFF..=TOGGLE_ON`.
 ///
-/// The knob is a square inset by [`TOGGLE_PADDING`], travelling from the left
-/// inset to the right. A track too small to hold a padded knob yields an empty
-/// knob rather than a negative one, so a caller can draw the track and skip
-/// the knob instead of being handed nonsense.
+/// A track too small to hold a padded knob yields an empty knob rather than a
+/// negative one, so a caller can draw the track and skip the knob.
 pub fn toggle_geometry(track: Rect, t: i32) -> ToggleGeometry {
     let t = t.clamp(TOGGLE_OFF, TOGGLE_ON);
-    // Square, and sized by whichever dimension is tighter: sizing by height
-    // alone overhangs the right inset in a track only a little wider than it is
-    // tall.
+    // Sized by the tighter dimension: height alone overhangs the right inset in
+    // a track only a little wider than it is tall.
     let size = (track.h - 2 * TOGGLE_PADDING)
         .min(track.w - 2 * TOGGLE_PADDING)
         .max(0);
@@ -51,9 +42,8 @@ pub fn toggle_geometry(track: Rect, t: i32) -> ToggleGeometry {
 
     let left = track.x + TOGGLE_PADDING;
     let travel = (track.w - 2 * TOGGLE_PADDING - size).max(0);
-    // Rounded rather than truncated so the two endpoints are symmetric:
-    // truncation lands an odd `travel` one pixel short of the right inset while
-    // sitting exactly on the left one.
+    // Rounded, not truncated: truncation leaves an odd `travel` a pixel short
+    // of the right inset while sitting exactly on the left one.
     let dx = (travel * t + TOGGLE_ON / 2) / TOGGLE_ON;
 
     ToggleGeometry {
@@ -106,7 +96,6 @@ mod tests {
         );
     }
 
-    /// An asymmetry here reads as the switch never quite reaching one end.
     #[test]
     fn the_endpoints_are_symmetric() {
         let track = track();
@@ -117,7 +106,6 @@ mod tests {
         assert_eq!(off.w, on.w);
     }
 
-    /// A transition can therefore never visibly backtrack.
     #[test]
     fn the_knob_advances_monotonically() {
         let track = track();
@@ -129,7 +117,6 @@ mod tests {
         }
     }
 
-    /// The case the rounding exists for.
     #[test]
     fn odd_travel_still_reaches_both_ends() {
         for w in 20..64 {
@@ -145,7 +132,6 @@ mod tests {
         }
     }
 
-    /// Nothing to draw, rather than a negative rect.
     #[test]
     fn a_degenerate_track_yields_an_empty_knob() {
         for (w, h) in [(0, 0), (4, 4), (44, 4), (4, 22), (2, 2)] {

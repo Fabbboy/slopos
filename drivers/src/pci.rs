@@ -19,46 +19,35 @@ pub use crate::pci_defs::*;
 const PCI_SECONDARY_BUS_OFFSET: u16 = 0x19;
 
 /// Reason a PCI probe rejected a candidate device.
-///
-/// Replaces the legacy `c_int` return so probe paths can log a typed
-/// reason rather than burning sentinel values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PciProbeError {
     /// Initial vendor/device match passed but post-inspection rules
     /// rejected the candidate (e.g., feature negotiation failed).
     Mismatch,
-    /// Resource allocation failed during probe (kernel heap, frames,
-    /// DMA pools, etc.).
+    /// Resource allocation failed during probe (heap, frames, DMA pools).
     OutOfMemory,
     /// The device was reachable but reported a fault or bad state.
     DeviceFault,
     /// A required capability (e.g., MSI-X) is unavailable on the device.
     Unsupported,
     /// The driver matched and would bind, but a dependency is not ready yet;
-    /// the registry retries it in a later bounded pass. The substrate for a
-    /// full deferred-probe fixpoint queue.
+    /// the registry retries it in a later bounded pass.
     Deferred,
 }
 
 /// One declarative match rule in a driver's `match_table`. A driver matches a
 /// device when **any** rule in its table matches (or its imperative `fallback`
-/// returns `true`). Lives in rodata behind a `&'static [PciMatch]`, so adding a
-/// driver stays a purely additive link-section static.
+/// returns `true`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PciMatch {
-    /// The common, directly-indexable case: an exact vendor+device pair.
     VendorDevice { vendor: u16, device: u16 },
-    /// Any device from `vendor` in `class` (e.g. any Intel display controller).
     VendorClass { vendor: u16, class: u8 },
-    /// A generic driver for a class+subclass, regardless of vendor.
     ClassSubclass { class: u8, subclass: u8 },
-    /// The broadest generic: any device in `class`.
     ClassOnly { class: u8 },
 }
 
 impl PciMatch {
-    /// Whether this rule matches `d`.
     pub const fn matches(&self, d: &PciDeviceInfo) -> bool {
         match *self {
             PciMatch::VendorDevice { vendor, device } => {
@@ -84,9 +73,8 @@ impl PciMatch {
         }
     }
 
-    /// The class index key for every class-shaped rule. The full predicate
-    /// (vendor / subclass) is still verified by [`PciMatch::matches`]; the
-    /// index only narrows candidates.
+    /// The class index key for every class-shaped rule. The index only narrows
+    /// candidates; [`PciMatch::matches`] still verifies the full predicate.
     const fn cs_key(&self) -> Option<u16> {
         match *self {
             PciMatch::VendorClass { class, .. }
@@ -100,48 +88,35 @@ impl PciMatch {
 /// What a probe did with a device it matched.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProbeOutcome {
-    /// The driver took ownership of the device; the registry records the claim
-    /// by device index so no other driver is offered it.
+    /// The registry records the claim by device index, so no other driver is
+    /// offered this device.
     Bound,
-    /// The driver matched but deliberately did not bind (e.g. it lost an
-    /// arbitration and stays passive, or it already owns an equivalent
-    /// device). Lower-priority candidates are still offered the device.
+    /// Matched but deliberately did not bind; lower-priority candidates are
+    /// still offered the device.
     Declined,
 }
 
 /// Registry record of a driver's successful claim on a device, stored in the
 /// per-device claim slot once its probe returns [`ProbeOutcome::Bound`].
-///
-/// Phase-2 drivers keep their state in their own module statics, so the binding
-/// only records the owning driver's name. The type is registry-local so later
-/// phases can grow it (the device's managed-resource bag, an unbind hook)
-/// without touching driver code.
 pub struct Binding {
     name: &'static str,
 }
 
 impl Binding {
-    /// The owning driver's name.
     pub const fn new(name: &'static str) -> Self {
         Self { name }
     }
 
-    /// The owning driver's name.
     pub fn name(&self) -> &'static str {
         self.name
     }
 }
 
-/// Static, link-section-resident PCI driver descriptor.
-///
-/// Replaces the legacy `PciDriver` (raw pointer name, `Option<fn>`
-/// callbacks taking `*const PciDeviceInfo` / `*mut c_void`,
-/// `KernelSync` Sync hacks). Every field is `'static`-constructible so
-/// the struct fits into a `static` placed in the `.driver_registry`
-/// link section by the [`crate::pci_driver!`] macro.
+/// Static PCI driver descriptor. Every field is `'static`-constructible so the
+/// struct fits into a `static` placed in the `.driver_registry` link section by
+/// the [`crate::pci_driver!`] macro.
 #[repr(C)]
 pub struct PciDriverEntry {
-    /// Human-readable driver name. Logged on registration and probe.
     pub name: &'static str,
     /// Declarative match rules: the driver matches when any rule matches.
     /// Indexed at boot for O(1) candidate lookup.
@@ -151,19 +126,15 @@ pub struct PciDriverEntry {
     /// table matches **or** the fallback returns `true`.
     pub fallback: Option<fn(&PciDeviceInfo) -> bool>,
     /// Bind order, ascending: a lower value binds first, so a specific driver
-    /// can beat a generic one for the same device. Defaults to a documented
-    /// mid value (128) via the [`crate::pci_driver!`] macro.
+    /// can beat a generic one for the same device. Defaults to 128.
     pub priority: u8,
-    /// Probe the matched device. The driver acquires every resource through
-    /// the [`BoundDevice`] capability, so a failed probe releases them
-    /// automatically. On `Ok(Bound)` the registry records the claim; on
-    /// `Ok(Declined)` it offers the device to the next candidate; on `Err` it
-    /// logs the typed reason (and retries once on `Deferred`).
+    /// Probe the matched device. The driver acquires every resource through the
+    /// [`BoundDevice`] capability, so a failed probe releases them
+    /// automatically. `Deferred` is retried once.
     pub probe: fn(&mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError>,
 }
 
 impl PciDriverEntry {
-    /// Whether this driver matches `dev` (any table rule, or the fallback).
     fn entry_matches(&self, dev: &PciDeviceInfo) -> bool {
         self.match_table.iter().any(|m| m.matches(dev)) || self.fallback.map_or(false, |f| f(dev))
     }
@@ -201,9 +172,8 @@ static MMIO_ALLOC_CURSOR: AtomicU64 = AtomicU64::new(0);
 /// a PCI BAR the firmware left unassigned (`base == 0`).
 ///
 /// The region is placed just above the highest MMIO BAR the firmware *did*
-/// assign, so it lands inside the same host-bridge MMIO aperture and the
-/// device decodes it. Lock-free: it is called from within driver probe,
-/// which already holds `ENUM_STATE`. Returns `None` if no anchor exists.
+/// assign, so it lands inside the same host-bridge MMIO aperture and the device
+/// decodes it. Returns `None` if no anchor exists.
 pub fn pci_alloc_mmio(size: u64) -> Option<u64> {
     if size == 0 {
         return None;
@@ -225,15 +195,9 @@ pub fn pci_alloc_mmio(size: u64) -> Option<u64> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Link-section-driven driver registry.
-//
-// The linker gathers every `PciDriverEntry` placed in `.driver_registry`
-// (via the `pci_driver!` macro) into a contiguous array bracketed by
-// `__start_driver_registry` / `__stop_driver_registry` symbols (see
-// `link.ld`). `driver_registry_iter` walks that slice; `pci_probe_drivers`
-// iterates it during boot.
-// ---------------------------------------------------------------------------
+// The linker gathers every `PciDriverEntry` placed in `.driver_registry` into a
+// contiguous array bracketed by `__start_driver_registry` /
+// `__stop_driver_registry` (see `link.ld`).
 
 impl slopos_ostd::ffi::registry::RegistryEntry for PciDriverEntry {
     const REGISTRIES: &'static [slopos_ostd::ffi::registry::RegistryId] =
@@ -261,12 +225,10 @@ macro_rules! __pci_driver_opt {
 }
 
 /// Declarative wrapper around `registry_entry!` for emitting a
-/// [`PciDriverEntry`] into the `.driver_registry` link section. Each
-/// driver crate uses this macro exactly once per driver; the linker
-/// gathers all expansions into a single contiguous array.
+/// [`PciDriverEntry`] into the `.driver_registry` link section.
 ///
 /// `match_table` is required; `fallback` (default `None`) and `priority`
-/// (default `128`, the documented mid value — lower binds first) are optional:
+/// (default `128` — lower binds first) are optional:
 ///
 /// ```ignore
 /// pci_driver! {
@@ -303,13 +265,8 @@ macro_rules! pci_driver {
     };
 }
 
-// =============================================================================
-// MCFG / ECAM State
-// =============================================================================
-
-/// Cached ECAM segments. Built once during `pci_discover_mcfg()`; read via the
-/// public `pci_ecam_*` accessors.  The primary segment (segment 0) is laid
-/// out first so the hot path skips an array search.
+/// Cached ECAM segments, built once during `pci_discover_mcfg()`. The primary
+/// segment (segment 0) is laid out first so the hot path skips an array search.
 struct EcamRegistry {
     primary: EcamConfigSpace,
     primary_entry: McfgEntry,
@@ -351,21 +308,6 @@ static ECAM: OnceLock<EcamRegistry> = OnceLock::new();
 /// PCIe extended configuration space size per function (4 KiB).
 const ECAM_FUNCTION_SIZE: u16 = 4096;
 
-// =============================================================================
-// PCI Configuration Access
-//
-// ECAM MMIO is the sole configuration space backend.
-// Legacy port I/O (0xCF8/0xCFC) has been removed from the active path.
-// ECAM MMIO is mapped during pci_discover_mcfg() and is a hard boot
-// requirement — pci_init() panics if MCFG is absent or mapping fails.
-// =============================================================================
-
-// =============================================================================
-// ECAM MMIO Implementation
-// =============================================================================
-
-/// Resolve `(bus, device, function)` to a typed [`Bdf`] and locate the
-/// `EcamConfigSpace` covering that bus.
 fn ecam_for(bus: u8, device: u8, function: u8) -> Option<(&'static EcamConfigSpace, Bdf)> {
     let bdf = Bdf::new(bus, device, function)?;
     let space = ECAM.get()?.find(bdf)?;
@@ -392,11 +334,9 @@ fn ecam_write<T: Pod>(bus: u8, device: u8, function: u8, offset: u16, value: T) 
     space.write::<T>(bdf, offset, value)
 }
 
-/// Read a 32-bit value from PCI configuration space via ECAM MMIO.
-///
-/// Supports the full 4096-byte PCIe extended config space (offset 0x000–0xFFC).
-/// Returns `None` if ECAM is unavailable, the BDF is out of range, or the
-/// offset is misaligned / out of bounds.
+/// Covers the full 4096-byte PCIe extended config space (0x000–0xFFC). `None`
+/// if ECAM is unavailable, the BDF is out of range, or the offset is misaligned
+/// or out of bounds — as for every `pci_ecam_*` accessor.
 pub fn pci_ecam_read32(bus: u8, device: u8, function: u8, offset: u16) -> Option<u32> {
     if offset & 0x3 != 0 {
         return None;
@@ -404,7 +344,6 @@ pub fn pci_ecam_read32(bus: u8, device: u8, function: u8, offset: u16) -> Option
     ecam_read::<u32>(bus, device, function, offset)
 }
 
-/// Read a 16-bit value from PCI configuration space via ECAM MMIO.
 pub fn pci_ecam_read16(bus: u8, device: u8, function: u8, offset: u16) -> Option<u16> {
     if offset & 0x1 != 0 {
         return None;
@@ -412,15 +351,10 @@ pub fn pci_ecam_read16(bus: u8, device: u8, function: u8, offset: u16) -> Option
     ecam_read::<u16>(bus, device, function, offset)
 }
 
-/// Read an 8-bit value from PCI configuration space via ECAM MMIO.
 pub fn pci_ecam_read8(bus: u8, device: u8, function: u8, offset: u16) -> Option<u8> {
     ecam_read::<u8>(bus, device, function, offset)
 }
 
-/// Write a 32-bit value to PCI configuration space via ECAM MMIO.
-///
-/// Returns `None` if ECAM is unavailable, the BDF is out of range, or the
-/// offset is misaligned / out of bounds.
 pub fn pci_ecam_write32(bus: u8, device: u8, function: u8, offset: u16, value: u32) -> Option<()> {
     if offset & 0x3 != 0 {
         return None;
@@ -428,7 +362,6 @@ pub fn pci_ecam_write32(bus: u8, device: u8, function: u8, offset: u16, value: u
     ecam_write::<u32>(bus, device, function, offset, value)
 }
 
-/// Write a 16-bit value to PCI configuration space via ECAM MMIO.
 pub fn pci_ecam_write16(bus: u8, device: u8, function: u8, offset: u16, value: u16) -> Option<()> {
     if offset & 0x1 != 0 {
         return None;
@@ -436,99 +369,64 @@ pub fn pci_ecam_write16(bus: u8, device: u8, function: u8, offset: u16, value: u
     ecam_write::<u16>(bus, device, function, offset, value)
 }
 
-/// Write an 8-bit value to PCI configuration space via ECAM MMIO.
 pub fn pci_ecam_write8(bus: u8, device: u8, function: u8, offset: u16, value: u8) -> Option<()> {
     ecam_write::<u8>(bus, device, function, offset, value)
 }
 
-// =============================================================================
-// Public PCI Configuration Access (ECAM-only)
-//
-// All config space reads/writes go through ECAM MMIO.  The offset parameter
-// is u16, supporting the full 4096-byte PCIe extended config space.
-//
-// These functions panic on ECAM read failure (which indicates a bug — the ECAM
-// region is validated at boot).  Use the `pci_ecam_read*` variants directly
-// if you need fallible access.
-// =============================================================================
-
-/// Read a 32-bit value from PCI configuration space via ECAM MMIO.
-///
-/// Supports the full 4096-byte PCIe config space (offset 0x000–0xFFC).
-/// Panics if the ECAM read fails (offset misaligned or out of range).
+/// Panics if the ECAM access fails (misaligned or out-of-range offset), as does
+/// every `pci_config_*` wrapper; use the `pci_ecam_*` variants for fallible
+/// access.
 #[inline]
 pub fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u16) -> u32 {
     pci_ecam_read32(bus, device, function, offset).expect("pci_config_read32: ECAM read failed")
 }
 
-/// Read a 16-bit value from PCI configuration space via ECAM MMIO.
 #[inline]
 pub fn pci_config_read16(bus: u8, device: u8, function: u8, offset: u16) -> u16 {
     pci_ecam_read16(bus, device, function, offset).expect("pci_config_read16: ECAM read failed")
 }
 
-/// Read an 8-bit value from PCI configuration space via ECAM MMIO.
 #[inline]
 pub fn pci_config_read8(bus: u8, device: u8, function: u8, offset: u16) -> u8 {
     pci_ecam_read8(bus, device, function, offset).expect("pci_config_read8: ECAM read failed")
 }
 
-/// Write a 32-bit value to PCI configuration space via ECAM MMIO.
 #[inline]
 pub fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u16, value: u32) {
     pci_ecam_write32(bus, device, function, offset, value)
         .expect("pci_config_write32: ECAM write failed");
 }
 
-/// Write a 16-bit value to PCI configuration space via ECAM MMIO.
 #[inline]
 pub fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u16, value: u16) {
     pci_ecam_write16(bus, device, function, offset, value)
         .expect("pci_config_write16: ECAM write failed");
 }
 
-/// Write an 8-bit value to PCI configuration space via ECAM MMIO.
 #[inline]
 pub fn pci_config_write8(bus: u8, device: u8, function: u8, offset: u16, value: u8) {
     pci_ecam_write8(bus, device, function, offset, value)
         .expect("pci_config_write8: ECAM write failed");
 }
 
-// =============================================================================
-// PCI Capability List Walking
-// =============================================================================
-
-/// Iterator over PCI capabilities in a device's configuration space.
-///
-/// Walks the capability linked list starting from the Capabilities Pointer
-/// (offset 0x34). Each capability header contains an 8-bit ID and a pointer
-/// to the next capability.
-///
-/// # Infinite-loop protection
-///
-/// A guard counter limits traversal to [`Self::MAX_CAPS`] entries to protect
-/// against malformed capability lists on buggy hardware.
+/// Iterator over PCI capabilities: walks the linked list from the Capabilities
+/// Pointer (offset 0x34), giving up after [`Self::MAX_CAPS`] entries so a
+/// malformed list on buggy hardware cannot loop forever.
 pub struct PciCapabilityIter {
     bus: u8,
     device: u8,
     function: u8,
     next_ptr: u16,
-    /// Remaining entries before we give up (infinite-loop guard).
     remaining: u8,
 }
 
 impl PciCapabilityIter {
-    /// Maximum capabilities to visit before assuming a malformed list.
-    ///
-    /// The standard 256-byte config space can fit at most ~60 entries
-    /// (4 bytes minimum per capability, starting around offset 0x40).
-    /// 48 is a generous upper bound matching Linux's `PCI_FIND_CAP_TTL`.
+    /// The 256-byte config space fits at most ~60 entries; 48 is a generous
+    /// bound matching Linux's `PCI_FIND_CAP_TTL`.
     const MAX_CAPS: u8 = 48;
 
-    /// Create a capability iterator for the specified PCI function.
-    ///
-    /// Returns an empty iterator if the device's Status register does not
-    /// advertise a capabilities list (bit 4 of Status).
+    /// Empty if the device's Status register does not advertise a capabilities
+    /// list (bit 4).
     pub fn new(bus: u8, device: u8, function: u8) -> Self {
         let status = pci_config_read16(bus, device, function, PCI_STATUS_OFFSET);
         let first_ptr = if (status & PCI_STATUS_CAP_LIST) != 0 {
@@ -547,7 +445,6 @@ impl PciCapabilityIter {
         }
     }
 
-    /// Create a capability iterator for a known [`PciDeviceInfo`].
     pub fn for_device(info: &PciDeviceInfo) -> Self {
         Self::new(info.bus, info.device, info.function)
     }
@@ -573,14 +470,8 @@ impl Iterator for PciCapabilityIter {
     }
 }
 
-// =============================================================================
-// PCIe Extended Capability List Walking (offset 0x100+, ECAM-only)
-// =============================================================================
-
-/// Iterator over PCIe extended capabilities in a device's configuration space.
-///
-/// Extended capabilities occupy offsets 0x100–0xFFF and are only accessible via
-/// ECAM MMIO (4096-byte config space).  Each header is a 32-bit DWORD:
+/// Iterator over PCIe extended capabilities: offsets 0x100–0xFFF, reachable
+/// only via ECAM MMIO. Each header is a 32-bit DWORD:
 ///
 /// ```text
 ///   bits [15:0]  — Capability ID (16-bit)
@@ -588,45 +479,29 @@ impl Iterator for PciCapabilityIter {
 ///   bits [31:20] — Next Capability Offset (12-bit, 0 = end of list)
 /// ```
 ///
-/// A header value of `0x0000_0000` or `0xFFFF_FFFF` at the first extended
-/// capability offset (0x100) indicates the device has no extended capabilities.
-///
-/// # Infinite-loop protection
-///
-/// A guard counter limits traversal to [`Self::MAX_EXT_CAPS`] entries.
+/// A header of `0x0000_0000` or `0xFFFF_FFFF` at 0x100 means the device has
+/// none. Traversal gives up after [`Self::MAX_EXT_CAPS`] entries.
 pub struct PciExtCapabilityIter {
     bus: u8,
     device: u8,
     function: u8,
     next_offset: u16,
-    /// Remaining entries before we give up (infinite-loop guard).
     remaining: u8,
 }
 
 impl PciExtCapabilityIter {
-    /// Maximum extended capabilities to visit before assuming a malformed list.
-    ///
-    /// The extended config space (0x100–0xFFF = 3840 bytes) can fit at most ~240
-    /// 16-byte entries.  48 matches the standard capability guard in
-    /// [`PciCapabilityIter`] and Linux's `PCI_FIND_CAP_TTL`.
+    /// 48 matches the standard-capability guard in [`PciCapabilityIter`] and
+    /// Linux's `PCI_FIND_CAP_TTL`.
     const MAX_EXT_CAPS: u8 = 48;
 
-    /// Create an extended capability iterator for the specified PCI function.
-    ///
-    /// Returns an empty iterator (yielding no items) if:
-    /// - ECAM MMIO is not active (extended config space inaccessible)
-    /// - The first extended capability header is absent (`0x0000_0000` or
-    ///   `0xFFFF_FFFF` at offset 0x100)
+    /// Empty if ECAM MMIO is inactive or the first extended header is absent.
     pub fn new(bus: u8, device: u8, function: u8) -> Self {
         let first_offset = if pci_ecam_available() {
             match pci_ecam_read32(bus, device, function, PCI_EXT_CAP_START) {
-                // No extended capabilities or device not present.
                 Some(0x0000_0000) | Some(0xFFFF_FFFF) | None => 0,
-                // Valid header — start iteration at 0x100.
                 Some(_) => PCI_EXT_CAP_START,
             }
         } else {
-            // Extended config space requires ECAM.
             0
         };
 
@@ -639,7 +514,6 @@ impl PciExtCapabilityIter {
         }
     }
 
-    /// Create an extended capability iterator for a known [`PciDeviceInfo`].
     pub fn for_device(info: &PciDeviceInfo) -> Self {
         Self::new(info.bus, info.device, info.function)
     }
@@ -657,8 +531,7 @@ impl Iterator for PciExtCapabilityIter {
         let offset = self.next_offset;
         let header = pci_ecam_read32(self.bus, self.device, self.function, offset)?;
 
-        // A zero or all-ones header terminates the list (shouldn't normally happen
-        // mid-list, but guard against malformed hardware).
+        // Zero or all-ones header terminates the list (malformed-hardware guard).
         if header == 0 || header == 0xFFFF_FFFF {
             self.next_offset = 0;
             return None;
@@ -668,9 +541,7 @@ impl Iterator for PciExtCapabilityIter {
         let version = ((header >> 16) & 0xF) as u8;
         let next = ((header >> 20) & 0xFFF) as u16;
 
-        // PCIe spec: next offset must be either 0 (end) or ≥ 0x100 and
-        // DWORD-aligned.  Reject anything that points below 0x100 or is
-        // unaligned.
+        // PCIe spec: next offset is either 0 (end) or ≥ 0x100 and DWORD-aligned.
         self.next_offset = if next == 0 || next < PCI_EXT_CAP_START || (next & 0x3) != 0 {
             0
         } else {
@@ -685,55 +556,41 @@ impl Iterator for PciExtCapabilityIter {
     }
 }
 
-/// Find the first PCI capability with the given ID.
-///
-/// Returns the config-space byte offset of the capability header,
-/// or `None` if the device doesn't advertise that capability.
+/// Config-space byte offset of the first capability header with `cap_id`.
 pub fn pci_find_capability(bus: u8, device: u8, function: u8, cap_id: u8) -> Option<u16> {
     PciCapabilityIter::new(bus, device, function)
         .find(|cap| cap.id == cap_id)
         .map(|cap| cap.offset)
 }
 
-/// Find the first PCIe extended capability with the given ID.
-///
-/// Returns the config-space byte offset of the extended capability header,
-/// or `None` if the device has no extended capabilities or the requested
-/// capability is absent.  Requires ECAM MMIO to be active.
+/// Config-space byte offset of the first extended capability header with
+/// `cap_id`. Requires ECAM MMIO to be active.
 pub fn pci_find_ext_capability(bus: u8, device: u8, function: u8, cap_id: u16) -> Option<u16> {
     PciExtCapabilityIter::new(bus, device, function)
         .find(|cap| cap.id == cap_id)
         .map(|cap| cap.offset)
 }
 
-/// Convenience methods for PCI capability queries on a known device.
 impl PciDeviceInfo {
-    /// Find the first standard capability with the given ID for this device.
     pub fn find_capability(&self, cap_id: u8) -> Option<u16> {
         pci_find_capability(self.bus, self.device, self.function, cap_id)
     }
 
-    /// Iterate over all standard PCI capabilities of this device.
     pub fn capabilities(&self) -> PciCapabilityIter {
         PciCapabilityIter::for_device(self)
     }
 
-    /// Find the first PCIe extended capability with the given ID for this device.
-    ///
-    /// Returns `None` if ECAM is not active or the capability is absent.
+    /// `None` if ECAM is not active or the capability is absent.
     pub fn find_ext_capability(&self, cap_id: u16) -> Option<u16> {
         pci_find_ext_capability(self.bus, self.device, self.function, cap_id)
     }
 
-    /// Iterate over all PCIe extended capabilities of this device.
-    ///
     /// Yields no items if ECAM MMIO is not active.
     pub fn ext_capabilities(&self) -> PciExtCapabilityIter {
         PciExtCapabilityIter::for_device(self)
     }
 }
 
-/// Human-readable name for a PCI capability ID (for boot log output).
 fn pci_cap_id_name(id: u8) -> &'static str {
     match id {
         0x01 => "PM",
@@ -756,7 +613,6 @@ fn pci_cap_id_name(id: u8) -> &'static str {
     }
 }
 
-/// Human-readable name for a PCIe extended capability ID (for boot log output).
 fn pci_ext_cap_id_name(id: u16) -> &'static str {
     match id {
         PCI_EXT_CAP_ID_AER => "AER",
@@ -855,9 +711,8 @@ fn pci_probe_bar(bus: u8, device: u8, function: u8, bar_idx: u8) -> PciBarInfo {
     }
 }
 
-/// Enumerate BARs for a non-bridge function and return the `[PciBarInfo;
-/// 6]` array plus the populated-entry count. `#[inline(never)]` so the
-/// 144 B BAR array lives in this helper's frame, not the caller's.
+/// `#[inline(never)]` so the 144 B BAR array lives in this helper's frame, not
+/// the caller's.
 #[inline(never)]
 fn pci_enumerate_bars(
     bus: u8,
@@ -899,9 +754,8 @@ fn pci_find_msi_caps(bus: u8, device: u8, function: u8) -> (Option<u16>, Option<
     (msi_cap_offset, msix_cap_offset)
 }
 
-/// Log summary + capability + BAR lines for one device. `#[inline(never)]`
-/// so each `klog_info!`'s `format_args!` scratch stays in this helper's
-/// frame, keeping `pci_probe_device` below the 1 KiB stack gate.
+/// `#[inline(never)]` so each `klog_info!`'s `format_args!` scratch stays in
+/// this helper's frame, keeping `pci_probe_device` below the stack gate.
 #[inline(never)]
 fn pci_log_device_summary(info: &PciDeviceInfo) {
     klog_info!(
@@ -1034,16 +888,9 @@ fn pci_scan_bus_inner(state: &mut PciEnumState, bus: u8) {
     }
 }
 
-// =============================================================================
-// MCFG / ECAM Discovery + MMIO Mapping
-// =============================================================================
-
-/// Discover and cache MCFG (PCIe ECAM) entries from ACPI tables, then map
-/// each entry's configuration space into virtual memory.
-///
-/// Called during [`pci_init`] before bus enumeration. ECAM is mandatory and
-/// this function panics if MCFG is absent, empty, or the
-/// primary segment's MMIO region cannot be mapped.
+/// Discover and cache MCFG (PCIe ECAM) entries from ACPI tables, then map each
+/// entry's configuration space. ECAM is mandatory, so this panics if MCFG is
+/// absent, empty, or the primary segment cannot be mapped.
 fn pci_discover_mcfg() {
     if !hhdm::is_available() {
         panic!("PCI: ECAM requires HHDM — cannot initialize PCI subsystem");
@@ -1127,38 +974,28 @@ fn pci_discover_mcfg() {
     );
 }
 
-// =============================================================================
-// Public ECAM Accessors
-// =============================================================================
-
-/// Check whether ECAM configuration space is available.
-///
-/// Returns `true` after [`pci_init`] has successfully mapped ECAM MMIO.
+/// `true` once [`pci_init`] has mapped ECAM MMIO.
 #[inline]
 pub fn pci_ecam_available() -> bool {
     ECAM.get().is_some()
 }
 
-/// Return the physical base address of the primary ECAM region (segment 0).
-///
-/// Returns `0` if MCFG was not found or does not cover segment 0.
+/// Physical base of the primary ECAM region (segment 0), or `0` if MCFG was not
+/// found or does not cover segment 0.
 #[inline]
 pub fn pci_ecam_base() -> u64 {
     ECAM.get().map(|r| r.primary_entry.base_phys).unwrap_or(0)
 }
 
-/// Return the number of cached ECAM entries.
 #[inline]
 pub fn pci_ecam_entry_count() -> u8 {
     ECAM.get().map(|r| r.entry_count() as u8).unwrap_or(0)
 }
 
-/// Retrieve a specific ECAM entry by index.
 pub fn pci_ecam_entry(index: usize) -> Option<McfgEntry> {
     ECAM.get()?.entry(index)
 }
 
-/// Find the ECAM entry that covers a given segment and bus.
 pub fn pci_ecam_find_entry(segment: u16, bus: u8) -> Option<McfgEntry> {
     let registry = ECAM.get()?;
     let mut idx = 0;
@@ -1175,28 +1012,20 @@ pub fn pci_ecam_find_entry(segment: u16, bus: u8) -> Option<McfgEntry> {
     None
 }
 
-/// Retrieve the mapped MMIO region for a given ECAM entry index.
-///
-/// Returns `None` if the index is out of range or the region was not mapped.
+/// `None` if the index is out of range or the region was not mapped.
 pub fn pci_ecam_mapped_region(index: usize) -> Option<MmioRegion> {
     ECAM.get()?
         .config_space(index)
         .map(|cs| cs.region().clone())
 }
 
-/// Return the virtual base address of the primary ECAM MMIO mapping.
-///
-/// Returns `0` if the primary segment was not mapped.
+/// Virtual base of the primary ECAM MMIO mapping, or `0` if it was not mapped.
 #[inline]
 pub fn pci_ecam_primary_virt() -> u64 {
     ECAM.get()
         .map(|r| r.primary.region().virt_base())
         .unwrap_or(0)
 }
-
-// =============================================================================
-// Initialization
-// =============================================================================
 
 pub fn pci_init() {
     if !PCI_INIT.init_once() {
@@ -1223,8 +1052,7 @@ pub fn pci_init() {
     }
 
     // Anchor the unassigned-BAR allocator above the highest firmware-assigned
-    // MMIO BAR while the state lock is already held here, so allocation during
-    // driver probe (which holds this same lock) needs no lock of its own.
+    // MMIO BAR, so a later allocation lands in the same host-bridge aperture.
     let mut mmio_top = 0u64;
     for dev in &state.devices[..state.device_count] {
         for bar in &dev.bars {
@@ -1253,8 +1081,7 @@ pub fn pci_get_device(index: usize) -> Option<PciDeviceInfo> {
     }
 }
 
-/// The name of the driver that has claimed device `dev_idx`, if any. Reads the
-/// per-device claim table populated by [`pci_probe_drivers`].
+/// The name of the driver that has claimed device `dev_idx`, if any.
 pub fn pci_device_owner(dev_idx: usize) -> Option<&'static str> {
     match CLAIMED_BY.lock().slots.get(dev_idx) {
         Some(ClaimSlot::Claimed { binding, .. }) => Some(binding.name()),

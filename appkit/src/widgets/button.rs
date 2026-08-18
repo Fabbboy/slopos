@@ -12,7 +12,6 @@ use crate::style::StyleSheet;
 use crate::text as font;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
-/// Visual interaction state of the button.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ButtonState {
     Idle,
@@ -21,7 +20,6 @@ enum ButtonState {
     Disabled,
 }
 
-/// Clickable button with a text label and visual states.
 pub struct ButtonWidget {
     core: WidgetCore,
     label: String,
@@ -55,7 +53,6 @@ impl ButtonWidget {
     }
 }
 
-/// Lighten a color by adding to each RGB channel (clamped to 255).
 fn lighten(c: Color32, amount: u8) -> Color32 {
     Color32::new(
         c.red().saturating_add(amount),
@@ -65,7 +62,6 @@ fn lighten(c: Color32, amount: u8) -> Color32 {
     )
 }
 
-/// Darken a color by subtracting from each RGB channel (clamped to 0).
 fn darken(c: Color32, amount: u8) -> Color32 {
     Color32::new(
         c.red().saturating_sub(amount),
@@ -75,7 +71,7 @@ fn darken(c: Color32, amount: u8) -> Color32 {
     )
 }
 
-/// Pick background and foreground colors for the given style + state.
+/// Returns (background, foreground) for the given style and state.
 fn button_colors(style: &StyleSheet, bs: ButtonStyle, state: ButtonState) -> (Color32, Color32) {
     match (bs, state) {
         (ButtonStyle::Primary, ButtonState::Idle) => (style.bg_accent, style.text_on_accent),
@@ -169,7 +165,6 @@ impl Widget for ButtonWidget {
                 EventResponse::Ignored
             }
             WidgetEvent::PointerLeave => {
-                // Cancel press or exit hover.
                 self.state = ButtonState::Idle;
                 EventResponse::Ignored
             }
@@ -178,9 +173,8 @@ impl Widget for ButtonWidget {
                 y,
                 button: PointerButton::Left,
             } => {
-                // Transition to Pressed from any interactive state.
-                // Don't require PointerEnter (hover) first — the framework
-                // may not synthesize enter/leave events from pointer motion.
+                // No prior PointerEnter is required: the framework may not
+                // synthesise enter/leave from pointer motion.
                 if !self.layout_rect().contains(*x, *y) {
                     return EventResponse::Ignored;
                 }
@@ -213,7 +207,6 @@ impl Widget for ButtonWidget {
             }
             WidgetEvent::FocusLost => {
                 self.focused = false;
-                // If we were pressed when focus was lost, reset to idle.
                 if self.state == ButtonState::Pressed {
                     self.state = ButtonState::Idle;
                 }

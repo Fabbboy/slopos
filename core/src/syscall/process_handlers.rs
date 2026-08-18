@@ -97,9 +97,8 @@ fn read_user_cstr_list(ptrs: &[u64]) -> Result<KVec<KVec<u8>>, ()> {
     Ok(out)
 }
 
-/// Copy an `Open` action's path out of user memory into a kernel buffer,
-/// trimming at the first NUL (accepts both explicit-length and NUL-terminated
-/// paths).
+/// Copy an `Open` action's path into a kernel buffer, trimming at the first NUL
+/// so both explicit-length and NUL-terminated paths are accepted.
 fn read_open_action_path(ptr: u64, len: u64) -> Result<KVec<u8>, Errno> {
     if ptr == 0 || len == 0 {
         return Err(Errno::EINVAL);
@@ -170,17 +169,10 @@ fn read_user_spawn_actions(attrs: &SpawnAttrs) -> Result<KVec<exec::FdAction>, E
 /// Classify the caller-supplied `SpawnAttrs::flags`, returning the subset the
 /// child is allowed to inherit from the request.
 ///
-/// Order is load-bearing. An undefined bit is a malformed request and is
-/// answered as such before anything is said about privilege, so a caller that
-/// probes reserved bits never learns from an `EPERM` that a bit *means*
-/// something. `KERNEL_MODE` is answered explicitly here rather than left to
-/// `task_build`, which refuses the USER|KERNEL combination by returning `None`
-/// — a value the exec layer can only report as `NoMem`.
-///
-/// What survives is `flags & SPAWN_USER_SETTABLE` by construction. Nothing a
-/// caller writes can add a privileged bit: the privileged bits the child ends
-/// up with come from [`crate::exec::grants`], keyed on the program being
-/// loaded.
+/// Order is load-bearing: an undefined bit is answered as malformed before
+/// anything is said about privilege, so probing reserved bits never learns from
+/// an `EPERM` that a bit *means* something. The privileged bits a child ends up
+/// with come from [`crate::exec::grants`], keyed on the program being loaded.
 fn validate_spawn_flags(flags: u16) -> Result<u16, Errno> {
     if flags & SPAWN_RESERVED != 0 {
         return Err(Errno::EINVAL);
@@ -191,10 +183,9 @@ fn validate_spawn_flags(flags: u16) -> Result<u16, Errno> {
     if flags & SPAWN_PRIVILEGED != 0 {
         return Err(Errno::EPERM);
     }
-    // `USER_MODE` reaches here intact and is dropped rather than refused: every
-    // `ProgramSpec` sets it and `spawn_program_with_attrs` ORs it back in
-    // unconditionally, so rejecting it would fail a request that asks for
-    // precisely what it is about to be given.
+    // `USER_MODE` is dropped rather than refused: `spawn_program_with_attrs`
+    // ORs it back in unconditionally, so refusing would fail a request asking
+    // for precisely what it is about to be given.
     Ok(flags & SPAWN_USER_SETTABLE)
 }
 
@@ -213,15 +204,10 @@ define_syscall!(syscall_spawn_path
     let attrs = copy_from_user(attrs_user).map_err(|_| Errno::EFAULT)?;
 
     let priority = TaskPriority::try_from_u8(attrs.priority).ok_or(Errno::EINVAL)?;
-    // Userland picks between the two ordinary tiers and nothing else. `High`
-    // sits above every other user task and is the compositor's own tier — one
-    // the kernel hands out by program identity (`exec::grants`), never one a
-    // caller may request, or a `loop {}` binary at that tier starves the
-    // machine. `KernelIo` is reserved for kernel kthreads (NAPI, net-timer, …);
-    // its only sanctioned spawn surface is
-    // `slopos_ostd::task::spawn_kernel_io`, which takes a typed `KernelIoToken`
-    // witness and has no syscall analogue. `Idle` is the per-CPU idle loop's
-    // tier and, per its own doc comment, is never a user-spawned task's.
+    // Userland picks between the two ordinary tiers and nothing else. `High` is
+    // the compositor's, handed out by program identity (`exec::grants`) — a
+    // `loop {}` binary at that tier starves the machine. `KernelIo` and `Idle`
+    // have no syscall spawn surface at all.
     if !matches!(priority, TaskPriority::Normal | TaskPriority::Low) {
         return Err(Errno::EINVAL);
     }
@@ -254,8 +240,6 @@ define_syscall!(syscall_spawn_path
         None => None,
     };
 
-    // The environment the child sees, so `export` in a shell is observable by
-    // what it launches.  Same shape as `argv`, and bounded the same way.
     let envp_storage = if attrs.envp_ptr != 0 && attrs.envp_len > 0 {
         let envp_ptrs = read_user_ptr_array_count(
             attrs.envp_ptr,
@@ -314,10 +298,8 @@ define_syscall!(syscall_waitpid
     let wnohang = (flags & 0x1) != 0;
     let caller_id = ctx.task_id();
 
-    // Wait-any resolves to a concrete child before the named path runs, so the
-    // ownership check and the reap below stay one implementation. Without it a
-    // supervisor has to name every child it ever spawned, which is why the
-    // in-tree launchers discarded their tids and leaked the zombies.
+    // Wait-any resolves to a concrete child first, so the ownership check and
+    // the reap below stay one implementation.
     let target_id = match target {
         WaitTarget::Child(id) => id,
         WaitTarget::Any => match slopos_sched::task::task_first_exited_child(caller_id) {
@@ -329,9 +311,7 @@ define_syscall!(syscall_waitpid
                 if wnohang {
                     return Err(Errno::EAGAIN);
                 }
-                // No child has exited yet. Park until one does, then re-resolve:
-                // the woken waiter learns *which* child exited by scanning, the
-                // same way it would have on entry.
+                // The woken waiter learns *which* child exited by re-scanning.
                 slopos_sched::task::task_wait_any_child(caller_id)?;
                 match slopos_sched::task::task_first_exited_child(caller_id) {
                     Some(id) => id,
@@ -341,10 +321,9 @@ define_syscall!(syscall_waitpid
         },
     };
 
-    // Reaping is the parent's alone. `task_consume_zombie` unlinks the target
-    // from whoever its parent is and drops that owning reference, so a
-    // stranger's wait would take the exit code *and* leave the real parent
-    // with `ECHILD` for a child it is still waiting on.
+    // Reaping is the parent's alone: `task_consume_zombie` unlinks from whoever
+    // the parent is and drops that owning reference, so a stranger's wait would
+    // leave the real parent with `ECHILD`.
     match task_find_by_id(target_id) {
         Some(t) if t.parent_task_id() == caller_id => {}
         _ => return Err(Errno::ECHILD),
@@ -493,14 +472,12 @@ define_syscall!(syscall_exec
                 }
             }
 
-            // Point of no return: old image is gone. Tear down task-bound
-            // resources (compositor surface, shm buffers, input queues, ...).
+            // Point of no return: the old image is gone.
             let task_id = ctx.task_id();
             slopos_sched::task::task_cleanup_for_exec(task_id);
 
-            // Reset caught signal handlers to SIG_DFL so a stale handler
-            // pointer never survives into the new image; SIG_IGN and the
-            // blocked/pending state are preserved (POSIX exec semantics).
+            // SIG_DFL so no stale handler pointer survives into the new image;
+            // SIG_IGN and blocked/pending state stay (POSIX exec semantics).
             if let Some(task) = Some(ctx.task()) {
                 task_reset_caught_handlers(task);
             }
@@ -512,8 +489,7 @@ define_syscall!(syscall_exec
                 }
                 slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
             }
-            // Build the new user-mode entry register snapshot, then commit
-            // through `set_regs` so CS/SS/RFLAGS sandbox bits are reapplied.
+            // `set_regs` reapplies the CS/SS/RFLAGS sandbox bits.
             let uc = ctx.user_ctx();
             let mut regs = uc.regs();
             regs.rip = entry_point;
@@ -529,17 +505,13 @@ define_syscall!(syscall_exec
             regs.r11 = 0;
             uc.set_regs(regs);
 
-            // The new image must start with a clean FPU/vector file — never
-            // leak the previous program's XMM/YMM contents. Reset the stored
-            // state AND load the default into the CPU under IRQ-off, so a
-            // context switch can't re-save the old image's live registers
-            // over the reset before the new image runs.
+            // The new image must never see the previous program's vector
+            // registers. Reset and load the default under IRQ-off, so a context
+            // switch cannot re-save the old live registers over the reset.
             let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
             slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-                // The exec'ing task is this CPU's current, so the guard is the
-                // witness that authorises both writes. One witness covers the
-                // reset and the load, so they cannot be split by a second
-                // derivation, and both maintain the FPU owner tag.
+                // One witness authorises both writes, so they cannot be split
+                // by a second derivation, and both keep the FPU owner tag.
                 if let Some(current) = slopos_sched::task_struct::Current::get() {
                     current.task().fpu_reset(&current);
                     let restored = current.task().fpu_restore_to_cpu(&current, xcr0);
@@ -569,20 +541,16 @@ define_syscall!(syscall_set_cpu_affinity
     let Some(task_ref) = task_find_by_id(resolved) else {
         return Err(Errno::ESRCH);
     };
-    // Pinning is a scheduling decision about someone else's task, and with no
-    // relation check it was one any task could make about any other: pin one
-    // `NO_PREEMPT` spinner per CPU and every core is wedged. Sharing an address
-    // space is the honest boundary — a sibling thread can already execute
-    // arbitrary code inside the target, so refusing it would buy nothing, while
-    // a task in another process has no standing to place this one at all.
-    // Compared as tables, not as numbers: a recycled id would let a task in a
-    // *later* process pass a check meant for a sibling of the target's.
+    // Pinning is a scheduling decision about someone else's task: unchecked,
+    // any task could pin a `NO_PREEMPT` spinner per CPU and wedge every core.
+    // Sharing an address space is the honest boundary. Compared as tables, not
+    // numbers — a recycled id would let a *later* process pass a sibling check.
     if task_ref.process().as_deref().and_then(FdTable::of) != Some(process_id) {
         return Err(Errno::EPERM);
     }
     task_ref.set_cpu_affinity(new_affinity);
     // Stamping the mask is not enough — re-place the task so the new mask
-    // actually governs where it runs (Linux `sched_setaffinity` → migrate).
+    // actually governs where it runs.
     task_apply_affinity(&task_ref, new_affinity);
     Ok(())
 });
@@ -596,10 +564,8 @@ define_syscall!(syscall_get_cpu_affinity
     let Some(task_ref) = task_find_by_id(resolved) else {
         return Err(Errno::ESRCH);
     };
-    // Same boundary as the setter. Leaving the pair asymmetric is how the
-    // setter's missing check gets reintroduced.
-    // Compared as tables, not as numbers: a recycled id would let a task in a
-    // *later* process pass a check meant for a sibling of the target's.
+    // Same boundary as the setter, compared as tables rather than numbers: a
+    // recycled id would let a task in a *later* process pass a sibling check.
     if task_ref.process().as_deref().and_then(FdTable::of) != Some(process_id) {
         return Err(Errno::EPERM);
     }
@@ -654,11 +620,8 @@ define_syscall!(syscall_setpgid
         return Err(Errno::EINVAL);
     }
 
-    // Resolve the group object the target should carry, mirroring the integer
-    // pgid it is about to hold.
+    // The group object must mirror the integer pgid the target is about to hold.
     let new_group = if resolved_pgid == resolved_pid {
-        // Become a new group leader within the current session — unless the
-        // target already leads exactly this group.
         match target.process_group.load() {
             Some(existing) if existing.id() == resolved_pgid => Some(existing),
             _ => {
@@ -671,7 +634,6 @@ define_syscall!(syscall_setpgid
             }
         }
     } else {
-        // Join an existing group: its leader must exist and share the session.
         let Some(leader_ref) = task_find_by_id(resolved_pgid) else {
             return Err(Errno::EINVAL);
         };
@@ -681,12 +643,10 @@ define_syscall!(syscall_setpgid
         Some(leader_ref.process_group.load().ok_or(Errno::EINVAL)?)
     };
 
-    // `target` is generally *not* the calling task, so both writes land on
-    // fields a reader on another CPU may be looking at right now. The integer
-    // goes first and the membership second: the slot's Release store is what
-    // orders the pair, and the displaced membership is released after a grace
-    // period, which keeps a concurrent reader's clone from racing its
-    // destructor.
+    // `target` is generally *not* the calling task, so a reader on another CPU
+    // may be looking at these fields. Integer first, membership second: the
+    // slot's Release store orders the pair and defers the displaced handle's
+    // release past any concurrent reader's clone.
     target.set_pgid(resolved_pgid);
     target.process_group.store(new_group);
     Ok(())
@@ -735,9 +695,8 @@ define_syscall!(syscall_chdir
         Err(_) => return Err(Errno::ENOENT),
     }
 
-    // The working directory is written under the exclusivity witness rather
-    // than a `&mut Task`: only the running task touches its own cwd, and that
-    // is precisely what `CurrentTask` proves.
+    // Only the running task touches its own cwd, which is exactly what the
+    // `Current` witness proves.
     let current = Current::get().ok_or(Errno::EINVAL)?;
     if !current.task().set_cwd(&current, path.as_bytes()) {
         return Err(Errno::ENAMETOOLONG);
@@ -866,20 +825,17 @@ define_syscall!(syscall_prlimit64
     use slopos_ostd::process::quota::{KindStats, NO_LIMIT, set_limit, stats};
 
     let process = process_id.process().ok_or(Errno::ESRCH)?;
-    // Self only. There is no privilege principal in this kernel — getuid and
-    // friends return a literal 0 — so "may I change that process's limits"
-    // has no answer that is not "everyone may", which is not a policy worth
-    // shipping. Belongs to plans/authority-model.md.
+    // Self only: there is no privilege principal in this kernel (getuid returns
+    // a literal 0), so a cross-process limit change has no answer but
+    // "everyone may". Belongs to plans/authority-model.md.
     if pid != 0 && pid != process.id() {
         return Err(Errno::EPERM);
     }
 
     let mapping = rlimit_mapping(resource).ok_or(Errno::EINVAL)?;
     let account = process.account();
-    // A process whose account row has gone — reaped mid-call — reports the
-    // enforced default rather than failing: the number is still true of every
-    // process, and `ESRCH` here would be a syscall that fails depending on how
-    // recently the caller was reaped.
+    // An account row reaped mid-call reports the enforced default rather than
+    // failing: `ESRCH` here would make the syscall depend on reap timing.
     let current = stats(account, mapping.kind).unwrap_or(KindStats {
         used: 0,
         limit: slopos_abi::quota::default_process_limit(mapping.kind),
@@ -898,10 +854,9 @@ define_syscall!(syscall_prlimit64
     // in force when it was made rather than what it just installed.
     if old_ptr != 0 {
         let out = MmUserPtr::<RLimit64>::try_new(old_ptr).map_err(|_| Errno::EFAULT)?;
-        // Soft and hard are the same number here: the hard limit is the
-        // enforced ceiling, and there is no privileged path that could raise
-        // one above the other, so reporting them apart would imply headroom
-        // that cannot be claimed.
+        // Soft and hard are the same number: there is no privileged path to
+        // raise one above the other, so reporting them apart would imply
+        // headroom that cannot be claimed.
         let value = publish(current.limit);
         copy_to_user(out, &RLimit64 { rlim_cur: value, rlim_max: value })
             .map_err(|_| Errno::EFAULT)?;
@@ -913,21 +868,15 @@ define_syscall!(syscall_prlimit64
         if want.rlim_cur > want.rlim_max {
             return Err(Errno::EINVAL);
         }
-        // Lowering only. Raising the ceiling is the privileged operation, and
-        // granting it unconditionally would make every limit advisory — a
-        // process refused for want of headroom could simply ask for more.
-        // Lowering is always safe and is the useful half: it is how a process
-        // sandboxes itself before running untrusted work.
+        // Lowering only: raising the ceiling is the privileged operation, and
+        // granting it unconditionally would make every limit advisory.
         if want.rlim_max > publish(current.limit) {
             return Err(Errno::EPERM);
         }
-        // Saturating, never `NO_LIMIT`. A `rlim_cur` too large for the arena's
-        // `u32` is a request to raise the ceiling past anything this kernel
-        // enforces, and mapping it to the no-limit sentinel would turn the
-        // widest possible *set* into a way to switch enforcement off for the
-        // caller's own account — an unprivileged escape from every ceiling.
-        // Clamping to the current one keeps `setrlimit` lower-only for every
-        // input, including the ones that do not fit.
+        // Saturating, never `NO_LIMIT`: mapping an over-wide `rlim_cur` to the
+        // no-limit sentinel would turn the widest possible *set* into a way to
+        // switch enforcement off. Clamping keeps `setrlimit` lower-only for
+        // every input, including the ones that do not fit.
         let scaled = want.rlim_cur / mapping.scale.max(1);
         let requested = u32::try_from(scaled).unwrap_or(u32::MAX).min(current.limit);
         set_limit(account, mapping.kind, requested);

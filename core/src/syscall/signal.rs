@@ -35,8 +35,7 @@ fn parse_signum(raw: u64) -> Option<u8> {
     }
 }
 
-/// Heap-backed list of unique task IDs collected during signal
-/// delivery.
+/// Heap-backed list of unique task IDs collected during signal delivery.
 struct TargetSet {
     ids: slopos_ostd::KVec<u32>,
 }
@@ -71,43 +70,28 @@ impl TargetSet {
 
 /// Whether `kill` may name this task at all.
 ///
-/// Kernel tasks are structurally excluded from signal *delivery* —
-/// `claim_pending_signal` returns `Done` for them before it even reads the
-/// pending mask — so naming one can only ever reach the SIGKILL arm, which is
-/// not signal-gated and terminates by id. That put the driver threads, which
-/// own device state and hardware interrupt lines and have no way to stop
-/// cleanly on demand, one `kill` away from teardown.
-///
-/// This gates the explicitly-named target as well as the fanouts. It used to
-/// carry the whole burden, because `process_list` reported every registered
-/// task's id and name, kernel tasks included, so naming one was not a guess.
-/// Enumeration now applies this same predicate
-/// ([`syscall_process_list`](crate::syscall::core_handlers)), so an
-/// unprivileged caller is not told the id in the first place — this stays as
-/// the enforcing check rather than the only one.
+/// Kernel tasks are structurally excluded from signal *delivery*, so naming one
+/// could only reach the SIGKILL arm — which is not signal-gated — and tear down
+/// a driver thread that owns device state and an interrupt line. Enumeration
+/// applies the same predicate; this stays as the enforcing check.
 pub(crate) fn signal_may_name(flags: u16) -> bool {
     (flags & TASK_FLAG_USER_MODE) != 0
 }
 
 /// Whether a task holding `caller_flags` may signal one holding `target_flags`.
 ///
-/// `task.flags` is the whole of SlopOS's privilege model, so this is the
-/// question POSIX answers with user ids, asked of the thing that actually
-/// carries authority here: a sender may name a task whose privileges it
-/// already holds, and no other. Peers reach each other exactly as one user's
-/// processes do — a task manager still ends a shell job — while nothing
-/// unprivileged reaches the compositor, `/bin/roulette`, `/bin/ip` or init.
+/// `task.flags` is the whole of SlopOS's privilege model, standing in for the
+/// user ids POSIX asks about: a sender may name a task whose privileges it
+/// already holds, and no other.
 pub(crate) fn signal_dominates(caller_flags: u16, target_flags: u16) -> bool {
     target_flags & SPAWN_PRIVILEGED & !caller_flags == 0
 }
 
 /// Init is never a signal target.
 ///
-/// Modelled on Linux's `SIGNAL_UNKILLABLE` for the global init, which ignores
-/// terminating signals outright because delivering one takes the system down
-/// with no way to debug it. Dominance already covers init while it is the only
-/// `TASK_FLAG_SYSTEM` task outside the test runner, but the guarantee should
-/// not rest on that staying true.
+/// Matches the `SIGNAL_UNKILLABLE` behaviour Linux gives global init: a
+/// terminating signal there takes the system down undebuggably. Dominance
+/// already covers init today; the guarantee should not rest on that.
 pub(crate) fn signal_is_init(task_id: u32) -> bool {
     let init = crate::exec::init_task_id();
     init != INVALID_TASK_ID && task_id == init
@@ -121,7 +105,6 @@ fn signal_permitted(caller_flags: u16, target_id: u32, target_flags: u16) -> boo
 
 /// Whether a sender holding `caller_flags` may act on the live task `target_id`.
 ///
-/// The same relation `kill` applies, for the other primitive that ends a task.
 /// A target that does not exist answers `true`; the caller's own lookup
 /// reports that.
 pub(crate) fn may_signal(caller_flags: u16, target_id: u32) -> bool {
@@ -205,8 +188,7 @@ define_syscall!(syscall_rt_sigaction
 
     if old_act_ptr != 0 {
         let old_ptr = MmUserPtr::<UserSigaction>::try_new(old_act_ptr).map_err(|_| Errno::EFAULT)?;
-        // `Signum` already bounded this. The checked read is what makes the
-        // bound structural rather than a promise kept at a distance.
+        // `Signum` already bounded this; the checked read keeps the bound structural.
         let current = task_ref.signal_action(idx).ok_or(Errno::EINVAL)?;
         let old_action = action_to_user(&current);
         copy_to_user(old_ptr, &old_action).map_err(|_| Errno::EFAULT)?;
@@ -279,9 +261,8 @@ define_syscall!(syscall_kill
     let mut fanout = Fanout { denied: false };
     if pid > 0 {
         let target_id = pid as u32;
-        // A kernel task is not a process, so ESRCH rather than EPERM: naming
-        // one is not a permission question, it is a category error. The
-        // privilege check comes after, so the two answers stay distinct.
+        // A kernel task is not a process: ESRCH rather than EPERM, a category
+        // error rather than a permission question.
         let target_flags = match task_find_by_id(target_id) {
             Some(target) if signal_may_name(target.flags) => target.flags,
             _ => return SyscallResult::Err(Errno::ESRCH),
@@ -346,17 +327,11 @@ define_syscall!(syscall_kill
         };
 
         if signum == SIGKILL {
-            // An ordinary post, plus the flag that makes a *blocked* target
-            // act on it. It stays reliably fatal without a special case:
-            // SIG_UNCATCHABLE is stripped from every sa_mask and from
-            // set_signal_blocked, so SIGKILL is always deliverable, and
-            // rt_sigaction refuses a handler for it — so the disposition is
-            // always SIG_DFL, whose default is Terminate.
-            //
-            // The flag is what a task parked in a blocking primitive sees: it
-            // aborts the wait, the target returns through its own frames
-            // running their destructors, and it exits at its next
-            // return-to-user boundary rather than being abandoned mid-stack.
+            // Reliably fatal without a special case: SIG_UNCATCHABLE is
+            // stripped from every mask so SIGKILL is always deliverable, and
+            // rt_sigaction refuses a handler for it. The kill flag is what a
+            // target parked in a blocking primitive sees — it unwinds by
+            // returning rather than being abandoned mid-stack.
             let _ = task_signal_post(&target, SIGKILL);
             task_kill_and_wake(&target);
             signaled += 1;
@@ -376,8 +351,7 @@ define_syscall!(syscall_kill
     }
 
     // A self-kill returns normally and dies one frame later, in the signal
-    // delivery at the end of syscall_handle: same CPU, same stack, after this
-    // frame has been left rather than through it.
+    // delivery at the end of `syscall_handle`.
     SyscallResult::Ok(0)
 });
 
@@ -386,28 +360,21 @@ fn read_signal_frame(rsp: u64) -> Option<SignalFrame> {
     copy_from_user(ptr).ok()
 }
 
-/// The FPU/vector save area sits immediately after the `SignalFrame` on
-/// the user stack; delivery writes it and sigreturn reads it back from
-/// the same offset. (The `SignalFrame` ABI is unchanged — this area is
-/// kernel-internal and the userland restorer never touches it.)
+/// The FPU/vector save area sits immediately after the `SignalFrame` on the
+/// user stack. Kernel-internal; the userland restorer never touches it.
 #[inline]
 fn sigframe_fpu_addr(sigframe_addr: u64) -> u64 {
     sigframe_addr.wrapping_add(core::mem::size_of::<SignalFrame>() as u64)
 }
 
-/// Save the interrupted task's live FPU/SSE/AVX state into its user
-/// signal frame so sigreturn can restore it — a handler that touches the
-/// vector registers must not corrupt the interrupted code's state. The
-/// kernel is `+soft-float` and has not touched the vector file since
-/// entry, so the live CPU state is still the interrupted user's. Returns
-/// false on a user-copy fault.
-///
-/// Delivery only ever runs on the interrupted task's own CPU, so the exclusive
-/// access the save needs is the `CurrentTask` witness the caller already holds.
+/// Save the interrupted task's live FPU/vector state into its user signal frame
+/// so a handler cannot corrupt it. The kernel is `+soft-float` and has not
+/// touched the vector file since entry, so the live CPU state is still the
+/// user's. Returns false on a user-copy fault. Delivery runs on the interrupted
+/// task's own CPU, so the `Current` witness is the exclusive access it needs.
 fn save_fpu_to_sigframe(current: &slopos_sched::task_struct::Current, sigframe_addr: u64) -> bool {
-    // Not a switch-out: the task resumes into its handler with this state still
-    // live in the register file, so the save keeps the owner tag rather than
-    // releasing it.
+    // Not a switch-out: the state stays live in the register file, so the save
+    // keeps the owner tag rather than releasing it.
     let task = current.task();
     task.fpu_save_in_place(current, slopos_ostd::cpu::x86_64::xsave::active_xcr0());
     let Ok(bytes) = UserBytes::try_new(sigframe_fpu_addr(sigframe_addr), FPU_STATE_SIZE) else {
@@ -420,22 +387,11 @@ fn save_fpu_to_sigframe(current: &slopos_sched::task_struct::Current, sigframe_a
 /// save area and check that `XRSTOR64` will accept it. Returns false on a
 /// user-copy fault or a malformed image.
 ///
-/// The bytes land in the save area before they can be checked — the area is
-/// 2.6 KiB against a 2 KiB stack-frame ceiling, so it is borrowed in place
-/// rather than staged through a scratch buffer. Rejection therefore leaves the
-/// task owning a buffer it did not author, and the reset is what takes it back:
-/// no other kernel path should have to reason about whether a task's save area
-/// is attacker-supplied, and the guarantee costs one `write_bytes`.
-///
-/// It is not what keeps the *scheduler* safe. Reaching a restore of this slot
-/// means switching to this task, which means having switched away from it
-/// first, and switch-out saves the live registers over whatever is here.
-///
-/// `xcr0` comes from the caller rather than a second read, so the mask the
-/// image is validated against is the one it is then restored under.
-///
-/// Takes the FPU area by reference for the same reason as
-/// [`save_fpu_to_sigframe`].
+/// The 2.6 KiB image is borrowed in place rather than staged through a scratch
+/// buffer (2 KiB stack-frame ceiling), so rejection leaves the task owning
+/// bytes it did not author and the reset is what takes them back. `xcr0` comes
+/// from the caller so the mask the image is validated against is the one it is
+/// then restored under.
 fn stage_fpu_from_sigframe(
     current: &slopos_sched::task_struct::Current,
     sigframe_addr: u64,
@@ -467,21 +423,15 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
     };
 
     // The sigreturn caller is this CPU's current task, so the guard is the
-    // witness the FPU accessors want.
+    // witness the FPU accessors need.
     let Some(current) = slopos_sched::task_struct::Current::get() else {
         return SyscallResult::Err(Errno::EFAULT);
     };
     let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
 
-    // Everything the frame supplies is committed in one IRQ-off window, FPU
-    // first. The two orderings are both load-bearing:
-    //
-    // * The copy-in and the XRSTOR cannot be split by interrupts. A context
-    //   switch between them saves the live register file over the staged image
-    //   and the restore then reinstates nothing.
-    // * The FPU image is committed before the GPRs, so a frame this syscall
-    //   refuses leaves the task exactly where it was rather than resumed at the
-    //   frame's RIP and RSP with unrestored vector state.
+    // Committed in one IRQ-off window: a context switch between the copy-in and
+    // the XRSTOR would save the live register file over the staged image. FPU
+    // before GPRs, so a refused frame leaves the task exactly where it was.
     let committed = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
         if !stage_fpu_from_sigframe(&current, rsp, xcr0) {
             return false;
@@ -490,8 +440,7 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
             return false;
         }
 
-        // Rebuild the user GPR snapshot from the SignalFrame and commit
-        // through `set_regs` (re-applies CS/SS selectors and RFLAGS mask).
+        // `set_regs` re-applies the CS/SS selectors and the RFLAGS mask.
         let mut regs = ctx.user_ctx().regs();
         regs.rax = sigframe.rax;
         regs.rbx = sigframe.rbx;
@@ -527,28 +476,21 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
     SyscallResult::NoReturn
 });
 
-/// Read/write view over the user-mode register file that signal
-/// delivery mutates. The two delivery sites — the syscall-exit path
-/// ([`UserContext`]) and the IRQ-exit path ([`InterruptFrame`]) — share
-/// [`deliver_pending_signal_core`] through this trait so the frame
-/// layout, RFLAGS masking, and redirect logic stay in lockstep.
+/// Read/write view over the user-mode register file that signal delivery
+/// mutates, shared by the syscall-exit ([`UserContext`]) and IRQ-exit
+/// ([`InterruptFrame`]) paths so both stay in lockstep.
 trait UserRegView {
-    /// Snapshot the GPR file as a `UserRegs`, with `rflags_user_subset`
-    /// already masked to the user-permitted bits so the value stored in
-    /// the `SignalFrame` matches across both delivery sites.
+    /// Snapshot the GPR file, with `rflags_user_subset` already masked to the
+    /// user-permitted bits so both delivery sites store the same value.
     fn snapshot(&self) -> UserRegs;
 
-    /// Commit a redirected register file (handler entry: new RSP/RIP +
-    /// signum in RDI). Re-applies RFLAGS masking and the user CS/SS
-    /// selectors so a redirect can never escape the sandbox.
+    /// Commit a redirected register file. Re-applies RFLAGS masking and the
+    /// user CS/SS selectors so a redirect cannot escape the sandbox.
     fn commit_redirect(&mut self, regs: &UserRegs);
 }
 
-/// Syscall-exit register view over the per-task [`UserContext`]. The
-/// `&mut self` the trait asks for is unused exclusivity here — the
-/// register file is written through a shared borrow — but
-/// [`InterruptFrameRegs`] genuinely needs it, so the wrapper carries the
-/// weaker claim rather than the trait carrying a weaker signature.
+/// Syscall-exit register view over the per-task [`UserContext`]. The trait's
+/// `&mut self` is unused exclusivity here; [`InterruptFrameRegs`] needs it.
 struct UserContextRegs<'a> {
     ctx: &'a UserContext,
 }
@@ -563,9 +505,9 @@ impl UserRegView for UserContextRegs<'_> {
     }
 }
 
-/// IRQ-exit register view over the CPU-pushed [`InterruptFrame`]. The
-/// `iretq` that resumes user mode loads RIP/RSP/RFLAGS from this frame,
-/// so redirecting user execution at IRQ exit means mutating it in place.
+/// IRQ-exit register view over the CPU-pushed [`InterruptFrame`]. The `iretq`
+/// that resumes user mode loads RIP/RSP/RFLAGS from this frame, so a redirect
+/// mutates it in place.
 struct InterruptFrameRegs<'a> {
     frame: &'a mut InterruptFrame,
 }
@@ -623,22 +565,12 @@ impl UserRegView for InterruptFrameRegs<'_> {
     }
 }
 
-/// Shared signal-delivery core driven by both the syscall-exit and the
-/// IRQ-exit paths. Pulls the lowest deliverable signal, runs its
-/// disposition (ignore / default-terminate / user handler), and on the
-/// handler path writes the restorer + `SignalFrame` to the user stack
-/// and redirects `regs` to the handler.
-///
-/// On ANY `copy_to_user` failure the pending bit is re-armed
-/// (`fetch_or`) so the signal retries at the next delivery point rather
-/// than being silently dropped.
 /// What [`claim_pending_signal`] decided, for a caller holding no borrow.
 enum SignalDisposition {
     /// Nothing deliverable, or the disposition needs no further work.
     Done,
     /// Default action is to terminate; the exit fields are already stamped.
     Terminate(u32),
-    /// Run a user handler.
     Handle {
         signum: u8,
         bit: u64,
@@ -650,10 +582,9 @@ enum SignalDisposition {
 /// Pick the lowest deliverable signal, consume its pending bit, and decide what
 /// happens to it.
 ///
-/// Split from the delivery below so the borrow ends before anything acts on the
-/// decision. Terminating re-enters the task through the registry and then
-/// context-switches; a `&mut Task` held across that aliased every reference
-/// those paths derive, and stayed live across a `schedule()`.
+/// Split from the delivery below so the task borrow ends before anything acts
+/// on the decision: terminating re-enters the task through the registry and
+/// then context-switches.
 fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
     if (task_ref.flags & TASK_FLAG_USER_MODE) == 0 {
         return SignalDisposition::Done;
@@ -712,16 +643,11 @@ fn deliver_pending_signal_core(
 
     let (signum, bit, action, saved_mask) = match claim_pending_signal(task_ref) {
         SignalDisposition::Done => {
-            // Nothing to deliver. A task marked for death still leaves here
-            // rather than returning to userland — the mark is deliberately not
-            // a signal, so no disposition covers it.
-            //
-            // Every caller has already established that this frame returns to
-            // CPL3 and is not on an exception stack, so what it abandons is a
-            // register save area plus the IRET payload on this task's own
-            // kernel stack: memory the exit path is about to free, owning no
-            // Rust value. That is why abandoning it is sound here and is not
-            // sound at an arbitrary kernel blocking point.
+            // A task marked for death leaves here rather than returning to
+            // userland; the mark is deliberately not a signal. Callers have
+            // established this frame returns to CPL3 off an exception stack,
+            // so it abandons only a register save area on the dying task's own
+            // kernel stack, owning no Rust value.
             if task_ref.is_killed() {
                 let task_id = task_ref.task_id;
                 if task_terminate(task_id) == 0 {
@@ -731,9 +657,8 @@ fn deliver_pending_signal_core(
             return;
         }
         SignalDisposition::Terminate(task_id) => {
-            // Terminate re-enters the task through the registry and then
-            // context-switches. The guard is a borrow, not an owning handle, so
-            // abandoning this frame leaks nothing.
+            // The guard is a borrow, not an owning handle, so abandoning this
+            // frame across the context switch leaks nothing.
             if task_terminate(task_id) == 0 {
                 schedule();
             }
@@ -749,15 +674,10 @@ fn deliver_pending_signal_core(
 
     let regs_snapshot = regs.snapshot();
 
-    // Frame = [restorer ptr (8)] [SignalFrame] [FPU/vector save area].
-    //
-    // The restorer pointer at `frame_addr` doubles as the handler's
-    // return address, so entering the handler is ABI-equivalent to a
-    // `call`: SysV requires `(rsp + 8) % 16 == 0` at a function's first
-    // instruction, i.e. `frame_addr % 16 == 8`. Aligning `frame_addr`
-    // to 16 (the obvious choice) leaves the handler's stack misaligned
-    // by 8, so any aligned vector spill (`vmovaps [rsp], …`) the handler
-    // emits faults with #GP. Subtract 8 after the 16-byte floor.
+    // Frame = [restorer ptr (8)] [SignalFrame] [FPU/vector save area]. The
+    // restorer pointer doubles as the handler's return address, so SysV wants
+    // `frame_addr % 16 == 8`; aligning to 16 instead misaligns the handler's
+    // stack by 8 and any aligned vector spill it emits faults #GP.
     let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64 + FPU_STATE_SIZE as u64;
     let frame_addr = (regs_snapshot.rsp.wrapping_sub(total_size) & !0xF).wrapping_sub(8);
 
@@ -810,7 +730,6 @@ fn deliver_pending_signal_core(
         return;
     }
 
-    // Preserve the interrupted task's vector state across the handler.
     if !save_fpu_to_sigframe(current, sigframe_addr) {
         task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
         return;
@@ -840,20 +759,16 @@ pub fn deliver_pending_signal(
 
 /// Deliver a pending signal on the IRQ/timer/IPI return-to-user path.
 ///
-/// Linux checks `TIF_SIGPENDING` on every return to user, including IRQ
-/// exit; without this a user task spinning in pure userspace (no
-/// syscalls) would never act on a pending signal and would be
-/// unkillable. The `iretq` that resumes the interrupted task loads its
-/// register state from `frame`, so a handler redirect mutates that
-/// frame in place.
+/// Without a check here a user task spinning in pure userspace (no syscalls)
+/// would never act on a pending signal and would be unkillable. The `iretq`
+/// that resumes the task loads its register state from `frame`, so a handler
+/// redirect mutates that frame in place.
 ///
-/// Guards (any failing → no-op): non-null frame, frame returning to
-/// user (`cs & 3 == 3`), a current user-mode task, and NOT running on an
-/// IST/exception stack — exception vectors 0-31 run under
-/// `IstPreemptHold` and must never deliver signals here.
+/// No-op unless the frame is non-null, returns to user (`cs & 3 == 3`), a
+/// user-mode task is current, and we are not on an IST/exception stack —
+/// vectors 0-31 run under `IstPreemptHold` and must never deliver here.
 pub fn deliver_pending_signal_on_irq_exit(frame: *mut InterruptFrame) {
-    // The frame lives for exactly this handler invocation, so a frame-local
-    // is the honest anchor for a borrow of it.
+    // The frame lives for exactly this invocation, so a frame-local anchors the borrow.
     let mut frame_anchor = ();
     let Some(frame_ref) = InterruptFrame::from_ptr_mut(&mut frame_anchor, frame) else {
         return;

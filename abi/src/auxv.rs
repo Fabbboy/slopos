@@ -1,9 +1,5 @@
 //! ELF auxiliary vector definitions (kernel-userland ABI).
 //!
-//! The auxiliary vector is placed on the user stack by the kernel during
-//! exec(). It provides runtime information that the C library startup code
-//! (crt0 / __libc_start_main) needs to initialize properly.
-//!
 //! Stack layout after exec:
 //!   [argc] [argv0..argvN] [NULL] [env0..envN] [NULL] [auxv entries] [AT_NULL,0]
 
@@ -15,9 +11,7 @@ pub struct AuxEntry {
     pub a_val: u64,
 }
 
-// =============================================================================
-// Auxiliary vector type constants (from ELF spec / Linux ABI)
-// =============================================================================
+// Type numbering follows the ELF spec and the Linux x86-64 ABI.
 
 /// End of auxiliary vector.
 pub const AT_NULL: u64 = 0;
@@ -43,20 +37,16 @@ pub const AT_BASE: u64 = 7;
 /// Flags (unused, set to 0).
 pub const AT_FLAGS: u64 = 8;
 
-/// UID of the process.
 pub const AT_UID: u64 = 11;
 
-/// Effective UID.
 pub const AT_EUID: u64 = 12;
 
-/// GID of the process.
 pub const AT_GID: u64 = 13;
 
-/// Effective GID.
 pub const AT_EGID: u64 = 14;
 
 /// Secure mode boolean (0 = normal).
 pub const AT_SECURE: u64 = 23;
 
-/// String identifying the real platform.
+/// Address of 16 kernel-supplied random bytes.
 pub const AT_RANDOM: u64 = 25;

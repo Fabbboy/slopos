@@ -1,9 +1,5 @@
-//! MCFG (PCI Express Memory-Mapped Configuration Space) ACPI table parsing.
-//!
-//! Discovers PCIe ECAM base addresses and bus ranges from the ACPI `"MCFG"`
-//! table (PCI Firmware Specification §4.1.2). The PCI driver in
-//! [`slopos_drivers::pci`] consumes this information to enable MMIO-based
-//! configuration space access (4 KiB per function, replacing legacy port I/O).
+//! PCIe ECAM base addresses and bus ranges from the ACPI `"MCFG"` table
+//! (PCI Firmware Specification §4.1.2).
 
 use slopos_ostd::klog_info;
 use slopos_ostd::util::packed_view::read_packed;
@@ -12,42 +8,33 @@ use crate::tables::AcpiTables;
 
 const MCFG_SIGNATURE: &[u8; 4] = b"MCFG";
 
-/// Size of the reserved field at the start of the MCFG payload (after
-/// the SDT header).
+/// Reserved field at the head of the payload, before the entry array.
 const MCFG_RESERVED_SIZE: usize = 8;
 
-/// Layout of an MCFG configuration space allocation entry (16 bytes).
 const MCFG_ENTRY_LEN: usize = 16;
 const MCFG_OFF_BASE: usize = 0;
 const MCFG_OFF_SEGMENT: usize = 8;
 const MCFG_OFF_BUS_START: usize = 10;
 const MCFG_OFF_BUS_END: usize = 11;
 
-/// Maximum number of MCFG entries we track.
 const MAX_MCFG_ENTRIES: usize = 16;
 
-/// A single parsed ECAM configuration space allocation entry.
 #[derive(Clone, Copy, Debug)]
 pub struct McfgEntry {
-    /// Physical base address of the ECAM MMIO region.
     pub base_phys: u64,
-    /// PCI segment group number (usually 0).
     pub segment: u16,
-    /// First PCI bus number in this entry's range.
     pub bus_start: u8,
-    /// Last PCI bus number in this entry's range (inclusive).
+    /// Inclusive.
     pub bus_end: u8,
 }
 
 impl McfgEntry {
-    /// Compute the total MMIO region size in bytes for this entry.
     pub fn region_size(&self) -> u64 {
         let bus_count = (self.bus_end as u64) - (self.bus_start as u64) + 1;
         // 256 functions per bus (32 devices × 8 functions) × 4096 bytes each
         bus_count * 256 * 4096
     }
 
-    /// Compute the ECAM MMIO offset for a given BDF within this entry.
     pub fn ecam_offset(&self, bus: u8, device: u8, function: u8) -> Option<u64> {
         if bus < self.bus_start || bus > self.bus_end {
             return None;
@@ -60,7 +47,6 @@ impl McfgEntry {
     }
 }
 
-/// Parsed MCFG table containing all discovered ECAM entries.
 pub struct Mcfg {
     entries: [McfgEntry; MAX_MCFG_ENTRIES],
     count: usize,
@@ -106,7 +92,6 @@ fn log_mcfg_bad_bus_range(i: usize, bus_start: u8, bus_end: u8) {
 }
 
 impl Mcfg {
-    /// Look up the `"MCFG"` table in the ACPI hierarchy and parse it.
     pub fn from_tables(tables: &AcpiTables) -> Option<Self> {
         let Some(table) = tables.find_table(MCFG_SIGNATURE) else {
             log_mcfg_missing();
@@ -171,25 +156,22 @@ impl Mcfg {
         })
     }
 
-    /// Number of valid ECAM entries.
     #[inline]
     pub fn count(&self) -> usize {
         self.count
     }
 
-    /// Iterate over the parsed ECAM entries.
     pub fn entries(&self) -> &[McfgEntry] {
         &self.entries[..self.count]
     }
 
-    /// Find the MCFG entry covering a given PCI segment and bus number.
     pub fn find_entry(&self, segment: u16, bus: u8) -> Option<&McfgEntry> {
         self.entries().iter().find(|e| {
             e.segment == segment && bus >= e.bus_start && bus <= e.bus_end && e.base_phys != 0
         })
     }
 
-    /// Find the ECAM entry for segment 0 (the primary/only segment on most systems).
+    /// Segment 0 — the only segment on most systems.
     pub fn primary_entry(&self) -> Option<&McfgEntry> {
         self.entries()
             .iter()

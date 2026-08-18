@@ -1,9 +1,4 @@
 //! TTY poll readiness and compositor focus management.
-//!
-//! decomposition: extracted from `mod.rs` to isolate event-driven
-//! poll readiness computation (`poll_events`), multi-slot poll sleep
-//! (`poll_sleep_on`, `poll_sleep`), and compositor-level focus tracking
-//! (`set_compositor_focus`, `get_compositor_focus`).
 
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 
@@ -14,37 +9,21 @@ use slopos_ostd::sync::BUS;
 use super::table::{TTY_SLOTS, tty_input_event, tty_output_event};
 use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
 
-/// Register the current task for poll readiness on a TTY slot. Poll waiters
-/// park on both the input and output queues so any readiness change — in
-/// either direction — wakes them. Returns true if either registration
-/// succeeded.
+/// Waiters park on both queues so a readiness change in either direction wakes
+/// them; true when either registration succeeded.
 fn poll_register_slot(slot: usize) -> bool {
     let input = BUS.subscribe_current(tty_input_event(slot));
     let output = BUS.subscribe_current(tty_output_event(slot));
     input || output
 }
 
-/// Remove the current task from both poll queues of a TTY slot.
 fn poll_unregister_slot(slot: usize) {
     BUS.unsubscribe_current(tty_input_event(slot));
     BUS.unsubscribe_current(tty_output_event(slot));
 }
 
-// ---------------------------------------------------------------------------
-// Compositor focus
-// ---------------------------------------------------------------------------
-
-/// Set the compositor-level focus on the active TTY.
-///
-/// Called by the compositor when window focus changes.  Sets ONLY the
-/// `focused_task_id` — it does NOT alter the POSIX foreground process
-/// group (`fg_pgrp`).  The two concepts are independent:
-///
-/// - `focused_task_id` — which task the compositor considers "active"
-/// - `fg_pgrp` — which process group may read/write the terminal (POSIX)
-///
-/// Compositor focus is used for input routing; foreground pgrp is used
-/// for job control signals and read/write access gating.
+/// Sets `focused_task_id` only, which routes input; the POSIX foreground process
+/// group that gates terminal access and job-control signals is independent.
 #[must_use]
 pub fn set_compositor_focus(task_id: u32) -> Result<(), TtyError> {
     let idx = super::active_tty();
@@ -69,7 +48,6 @@ pub fn set_compositor_focus(task_id: u32) -> Result<(), TtyError> {
     Ok(())
 }
 
-/// Get the compositor-focused task ID from the active TTY.
 #[must_use]
 pub fn get_compositor_focus() -> Result<u32, TtyError> {
     let idx = super::active_tty();
@@ -84,24 +62,9 @@ pub fn get_compositor_focus() -> Result<u32, TtyError> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Event-driven poll readiness
-// ---------------------------------------------------------------------------
-
-/// Compute poll readiness events for a TTY file descriptor.
-///
-/// Drains pending hardware input, then checks:
-/// - `POLLIN`  — cooked data available for reading
-/// - `POLLOUT` — output is NOT stopped by IXON flow control
-/// - `POLLHUP` — TTY is hung up (or peer closed with no remaining data)
-/// - `POLLERR` — TTY is hung up (write would return EIO); matches Linux
-///   `tty_poll()` which reports `POLLERR` alongside `POLLHUP` so programs
-///   that check write-readiness via `POLLERR` detect the error condition.
-///
-/// Properly captures and delivers deferred signals from
-/// `drain_hw_input_locked()` instead of silently discarding them.
-///
-/// Only events that are both requested and ready are returned.
+/// Poll readiness for a TTY fd, after draining pending hardware input. `POLLERR`
+/// accompanies `POLLHUP` as in Linux's `tty_poll()`, so a program testing
+/// write-readiness through `POLLERR` still sees the error.
 pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -150,9 +113,6 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
     revents
 }
 
-/// Register the current task on a TTY poll wait queue.
-///
-/// Returns true when registration succeeds.
 pub fn poll_enqueue(idx: TtyIndex) -> bool {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -164,7 +124,6 @@ pub fn poll_enqueue(idx: TtyIndex) -> bool {
     poll_register_slot(slot)
 }
 
-/// Remove the current task from a TTY poll wait queue.
 pub fn poll_dequeue(idx: TtyIndex) {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -173,19 +132,11 @@ pub fn poll_dequeue(idx: TtyIndex) {
     poll_unregister_slot(slot);
 }
 
-/// Sleep until a poll-relevant event occurs on one of the given TTY slots,
-/// or fall back to a short busy-wait if the scheduler is not yet enabled.
-///
-/// Per-slot registration.  The caller provides the set
-/// of TTY indices it is currently monitoring.  The current task is enqueued
-/// on each slot's input and output event queues, then blocked exactly once.
-/// When *any* of the registered slots fires a wake, the task resumes and
-/// is cleaned up from all queues.
-///
-/// If `slots` is empty, falls back to a 1 ms delay (timer poll).
+/// Enqueue the current task on every named slot's input and output queues, then
+/// block once; any one of them waking resumes it. Falls back to a 1 ms timer
+/// delay when `slots` is empty or the scheduler is not yet running.
 pub fn poll_sleep_on(slots: &[u8]) {
     if scheduler_is_enabled() == 0 {
-        // Pre-scheduler fallback: yield briefly.
         slopos_kernel_services::platform::timer_poll_delay_ms(1);
         return;
     }
@@ -195,22 +146,8 @@ pub fn poll_sleep_on(slots: &[u8]) {
         return;
     }
 
-    // Enqueue the current task on each slot's poll waiter. The
-    // queue's SpinLock pairs with the producer's `wake_all` to
-    // serialise the enqueue against any racing wake (Linux's
-    // wq_head->lock pattern).
-    //
-    // CORRECTNESS NOTE: this multi-queue path keeps the legacy
-    // "enqueue then block" sequence with a 100 ms bounded timeout.
-    // A wake that fires between the last enqueue and the timeout
-    // CAS sees us still `Running`, so its `unblock_task` Blocked→
-    // Ready CAS fails and the wake's only durable effect is the
-    // node-pop. Worst case we wait out the full 100 ms; the timer
-    // bounds latency. Fixing this to zero latency would require
-    // either a shared serialisation lock that pairs with every
-    // wake across all registered slots, or restructuring this
-    // path around `wait_event_timeout` on a single queue — both
-    // out of scope for the harmonic-cascade Phase 5 cleanup.
+    // TODO(tech-debt): a wake landing between enqueue and the block CAS is lost, so
+    // this waits out the full 100 ms — fix is one `wait_event_timeout` queue, not N.
     let mut registered = 0usize;
     for &slot in slots {
         let s = slot as usize;
@@ -220,14 +157,12 @@ pub fn poll_sleep_on(slots: &[u8]) {
     }
 
     if registered == 0 {
-        // Could not enqueue on any queue — fall back to brief delay.
         slopos_kernel_services::platform::timer_poll_delay_ms(1);
         return;
     }
 
     slopos_kernel_services::driver_runtime::block_current_task_with_timeout(100);
 
-    // Clean up: remove ourselves from all registered queues.
     for &slot in slots {
         let s = slot as usize;
         if s < MAX_TTYS {
@@ -236,9 +171,8 @@ pub fn poll_sleep_on(slots: &[u8]) {
     }
 }
 
-/// Legacy poll_sleep with no slot information — falls back to sleeping on
-/// ALL active TTY poll waiters.  Retained for backward compatibility with
-/// code paths that do not yet pass slot indices.
+/// Slot-less form, for callers that do not pass indices: sleeps on every active
+/// TTY poll waiter.
 pub fn poll_sleep() {
     let mut slots = [0u8; MAX_TTYS];
     let mut count = 0;

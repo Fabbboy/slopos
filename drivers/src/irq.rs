@@ -12,24 +12,11 @@ use slopos_ostd::klog_info;
 
 use crate::{apic, ioapic, ps2};
 
-// PIT timer IRQ handler and fallback have been removed.
-// Scheduler preemption is driven exclusively by the per-CPU LAPIC timer
-// (vector LAPIC_TIMER_VECTOR), handled directly in the IDT dispatch —
-// see boot/src/idt.rs.  HPET + LAPIC are mandatory.
-
-/// Reserve the IDT vector for a hardware-pinned legacy IRQ line, register
-/// the PS/2 dispatch closure, leak both handles so the registration
-/// persists for the kernel's lifetime, and unmask the IOAPIC route so
-/// the line actually fires.
-///
-/// `setup_ioapic_routes` programs the IOAPIC RTE with the mask bit set
-/// (matching the default `FLAG_MASKED` state in `core::irq`'s book-keeping).
-/// Without the `irq_enable_line` call below the OSTD callback is wired but
-/// the IOAPIC keeps the line gated, so PS/2 input never reaches us.
-///
-/// Used only by the `i8042.legacy` escape-hatch bring-up below; the default
-/// path wires the PS/2 IRQs through the platform-bus i8042 driver's
-/// `request_legacy_irq` (see `crate::ps2::platform`).
+/// Reserve the IDT vector for a legacy IRQ line, wire the PS/2 dispatch closure,
+/// leak both handles for the kernel's lifetime, and unmask the IOAPIC route —
+/// `setup_ioapic_routes` programs the RTE masked, so without the unmask the
+/// callback is wired but the line stays gated. Used only by the `i8042.legacy`
+/// escape hatch.
 fn register_legacy_irq(irq_line: u8) {
     let vector = IRQ_BASE_VECTOR.wrapping_add(irq_line);
     let line = match IrqAllocator::reserve_specific(vector) {
@@ -52,14 +39,10 @@ fn register_legacy_irq(irq_line: u8) {
             return;
         }
     };
-    // Order matters for the borrow checker: the handle borrows `line`, so we
-    // forget the handle (ending the borrow) before forgetting the line.
+    // The handle borrows `line`; forget it first to end the borrow.
     core::mem::forget(handle);
     core::mem::forget(line);
 
-    // Now that the OSTD dispatch slot is populated, unmask the IOAPIC RTE
-    // so the line fires.  This mirrors the legacy `register_handler` path
-    // which always called `unmask_irq_line` at the end.
     irq_enable_line(irq_line);
 }
 
@@ -123,12 +106,10 @@ fn setup_ioapic_routes() {
         panic!("IRQ: APIC/IOAPIC not ready during dispatcher init");
     }
 
-    // PIT timer route removed — scheduler ticks come from the per-CPU LAPIC timer.
     program_ioapic_route(LEGACY_IRQ_COM1);
 
-    // The default path leaves the PS/2 lines masked here; the platform-bus
-    // i8042 driver programs + unmasks them when it binds (priority-80 PCI
-    // probe). The legacy escape hatch routes them up front instead.
+    // Otherwise the platform-bus i8042 driver programs and unmasks the PS/2 lines
+    // when it binds.
     if ps2::legacy_mode() {
         program_ioapic_route(LEGACY_IRQ_KEYBOARD);
         program_ioapic_route(LEGACY_IRQ_MOUSE);
@@ -140,24 +121,18 @@ pub fn init() {
 
     setup_ioapic_routes();
 
-    // PS/2 bring-up. The default path defers to the platform-bus i8042 driver
-    // (`crate::ps2::platform`), which enumerates `PNP0303` via ACPI and claims
-    // 0x60/0x64 + IRQ 1 with devres ownership during the probe. The
-    // `i8042.legacy` escape hatch runs the hardcoded bring-up here instead.
+    // The `i8042.legacy` escape hatch; the default path defers PS/2 bring-up to
+    // the platform-bus i8042 driver, which claims 0x60/0x64 + IRQ 1 at probe.
     if ps2::legacy_mode() {
-        // Full PS/2 controller init: disable ports, flush, self-test, clean config
         ps2::init_controller();
 
-        // Device-level init (controller is ready, IRQs still off)
         ps2::keyboard::init();
         ps2::mouse::init();
 
-        // Final flush before enabling IRQs to drain any stray init response bytes
+        // Drain stray init responses before the controller starts raising IRQs.
         ps2::flush();
-        // Enable IRQs in the controller config byte now that devices are ready
         ps2::enable_irqs();
 
-        // LAPIC timer handler lives in boot/src/idt.rs (per-CPU, not via IOAPIC).
         register_legacy_irq(LEGACY_IRQ_KEYBOARD);
         register_legacy_irq(LEGACY_IRQ_MOUSE);
     }

@@ -1,13 +1,8 @@
 //! AppKit — SlopOS application toolkit.
 //!
-//! Provides everything needed to build widget-based GUI applications:
-//!
-//! - **Widget apps** (primary): Implement [`App`], return a [`Node`] tree from
-//!   `view()`, handle messages in `update()`. Call [`run_app()`] to launch.
-//!
-//! - **Raw-drawing apps**: Use `slopos-windowing` directly — implement
-//!   [`WindowedApp`], draw into a [`DrawBuffer`](slopos_gfx::DrawBuffer),
-//!   and call [`slopos_windowing::run()`].
+//! Widget apps implement [`App`], return a [`Node`] tree from `view()`, handle
+//! messages in `update()`, and launch with [`run_app()`]. Raw-drawing apps use
+//! `slopos-windowing` directly via [`WindowedApp`].
 //!
 //! # Quick Start
 //!
@@ -25,17 +20,13 @@
 //! ```
 
 #![feature(restricted_std)]
-// Widget toolkit — many fields are read by the framework integration
-// layer (run_app, tree reconciliation) rather than within widget impls.
+// Many widget fields are read by run_app and tree reconciliation, not by the
+// widget impls themselves.
 #![allow(dead_code)]
 
-// === Platform layer (backward-compat re-exports from slopos-windowing) ===
 pub mod platform;
-
-// === Text rendering ===
 pub mod text;
 
-// === Widget toolkit modules ===
 pub mod constraints;
 pub mod dirty;
 pub mod event;
@@ -52,35 +43,29 @@ pub mod traits;
 pub mod tree;
 pub mod widgets;
 
-// === Public re-exports: primary app API ===
 pub use node::{
     Action, App, ButtonStyle, ContextMenuAt, ImageData, MenuItem, MenuItemKind, Node,
     SortIndicator, TableColumn, TableColumnWidth,
 };
 pub use run::run_app;
 
-// === Public re-exports: layout & constraint types ===
 pub use constraints::{
     BoxConstraints, CrossAxisAlignment, EdgeInsets, ImageScale, Length, Orientation, Rect,
     ScrollDirection, ScrollbarVisibility, Size, SizePolicy, TextAlignment,
 };
 
-// === Public re-exports: event & input types ===
 pub use event::{
     EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
 };
 
-// === Public re-exports: framework types ===
 pub use dirty::DirtyFlags;
 pub use focus::FocusManager;
 pub use paint::PaintContext;
 pub use style::StyleSheet;
 pub use traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId};
 
-// === Public re-exports: windowing types ===
 pub use slopos_windowing::{ControlFlow, WindowedApp};
 pub use slopos_windowing::{ProtocolHandle, UiSender};
 
-// === Public re-exports: render surface abstraction ===
 pub use slopos_gfx::image::ImageSampling;
 pub use slopos_gfx::{RenderError, RenderSurface};

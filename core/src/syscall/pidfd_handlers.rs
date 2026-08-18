@@ -1,8 +1,5 @@
-//! pidfd syscall handler (`SYSCALL_PIDFD_OPEN`).
-//!
-//! Synchronous; threads through the normal `define_syscall!` dispatch path.
-//! The work lives in the `slopos-pidfd` crate — this only marshals the
-//! caller's task/process ids and maps the result to an errno.
+//! pidfd syscall handler (`SYSCALL_PIDFD_OPEN`); the work lives in the
+//! `slopos-pidfd` crate.
 
 use slopos_abi::Errno;
 

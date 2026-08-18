@@ -1,7 +1,5 @@
-//! signalfd syscall handler (`SYSCALL_SIGNALFD`).
-//!
-//! Synchronous; the work lives in the `slopos-signalfd` crate. This only
-//! marshals the caller's task/process ids and maps the result to an errno.
+//! signalfd syscall handler (`SYSCALL_SIGNALFD`); the work lives in the
+//! `slopos-signalfd` crate.
 
 use slopos_abi::Errno;
 

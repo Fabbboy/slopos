@@ -12,9 +12,6 @@ pub struct UserTimeval {
     pub tv_sec: i64,
     pub tv_usec: i64,
 }
-// =============================================================================
-// Syscall data structures
-// =============================================================================
 
 /// System information returned by SYSCALL_SYS_INFO
 #[repr(C)]

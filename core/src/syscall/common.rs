@@ -1,10 +1,5 @@
 //! Shared syscall infrastructure: dispatch-table entry type, user-string
 //! copy helpers, fixed I/O cap.
-//!
-//! The pre-Phase-2D `SyscallDisposition` enum and the
-//! `syscall_return_ok` / `syscall_return_err` helpers have been
-//! removed: handlers now return [`SyscallResult`] and the dispatcher
-//! is the sole site that writes `rax`.
 
 use core::ffi::{c_char, c_int};
 
@@ -27,8 +22,6 @@ pub fn errno_from_neg(rc: i32) -> Errno {
     Errno::from_raw(rc).unwrap_or(Errno::EINVAL)
 }
 
-/// 64-bit variant of [`errno_from_neg`] for handlers whose backend
-/// returns an `i64` status.
 pub fn errno_from_neg64(rc: i64) -> Errno {
     Errno::from_raw(rc as i32).unwrap_or(Errno::EINVAL)
 }
@@ -39,25 +32,17 @@ pub type SyscallHandler = fn(&SyscallContext) -> SyscallResult;
 #[derive(Copy, Clone)]
 pub struct SyscallEntry {
     pub handler: Option<SyscallHandler>,
-    /// Diagnostic label for the syscall (NUL-terminated static string).
-    /// `KernelSync` because raw pointers are `!Send + !Sync` by default;
-    /// the wrapped value is a `'static` text-segment pointer, never
-    /// mutated after table construction.
+    /// Diagnostic label (NUL-terminated static string). `KernelSync` because
+    /// raw pointers are `!Send + !Sync`; the target is a `'static` text-segment
+    /// pointer, never mutated after table construction.
     pub name: KernelSync<*const c_char>,
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// User-string copy helpers (kept — used by `UserCStr::from_raw` and a
-// handful of handler bodies that still want explicit bounded copies).
-// ─────────────────────────────────────────────────────────────────────
-
 /// Copy a NUL-terminated string out of user memory, bounded by `dst`.
 ///
-/// Copies a page at a time and stops at the first NUL, so the fault domain is
-/// the string rather than the caller's whole capacity.  Reading the capacity in
-/// one go would reject a perfectly valid short string that merely sits near the
-/// end of its mapping — which every `argv` entry a program builds on its own
-/// stack or heap can.
+/// Copies a page at a time and stops at the first NUL: reading the full
+/// capacity in one go would reject a short string sitting near the end of its
+/// mapping.
 pub fn syscall_copy_user_str(dst: &mut [u8], user_src: u64) -> Result<(), UserPtrError> {
     if dst.is_empty() {
         return Err(UserPtrError::Null);
