@@ -406,6 +406,9 @@ fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task:
         return;
     }
 
+    // Stays armed across the switch: the switch span mutates current_task, the
+    // PCR and per-task context as one transition, and a descheduled frame cannot
+    // unwind until its task resumes.
     let switch_abort_guard = slopos_ostd::panic::AbortOnUnwind::new();
     if let Some(current) = current {
         save_live_recovery_depth(current);
@@ -1365,6 +1368,10 @@ pub fn consume_ready_wake_for_current_for_test(current: &Current) -> bool {
 /// the `unschedule_task` here, which just stripped that enqueue. Descheduling
 /// anyway would strand the task Ready in no runqueue forever, so on a detected
 /// race the wake is consumed and the caller must not deschedule.
+///
+/// A wake landing after this returns `true` but before the caller's
+/// `schedule()` is not lost either: it enqueues via its own `schedule_task`,
+/// so the task is dispatched on a later tick rather than stranded.
 ///
 /// Must be called with IRQs disabled, after the caller committed
 /// `Running → Blocked`.

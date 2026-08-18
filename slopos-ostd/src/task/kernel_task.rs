@@ -583,6 +583,9 @@ const TEST_REPORTS_CLASS: &crate::sync::lock_tracking::LockClassKey =
 
 impl<K, U> TaskInner<K, U> {
     /// This task's FS segment base (TLS pointer).
+    ///
+    /// Acquire/Release rather than Relaxed: the cross-CPU reader is the next
+    /// `prepare_switch_to`, which reads the *incoming* task's copy.
     #[inline]
     pub fn fs_base(&self) -> u64 {
         self.fs_base.load(Ordering::Acquire)

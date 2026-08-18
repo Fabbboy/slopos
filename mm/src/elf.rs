@@ -2,6 +2,9 @@
 //!
 //! Input is untrusted: every field is validated before use and any failure
 //! aborts the load.
+//!
+//! Structure layouts and constant values follow the ELF gABI / System V ABI
+//! (x86-64 supplement).
 
 use core::fmt;
 

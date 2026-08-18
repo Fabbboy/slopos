@@ -51,11 +51,8 @@ _start:
     mov al, SERIAL_MARKER_S
     out dx, al
 
-    # Clear CR0.EM and set CR4.OSFXSR: the `fninit` below is an x87
-    # instruction that #UDs with EM set, and the context switch's FPU
-    # save/restore needs OSFXSR. The kernel itself is +soft-float
-    # (targets/x86_64-slos.json) -- this state exists for the user tasks
-    # whose FPU registers it saves, not for kernel-generated code.
+    # `fninit` below is x87 and #UDs with CR0.EM set; the FPU save/restore
+    # needs CR4.OSFXSR. The kernel is +soft-float — this is for user state.
     mov rax, cr0
     or rax, 1 << 1          # CR0.MP
     and rax, ~(1 << 2)      # clear CR0.EM

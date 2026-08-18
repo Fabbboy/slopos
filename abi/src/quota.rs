@@ -190,7 +190,9 @@ pub enum QuotaMode {
     Enforce,
 }
 
-// `RLIMIT_*` numbering and `struct rlimit64` layout follow Linux's `asm-generic/resource.h`.
+// `RLIMIT_*` numbering and `struct rlimit64` layout follow Linux's
+// `asm-generic/resource.h`. Interface facts only: ABI numbers and struct
+// layouts carry no copyright, which is what makes the compatibility sound.
 
 /// `struct rlimit64`. Soft limit, then hard limit.
 #[repr(C)]
