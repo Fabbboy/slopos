@@ -221,10 +221,8 @@ impl Popover {
         }
     }
 
-    /// The popover's rect while it is open.
-    ///
-    /// `None` when closed, which is what `resolve_cursor_hit` reads as "no
-    /// grab" — so the closed state cannot accidentally swallow a click.
+    /// The popover's rect while it is open; `None` when closed, which
+    /// `resolve_cursor_hit` reads as "no grab".
     pub fn rect(&self) -> Option<Rect> {
         if self.open.is_some() && !self.rect.is_empty() {
             Some(self.rect)
@@ -254,8 +252,8 @@ impl Popover {
             item.y1 - item.y0 + 1,
         );
         self.anchor = anchor;
-        // Sized from the model at open, so the panel does not appear at
-        // header height and resize on the next frame.
+        // Sized from the model at open, so the panel does not appear at header
+        // height and resize on the next frame.
         let size = Size {
             w: PANEL_WIDTH,
             h: if kind == StatusKind::Network {
@@ -281,7 +279,7 @@ impl Popover {
     }
 
     /// Resize the open popover to fit `model`, so the panel is as tall as its
-    /// content rather than a guess.
+    /// content rather than a guess made at open.
     pub fn fit_to(&mut self, model: &NetPanelModel, screen_w: u32, screen_h: u32) {
         if self.open != Some(StatusKind::Network) || self.rect.is_empty() {
             return;
@@ -290,8 +288,6 @@ impl Popover {
         if wanted == self.rect.h {
             return;
         }
-        // The anchor the panel was opened under, not a synthesised one: the two
-        // differ by a pixel, which moves the panel's top edge on resize.
         self.rect = position(
             &Positioner::below_bar_item(
                 self.anchor,
@@ -305,9 +301,7 @@ impl Popover {
         );
     }
 
-    /// The switch's track, from the panel rect.
-    ///
-    /// One function, used by both the draw and the hit test. Two copies of
+    /// The switch's track, shared by the draw and the hit test: two copies of
     /// this arithmetic is how a control comes to ignore a press that visibly
     /// lands on it.
     fn switch_track(rect: Rect, l: &Layout) -> Rect {
@@ -319,10 +313,9 @@ impl Popover {
         )
     }
 
-    /// The switch's press target: the track, padded to the header band.
-    ///
-    /// Separate from the draw geometry because a 20 px control with zero hit
-    /// padding is a control people miss.
+    /// The switch's press target: the track, padded to the header band. Separate
+    /// from the draw geometry because a 20 px control with zero hit padding is a
+    /// control people miss.
     fn switch_hit(rect: Rect, l: &Layout) -> Rect {
         let track = Self::switch_track(rect, l);
         Rect::new(

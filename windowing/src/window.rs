@@ -13,9 +13,7 @@ pub const EVENT_BUF_LEN: usize = 16;
 
 /// A compositor-managed window with input handling and redraw tracking.
 ///
-/// `Window` owns a [`Surface`] (windowing lifecycle) and a [`SoftSurface`]
-/// (rendering backend).  Applications that use `run()` receive a `Window`
-/// automatically; applications with custom event loops can create one directly.
+/// Owns a [`Surface`] (windowing lifecycle) and a [`SoftSurface`] (rendering).
 pub struct Window {
     handle: ProtocolHandle,
     surface: Surface,

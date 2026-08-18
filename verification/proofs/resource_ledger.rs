@@ -53,45 +53,33 @@ use vstd::prelude::*;
 
 verus! {
 
-// ===========================================================================
-// Abstract ledger state.
-//
 // Three rows on one chain: leaf -> mid -> root, mirroring a process account,
-// its spawner's, and the kernel's. `live_*` is the sum of the amounts of the
-// charges outstanding against that row — the quantity L1 says `used` equals.
-// ===========================================================================
-
+// its spawner's, and the kernel's.
 pub struct Ledger {
-    // Row occupancy.
     pub used_leaf: nat,
     pub used_mid: nat,
     pub used_root: nat,
 
-    // The ghost sum of live charges debiting each row. A charge against the
-    // leaf debits all three, so `live_mid` includes the leaf's and `live_root`
-    // includes both.
+    // Ghost sum of the live charges debiting each row — the quantity L1 says
+    // `used` equals. A charge against the leaf debits all three.
     pub live_leaf: nat,
     pub live_mid: nat,
     pub live_root: nat,
 
-    // Ceilings. `NO_LIMIT` is modelled as a very large nat rather than a
-    // separate variant; the arena's `u32::MAX` sentinel plays the same role.
+    // `NO_LIMIT` is a very large nat rather than a separate variant; the
+    // arena's `u32::MAX` sentinel plays the same role.
     pub limit_leaf: nat,
     pub limit_mid: nat,
     pub limit_root: nat,
 
-    // The generation stamped on the leaf's row, and the generation the
-    // outstanding charge was minted against. A refund applies only when they
-    // match — the mechanism that makes a stale refund a defined no-op.
+    // A refund applies only when the charge's generation matches the row's —
+    // the mechanism that makes a stale refund a defined no-op.
     pub gen_row: nat,
     pub gen_charge: nat,
 
-    // Whether the leaf row is bound at all.
     pub leaf_live: bool,
 
-    // The single outstanding charge under test: its amount, and whether it has
-    // already been given back. L3a is the claim that `refunded` never goes
-    // from true back to a second refund.
+    // The single outstanding charge under test; the model tracks one token.
     pub charge_amount: nat,
     pub charge_held: bool,
 }
