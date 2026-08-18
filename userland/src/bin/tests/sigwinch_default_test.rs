@@ -2,15 +2,11 @@
 
 //! SIGWINCH default-disposition end-to-end test.
 //!
-//! Regression guard for the terminal-resize crash: SIGWINCH used to fall
-//! through the default-action table to Terminate, so every TIOCSWINSZ
-//! (window resize) killed the foreground shell. The default must be
-//! ignore — a process with no handler installed survives the signal —
-//! while an installed handler still receives it.
+//! The default must be ignore — a process with no handler installed survives
+//! the signal — while an installed handler still receives it.
 
-// Pull in the `slopos-userland` lib crate so its `_start` ELF entry point
-// is linked into the binary (same requirement as the sibling test bins;
-// without it the linker emits entry 0x0 and `do_exec` rejects the ELF).
+// Links the `slopos-userland` lib for its `_start` ELF entry point; without it
+// the linker emits entry 0x0 and `do_exec` rejects the binary.
 use slopos_userland as _;
 
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -24,8 +20,6 @@ extern "C" fn on_sigwinch(_sig: i32) {
     SIGWINCH_COUNT.fetch_add(1, Ordering::SeqCst);
 }
 
-/// A default-disposition SIGWINCH must not terminate the process: kill()
-/// succeeds (POSIX) and the process keeps making syscalls afterwards.
 fn test_sigwinch_default_survives() -> bool {
     let pid = process::getpid();
     if process::default_signal(SIGWINCH) != 0 {
@@ -36,12 +30,10 @@ fn test_sigwinch_default_survives() -> bool {
         eprintln!("sigwinch_default_test: kill(self, SIGWINCH) failed");
         return false;
     }
-    // Forward progress past the raise proves survival; the buggy
-    // Terminate disposition never reached this syscall.
+    // Forward progress past the raise is what proves survival.
     process::getpid() == pid
 }
 
-/// SIGCHLD shares the ignore default; same survival contract.
 fn test_sigchld_default_survives() -> bool {
     let pid = process::getpid();
     if process::default_signal(SIGCHLD) != 0 {

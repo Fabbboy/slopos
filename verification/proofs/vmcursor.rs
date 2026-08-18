@@ -1,42 +1,32 @@
-// SlopRing single-direct-copy volatile-cursor bounds proof.
+// Verus mirror of the two in-bounds properties the kernel's `VmReader` /
+// `VmWriter` (`slopos-ostd/src/mm/vmcursor.rs`) rely on:
 //
-// Machine-checks the two in-bounds properties the kernel's `VmReader` /
-// `VmWriter` (`slopos-ostd/src/mm/vmcursor.rs`) rely on — the obligation the
-// single-direct-copy work names ("the reader/writer offset/advance stays in
-// bounds; a copy never spans two frames"):
-//
-//   (INV-VMCURSOR-NO-CROSS-FRAME) Each per-frame volatile copy moves
-//        `cursor_chunk(remaining, page - intra_off, buf_len)` bytes, which is
-//        `<= page - intra_off`, so `intra_off + chunk <= page`. The copy
-//        therefore stays inside the current frame and the per-frame
-//        `UFrame::copy_{out,in}_volatile` range check (`offset + len <= 4096`)
+//   (INV-VMCURSOR-NO-CROSS-FRAME) A per-frame volatile copy moves at most
+//        `page - intra_off` bytes, so it stays inside the current frame and
+//        `UFrame::copy_{out,in}_volatile`'s `offset + len <= 4096` check
 //        always passes — the machine-checked analogue of the compile-fail
 //        "no `&[u8]` over a UFrame" discipline (AD-3).
 //
 //   (INV-VMCURSOR-FRAME-IN-RANGE) Whenever a copy occurs (`remaining > 0`) the
-//        cursor points at a frame that exists (`frame_idx < n_frames`), so the
-//        `frames[frame_idx]` index is always valid. Preserved across every
-//        advance by the byte-accounting invariant
-//        `frame_idx*page + intra_off + remaining <= n_frames*page`.
+//        cursor points at a frame that exists, so `frames[frame_idx]` is always
+//        a valid index. Preserved across every advance by the byte-accounting
+//        invariant `frame_idx*page + intra_off + remaining <= n_frames*page`.
 
 use vstd::prelude::*;
 
 verus! {
 
-/// Frame size in bytes (4 KiB). A positive constant.
+/// Frame size in bytes.
 pub open spec fn page() -> nat {
     4096
 }
 
-/// `min(a, b, c)`.
 pub open spec fn min3(a: nat, b: nat, c: nat) -> nat {
     let m = if a <= b { a } else { b };
     if m <= c { m } else { c }
 }
 
-/// Bytes a single per-frame volatile copy moves: clamped to the bytes left in
-/// the logical range (`remaining`), the bytes left in the current frame
-/// (`page_left`), and the kernel buffer length (`buf_len`). Mirrors the
+/// Bytes a single per-frame volatile copy moves. Mirrors the
 /// `self.remaining.min(page_left).min(dst.len())` clamp in `read`/`write`.
 pub open spec fn cursor_chunk(remaining: nat, page_left: nat, buf_len: nat) -> nat {
     min3(remaining, page_left, buf_len)
@@ -57,10 +47,6 @@ pub proof fn chunk_within_remaining(remaining: nat, page_left: nat, buf_len: nat
         cursor_chunk(remaining, page_left, buf_len) <= remaining,
 {
 }
-
-// ===========================================================================
-// Cursor state machine.
-// ===========================================================================
 
 pub struct CursorState {
     /// Index of the frame the cursor points into.
@@ -101,7 +87,6 @@ pub proof fn cursor_frame_in_range(s: CursorState)
     ensures
         s.frame_idx < s.n_frames,
 {
-    // frame_idx*page < frame_idx*page + intra_off + remaining <= n_frames*page
     assert(s.frame_idx * page() < s.n_frames * page());
     mul_lt_cancel(s.frame_idx, s.n_frames, page());
 }
