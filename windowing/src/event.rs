@@ -17,7 +17,6 @@ pub enum Event {
     PointerRelease {
         button: u8,
     },
-    /// Pointer axis (scroll) event.
     /// `axis`: 0 = vertical, 1 = horizontal (see `POINTER_AXIS_*` in ABI).
     /// `value_v120`: scroll amount in value120 units (+-120 = one wheel click).
     PointerAxis {
@@ -50,10 +49,7 @@ pub enum Event {
 }
 
 impl Event {
-    /// Convert a protocol event into a windowing Event.
-    ///
-    /// Returns `None` for protocol events that have no windowing equivalent
-    /// (e.g. `FrameDone`, `OutputInfo`).
+    /// Returns `None` for protocol events with no windowing equivalent.
     pub fn from_protocol(evt: &ProtocolEvent) -> Option<Self> {
         match evt {
             ProtocolEvent::PointerEnter { x, y, .. }

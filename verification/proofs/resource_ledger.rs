@@ -650,8 +650,8 @@ pub proof fn broken_cloneable_charge_violates_l1()
             #![trigger broken_double_refund(s)]
             ledger_inv(s) && !ledger_inv(broken_double_refund(s)),
 {
-    // Two charges of 3 outstanding, one of which is a clone of the other: the
-    // row holds 6 and the live sum is 6, but both tokens refund 3.
+    // Two charges of 3 outstanding, one a clone of the other: the row holds 6
+    // and the live sum is 6, but both tokens refund 3.
     let s = Ledger {
         used_leaf: 6,
         used_mid: 6,
@@ -678,14 +678,10 @@ pub proof fn broken_cloneable_charge_violates_l1()
         ledger_inv(s) && !ledger_inv(broken_double_refund(s)));
 }
 
-/// BROKEN 4: a check-then-charge split.
-///
-/// `has_headroom(kind) -> bool` followed by an unconditional debit. Between
-/// the two, another CPU takes the last unit; the debit then lands over the
-/// ceiling. This is why no headroom predicate is exposed anywhere and the
-/// `Reservation` is the only observation of headroom — the same split that
-/// caused a multi-commit fix series upstream, including an off-by-one that
-/// permitted one task past the limit.
+/// BROKEN 4: a check-then-charge split — `has_headroom(kind) -> bool` followed
+/// by an unconditional debit. Another CPU takes the last unit between the two
+/// and the debit lands over the ceiling, which is why no headroom predicate is
+/// exposed and a `Reservation` is the only observation of headroom.
 pub open spec fn broken_check_then_charge(s: Ledger, n: nat, stale_used: nat) -> Ledger {
     // The check used `stale_used`; the debit applies to the current value.
     if fits(stale_used, n, s.limit_leaf) {
@@ -727,17 +723,15 @@ pub proof fn broken_check_then_charge_violates_l2()
         broken_check_then_charge(s, n, stale).used_leaf > s.limit_leaf);
 }
 
-/// BROKEN 5: hierarchical debit combined with committed child limits.
+/// BROKEN 5: hierarchical debit combined with committed child limits. Crediting
+/// a parent's row with each child's *ceiling* at creation time — the
+/// admission-control shape — double-counts: once for the reservation and again
+/// for each real charge walking up. Violates L1.
 ///
-/// If a parent's row were credited with each child's *ceiling* at creation
-/// time — the admission-control shape — rather than with what the children
-/// actually hold, the parent would double-count: once for the reservation and
-/// again for each real charge walking up. Violates L1.
-///
-/// SlopOS deliberately over-commits instead: a parent may hand out child
-/// ceilings summing past its own, and the bound comes from the debit reaching
-/// every ancestor. That is KeyKOS's sub-bank rule, and it is why a ceiling can
-/// be unreachable without that being a bug.
+/// SlopOS over-commits instead: a parent may hand out child ceilings summing
+/// past its own, and the bound comes from the debit reaching every ancestor
+/// (KeyKOS's sub-bank rule), which is why a ceiling can be unreachable without
+/// that being a bug.
 pub open spec fn broken_commit_child_limit(s: Ledger, child_limit: nat) -> Ledger {
     Ledger { used_mid: (s.used_mid + child_limit) as nat, ..s }
 }

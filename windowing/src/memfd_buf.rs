@@ -1,6 +1,4 @@
 //! Memfd-backed shared memory RAII wrappers.
-//!
-//! All buffer sharing uses memfd_create + ftruncate + mmap(MAP_SHARED).
 
 use core::ptr::NonNull;
 
