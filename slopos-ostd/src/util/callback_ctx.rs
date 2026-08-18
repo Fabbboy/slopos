@@ -1,20 +1,13 @@
 //! Typed wrapper for opaque `*mut c_void` callback contexts.
 //!
-//! Many kernel-half iteration helpers take a callback shaped like
-//! `fn(item: &Foo, ctx: *mut c_void)`. The caller normally stashes a
-//! `&mut MyCollector` in `ctx` and reborrows it inside the callback
-//! with `unsafe { &mut *(ctx as *mut MyCollector) }`. [`CallbackCtx`]
-//! centralises that unsafe reborrow so consumers stay fully safe.
+//! Centralises the `unsafe { &mut *(ctx as *mut T) }` reborrow that every
+//! `fn(item: &Foo, ctx: *mut c_void)` callback would otherwise write itself.
 
 use core::ffi::c_void;
 use core::marker::PhantomData;
 
-/// Type-erased mutable borrow into a caller-owned context.
-///
-/// Construct with [`CallbackCtx::from_raw`] inside a callback closure;
-/// reach the typed reference with [`CallbackCtx::try_borrow`]. The
-/// type parameter `T` is the *expected* concrete type — the caller is
-/// responsible for matching the type at construction and use sites.
+/// Type-erased mutable borrow into a caller-owned context; `T` is the
+/// *expected* concrete type.
 ///
 /// SAFETY contract: the `*mut c_void` must originate from the callback
 /// invoker's typed `&mut T` cast (or a null pointer). Mismatched `T`

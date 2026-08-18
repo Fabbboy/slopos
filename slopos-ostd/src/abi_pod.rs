@@ -1,17 +1,7 @@
 //! `Pod` impls for `slopos-abi` types.
 //!
-//! `Pod` is OSTD's trait and `slopos-abi` is the upstream ABI crate;
-//! the orphan rule permits these impls to live here even though the
-//! types themselves are defined in `slopos-abi`. Centralising the
-//! impls in OSTD keeps the unsafe surface inside the trusted core and
-//! lets downstream kernel crates obtain byte views of these aggregates
-//! through `util::byte_view::pod_*` without writing their own
-//! `unsafe { from_raw_parts(... as *const u8, ...) }` blocks.
-//!
-//! Every impl below carries a SAFETY block naming the bit-pattern
-//! justification: every byte sequence of length `size_of::<Self>()`
-//! must be a valid representation of `Self`. See `slopos_ostd::Pod`
-//! for the trait contract.
+//! They live here rather than in `slopos-abi` because OSTD owns the trait and
+//! all of the kernel's `unsafe`.
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::fs::UserFsEntry;

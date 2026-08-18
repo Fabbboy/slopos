@@ -1,22 +1,17 @@
 //! Framebuffer kernel-log console — capture ring + control state.
 //!
-//! On real hardware there is no serial port to read, so the only way to see
-//! kernel output is to render it onto the Limine framebuffer. This module is
-//! the kernel-side half of that: it captures the **full serial byte stream**
-//! (kernel `klog` *and* userland TTY output — both funnel through
-//! [`crate::early_console::write_bytes`]) into an in-memory ring, and drives an
-//! optional on-screen renderer registered by the `video` crate.
+//! Captures the **full serial byte stream** — kernel `klog` and userland TTY
+//! output both funnel through [`crate::early_console::write_bytes`] — into an
+//! in-memory ring, and drives an optional on-screen renderer registered by the
+//! `video` crate.
 //!
-//! **ESC during boot** toggles it — built in, no flag. ESC reveals the log
-//! while the splash / Wheel of Fate is up (and *pauses* the wheel rather than
-//! skipping it); once the compositor presents its first frame (the desktop is
-//! up) ESC belongs to applications again. This mirrors Plymouth, which only
-//! grabs ESC during boot.
+//! ESC toggles the log while the boot splash is up; once the compositor
+//! presents its first frame, ESC belongs to applications again.
 //!
-//! The renderer is invoked from the scheduler timer tick (so it works even
-//! when userland is wedged) and never from inside a log call, avoiding
-//! re-entrancy. Capture and read-back use `try_lock`, so this can never
-//! deadlock a panic, IRQ, or log writer.
+//! The renderer is invoked from the scheduler timer tick, so it works even
+//! when userland is wedged, and never from inside a log call. Capture and
+//! read-back use `try_lock`, so this can never deadlock a panic, IRQ, or log
+//! writer.
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
@@ -25,12 +20,6 @@ use crate::lock_class;
 #[cfg(target_os = "none")]
 use crate::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 
-// ---------------------------------------------------------------------------
-// Capture ring
-// ---------------------------------------------------------------------------
-
-// The capture ring lives only on the kernel target — host builds no-op
-// `capture`/`ring_copy_tail`, so the ring + its `SpinLock` are absent there.
 #[cfg(target_os = "none")]
 const RING_SIZE: usize = 64 * 1024;
 
@@ -57,10 +46,8 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Append raw serial bytes to the capture ring.
 ///
-/// Called from [`crate::early_console::write_bytes`] — the single sink every
-/// serial write funnels through. Uses `try_lock`, so a contended ring (another
-/// CPU mid-append, or a panic writer) simply drops this fragment rather than
-/// blocking.
+/// Uses `try_lock`, so a contended ring — another CPU mid-append, or a panic
+/// writer — drops this fragment rather than blocking.
 #[cfg(target_os = "none")]
 pub fn capture(bytes: &[u8]) {
     if bytes.is_empty() {
@@ -78,9 +65,9 @@ pub fn capture(bytes: &[u8]) {
     SEQ.store(ring.written, Ordering::Relaxed);
 }
 
-/// Host builds (unit tests / KernMiri) have no framebuffer ring; capture is
-/// a no-op so the serial path doesn't take the kernel `SpinLock`, whose
-/// gs-relative preempt asm the host cannot execute.
+/// Host builds have no framebuffer ring; capture is a no-op so the serial path
+/// never takes the kernel `SpinLock`, whose gs-relative preempt asm the host
+/// cannot execute.
 #[cfg(not(target_os = "none"))]
 pub fn capture(_bytes: &[u8]) {}
 
@@ -112,22 +99,18 @@ pub fn ring_copy_tail(_out: &mut [u8]) -> usize {
     0
 }
 
-// ---------------------------------------------------------------------------
-// Console control
-// ---------------------------------------------------------------------------
-
 /// The log is currently drawn on screen (renders + suppresses compositor flips).
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Set once the compositor presents its first frame — the boot phase is over,
 /// so ESC stops toggling the log and is delivered to userland applications.
 static DESKTOP_PRESENTED: AtomicBool = AtomicBool::new(false);
-/// Set when the log is dismissed: the kernel painted the whole screen, so the
-/// next compositor present must be full-screen (the compositor otherwise only
-/// repaints damaged regions and would leave the stale log behind the desktop).
+/// Set when the log is dismissed: the kernel painted the whole screen, and the
+/// compositor otherwise repaints only damaged regions, leaving the stale log
+/// behind the desktop.
 static FORCE_FULL_PRESENT: AtomicBool = AtomicBool::new(false);
-/// Set on every ESC toggle so the renderer repaints on the next tick even if
-/// presses interleaved between ticks (rapid spamming would otherwise leave the
-/// renderer's skip-on-unchanged heuristic stuck, never repainting the log).
+/// Set on every ESC toggle so the renderer repaints on the next tick however
+/// the presses interleaved with ticks, rather than sticking on its
+/// skip-on-unchanged heuristic.
 static RENDER_DIRTY: AtomicBool = AtomicBool::new(false);
 static TICKS: AtomicU32 = AtomicU32::new(0);
 static RENDER_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
@@ -141,22 +124,19 @@ pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }
 
-/// Called by the compositor's first presented frame. After this, ESC belongs
-/// to userland applications rather than the boot-log toggle.
+/// Called by the compositor's first presented frame.
 pub fn notify_desktop_presented() {
     DESKTOP_PRESENTED.store(true, Ordering::Relaxed);
 }
 
-/// Consume the "force a full-screen present" request set when the log is
-/// dismissed. The compositor flip path calls this to repaint the whole screen
-/// once, erasing the dismissed log instead of doing an incremental update.
+/// Consume the "force a full-screen present" request, from the compositor flip
+/// path.
 pub fn take_force_full_present() -> bool {
     FORCE_FULL_PRESENT.swap(false, Ordering::Relaxed)
 }
 
-/// Consume the "an ESC toggle happened, repaint now" request. The renderer
-/// calls this so it never skips a frame after a toggle (however the presses
-/// interleaved with ticks).
+/// Consume the "an ESC toggle happened, repaint now" request, from the
+/// renderer.
 pub fn take_render_dirty() -> bool {
     RENDER_DIRTY.swap(false, Ordering::Relaxed)
 }
@@ -173,15 +153,12 @@ fn invoke_render() {
     }
     // SAFETY: `register_renderer` is the only writer of `RENDER_HOOK` and only
     // ever stores a valid `RenderHook` fn pointer (same size as `*mut ()` on
-    // x86_64), mirroring the klog backend pattern.
+    // x86_64).
     let hook: RenderHook = unsafe { core::mem::transmute(ptr) };
     hook();
 }
 
 /// Drive the renderer from the scheduler timer tick (call on CPU 0 only).
-///
-/// A single relaxed atomic load on the inactive fast path; throttled to
-/// ~16 Hz when the log is shown.
 pub fn on_timer_tick() {
     if !ACTIVE.load(Ordering::Relaxed) {
         return;
@@ -195,23 +172,20 @@ pub fn on_timer_tick() {
 
 /// Handle an ESC key-press seen in the keyboard IRQ.
 ///
-/// During boot (before the desktop is up) ESC toggles the on-screen log and is
-/// consumed (`true`). Once the compositor has presented a frame, ESC belongs to
-/// userland applications and this is a no-op (`false`, so the key is delivered
-/// normally) — unless the log is currently showing, in which case ESC still
-/// dismisses it. Pure atomic flip; the redraw happens on the next timer tick,
-/// so this is safe to call with the keyboard lock held.
+/// Returns whether the key was consumed: during boot ESC toggles the on-screen
+/// log, and once the compositor has presented a frame it belongs to userland
+/// unless the log is still showing, which ESC dismisses.
+///
+/// Pure atomic flip — the redraw happens on the next timer tick — so this is
+/// safe to call with the keyboard lock held.
 pub fn handle_esc_press() -> bool {
     if DESKTOP_PRESENTED.load(Ordering::Relaxed) && !ACTIVE.load(Ordering::Relaxed) {
         return false;
     }
     let now_active = !ACTIVE.load(Ordering::Relaxed);
     ACTIVE.store(now_active, Ordering::Relaxed);
-    // Repaint on the next tick regardless of how presses interleaved with ticks.
     RENDER_DIRTY.store(true, Ordering::Relaxed);
     if !now_active {
-        // Dismissed: make the next compositor present full-screen so it paints
-        // over the log instead of leaving it behind a damage-only update.
         FORCE_FULL_PRESENT.store(true, Ordering::Relaxed);
     }
     true

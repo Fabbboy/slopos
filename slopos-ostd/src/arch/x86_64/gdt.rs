@@ -1,31 +1,8 @@
-//! Global Descriptor Table (GDT) — Single Source of Truth
-//!
-//! This module defines **all** GDT-related types, constants, and descriptor
-//! constructors for SlopOS.  Every other crate (`boot`, `lib/pcr`, etc.)
-//! imports from here rather than keeping private copies.
-//!
-//! # What lives here
-//!
-//! | Item | Purpose |
-//! |------|---------|
-//! | [`SegmentSelector`] | Type-safe segment selector with named constants |
-//! | [`Tss64`] | 64-bit Task State Segment |
-//! | [`GdtTssEntry`] | 16-byte TSS descriptor inside the GDT |
-//! | [`GdtLayout`] | Complete GDT: 5 standard entries + TSS descriptor |
-//! | [`GdtDescriptor`] | `lgdt` operand (limit + base) |
-//! | `GDT_*` constants | Access-byte, flag, and descriptor constants |
-//! | [`gdt_make_descriptor`] | `const fn` descriptor constructor |
+//! GDT types, constants and descriptor constructors. Every other crate
+//! imports these rather than keeping private copies.
 
-// =========================================================================
-// Segment Selector
-// =========================================================================
-
-/// x86_64 segment selector.
-///
-/// Layout (16 bits):
-/// - Bits 0-1: Requested Privilege Level (RPL)
-/// - Bit 2: Table Indicator (0 = GDT, 1 = LDT)
-/// - Bits 3-15: Descriptor index
+/// x86_64 segment selector: RPL in bits 0-1, table indicator in bit 2,
+/// descriptor index in bits 3-15.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct SegmentSelector(pub u16);
@@ -51,60 +28,42 @@ impl SegmentSelector {
     /// TSS segment (GDT index 5, RPL 0) = 0x28.
     pub const TSS: Self = Self::new(5, false, 0);
 
-    /// Create a new segment selector.
     #[inline]
     pub const fn new(index: u16, ldt: bool, rpl: u8) -> Self {
         let ti = if ldt { 1 << 2 } else { 0 };
         Self((index << 3) | ti | (rpl as u16 & 0x3))
     }
 
-    /// Get the descriptor table index.
     #[inline]
     pub const fn index(self) -> u16 {
         self.0 >> 3
     }
 
-    /// Check if this selector references the LDT.
     #[inline]
     pub const fn is_ldt(self) -> bool {
         self.0 & (1 << 2) != 0
     }
 
-    /// Get the requested privilege level (0-3).
     #[inline]
     pub const fn rpl(self) -> u8 {
         (self.0 & 0x3) as u8
     }
 
-    /// Get the raw selector value for loading into segment register.
     #[inline]
     pub const fn bits(self) -> u16 {
         self.0
     }
 }
 
-// =========================================================================
-// GDT Descriptor Access Byte Fields (bits 40-47)
-// =========================================================================
-
-/// Present bit (bit 7).
 pub const GDT_ACCESS_PRESENT: u8 = 1 << 7;
-/// DPL = 0 — Ring 0 / Kernel (bits 5-6).
 pub const GDT_ACCESS_DPL_KERNEL: u8 = 0 << 5;
-/// DPL = 3 — Ring 3 / User (bits 5-6).
 pub const GDT_ACCESS_DPL_USER: u8 = 3 << 5;
-/// Segment type bit (bit 4) — 1 for code/data segment.
 pub const GDT_ACCESS_SEGMENT: u8 = 1 << 4;
 /// Code segment type: executable, readable, non-conforming.
 pub const GDT_ACCESS_CODE_TYPE: u8 = 0b1010;
 /// Data segment type: writable, expand-up.
 pub const GDT_ACCESS_DATA_TYPE: u8 = 0b0010;
-/// TSS Available (64-bit) access byte — 0x89.
 pub const GDT_ACCESS_TSS_AVAILABLE: u8 = 0x89;
-
-// =========================================================================
-// GDT Flags (bits 52-55 of descriptor)
-// =========================================================================
 
 /// Granularity flag (G=1) — limit in 4KB units.
 pub const GDT_FLAG_GRANULARITY: u8 = 1 << 3;
@@ -113,20 +72,7 @@ pub const GDT_FLAG_LONG_MODE: u8 = 1 << 1;
 /// Combined flags for 64-bit segments: G=1, D/B=0, L=1, AVL=0 = 0xA.
 pub const GDT_FLAGS_64BIT: u8 = GDT_FLAG_GRANULARITY | GDT_FLAG_LONG_MODE;
 
-// =========================================================================
-// Descriptor Constructor
-// =========================================================================
-
 /// Build a 64-bit GDT descriptor from individual fields.
-///
-/// Bit layout of a GDT entry:
-/// - Bits  0-15: Limit (low 16 bits)
-/// - Bits 16-31: Base (low 16 bits)
-/// - Bits 32-39: Base (middle 8 bits)
-/// - Bits 40-47: Access byte
-/// - Bits 48-51: Limit (high 4 bits)
-/// - Bits 52-55: Flags
-/// - Bits 56-63: Base (high 8 bits)
 pub const fn gdt_make_descriptor(
     limit_low: u16,
     base_low: u16,
@@ -145,14 +91,11 @@ pub const fn gdt_make_descriptor(
         | ((base_high as u64) << 56)
 }
 
-// =========================================================================
-// Standard 64-bit Descriptors (base/limit ignored by hardware, set to max)
-// =========================================================================
-
 /// Null descriptor — GDT index 0.
 pub const GDT_NULL_DESCRIPTOR: u64 = 0;
 
-/// Kernel code segment (Ring 0, 64-bit).
+/// Kernel code segment (Ring 0, 64-bit). Base and limit are ignored by
+/// hardware in 64-bit mode, so all four segment descriptors set them to max.
 pub const GDT_KERNEL_CODE_DESCRIPTOR: u64 = gdt_make_descriptor(
     0xFFFF,
     0,
@@ -197,8 +140,6 @@ pub const GDT_USER_CODE_DESCRIPTOR: u64 = gdt_make_descriptor(
 );
 
 /// Standard GDT entries in the order expected by the kernel.
-///
-/// Index 0: null, 1: kernel code, 2: kernel data, 3: user data, 4: user code.
 pub const GDT_STANDARD_ENTRIES: [u64; 5] = [
     GDT_NULL_DESCRIPTOR,
     GDT_KERNEL_CODE_DESCRIPTOR,
@@ -206,10 +147,6 @@ pub const GDT_STANDARD_ENTRIES: [u64; 5] = [
     GDT_USER_DATA_DESCRIPTOR,
     GDT_USER_CODE_DESCRIPTOR,
 ];
-
-// =========================================================================
-// Hardware Structures
-// =========================================================================
 
 /// Number of 8-byte GDT entries (5 standard + 2 for 16-byte TSS descriptor).
 pub const GDT_ENTRY_COUNT: usize = 7;
@@ -232,7 +169,6 @@ pub struct Tss64 {
 }
 
 impl Tss64 {
-    /// Zeroed TSS, suitable for static initialization.
     pub const fn new() -> Self {
         Self {
             reserved0: 0,
@@ -249,8 +185,6 @@ impl Tss64 {
 }
 
 /// TSS descriptor entry (16 bytes for 64-bit mode, occupies two GDT slots).
-///
-/// Hardware-defined layout — do not reorder or add fields.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct GdtTssEntry {
@@ -265,7 +199,6 @@ pub struct GdtTssEntry {
 }
 
 impl GdtTssEntry {
-    /// Zeroed TSS descriptor.
     pub const fn new() -> Self {
         Self {
             limit_low: 0,
@@ -279,11 +212,8 @@ impl GdtTssEntry {
         }
     }
 
-    /// Populate this descriptor to point at the given TSS.
-    ///
-    /// # Arguments
-    /// * `tss_base` — virtual address of the [`Tss64`] instance
-    /// * `tss_limit` — `size_of::<Tss64>() - 1`
+    /// Populate this descriptor to point at the given TSS. `tss_limit` is
+    /// `size_of::<Tss64>() - 1`.
     pub fn set_base_limit(&mut self, tss_base: u64, tss_limit: u16) {
         self.limit_low = tss_limit & 0xFFFF;
         self.base_low = (tss_base & 0xFFFF) as u16;
@@ -297,8 +227,6 @@ impl GdtTssEntry {
 }
 
 /// Complete GDT: 5 standard entries (null + 4 segments) + 16-byte TSS descriptor.
-///
-/// Hardware-defined layout — do not reorder or add fields.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct GdtLayout {
@@ -309,7 +237,6 @@ pub struct GdtLayout {
 }
 
 impl GdtLayout {
-    /// Zeroed GDT layout.
     pub const fn new() -> Self {
         Self {
             entries: [0; 5],
@@ -317,19 +244,16 @@ impl GdtLayout {
         }
     }
 
-    /// Populate the standard segment descriptors.
     pub fn load_standard_entries(&mut self) {
         self.entries = GDT_STANDARD_ENTRIES;
     }
 
-    /// Populate the TSS descriptor to point at the given TSS.
     pub fn load_tss(&mut self, tss: &Tss64) {
         let tss_base = tss as *const Tss64 as u64;
         let tss_limit = (core::mem::size_of::<Tss64>() as u16) - 1;
         self.tss_entry.set_base_limit(tss_base, tss_limit);
     }
 
-    /// Byte size of the entire GDT (for the `lgdt` limit field).
     pub const fn byte_size() -> usize {
         core::mem::size_of::<Self>()
     }
@@ -343,7 +267,6 @@ pub struct GdtDescriptor {
 }
 
 impl GdtDescriptor {
-    /// Build a descriptor pointing at the given [`GdtLayout`].
     pub fn from_layout(layout: &GdtLayout) -> Self {
         Self {
             limit: (GdtLayout::byte_size() - 1) as u16,
@@ -351,10 +274,6 @@ impl GdtDescriptor {
         }
     }
 }
-
-// =========================================================================
-// GDT install — issues lgdt + segment reload + ltr
-// =========================================================================
 
 /// Load the given [`GdtLayout`] into GDTR, reload the segment registers
 /// to point at `KERNEL_CODE` / `KERNEL_DATA`, and load the TSS.
@@ -416,19 +335,13 @@ pub unsafe fn install(layout: &GdtLayout, tss_selector: SegmentSelector) {
     }
 }
 
-// =========================================================================
-// Compile-time safety assertions
-// =========================================================================
-
 const _: () = {
-    // SegmentSelector raw values
     assert!(SegmentSelector::KERNEL_CODE.0 == 0x08);
     assert!(SegmentSelector::KERNEL_DATA.0 == 0x10);
     assert!(SegmentSelector::USER_DATA.0 == 0x1B);
     assert!(SegmentSelector::USER_CODE.0 == 0x23);
     assert!(SegmentSelector::TSS.0 == 0x28);
 
-    // Hardware structure sizes
     assert!(core::mem::size_of::<Tss64>() == 104);
     assert!(core::mem::size_of::<GdtTssEntry>() == 16);
     // GdtLayout = 5*8 + 16 = 56 bytes
@@ -436,29 +349,17 @@ const _: () = {
     // GdtDescriptor = 2 + 8 = 10 bytes
     assert!(core::mem::size_of::<GdtDescriptor>() == 10);
 
-    // GDT_ENTRY_COUNT covers the standard entries (5) + TSS spanning 2 slots
     assert!(GDT_ENTRY_COUNT == 7);
 
-    // TSS access byte value
     assert!(GDT_ACCESS_TSS_AVAILABLE == 0x89);
 
-    // Flags sanity
     assert!(GDT_FLAGS_64BIT == 0x0A);
 };
 
-// =========================================================================
-// IST Slots — typed indices into Tss64.ist[]
-// =========================================================================
-
 /// Named IST (Interrupt Stack Table) slot.
 ///
-/// Replaces the previous `u8` index parameter on `gdt_set_ist` /
-/// `idt_set_ist`. Out-of-range values (0, 8+) are non-representable, so
-/// the runtime checks in those functions become compile-time errors.
-///
-/// The layout assignments here mirror `IST_CONFIGS` in
-/// `boot/src/ist_stacks.rs`. Changing one without the other breaks the
-/// IDT/TSS contract.
+/// Assignments must match `IST_CONFIGS` in `boot/src/ist_stacks.rs`;
+/// changing one without the other breaks the IDT/TSS contract.
 ///
 /// # Compile-fail examples
 ///
@@ -501,8 +402,6 @@ impl IstSlot {
         (self as u8 - 1) as usize
     }
 
-    /// Construct from the runtime `u8` index. Returns `None` for 0
-    /// or 8+ (which `IstSlot` does not represent).
     pub const fn from_index(idx: u8) -> Option<Self> {
         match idx {
             1 => Some(IstSlot::DoubleFault),
@@ -516,7 +415,6 @@ impl IstSlot {
         }
     }
 
-    /// Diagnostic name.
     pub const fn name(self) -> &'static str {
         match self {
             IstSlot::DoubleFault => "DoubleFault",

@@ -1,11 +1,5 @@
 //! Safe reads at kernel-virtual integer addresses.
 //!
-//! Kernel-half code frequently needs to read a small, naturally-aligned
-//! value (a `u32` magic, a `u64` PML4 entry, a header field) at a
-//! kernel-virtual address that's expressed as a `u64`. The raw form
-//! is `unsafe { *(addr as *const T) }`; this module folds the cast
-//! and deref into safe helpers so the consumer site stays in safe Rust.
-//!
 //! Every helper here is **safe to call** but the interior `unsafe` is
 //! sound only when the caller has confirmed that:
 //!
@@ -44,10 +38,8 @@ pub fn read_kernel_at<T: Copy>(addr: u64, offset: usize) -> T {
     // expressed in `T`-strides matching the underlying layout.
     unsafe { *p.add(offset) }
 }
-/// High 17 bits of a canonical kernel-half x86-64 virtual address.
-///
-/// Both 0xFFFF_8000_0000_0000 and 0xFFFF_FFFF_FFFF_FFFF satisfy
-/// `(addr >> 47) == 0x1FFFF`.
+/// High 17 bits of a canonical kernel-half x86-64 virtual address: both
+/// 0xFFFF_8000_0000_0000 and 0xFFFF_FFFF_FFFF_FFFF satisfy `(addr >> 47) == 0x1FFFF`.
 const CANONICAL_KERNEL_HIGH_BITS: u64 = 0x1FFFF;
 
 /// Returns `true` when `addr` is a canonical kernel-half virtual
@@ -71,20 +63,11 @@ pub const fn is_canonical_kernel(addr: u64, align: u64, extra: u64) -> bool {
     (end >> 47) == CANONICAL_KERNEL_HIGH_BITS
 }
 
-// ---------------------------------------------------------------------------
-// Fault-recoverable kernel probe read (Linux `probe_kernel_read` analogue).
-//
-// Diagnostic walkers (the NMI-watchdog backtrace, panic-time frame chases)
-// must read kernel addresses they cannot prove are mapped — a canonical
-// address can still be a stack
-// guard page or a freed region. The probe routes the load through a
-// known RIP range; the page-fault handler recognises a kernel-mode
-// fault inside `__ostd_probe_read_start..end` and redirects RIP to
-// `__ostd_probe_read_fault`, which reports failure instead of letting
-// the diagnostic itself escalate into a panic (the secondary-panic
-// class observed live: the watchdog's rbp chase faulting on an
-// unmapped page and burying the original lockup diagnosis).
-// ---------------------------------------------------------------------------
+// The probe routes its load through a known RIP range: the page-fault
+// handler recognises a kernel-mode fault inside
+// `__ostd_probe_read_start..end` and redirects RIP to
+// `__ostd_probe_read_fault`, so a diagnostic walker can read an address
+// it cannot prove is mapped without escalating into a second panic.
 
 core::arch::global_asm!(
     ".global __ostd_probe_read_u64",
@@ -131,31 +114,19 @@ pub fn probe_read_fault_ip() -> u64 {
 /// unmapped pages. Returns `None` if the address fails the canonical-
 /// kernel + 8-byte-aligned + 8-byte-headroom check, **or** if the read
 /// page-faults (the handler redirects the probe to its failure tail).
-///
-/// Designed for NMI-context frame-pointer chase loops and parked-task
-/// stack walks: the pre-validation cuts off the cheap fault classes
-/// (null / user-half / unaligned / canonical wrap), and the
-/// fault-recoverable probe absorbs the rest (guard pages, freed
-/// stacks), so a diagnostic can never escalate into a secondary panic.
 #[inline]
 pub fn read_volatile_canonical_kernel_u64(addr: u64) -> Option<u64> {
     if !is_canonical_kernel(addr, 8, 8) {
         return None;
     }
     let mut out = 0u64;
-    // SAFETY: the probe load is fault-recoverable by construction (the
-    // #PF handler redirects a fault inside the probe's RIP range to the
-    // failure tail); `out` is a live stack slot.
+    // SAFETY: the probe load is fault-recoverable by construction;
+    // `out` is a live stack slot.
     let ok = unsafe { __ostd_probe_read_u64(addr as *const u64, &mut out) };
     if ok != 0 { Some(out) } else { None }
 }
 
-/// Read an unaligned `u64` from a raw pointer with `read_unaligned`.
-///
-/// The pointer must point to 8 readable bytes; callers in
-/// IRET-corruption diagnostics typically validate the surrounding
-/// region via [`is_canonical_kernel`] first. The unsafe `read_unaligned`
-/// is centralised here.
+/// Read an unaligned `u64` from a raw pointer.
 ///
 /// # Safety
 ///
@@ -171,15 +142,11 @@ pub unsafe fn read_unaligned_u64(ptr: *const u64) -> u64 {
 }
 
 /// Read the five-word IRETQ frame `[RIP, CS, RFLAGS, RSP, SS]` from a
-/// kernel-space pointer published by an ISR asm stub. The interior
-/// `unsafe` is centralised here; consumers stay safe.
+/// kernel-space pointer published by an ISR asm stub.
 ///
-/// The pointer is treated as the base of a 5×`u64` window. The helper
-/// validates canonical-kernel + 8-byte-aligned + 40-byte headroom; if
-/// the check fails, returns `None` so the caller can render a
-/// diagnostic without faulting. The lone caller is the corruption-
-/// recovery shim and accepts the residual unmapped-page risk in
-/// exchange for the panic-time forensic value.
+/// Validates canonical-kernel + 8-byte-aligned + 40-byte headroom and
+/// returns `None` on failure; the residual unmapped-page risk is
+/// accepted for the panic-time forensic value.
 #[inline]
 pub fn read_iret_frame(ptr: *const u64) -> Option<[u64; 5]> {
     let addr = ptr as u64;
@@ -187,9 +154,8 @@ pub fn read_iret_frame(ptr: *const u64) -> Option<[u64; 5]> {
         return None;
     }
     let mut out = [0u64; 5];
-    // SAFETY: address validated canonical-kernel + 8-byte-aligned with
-    // 40 bytes of headroom; the read sequence stays within the same
-    // 5×u64 window the ISR asm stub set up.
+    // SAFETY: the reads stay inside the 5×u64 window just validated
+    // above, which is the window the ISR asm stub set up.
     for (i, slot) in out.iter_mut().enumerate() {
         *slot = unsafe { core::ptr::read_unaligned(ptr.add(i)) };
     }
@@ -199,10 +165,6 @@ pub fn read_iret_frame(ptr: *const u64) -> Option<[u64; 5]> {
 /// Read an unaligned `u64` at `ptr` only if the byte window
 /// `[ptr, ptr + 8)` lies inside `[lo, hi)`. Returns `None` when the
 /// window escapes the supplied bounds.
-///
-/// Used by panic-time stack-vicinity dumps to bound forensic reads to
-/// a known-mapped region (the current task's kernel stack, or a tight
-/// window around a probed pointer).
 #[inline]
 pub fn read_unaligned_u64_in_range(ptr: *const u64, lo: usize, hi: usize) -> Option<u64> {
     let addr = ptr as usize;
@@ -210,18 +172,13 @@ pub fn read_unaligned_u64_in_range(ptr: *const u64, lo: usize, hi: usize) -> Opt
     if addr < lo || end > hi {
         return None;
     }
-    // SAFETY: caller-supplied `[lo, hi)` is the bounds of a live mapped
-    // region (kernel stack or vicinity window); we just checked that
-    // the 8-byte read lies entirely inside it.
+    // SAFETY: caller-supplied `[lo, hi)` bounds a live mapped region,
+    // and the 8-byte read was just checked to lie entirely inside it.
     Some(unsafe { core::ptr::read_unaligned(ptr) })
 }
 
-/// Safe `fn(*mut InterruptFrame)` ↔ `*mut ()` round-trip.
-///
-/// fn-pointers and `*mut ()` are layout-compatible on x86_64; round-
-/// tripping through an `AtomicPtr<()>` is a common pattern for slot-
-/// based exception-handler tables. The unsafe `transmute` lives once,
-/// here. Consumers wrap the registry with these helpers.
+/// Safe `fn(*mut InterruptFrame)` ↔ `*mut ()` round-trip: fn-pointers
+/// and `*mut ()` are layout-compatible on x86_64.
 pub mod fn_ptr {
     /// Encode an `Option<F>` as `*mut ()`.  `None` → null.
     #[inline]

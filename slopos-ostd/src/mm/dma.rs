@@ -1,38 +1,21 @@
 //! `DmaCoherent` / `DmaStream`: typed handles for IOMMU-mapped
 //! device-visible memory.
 //!
-//! `DmaCoherent` is for buffers the device polls without explicit
-//! cache management (descriptor rings, doorbell pages); `DmaStream`
-//! carries an explicit [`DmaDirection`] and a `sync_for_device` /
-//! `sync_for_cpu` API for non-coherent architectures (no-op on
-//! x86_64; the API is there for future ARM64).
+//! `DmaCoherent` is for buffers the device polls without explicit cache
+//! management (descriptor rings, doorbell pages); `DmaStream` carries an
+//! explicit [`DmaDirection`] plus a `sync_for_device` / `sync_for_cpu` API
+//! that exists for future ARM64.
 //!
-//! # IOMMU policy
+//! All device-visible mappings flow through the registered [`IommuMapper`],
+//! and with none registered every allocation fails with
+//! [`DmaError::NotInitialised`]. That deny is type-level only: programming
+//! the hardware IOMMU is the mapper's own responsibility, so a device the
+//! bootloader left with an open DMA window keeps it until the mapper closes
+//! it.
 //!
-//! All device-visible mappings flow through the registered
-//! [`IommuMapper`]. The default state is *no mapper registered* →
-//! [`DmaError::NotInitialised`], i.e. type-level default-deny: a
-//! driver cannot allocate DMA storage until the IOMMU is wired up.
-//!
-//! Caveat — only the type-level deny ships here; programming the
-//! hardware IOMMU is the registered mapper's responsibility. A device
-//! the bootloader left with an open DMA window will still be able to
-//! issue arbitrary DMA until the mapper closes it.
-//!
-//! # Drop and in-flight DMA
-//!
-//! Dropping a `DmaCoherent` / `DmaStream` calls [`IommuMapper::unmap`]
-//! and releases the underlying frames. **OSTD does not issue a DMA
-//! fence**: drivers must quiesce the device (clear queues, mask
-//! interrupts) *before* dropping the handle. A drop while the device
-//! still issues DMA would race the unmap and corrupt unrelated
-//! kernel memory.
-//!
-//! # Surface shape
-//!
-//! The current IOMMU surface is contiguous-only (`map(phys, size)`).
-//! A per-page IOVA list — needed for scatter/gather and for VT-d's
-//! non-contiguous IOVA layouts — is a future extension to the trait.
+//! Drop unmaps and releases the frames but issues **no DMA fence**: drivers
+//! must quiesce the device before dropping a handle, or the unmap races
+//! in-flight DMA and corrupts unrelated kernel memory.
 
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -44,10 +27,6 @@ use crate::mm::frame_alloc::current_frame_allocator;
 use crate::mm::pod::Pod;
 use crate::mm::uframe::{AnyUFrameMeta, UFrameError, USegment};
 use crate::sync::BspToken;
-
-// ---------------------------------------------------------------------------
-// Direction + errors.
-// ---------------------------------------------------------------------------
 
 /// Direction of a streaming DMA mapping. `DmaCoherent` is implicitly
 /// bidirectional and so does not carry a direction.
@@ -63,13 +42,12 @@ pub enum DmaDirection {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DmaError {
-    /// [`register_iommu_mapper`] has not been called yet — type-level
-    /// default-deny.
+    /// [`register_iommu_mapper`] has not been called yet.
     NotInitialised,
     /// Frame or page-table allocator is out of memory.
     Exhausted,
-    /// IOMMU policy refuses to map this physical range (e.g. it
-    /// covers kernel-sensitive memory).
+    /// IOMMU policy refuses this physical range (e.g. it covers
+    /// kernel-sensitive memory).
     Forbidden,
     /// Mapper failed for another reason (page-walk failure, etc.).
     MappingFailed,
@@ -79,41 +57,31 @@ impl From<UFrameError> for DmaError {
     fn from(e: UFrameError) -> Self {
         match e {
             UFrameError::OutOfMemory => DmaError::Exhausted,
-            // Misalignment / OOB / Truncated should not occur at
-            // alloc-time; treat as MappingFailed for surface-area
-            // simplicity. Callers exercising the byte-copy methods
-            // surface `UFrameError` directly.
+            // Misalignment / OOB / Truncated cannot occur at alloc time; the
+            // byte-copy methods surface `UFrameError` directly instead.
             _ => DmaError::MappingFailed,
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// DmaCoherentMeta / DmaStreamMeta.
-// ---------------------------------------------------------------------------
-
-/// Per-frame metadata for `DmaCoherent` pages. ZST: distinct type so
-/// the `M` parameter on [`USegment`] tracks coherent vs. streaming at
-/// the type system level.
+/// Per-frame metadata for `DmaCoherent` pages: a distinct ZST so
+/// [`USegment`]'s `M` tracks coherent vs. streaming in the type system.
 #[derive(Debug, Default)]
 pub struct DmaCoherentMeta;
 
-// SAFETY: ZST has no representation invariants. A DMA run's pages are owned
-// by its [`DmaRun`], not by the per-frame lifecycle, so
-// `returns_frame_on_last_drop` is `false`: the last drop resets the slot and
-// `RunRelease` returns the pages.
+// SAFETY: ZST has no representation invariants. `returns_frame_on_last_drop`
+// is `false` because a run's pages are owned by its `DmaRun`: the last drop
+// resets the slot and `RunRelease` returns the pages.
 unsafe impl AnyFrameMeta for DmaCoherentMeta {
     fn returns_frame_on_last_drop(&self) -> bool {
         false
     }
 }
 
-// SAFETY: DMA pages are by definition peripheral-tampered, so the
-// `AnyUFrameMeta` no-`&T` contract is the right home — only
-// byte-copy access is sound.
+// SAFETY: DMA pages are peripheral-tampered, so only the byte-copy access
+// `AnyUFrameMeta` permits (no `&T`) is sound.
 unsafe impl AnyUFrameMeta for DmaCoherentMeta {}
 
-/// Per-frame metadata for `DmaStream` pages.
 #[derive(Debug, Default)]
 pub struct DmaStreamMeta;
 
@@ -128,13 +96,7 @@ unsafe impl AnyFrameMeta for DmaStreamMeta {
 // SAFETY: as `DmaCoherentMeta`.
 unsafe impl AnyUFrameMeta for DmaStreamMeta {}
 
-// ---------------------------------------------------------------------------
-// IommuMapper trait + registration.
-// ---------------------------------------------------------------------------
-
-/// Pluggable IOMMU mapper. Only one is registered per kernel
-/// lifetime; `DmaCoherent::alloc` / `DmaStream::alloc` go through it
-/// and `Drop` calls `unmap`.
+/// Pluggable IOMMU mapper; exactly one is registered per kernel lifetime.
 pub trait IommuMapper: Send + Sync + 'static {
     /// Map `[phys, phys + size)` as a device-visible IOVA in the
     /// requested direction. Returns the IOVA base.
@@ -152,9 +114,8 @@ static IOMMU_MAPPER: MapperSlot = MapperSlot {
     inner: AtomicPtr::new(core::ptr::null_mut()),
 };
 
-/// One-shot wiring point for the kernel's [`IommuMapper`]. The
-/// `&BspToken<'brand>` witnesses BSP-only init; the underlying
-/// mapper must be sound for concurrent `map` / `unmap` from any CPU.
+/// One-shot wiring point for the kernel's [`IommuMapper`]; the mapper must
+/// be sound for concurrent `map` / `unmap` from any CPU.
 pub fn register_iommu_mapper<'brand>(
     _token: &BspToken<'brand>,
     slot: &'static &'static dyn IommuMapper,
@@ -172,9 +133,8 @@ fn current_iommu_mapper() -> Option<&'static dyn IommuMapper> {
     if raw.is_null() {
         return None;
     }
-    // SAFETY: Inv. 6. `raw` was produced by `register_iommu_mapper`
-    // from a `&'static &'static dyn IommuMapper`; the storage is
-    // `'static` by contract.
+    // SAFETY: Inv. 6. `raw` came from `register_iommu_mapper`'s
+    // `&'static &'static dyn IommuMapper`, so the storage is `'static`.
     let slot = unsafe { &*(raw as *const &'static dyn IommuMapper) };
     Some(*slot)
 }
@@ -187,17 +147,9 @@ pub fn reset_for_test() {
         .store(core::ptr::null_mut(), Ordering::Release);
 }
 
-// ---------------------------------------------------------------------------
-// Identity (passthrough) mapper.
-// ---------------------------------------------------------------------------
-
-/// Passthrough mapper: IOVA == physical address, unmap is a no-op.
-///
-/// On platforms with no IOMMU policy to enforce (e.g. QEMU `q35` without
-/// VT-d), this turns "no mapper registered → hard deny" into "passthrough
-/// policy", giving `DmaCoherent` / `DmaStream` their first live mapper. A
-/// future VT-d mapper swaps in at the same single seam
-/// ([`register_iommu_mapper`]).
+/// Passthrough mapper: IOVA == physical address, unmap is a no-op. Turns the
+/// no-mapper hard deny into a passthrough policy on platforms with no IOMMU
+/// to program (e.g. QEMU `q35` without VT-d).
 struct IdentityMapper;
 
 impl IommuMapper for IdentityMapper {

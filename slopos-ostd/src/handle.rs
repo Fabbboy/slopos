@@ -1,34 +1,9 @@
 //! Generation-counter handles for slot-based tables.
 //!
-//! [`Handle<T>`] is a small `Copy` token pairing a 32-bit slot index with
-//! a 64-bit generation. [`HandleTable<T>`] stores values in recyclable
-//! slots; every removal bumps the slot's generation, so a handle minted
-//! before a slot was reused resolves to [`HandleError::Stale`] rather than
-//! silently aliasing the slot's new occupant. This is the canonical
-//! defence against use-after-reuse on kernel object tables (file
-//! descriptors, pipes, process address spaces, tasks): a stale reference
-//! becomes a typed error, never undefined behaviour.
-//!
-//! # Growth modes
-//!
-//! - [`HandleTable::new`] / [`HandleTable::with_capacity`] build a
-//!   *growable* table: [`insert`](HandleTable::insert) appends a fresh
-//!   slot (reallocating the spine) when no recycled slot is free.
-//! - [`HandleTable::with_fixed_capacity`] pre-fills every slot up front
-//!   and forbids growth, so the backing spine's pointer and length are
-//!   stable for the table's whole life. This is the contract that lets a
-//!   caller scan the table lock-free (see
-//!   [`SpinLock::read_atomic_field`](crate::sync::SpinLock::read_atomic_field))
-//!   without observing a reallocated spine — the table never moves a slot
-//!   body once `insert` has placed it.
-//!
-//! # Generation
-//!
-//! The generation lives in the slot, not the value, and is bumped on
-//! [`remove`](HandleTable::remove). A handle carries the generation that
-//! was current when it was minted; resolution compares the two. Slot
-//! reuse therefore never produces an aliasing read — the old handle's
-//! generation no longer matches.
+//! [`Handle<T>`] pairs a slot index with a generation. The generation lives in
+//! the slot and is bumped on [`remove`](HandleTable::remove), so a handle
+//! minted before a slot was reused resolves to [`HandleError::Stale`] rather
+//! than aliasing the slot's new occupant.
 
 use core::marker::PhantomData;
 
@@ -36,20 +11,16 @@ use crate::mm::heap::{AllocError, KVec};
 
 /// Slot width of the packed process-address-space handle a task carries.
 ///
-/// The handle names a slot in a table this crate cannot see — the address
-/// space lives in `slopos_mm` — so it travels as a packed word and the
-/// two sides have to agree on where the slot ends and the generation
-/// begins. That agreement is this constant. 16 bits leaves 48 for the
-/// generation, and a packed word of 0 means "no address space", which is
-/// why the generation is never 0.
+/// The table lives in `slopos_mm`, so the handle travels as a packed word and
+/// both sides must agree on this split. A packed word of 0 means "no address
+/// space", which is why the generation is never 0.
 pub const PROCESS_VM_SLOT_BITS: u32 = 16;
 
 /// A `Copy` token identifying one slot of a [`HandleTable`].
 ///
-/// The `PhantomData<fn() -> T>` marker makes `Handle<T>` unconditionally
-/// `Copy`/`Send`/`Sync` regardless of `T`, so a handle can live inside a
-/// `#[derive(Copy)]` struct and reference a table whose value type is
-/// itself non-`Copy`.
+/// The `PhantomData<fn() -> T>` marker keeps `Copy`/`Send`/`Sync`
+/// unconditional on `T`, so a handle can sit in a `#[derive(Copy)]` struct
+/// while the table's value type is not `Copy`.
 pub struct Handle<T> {
     slot: u32,
     generation: u64,
@@ -59,11 +30,9 @@ pub struct Handle<T> {
 impl<T> Handle<T> {
     /// Reconstruct a handle from its raw parts.
     ///
-    /// Used by callers that must store a handle in a narrower encoding
-    /// (e.g. packed into a `usize`) and rebuild it before resolution.
-    /// Forging a handle is harmless: [`HandleTable`] validates the slot
-    /// and generation on every access, so a bogus handle resolves to a
-    /// typed [`HandleError`], never an aliasing read.
+    /// Forging one is harmless: [`HandleTable`] validates slot and generation
+    /// on every access, so a bogus handle resolves to a typed [`HandleError`],
+    /// never an aliasing read.
     #[inline]
     pub const fn from_parts(slot: u32, generation: u64) -> Self {
         Self {
@@ -73,26 +42,19 @@ impl<T> Handle<T> {
         }
     }
 
-    /// The slot index this handle refers to.
     #[inline]
     pub const fn slot(&self) -> u32 {
         self.slot
     }
 
-    /// The generation this handle was minted with.
     #[inline]
     pub const fn generation(&self) -> u64 {
         self.generation
     }
 
-    /// Pack into a `usize` for storage in a width-limited field (e.g. the
-    /// open-file `handle: usize` shared by every file backend). The low
-    /// `slot_bits` hold the slot index; the rest hold the generation.
-    ///
-    /// Lossless while `slot < 2^slot_bits` and
-    /// `generation < 2^(64 - slot_bits)`; a slot table capped well below
-    /// `2^slot_bits` (the usual case) leaves an ample generation space, so a
-    /// recycled slot is always detectable as stale after [`unpack`](Self::unpack).
+    /// Pack into a `usize`: the low `slot_bits` hold the slot index, the rest
+    /// the generation. Lossless while `slot < 2^slot_bits` and
+    /// `generation < 2^(64 - slot_bits)`.
     #[inline]
     pub const fn pack(self, slot_bits: u32) -> usize {
         let slot_mask = (1u64 << slot_bits) - 1;
@@ -100,8 +62,7 @@ impl<T> Handle<T> {
             | (self.slot as u64 & slot_mask)) as usize
     }
 
-    /// Inverse of [`pack`](Self::pack). Forging a handle is harmless — the
-    /// [`HandleTable`] validates slot and generation on every access.
+    /// Inverse of [`pack`](Self::pack).
     #[inline]
     pub const fn unpack(raw: usize, slot_bits: u32) -> Self {
         let raw = raw as u64;
@@ -110,8 +71,7 @@ impl<T> Handle<T> {
     }
 }
 
-// Hand-written trait impls (rather than `#[derive]`) so the bounds stay
-// free of `T`: a `Handle<T>` is plain data regardless of `T`.
+// Hand-written rather than `#[derive]`d so the impls carry no `T` bound.
 impl<T> Clone for Handle<T> {
     #[inline]
     fn clone(&self) -> Self {
@@ -144,8 +104,7 @@ impl<T> core::fmt::Debug for Handle<T> {
 /// Why a [`Handle`] failed to resolve against its [`HandleTable`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandleError {
-    /// The slot's generation no longer matches the handle — the slot was
-    /// removed and (possibly) reused since the handle was minted.
+    /// The slot was removed, and possibly reused, since the handle was minted.
     Stale,
     /// The slot index lies outside the table's spine.
     OutOfBounds,
@@ -161,20 +120,13 @@ struct HandleSlot<T> {
 }
 
 /// A table of generation-checked slots.
-///
-/// See the [module documentation](self) for the growth-mode and
-/// generation contracts.
 pub struct HandleTable<T> {
     slots: KVec<HandleSlot<T>>,
-    /// Recycled slot indices, ready for the next `insert`.
     free_list: KVec<u32>,
-    /// Number of currently-occupied slots.
     live: usize,
-    /// One past the highest slot index ever occupied. Bounds iteration so
-    /// scans skip slots that have never held a value.
     high_water: u32,
-    /// When `true`, `insert` never grows the spine (returns
-    /// [`HandleError::Full`] instead) — the lock-free-scan contract.
+    /// When `true`, `insert` never grows the spine — the lock-free-scan
+    /// contract.
     fixed_capacity: bool,
 }
 
@@ -214,8 +166,8 @@ impl<T> HandleTable<T> {
                 generation: 0,
             })?;
         }
-        // Reverse order so the first `insert` consumes slot 0, keeping the
-        // high-water mark tight for early allocations.
+        // Reversed so the first `insert` takes slot 0, keeping the high-water
+        // mark tight.
         for idx in (0..cap as u32).rev() {
             free_list.push(idx)?;
         }
@@ -234,11 +186,8 @@ impl<T> HandleTable<T> {
     /// slot (growable mode) or fails with [`HandleError::Full`]
     /// (fixed-capacity mode).
     ///
-    /// Unwind safety: a panic between the free-list pop and the value
-    /// install (or, in [`Self::remove`], between the value take and the
-    /// free-list push) leaks that one slot but never poisons lookups —
-    /// `resolve` treats the torn slot as vacant/stale. No unwind-abort
-    /// guard is needed.
+    /// Unwind safety: a panic mid-update leaks that one slot but never poisons
+    /// lookups — `resolve` treats a torn slot as vacant or stale.
     pub fn insert(&mut self, value: T) -> Result<Handle<T>, HandleError> {
         if let Some(idx) = self.free_list.pop() {
             let slot = &mut self.slots[idx as usize];
@@ -298,9 +247,8 @@ impl<T> HandleTable<T> {
         let slot = &mut self.slots[idx];
         let value = slot.value.take().expect("resolved slot is occupied");
         slot.generation = slot.generation.wrapping_add(1);
-        // In fixed-capacity mode `free_list` was reserved to `cap`, so this
-        // push never reallocates; in growable mode a realloc of the
-        // free-list (not the value spine) is harmless.
+        // Reserved to `cap` in fixed-capacity mode, so this push cannot fail
+        // there; a growable table's free-list realloc never moves the spine.
         let _ = self.free_list.push(idx as u32);
         self.live -= 1;
         Ok(value)
@@ -316,7 +264,6 @@ impl<T> HandleTable<T> {
         self.live
     }
 
-    /// Whether no slot is occupied.
     pub fn is_empty(&self) -> bool {
         self.live == 0
     }
@@ -326,22 +273,19 @@ impl<T> HandleTable<T> {
         self.slots.len()
     }
 
-    /// One past the highest slot index ever occupied. Iteration and
-    /// lock-free scans only need to look this far.
+    /// One past the highest slot index ever occupied; iteration and lock-free
+    /// scans need look no further.
     pub fn high_water(&self) -> usize {
         self.high_water as usize
     }
 
-    /// Iterate live `(handle, &value)` pairs, bounded by the high-water
-    /// mark.
+    /// Iterate live `(handle, &value)` pairs, bounded by the high-water mark.
     ///
-    /// This is a plain shared-reference scan, so it is also the lock-free
-    /// read path: a caller holding the table's `SpinLock` through
-    /// [`read_atomic_field`](crate::sync::SpinLock::read_atomic_field) may
-    /// call it **only** when the table was built with
-    /// [`with_fixed_capacity`](Self::with_fixed_capacity) (spine never
-    /// reallocates) and every field the visitor reads is a tear-free
-    /// naturally-aligned load.
+    /// Also the lock-free read path: a caller going through
+    /// [`read_atomic_field`](crate::sync::SpinLock::read_atomic_field) may call
+    /// it **only** when the table was built with
+    /// [`with_fixed_capacity`](Self::with_fixed_capacity) and every field the
+    /// visitor reads is a tear-free naturally-aligned load.
     pub fn iter(&self) -> impl Iterator<Item = (Handle<T>, &T)> + '_ {
         let bound = self.high_water as usize;
         self.slots[..bound].iter().enumerate().filter_map(|(i, s)| {
@@ -419,8 +363,7 @@ mod tests {
         let mut t: HandleTable<u32> = HandleTable::new();
         let a = t.insert(1).unwrap();
         t.remove(a).unwrap();
-        // Same slot, but now empty and the handle's generation is stale.
-        // Empty wins: NoEntry.
+        // The slot is both empty and stale; empty wins.
         assert_eq!(t.get(a), Err(HandleError::NoEntry));
     }
 
@@ -429,7 +372,6 @@ mod tests {
         let mut t: HandleTable<u32> = HandleTable::new();
         let a = t.insert(100).unwrap();
         t.remove(a).unwrap();
-        // Reuse slot 0 for a new value; it gets a bumped generation.
         let b = t.insert(200).unwrap();
         assert_eq!(
             a.slot(),
@@ -437,7 +379,6 @@ mod tests {
             "slot must be recycled to prove the point"
         );
         assert_eq!(t.get(b).unwrap(), &200);
-        // The stale handle must NOT alias the new occupant.
         assert_eq!(t.get(a), Err(HandleError::Stale));
         assert_eq!(t.remove(a), Err(HandleError::Stale));
     }
@@ -456,7 +397,7 @@ mod tests {
         let mut t: HandleTable<u32> = HandleTable::with_fixed_capacity(1).unwrap();
         let a = t.insert(1).unwrap();
         t.remove(a).unwrap();
-        let b = t.insert(2).unwrap(); // reuses the only slot
+        let b = t.insert(2).unwrap();
         assert_eq!(a.slot(), b.slot());
         assert_eq!(t.get(a), Err(HandleError::Stale));
         assert_eq!(*t.get(b).unwrap(), 2);
@@ -473,7 +414,6 @@ mod tests {
         let mut vals: alloc::vec::Vec<u32> = t.iter().map(|(_, v)| *v).collect();
         vals.sort_unstable();
         assert_eq!(vals, alloc::vec![1, 3]);
-        // The surviving handle still resolves.
         assert_eq!(*t.get(a).unwrap(), 1);
     }
 
@@ -485,7 +425,6 @@ mod tests {
         assert_eq!(t.high_water(), 2);
         t.remove(a).unwrap();
         t.remove(b).unwrap();
-        // High-water stays at its peak; iteration finds nothing live.
         assert_eq!(t.high_water(), 2);
         assert_eq!(t.iter().count(), 0);
     }
@@ -504,7 +443,6 @@ mod tests {
 
     #[test]
     fn pack_low_bits_are_slot() {
-        // The slot must occupy exactly the low `slot_bits` of the encoding.
         let h = Handle::<u32>::from_parts(0xAB, 0x3);
         let raw = h.pack(8) as u64;
         assert_eq!(raw & 0xFF, 0xAB);

@@ -1,8 +1,7 @@
 //! XSAVE / XRSTOR initialisation and runtime queries.
 //!
-//! XSAVE is a hard boot requirement: `init()` panics if the CPU lacks it and
-//! there is no FXSAVE fallback. The BSP runs `init()` before SMP; each AP then
-//! calls `enable_on_current_cpu()` to replicate the CR4 + XCR0 configuration.
+//! The BSP runs `init()` before SMP; each AP then calls
+//! `enable_on_current_cpu()` to replicate the CR4 + XCR0 configuration.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -10,22 +9,17 @@ use super::control_regs::{Osxsave, Xcr0Flags, Xcr0Mask, xcr0_write};
 use crate::arch::x86_64::cpuid::XsaveFeatures;
 use crate::task::FXSAVE_AREA_SIZE;
 
-/// Active XSAVE area size in bytes; 0 until `init()` runs.
 static XSAVE_AREA_SIZE: AtomicUsize = AtomicUsize::new(0);
 
-/// XCR0 value computed by the BSP — every AP writes the same mask.
 static ACTIVE_XCR0: AtomicU64 = AtomicU64::new(0);
 
-/// `true` when `XSAVEC` is available (compact save format, no gaps).
 static XSAVEC_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
-/// `true` when `XSAVEOPT` is available (optimised — only writes dirty state).
 static XSAVEOPT_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
-/// The set of MXCSR bits this CPU implements. Loading a bit outside it raises
-/// `#GP`, which makes this the authority for validating an MXCSR word that
-/// came from user memory. Seeded with [`MXCSR_MASK_DEFAULT`] rather than zero
-/// so a read before `init()` rejects reserved bits instead of everything.
+/// The set of MXCSR bits this CPU implements; loading a bit outside it raises
+/// `#GP`. Seeded with [`MXCSR_MASK_DEFAULT`] rather than zero so a read before
+/// `init()` rejects reserved bits instead of everything.
 static MXCSR_FEATURE_MASK: AtomicU32 = AtomicU32::new(MXCSR_MASK_DEFAULT);
 
 /// The MXCSR mask to assume when the FXSAVE image reports zero, which is how
@@ -40,8 +34,7 @@ pub fn area_size() -> usize {
     XSAVE_AREA_SIZE.load(Ordering::Relaxed)
 }
 
-/// Whether XSAVE is the active FPU save/restore mechanism — always `true`,
-/// since a CPU without XSAVE panics in `init()`.
+/// Always `true`: a CPU without XSAVE panics in `init()`.
 #[inline]
 pub fn is_enabled() -> bool {
     true
@@ -53,13 +46,11 @@ pub fn active_xcr0() -> u64 {
     ACTIVE_XCR0.load(Ordering::Relaxed)
 }
 
-/// Whether the compact `XSAVEC` instruction is available.
 #[inline]
 pub fn has_xsavec() -> bool {
     XSAVEC_AVAILABLE.load(Ordering::Relaxed)
 }
 
-/// Whether the optimised `XSAVEOPT` instruction is available.
 #[inline]
 pub fn has_xsaveopt() -> bool {
     XSAVEOPT_AVAILABLE.load(Ordering::Relaxed)
@@ -76,10 +67,10 @@ const FXSAVE_MXCSR_MASK_OFFSET: usize = 28;
 
 /// Read this CPU's `MXCSR_MASK` out of a scratch FXSAVE image: CPUID reports
 /// it nowhere, and `fxsave64` only writes memory, so the soft-float guarantee
-/// (no writes to the XCR0-managed registers) still holds.
+/// still holds.
 ///
-/// `#[inline(never)]` keeps the symbol name stable across build variants — the
-/// vector gate keys its allowlist on it.
+/// `#[inline(never)]` keeps the symbol name stable for the vector gate's
+/// allowlist.
 #[inline(never)]
 fn detect_mxcsr_feature_mask() -> u32 {
     #[repr(C, align(16))]
@@ -169,8 +160,7 @@ pub fn enable_on_current_cpu() {
     }
 
     // Re-validated against *this* CPU's CPUID: an asymmetric core reporting
-    // fewer XCR0 components would #GP on the write, and a panic naming the
-    // mask beats a fault in the AP bring-up path.
+    // fewer XCR0 components would #GP on the write.
     let mask = Xcr0Mask::new(Xcr0Flags::from_bits_truncate(xcr0))
         .expect("AP does not support the XCR0 components the BSP enabled");
     let osxsave = Osxsave::enable();

@@ -4,21 +4,15 @@
 //! counter — [`ProcessorControlRegion::heartbeat`] — against the watcher's
 //! *own* previous reading. N consecutive unchanged samples is a breach.
 //!
-//! There is no clock in that predicate, which is the point. A wall-time
-//! threshold has to be calibrated against the slowest machine the kernel
-//! will ever run on, and emulation and host steal time both stretch that
-//! without bound. Consecutive samples cannot be stretched: a host that
-//! stalls the target stalls the watcher identically, and the watcher's own
-//! samples come from its own timer interrupts.
+//! There is no clock in that predicate: a wall-time threshold has to be
+//! calibrated against the slowest machine the kernel will ever run on, and
+//! emulation and host steal time both stretch that without bound. A host that
+//! stalls the target stalls the watcher identically.
 //!
-//! # Detection is not execution
-//!
-//! A breach means "this CPU has not taken a timer interrupt recently". It
-//! does not mean the CPU is stopped — a CPU spinning on a lock with
-//! interrupts masked is executing hard. So the first breach reports and
-//! the machine survives it; only a sustained breach is fatal. Making every
-//! detection lethal is what forces a threshold to be tuned for zero false
-//! positives everywhere, which is how a detector loses its sharpness.
+//! A breach means "this CPU has not taken a timer interrupt recently", not
+//! that it is stopped — a CPU spinning on a lock with interrupts masked is
+//! executing hard. So the first breach only reports; only a sustained breach
+//! is fatal.
 //!
 //! [`ProcessorControlRegion::heartbeat`]: crate::cpu::x86_64::pcr::ProcessorControlRegion::heartbeat
 
@@ -26,12 +20,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::cpu::x86_64::pcr::{self, MAX_CPUS};
 
-/// Consecutive unchanged samples before a CPU is reported. At the 100 Hz
-/// LAPIC tick this is one second.
-///
-/// Not the tens of milliseconds the sample-based predicate would allow:
-/// the kernel has legitimate interrupts-off sections in the hundreds of
-/// milliseconds, and the LAPIC timer tests stop the timer outright.
+/// Consecutive unchanged samples before a CPU is reported; one second at the
+/// 100 Hz LAPIC tick. Not less: the kernel has legitimate interrupts-off
+/// sections in the hundreds of milliseconds, and the LAPIC timer tests stop
+/// the timer outright.
 pub const DEFAULT_MISS_THRESHOLD: u32 = 100;
 
 /// Multiple of the miss threshold at which a breach becomes fatal.
@@ -64,8 +56,7 @@ pub enum NmiDisposition {
     /// describe itself. Dump context and resume.
     ///
     /// Distinct from [`Self::Report`] because it is not evidence of a fault:
-    /// it must not spend the recovered-fault budget `panic.oops_limit=`
-    /// bounds, or reading the machine's state would eventually kill it.
+    /// it must not spend the recovered-fault budget `panic.oops_limit=` bounds.
     Probe = 4,
 }
 
@@ -93,34 +84,28 @@ struct CpuSlot {
     /// so a long legitimate section logs a handful of lines rather than
     /// one per tick.
     next_report: AtomicU32,
-    /// Largest `stale` ever observed and the CPU it was observed against,
-    /// packed together. One word because `target` moves when this watcher
-    /// retargets, and a maximum paired with whoever it happens to be
-    /// watching now names the wrong CPU.
+    /// Largest `stale` ever observed, packed with the CPU it was observed
+    /// against: `target` moves when this watcher retargets, so a maximum
+    /// paired with the current target names the wrong CPU.
     worst_stall: AtomicU64,
     /// The CPU this one watches, cached across ticks.
     target: AtomicU32,
     /// Disposition of the NMI this CPU is being sent, and the interlock
     /// that stops a second one arriving while the first is being handled.
     probe: AtomicU32,
-    /// Odd while this CPU is spinning on a lock, bumped on entry and exit.
-    /// A walker records it per hop and re-reads it afterwards, so a chain
-    /// assembled out of links that were released and re-taken underneath
-    /// it is rejected rather than reported as a cycle.
+    /// Odd while this CPU is spinning on a lock. A walker records it per hop
+    /// and re-reads it afterwards, so a chain assembled out of links that were
+    /// released and re-taken underneath it is rejected.
     wait_seq: AtomicU64,
     /// Holder CPU of the lock this one is spinning on; `NO_CPU` otherwise.
     blocked_on: AtomicU32,
-    /// Address of that lock. Printed, never dereferenced — a `SpinLock` can
-    /// live in a heap allocation the spinner frees the moment it wins, and
-    /// the fault a walker would take is one an NMI handler cannot afford.
+    /// Address of that lock. Printed, never dereferenced.
     waiting_on: AtomicU64,
 }
 
-/// Longest wait-for chain the walker will follow.
-///
-/// A real deadlock cycle is short; a chain this long is contention, and
-/// bounding it keeps the walker's frame small enough to run from a stalled
-/// spin loop.
+/// Longest wait-for chain the walker will follow. A real deadlock cycle is
+/// short; a chain this long is contention, and the bound keeps the walker's
+/// frame small enough to run from a stalled spin loop.
 pub const MAX_WAIT_HOPS: usize = 8;
 
 /// One step of a wait-for chain: `cpu` is spinning on `lock`.
@@ -162,10 +147,6 @@ fn unpack_stall(packed: u64) -> Option<(usize, u32)> {
     (samples != 0).then(|| ((packed >> 32) as usize, samples))
 }
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
 /// Turn the detector off entirely (`watchdog=off`).
 pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Release);
@@ -176,8 +157,7 @@ pub fn is_enabled() -> bool {
 }
 
 /// Consecutive unchanged samples before a CPU is reported
-/// (`watchdog.miss_threshold=`). Zero is rejected — it would report every
-/// tick.
+/// (`watchdog.miss_threshold=`). Zero is rejected — it would report every tick.
 pub fn set_miss_threshold(samples: u32) -> bool {
     if samples == 0 {
         return false;
@@ -196,32 +176,25 @@ pub fn set_panic_enabled(enabled: bool) {
     PANIC_ENABLED.store(enabled, Ordering::Release);
 }
 
-// ---------------------------------------------------------------------------
-// Progress
-// ---------------------------------------------------------------------------
-
 /// Record that this CPU has made progress.
 ///
 /// > Touch only from a loop whose trip count is bounded by data already in
 /// > hand, which acquires no lock and performs no wait. **Never from a wait
 /// > loop.**
 ///
-/// That rule is the whole difference between a progress heartbeat and a
-/// renamed grace period. A touch inside a wait loop converts a real
-/// deadlock into a silent permanent hang: it makes the CPU look alive
-/// precisely while it is doing nothing.
+/// A touch inside a wait loop makes the CPU look alive precisely while it is
+/// doing nothing, converting a real deadlock into a silent permanent hang.
 #[inline]
 pub fn touch() {
     pcr::heartbeat_bump();
 }
 
-/// Suppress watching of the current CPU for the token's lifetime.
+/// Suppress watching of the current CPU for the token's lifetime — for code
+/// that deliberately runs without timer ticks, such as stopping or masking the
+/// LAPIC timer to test it.
 ///
-/// For code that deliberately runs without timer ticks — stopping or
-/// masking the LAPIC timer to test it, for instance. Unlike a touch this
-/// cannot hide a deadlock: it is scoped, and a CPU that wedges inside the
-/// scope stops running the `Drop` that ends it, so the suppression outlives
-/// nothing.
+/// Unlike a touch this cannot hide a deadlock: it is scoped, and a CPU that
+/// wedges inside the scope stops running the `Drop` that ends it.
 pub struct Suppress {
     previous: bool,
 }
@@ -234,13 +207,11 @@ impl Suppress {
     }
 }
 
-/// Take the calling CPU out of the watched set for good.
+/// Take the calling CPU out of the watched set for good — for a path that
+/// stops ticking and does not come back (shutdown, reboot, a permanent park).
 ///
-/// For a CPU on a path that stops ticking and does not come back — shutdown,
-/// reboot, a permanent park. Unlike [`Suppress`] this has no end, which is
-/// only sound because the caller has none either. Call it *before* the
-/// instruction that stops the ticks, or the gap between the two is a window
-/// in which a watcher reports a CPU that left on purpose.
+/// Call it *before* the instruction that stops the ticks; the gap between the
+/// two is a window in which a watcher reports a CPU that left on purpose.
 pub fn leave_watched_set() {
     pcr::set_watchdog_suppressed(true);
 }
@@ -248,26 +219,20 @@ pub fn leave_watched_set() {
 impl Drop for Suppress {
     fn drop(&mut self) {
         // Bump before unsuppressing: the first sample after the scope would
-        // otherwise compare against a reading taken before it and count as
-        // stale through no fault of this CPU.
+        // otherwise compare against a reading taken before it and count stale.
         pcr::heartbeat_bump();
         pcr::set_watchdog_suppressed(self.previous);
     }
 }
 
-// ---------------------------------------------------------------------------
-// The check
-// ---------------------------------------------------------------------------
-
 /// Timer-interrupt hook: record progress, then sample the neighbour.
 ///
-/// Called from the timer interrupt rather than from the idle loop. A CPU
-/// busy running a task never reaches the idle loop, so an idle-only check
-/// leaves every loaded CPU unwatched.
+/// From the timer interrupt rather than the idle loop — a CPU busy running a
+/// task never reaches the idle loop, so an idle-only check leaves every loaded
+/// CPU unwatched.
 #[inline]
 pub fn tick() {
-    // Before any lock is taken, so a heartbeat never depends on acquiring
-    // one.
+    // Before any lock is taken, so a heartbeat never depends on acquiring one.
     pcr::heartbeat_bump();
     if !is_enabled() {
         return;
@@ -279,7 +244,6 @@ fn eligible(cpu: usize) -> bool {
     pcr::is_cpu_online(cpu) && pcr::timer_is_armed(cpu) && !pcr::watchdog_is_suppressed(cpu)
 }
 
-/// The next eligible CPU after `me`, scanning round-robin.
 fn scan_for_target(me: usize) -> Option<usize> {
     let count = pcr::get_cpu_count().min(MAX_CPUS);
     (1..count)
@@ -320,7 +284,6 @@ fn check_neighbour(me: usize) {
     report_stalled_cpu(me, target, stale);
 }
 
-/// Which CPU, if any, is currently watching `target`.
 pub fn watcher_of(target: usize) -> Option<usize> {
     let count = pcr::get_cpu_count().min(MAX_CPUS);
     (0..count).find(|&cpu| {
@@ -337,8 +300,7 @@ fn reset(slot: &CpuSlot, beat: u64) {
 }
 
 /// Fold one sample of `target` into `slot`, returning the consecutive-stale
-/// count. The maximum is recorded against the CPU it was measured on, not
-/// against whoever `slot.target` names by the time it is read.
+/// count.
 fn accumulate(slot: &CpuSlot, target: usize, beat: u64, threshold: u32) -> u32 {
     if beat != slot.last_seen.load(Ordering::Relaxed) {
         slot.last_seen.store(beat, Ordering::Relaxed);
@@ -391,24 +353,16 @@ fn report_stalled_cpu(me: usize, target: usize, stale: u32) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Wait-for graph
-// ---------------------------------------------------------------------------
-//
-// The graph is over CPU indices, never over lock pointers. A spinner holds
-// `&self` on the lock it is waiting for, so reading that lock's holder is
-// sound — but a *walker* on another CPU following a published pointer is
-// not: the spinner can win, release and free the lock between the walker's
-// two loads. The fault that would follow lands in an NMI handler, whose own
-// `iretq` unblocks NMI mid-handler. Publishing the holder's CPU index
-// instead makes the walk a bounded array traversal with nothing to
-// dereference.
+// The wait-for graph is over CPU indices, never over lock pointers: a walker
+// on another CPU can be following a pointer the spinner already won, released
+// and freed, and that fault lands in an NMI handler, whose own `iretq`
+// unblocks NMI mid-handler.
 
 /// Publish that this CPU has begun spinning on the lock at `lock_addr`.
 ///
-/// Returns `false` if a wait is already published. The contended-spin relax
-/// hook takes a lock of its own, and it is the outer wait that describes
-/// why this CPU is stuck.
+/// Returns `false` if a wait is already published: the contended-spin relax
+/// hook takes a lock of its own, and it is the outer wait that describes why
+/// this CPU is stuck.
 pub fn begin_wait(lock_addr: u64) -> bool {
     let Some(slot) = SLOTS.get(pcr::get_current_cpu()) else {
         return false;
@@ -434,18 +388,15 @@ pub fn publish_wait_holder(holder: Option<usize>) {
         return;
     }
     // A seqlock write: `wait_seq` goes even for the duration, so a walker
-    // spanning the update either breaks on the even parity or sees a
-    // changed sequence and rejects. Without it `wait_seq` would prove only
-    // that each CPU stayed in *some* wait, not that the edges it published
-    // were current at one instant — and a cycle assembled from two edges a
-    // spin iteration apart is not a proof.
+    // spanning the update either breaks on the even parity or sees a changed
+    // sequence and rejects. Without it a cycle could be assembled from two
+    // edges published a spin iteration apart.
     let seq = slot.wait_seq.load(Ordering::Relaxed);
     slot.wait_seq.store(seq.wrapping_add(1), Ordering::Release);
     slot.blocked_on.store(next, Ordering::Release);
     slot.wait_seq.store(seq.wrapping_add(2), Ordering::Release);
 }
 
-/// Retract this CPU's wait.
 pub fn end_wait() {
     if let Some(slot) = SLOTS.get(pcr::get_current_cpu()) {
         slot.blocked_on.store(NO_CPU, Ordering::Relaxed);
@@ -464,9 +415,8 @@ fn collect_wait_chain(start: usize, hops: &mut [WaitHop; MAX_WAIT_HOPS]) -> (usi
         };
         let seq = slot.wait_seq.load(Ordering::Acquire);
         if seq % 2 == 0 {
-            // Either not spinning — stuck somewhere the graph cannot
-            // describe, or running normally — or mid-update, whose edge is
-            // not safe to read.
+            // Either not spinning at all, or mid-update, whose edge is not
+            // safe to read.
             break;
         }
         let next = slot.blocked_on.load(Ordering::Acquire);
@@ -487,12 +437,11 @@ fn collect_wait_chain(start: usize, hops: &mut [WaitHop; MAX_WAIT_HOPS]) -> (usi
     (len, false)
 }
 
-/// Whether the wait-for chain from `start` returns to `start` with every
-/// link still in the wait it was read in.
+/// Whether the wait-for chain from `start` returns to `start` with every link
+/// still in the wait it was read in.
 ///
-/// The re-read is what separates a proof from a coincidence: each hop is
-/// two unsynchronised loads, so a chain can otherwise be assembled from
-/// links that never existed at the same instant.
+/// Each hop is two unsynchronised loads, so without the re-read a chain can be
+/// assembled from links that never existed at the same instant.
 pub fn wait_chain_closes_cycle(start: usize) -> bool {
     let mut hops = [WaitHop {
         cpu: 0,
@@ -509,13 +458,6 @@ pub fn wait_chain_closes_cycle(start: usize) -> bool {
         })
 }
 
-/// Print the wait-for chain from `start`.
-///
-/// Ends with an explicit terminator rather than trailing off: a chain can
-/// leave the graph entirely, because `PreemptMutex`, `IrqRwLock` (whose
-/// readers are a count, not an owner), `Mutex` and the klog ticket pair
-/// publish no holder. "Holder unknown" and "no cycle" are different
-/// answers and the reader is entitled to know which one this is.
 /// How a wait-for chain ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainEnd {
@@ -530,10 +472,9 @@ pub enum ChainEnd {
     HolderUnknown,
 }
 
-/// Snapshot the wait-for chain from `start` without printing it.
-///
-/// The data-returning form of [`dump_wait_chain`], for a caller that formats
-/// through a console rather than through the NMI-safe emitters.
+/// Snapshot the wait-for chain from `start`: the data-returning form of
+/// [`dump_wait_chain`], for a caller that formats through a console rather
+/// than through the NMI-safe emitters.
 pub fn wait_chain_snapshot(start: usize, out: &mut [WaitHop; MAX_WAIT_HOPS]) -> (usize, ChainEnd) {
     let (len, closed) = collect_wait_chain(start, out);
     let end = if len == 0 {
@@ -548,13 +489,14 @@ pub fn wait_chain_snapshot(start: usize, out: &mut [WaitHop; MAX_WAIT_HOPS]) -> 
     (len, end)
 }
 
-/// The worst stall `watcher` ever observed, in samples, and who it was watching.
-///
-/// `None` when that watcher has never seen its target stall.
+/// The worst stall `watcher` ever observed, in samples, and who it was
+/// watching; `None` if that watcher never saw its target stall.
 pub fn max_stall(watcher: usize) -> Option<(usize, u32)> {
     unpack_stall(SLOTS.get(watcher)?.worst_stall.load(Ordering::Relaxed))
 }
 
+/// Print the wait-for chain from `start`, ending with an explicit terminator:
+/// "holder unknown" and "no cycle" are different answers.
 pub fn dump_wait_chain(start: usize) {
     let mut hops = [WaitHop {
         cpu: 0,
@@ -581,10 +523,6 @@ pub fn dump_wait_chain(start: usize) {
         nmi_emit_line("WATCHDOG:   chain ends: holder unknown");
     }
 }
-
-// ---------------------------------------------------------------------------
-// NMI disposition
-// ---------------------------------------------------------------------------
 
 /// Claim `target`'s probe slot. Fails if one is already in flight, which is
 /// what stops a per-tick check from storming a CPU that is still emitting
@@ -613,12 +551,10 @@ pub fn probe_disposition(cpu: usize) -> NmiDisposition {
 
 /// Free `cpu`'s probe slot only if it still holds `expected`.
 ///
-/// For reaping a probe whose target never answered. A plain
-/// [`release_probe`] would be wrong there: between the timeout and the
-/// release the detector may have armed [`NmiDisposition::Fatal`] on the same
-/// slot, and clearing that would let a stale NMI arrive at a slot the
-/// watchdog has since re-armed. A failed exchange means the slot is no longer
-/// ours to touch.
+/// For reaping a probe whose target never answered: between the timeout and
+/// the release the detector may have armed [`NmiDisposition::Fatal`] on the
+/// same slot, and clearing that would let a stale NMI arrive at a re-armed
+/// slot. A failed exchange means the slot is no longer ours to touch.
 pub fn release_probe_if(cpu: usize, expected: NmiDisposition) -> bool {
     let Some(slot) = SLOTS.get(cpu) else {
         return false;
@@ -642,18 +578,13 @@ pub fn release_probe(cpu: usize) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Reporting
-// ---------------------------------------------------------------------------
-
 /// Write a fragment to the serial console from NMI or spin-stall context.
 ///
-/// Deliberately not `klog!` and not `early_console::write_bytes`. The
-/// former's serial backend spins on a blocking ticket lock that the
-/// interrupted CPU may already hold; the latter funnels through
-/// `fblog::capture`, whose `try_lock` runs `push_lock` — and `cli` does not
-/// mask an NMI, so the held-stack update it performs is the one thing on that
-/// path this context cannot be made atomic against.
+/// Deliberately not `klog!`, whose serial backend spins on a blocking ticket
+/// lock the interrupted CPU may already hold, and not
+/// `early_console::write_bytes`, which funnels through `fblog::capture` and
+/// its `push_lock` — `cli` does not mask an NMI, so that held-stack update
+/// cannot be made atomic against this context.
 /// `early_console::write_byte` polls the UART and touches nothing else.
 pub fn nmi_emit(text: &str) {
     for byte in text.as_bytes() {
@@ -670,9 +601,8 @@ pub fn nmi_emit_line(text: &str) {
     nmi_emit("\n");
 }
 
-/// Emit `value` in decimal. Format-free: `core::fmt` on this path would
-/// pull in machinery that allocates stack the interrupted context may not
-/// have.
+/// Emit `value` in decimal. Format-free: `core::fmt` would pull in machinery
+/// that allocates stack the interrupted context may not have.
 pub fn nmi_emit_dec(value: u64) {
     let mut buf = [0u8; 20];
     let mut len = 0;
@@ -703,11 +633,9 @@ pub fn nmi_emit_hex(value: u64) {
 
 /// Freeze the per-watcher maxima for a later [`report_max_stalls`].
 ///
-/// Shutdown runs a long interrupts-off tail on the CPU it is reporting
-/// about, so a summary read after that tail measures the shutdown path
-/// rather than the steady state it claims to describe. Call this at the
-/// point the request is accepted, while the kernel still looks the way the
-/// number is supposed to characterise. First caller wins.
+/// Shutdown runs a long interrupts-off tail on the CPU it is reporting about,
+/// so a summary read after that tail measures the shutdown path rather than
+/// the steady state. Call this when the request is accepted. First caller wins.
 pub fn snapshot_max_stalls() {
     if SNAPSHOT_CLAIMED.swap(true, Ordering::AcqRel) {
         return;
@@ -721,11 +649,8 @@ pub fn snapshot_max_stalls() {
     SNAPSHOT_READY.store(true, Ordering::Release);
 }
 
-/// Print the worst interrupts-off section each CPU was observed in.
-///
-/// The honest way to size a threshold: measure what the kernel actually
-/// produces rather than infer it from whichever bug report arrived last.
-/// Reads [`snapshot_max_stalls`]'s frozen copy when one was taken.
+/// Print the worst interrupts-off section each CPU was observed in, reading
+/// [`snapshot_max_stalls`]'s frozen copy when one was taken.
 pub fn report_max_stalls() {
     if !is_enabled() {
         return;
@@ -761,11 +686,8 @@ pub mod test_support {
     use super::*;
 
     /// Drive one watcher sample of `target` with an injected heartbeat,
-    /// returning the resulting consecutive-stale count.
-    ///
-    /// The real [`check_neighbour`] reads the heartbeat out of a live PCR,
-    /// which a host test has no way to move; the state machine it drives is
-    /// the part worth pinning.
+    /// returning the resulting consecutive-stale count. The real
+    /// [`check_neighbour`] reads a live PCR a host test has no way to move.
     pub fn sample_of(watcher: usize, target: usize, beat: u64, threshold: u32) -> u32 {
         accumulate(&SLOTS[watcher], target, beat, threshold)
     }
@@ -775,7 +697,7 @@ pub mod test_support {
     }
 
     /// Retarget `watcher` as [`check_neighbour`] does when its target stops
-    /// being eligible, without needing a live PCR to make it happen.
+    /// being eligible, without needing a live PCR.
     pub fn retarget(watcher: usize, target: usize, beat: u64) {
         let slot = &SLOTS[watcher];
         slot.target.store(target as u32, Ordering::Relaxed);
@@ -783,9 +705,8 @@ pub mod test_support {
     }
 
     /// Plant a wait-for edge as if `cpu` were spinning on a lock held by
-    /// `blocked_on`. The real publishers only ever describe the CPU they
-    /// run on, so a graph with more than one node has no other way to
-    /// exist in a single-threaded test.
+    /// `blocked_on`. The real publishers only describe the CPU they run on, so
+    /// a multi-node graph cannot otherwise exist in a single-threaded test.
     pub fn plant_wait(cpu: usize, blocked_on: Option<usize>, lock: u64) {
         let slot = &SLOTS[cpu];
         slot.waiting_on.store(lock, Ordering::Relaxed);
@@ -820,7 +741,7 @@ pub mod test_support {
     }
 
     /// Discard any frozen summary, so a test that takes one does not decide
-    /// what every later reader sees.
+    /// what later readers see.
     pub fn clear_snapshot() {
         SNAPSHOT_READY.store(false, Ordering::Release);
         SNAPSHOT_CLAIMED.store(false, Ordering::Release);

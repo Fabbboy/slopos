@@ -1,29 +1,17 @@
 //! The account arena: one `.bss` row per process plus the kernel's root.
 //!
-//! # No lock, and that is a property of the layout
-//!
-//! A lock on the charge path would take an inbound edge from every charge-site
-//! class at once — the TCP shard, `UNIX_STATE`, `PROCESS_VMS`, a descriptor
-//! table slot, the ring registry, memfd, signalfd, the vnode table — and any
-//! path holding the account and then touching a subsystem lock would close a
-//! cycle. Charging walks *up* a bounded chain of atomics, so it takes no locks
-//! at all and cannot participate in one.
-//!
-//! # No release point
+//! Charging walks *up* a bounded chain of atomics and takes no lock at all, so
+//! it cannot close a cycle with the subsystem lock a charge site holds.
 //!
 //! A row is named by a generation-stamped [`AccountId`], never by a counted
-//! reference. A counted reference inside a [`Charge`](super::Charge) would
-//! make a refund a potential last release and therefore a heap free — and
-//! refunds provably happen with interrupts off, under a cli-spinlock, and from
-//! a dying task's own unwind. A `.bss` row has no release point, so the
-//! question does not arise, and a refund against a released row is a defined
-//! no-op rather than a write into a stranger's numbers.
+//! reference: a counted reference inside a [`Charge`](super::Charge) would make
+//! a refund a potential heap free, and refunds happen with interrupts off,
+//! under a cli-spinlock, and from a dying task's own unwind. A `.bss` row has
+//! no release point, and a refund against a released row is a defined no-op.
 //!
-//! # No headroom predicate
-//!
-//! There is deliberately no `has_headroom(kind) -> bool`. A check-then-charge
-//! split is a race by construction, and the reservation is the only
-//! observation of headroom this module offers.
+//! There is deliberately no `has_headroom(kind) -> bool`: a check-then-charge
+//! split is a race by construction, and the reservation is the only observation
+//! of headroom this module offers.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -36,12 +24,10 @@ use crate::process::account::{MAX_ACCOUNTS, ROOT_ACCOUNT_SLOT, root_account};
 
 /// Rows on the longest permitted root-to-leaf chain.
 ///
-/// Bounded so every hierarchical walk terminates and costs a fixed stack
-/// frame, and creation at the bound is refused rather than silently re-homed.
-/// The debit walk runs at most this many iterations, so the bound on chain
-/// length and the bound on the walk are deliberately the same number: a chain
-/// longer than the walk would have ancestors that never get debited, which is
-/// a ceiling that silently does not apply.
+/// Bounded so every hierarchical walk terminates in a fixed stack frame, and
+/// creation at the bound is refused rather than silently re-homed. The debit
+/// walk runs at most this many iterations, so a longer chain would have
+/// ancestors that never get debited — a ceiling that silently does not apply.
 pub const MAX_ACCOUNT_DEPTH: u8 = 8;
 
 /// Levels a root may have beneath it: the chain length minus the root itself.
@@ -57,23 +43,20 @@ const NO_PARENT: u32 = u32::MAX;
 /// One principal's numbers.
 ///
 /// `peak` rather than a dump-time read of `used`: a dump samples whatever is
-/// live at that instant, which is not the high-water mark the ceiling has to
-/// be derived from. `denials` exists because a refusal nobody can see is a
-/// silent denial, which is the failure mode this whole subsystem was written
-/// to delete.
+/// live at that instant, not the high-water mark a ceiling has to be derived
+/// from. `denials` exists so that a refusal nobody can see is not silent.
 struct AccountRow {
     used: [AtomicU32; KIND_COUNT],
     limit: [AtomicU32; KIND_COUNT],
     peak: [AtomicU32; KIND_COUNT],
     denials: [AtomicU32; KIND_COUNT],
     /// Arena index of the account this one debits through. Written once at
-    /// creation; there is no setter, which is what makes charge migration
+    /// creation and never given a setter, which makes charge migration
     /// unrepresentable rather than merely discouraged.
     parent: AtomicU32,
     depth_remaining: AtomicU8,
-    /// Matched against an [`AccountId`]'s generation before any row is
-    /// touched. A mismatch is a stale designator and every operation on one is
-    /// a no-op.
+    /// Matched against an [`AccountId`]'s generation before any row is touched.
+    /// A mismatch is a stale designator and every operation on one is a no-op.
     generation: AtomicU64,
     live: AtomicBool,
 }
@@ -108,11 +91,9 @@ static ACCOUNTS: [AccountRow; MAX_ACCOUNTS] = [const { AccountRow::new() }; MAX_
 
 /// Refusal policy.
 ///
-/// `Enforce` by default, now that the peaks have been measured and the
-/// enforced ceilings derived from them. `quota=warn` remains the tier a *new*
-/// kind's peaks are measured on — it grants an over-limit charge and counts
-/// it, because a system that dies at its first over-limit cannot report what
-/// its real high-water mark would have been.
+/// `quota=warn` is the tier a *new* kind's peaks are measured on: it grants an
+/// over-limit charge and counts it, because a system that dies at its first
+/// over-limit cannot report what its real high-water mark would have been.
 static QUOTA_MODE: AtomicU8 = AtomicU8::new(mode_bits(QuotaMode::Enforce));
 
 const fn mode_bits(mode: QuotaMode) -> u8 {
@@ -128,7 +109,6 @@ pub fn set_quota_mode(mode: QuotaMode) {
     QUOTA_MODE.store(mode_bits(mode), Ordering::Release);
 }
 
-/// The active refusal policy.
 pub fn quota_mode() -> QuotaMode {
     match QUOTA_MODE.load(Ordering::Acquire) {
         0 => QuotaMode::Off,
@@ -140,8 +120,7 @@ pub fn quota_mode() -> QuotaMode {
 /// Why a charge was refused.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TryChargeError {
-    /// The ancestor whose ceiling was reached — not necessarily the leaf, and
-    /// naming it is what makes an over-limit diagnosable.
+    /// The ancestor whose ceiling was reached — not necessarily the leaf.
     pub refused_by: AccountId,
     pub kind: ResourceKind,
     pub errno: slopos_abi::Errno,
@@ -159,15 +138,11 @@ pub enum AccountCreateError {
     NoParent,
 }
 
-// ---------------------------------------------------------------------------
-// Row resolution
-// ---------------------------------------------------------------------------
-
 /// The live row `id` names, or `None` for a stale, absent or out-of-range one.
 ///
 /// The generation compare is the whole mechanism: a refund arriving after its
-/// account's slot was reused finds a generation that does not match and does
-/// nothing, rather than debiting whichever principal holds that slot now.
+/// account's slot was reused finds a mismatch and does nothing, rather than
+/// debiting whichever principal holds that slot now.
 fn row_for(id: AccountId) -> Option<&'static AccountRow> {
     if id.is_none() {
         return None;
@@ -187,11 +162,10 @@ fn row_for(id: AccountId) -> Option<&'static AccountRow> {
 
 /// Materialise the root row, idempotently.
 ///
-/// The root is the kernel's own payer and the ancestor every process account
-/// debits through, so it has to exist before the first charge — which happens
-/// during boot, before any explicit initialisation step could have run. The
-/// limits start unset and are written later by [`set_limit`] once the frame
-/// count has actually been measured.
+/// The root is the ancestor every process account debits through, so it has to
+/// exist before the first charge — which happens during boot, before any
+/// explicit initialisation step could have run. Limits start unset and are
+/// written by [`set_limit`] once the frame count has been measured.
 fn ensure_root() {
     let id = root_account();
     let row = &ACCOUNTS[ROOT_ACCOUNT_SLOT as usize];
@@ -211,10 +185,6 @@ pub fn root() -> AccountId {
     ensure_root();
     root_account()
 }
-
-// ---------------------------------------------------------------------------
-// Lifecycle
-// ---------------------------------------------------------------------------
 
 /// Bind a row for `id`, debiting through `parent`.
 ///
@@ -239,10 +209,9 @@ pub fn account_create(id: AccountId, parent: AccountId) -> Result<(), AccountCre
 
     let row = &ACCOUNTS[slot];
     row.reset_counters();
-    // Every process account starts at the enforced per-kind defaults. The root
-    // deliberately does not: it is the sum of every principal, so a
-    // per-principal ceiling applied to it would refuse the machine's own
-    // aggregate. Its limits are set from measured RAM at boot instead.
+    // The root is deliberately exempt from the per-kind process defaults: it is
+    // the sum of every principal, so a per-principal ceiling applied to it would
+    // refuse the machine's own aggregate. Its limits come from measured RAM.
     if slot != ROOT_ACCOUNT_SLOT as usize {
         for kind in ResourceKind::ALL {
             row.limit[kind.index()].store(
@@ -262,33 +231,22 @@ pub fn account_create(id: AccountId, parent: AccountId) -> Result<(), AccountCre
 
 /// Release the row `id` names.
 ///
-/// Outstanding amounts move one hop up the immutable parent chain — which is a
-/// no-op on every ancestor, because the hierarchical debit already charged
-/// them. The row itself goes dark, so a refund arriving later fails the
-/// generation compare and does nothing. That is what makes a leaked charge
-/// self-healing rather than a permanent lie.
+/// Outstanding amounts move one hop up the immutable parent chain. The row
+/// itself goes dark, so a refund arriving later fails the generation compare
+/// and does nothing — which is what makes a leaked charge self-healing.
 pub fn account_release(id: AccountId) {
     let Some(row) = row_for(id) else {
         return;
     };
 
-    // Give the ancestors back whatever this row still holds, BEFORE going
-    // dark.
+    // Give the ancestors back whatever this row still holds, BEFORE going dark:
+    // once it is dark a late refund fails the generation compare, so the
+    // ancestors would keep those debits with nothing left to release them, and
+    // the root accumulates one per charge that outlived its process.
     //
-    // A charge debits every level; its refund credits every level. Once this
-    // row is dark, a late refund fails the generation compare and is a no-op —
-    // which is what makes a stale refund safe, but it also means the ancestors
-    // would keep those debits with nothing left to release them. Left
-    // uncorrected the root accumulates one debit per charge that outlived its
-    // process, which is unbounded across a boot: the measurement that caught
-    // this showed the root holding 574 tasks while every process row read
-    // zero.
-    //
-    // Cancelling here is exact rather than approximate. `used` is the sum of
-    // the charges outstanding against this row, and those are precisely the
-    // charges whose refunds are about to become no-ops, so crediting the
-    // ancestors by that number retires exactly the debits that will never be
-    // retired by a token.
+    // `used` is the sum of the charges outstanding against this row, which are
+    // precisely the charges whose refunds are about to become no-ops, so the
+    // cancellation is exact rather than approximate.
     let parent_slot = row.parent.load(Ordering::Acquire);
     if parent_slot != NO_PARENT {
         let parent = account_id_at(parent_slot);
@@ -308,9 +266,9 @@ pub fn account_release(id: AccountId) {
 /// Release whichever account currently occupies `slot`, whatever its
 /// generation.
 ///
-/// For the fixture reset, which clears the id space wholesale and therefore
-/// has no live [`AccountId`] to name each row with. Ordinary teardown goes
-/// through [`account_release`], which is generation-checked.
+/// For the fixture reset, which clears the id space wholesale and has no live
+/// [`AccountId`] to name each row with; ordinary teardown goes through the
+/// generation-checked [`account_release`].
 pub fn account_release_by_slot(slot: u32) {
     let Some(row) = ACCOUNTS.get(slot as usize) else {
         return;
@@ -331,37 +289,28 @@ pub fn set_limit(id: AccountId, kind: ResourceKind, limit: u32) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Charge and refund
-// ---------------------------------------------------------------------------
-
 /// Debit `n` units of `A` from `account` and every ancestor.
 ///
 /// The debit is applied leaf-upward. On refusal at level *k* every level
 /// already debited is given back before returning, so a denied call is the
-/// identity on every row — including the batch that succeeded for *k* and
-/// failed at *k+1*, which is the case a hand-written cancel loop gets wrong.
+/// identity on every row.
 ///
 /// A refusal against a stale or absent account succeeds vacuously: there is no
-/// row to debit, so there is nothing to refuse, and returning an error would
-/// make a process whose account had already been released unable to close its
-/// own descriptors.
+/// row to debit, and returning an error would make a process whose account had
+/// already been released unable to close its own descriptors.
+///
 /// # Context
 ///
 /// A charge belongs at a syscall entry point, where a principal is known and a
 /// refusal has an errno to travel back on. A queue filled by a device IRQ or
 /// by a remote peer must be **pre-charged at the syscall that created it**,
 /// with an amount equal to its fixed capacity, so a full queue is a bound its
-/// owner already paid for and dropping an event stops being an accounting
-/// event.
+/// owner already paid for.
 ///
-/// That rule is deliberately not a runtime assertion. This kernel enters
+/// That rule is deliberately not a runtime assertion: this kernel enters
 /// syscalls through an interrupt gate, so `in_interrupt_context` is true on
-/// every sanctioned charge site and false on none — an assertion over it fires
-/// on exactly the callers it is meant to bless. Nothing else in the PCR
-/// separates "a syscall that arrived via a trap gate" from "a device IRQ", so
-/// the property is kept by where charges are written rather than by a check
-/// that would have to be disabled to boot.
+/// every sanctioned charge site and false on none, and nothing else in the PCR
+/// separates a syscall that arrived via a trap gate from a device IRQ.
 pub fn try_charge<A: Refundable>(
     account: AccountId,
     n: u32,
@@ -431,9 +380,8 @@ pub(super) fn refund_raw(account: AccountId, kind: ResourceKind, n: u32) {
 /// The live id occupying arena slot `slot`, or [`AccountId::NONE`].
 ///
 /// Reading the generation back out of the row is what keeps the parent edge a
-/// plain index: storing a full id would double the row's parent field for no
-/// gain, and a parent whose row went dark answers `NONE` here, which stops the
-/// walk exactly as it should.
+/// plain index; a parent whose row went dark answers `NONE` here, which stops
+/// the walk exactly as it should.
 fn account_id_at(slot: u32) -> AccountId {
     let Some(row) = ACCOUNTS.get(slot as usize) else {
         return AccountId::NONE;
@@ -447,14 +395,12 @@ fn account_id_at(slot: u32) -> AccountId {
 /// Debit one row, keeping `used <= limit` on every success.
 ///
 /// A compare-exchange loop rather than `fetch_add`-then-check: an add that
-/// overshoots and is corrected afterwards is observable, and "no successful
-/// charge leaves `used` above `limit`" has to hold at every instant or it is
-/// not the property the ceiling claims.
+/// overshoots and is corrected afterwards is observable, and the ceiling has to
+/// hold at every instant or it is not the property it claims.
 fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> Result<(), ()> {
     let idx = kind.index();
-    // `Off` consults no ceiling at all, so it records no denial either: a
-    // denial count that moved under `quota=off` would report refusals on a
-    // tier that refuses nothing.
+    // `Off` consults no ceiling and so records no denial: a count that moved
+    // under `quota=off` would report refusals on a tier that refuses nothing.
     let limit = match mode {
         QuotaMode::Off => NO_LIMIT,
         _ => row.limit[idx].load(Ordering::Acquire),
@@ -475,8 +421,7 @@ fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> 
             Ok(_) => {
                 row.peak[idx].fetch_max(next, Ordering::Relaxed);
                 // Counted even though the charge was granted: `quota=warn`
-                // exists to measure what enforcement *would* have refused, and
-                // a tier that reports nothing measures nothing.
+                // exists to measure what enforcement *would* have refused.
                 if over_limit {
                     row.denials[idx].fetch_add(1, Ordering::Relaxed);
                 }
@@ -487,9 +432,9 @@ fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> 
     }
 }
 
-/// Credit one row. Saturating: an under-run is a bookkeeping bug, and the
-/// failure it must not produce is a count that wraps to `u32::MAX` and refuses
-/// every subsequent charge forever.
+/// Credit one row. Saturating rather than wrapping: an under-run is a
+/// bookkeeping bug, and a count wrapped to `u32::MAX` would refuse every
+/// subsequent charge forever.
 fn release_row(row: &AccountRow, kind: ResourceKind, n: u32) {
     let idx = kind.index();
     let mut used = row.used[idx].load(Ordering::Relaxed);
@@ -513,10 +458,6 @@ fn unwind(slots: &[u32], kind: ResourceKind, n: u32) {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Observation
-// ---------------------------------------------------------------------------
 
 /// One kind's numbers on one row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -542,7 +483,7 @@ pub fn stats(id: AccountId, kind: ResourceKind) -> Option<KindStats> {
 /// Visit every live row, lowest slot first, with its id and parent.
 ///
 /// The root sorts first because its slot is fixed at zero, so a dump reads
-/// top-down without the walker sorting anything.
+/// top-down without sorting.
 pub fn for_each_account(mut f: impl FnMut(AccountId, AccountId)) {
     ensure_root();
     for (slot, row) in ACCOUNTS.iter().enumerate() {
@@ -561,10 +502,8 @@ pub fn for_each_account(mut f: impl FnMut(AccountId, AccountId)) {
 /// A violation of the ledger's own consistency, found by the runtime audit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LedgerFault {
-    /// An ancestor holds less than the descendants debiting through it. The
-    /// hierarchical debit makes this impossible while every charge and refund
-    /// walks the same chain, so it means a refund reached a level a charge did
-    /// not — the phantom-refund shape the token exists to eliminate.
+    /// An ancestor holds less than the descendants debiting through it: a
+    /// refund reached a level a charge did not.
     AncestorUnderCount {
         ancestor: AccountId,
         kind: ResourceKind,
@@ -591,18 +530,15 @@ pub enum LedgerFault {
     /// A `Pages` row disagrees with the address spaces it accounts for.
     ///
     /// The only kind whose charge tracks a quantity that *changes* over the
-    /// holder's life rather than a countable object, so it is the only one
-    /// where "the token is unique" does not already imply "the number is
-    /// right": a mapping can grow, split or merge under a token that was
-    /// minted once.
+    /// holder's life, so it is the only one where "the token is unique" does
+    /// not already imply "the number is right": a mapping can grow, split or
+    /// merge under a token that was minted once.
     ///
-    /// Two comparisons, because they fail in different ways. `mapped` against
-    /// `charged` catches a token that stopped tracking its own tree — a
-    /// mutation that forgot to adjust it. `charged` against the row's `used`
-    /// catches a debit that reached the account without a token behind it, or
-    /// a token whose refund never reached the row; that is the phantom-debit
-    /// shape, and the other three checks are blind to it because they compare
-    /// rows only against each other.
+    /// `mapped` against `charged` catches a token that stopped tracking its own
+    /// tree. `charged` against the row's `used` catches a debit that reached the
+    /// account without a token behind it — the phantom-debit shape, which the
+    /// other three checks are blind to because they compare rows only against
+    /// each other.
     PagesMismatch {
         account: AccountId,
         /// Pages the address spaces on this account actually span.
@@ -617,10 +553,9 @@ pub enum LedgerFault {
 /// Reports each address space's `(account, mapped, charged)` page counts.
 ///
 /// One call per bound address space, not per account: several address spaces
-/// can name one account (every kernel-side `process_spawn_root` shares the
-/// root's), so the audit sums the reports per account before comparing. A
-/// reconciler that pre-aggregated would hide exactly the case where two maps
-/// disagree in opposite directions.
+/// can name one account, so the audit sums the reports per account before
+/// comparing. A reconciler that pre-aggregated would hide exactly the case
+/// where two maps disagree in opposite directions.
 pub type PagesReconciler = fn(&mut dyn FnMut(AccountId, u32, u32));
 
 static PAGES_RECONCILER: AtomicUsize = AtomicUsize::new(0);
@@ -629,17 +564,16 @@ static PAGES_RECONCILER: AtomicUsize = AtomicUsize::new(0);
 ///
 /// Registered by `mm`, which owns the region trees; OSTD defines the axis but
 /// cannot name a `VmaMap`. Without this the audit's other three checks pass
-/// vacuously on `Pages`: they compare rows against each other, and a charge
-/// that drifted from its *map* is consistent with every ancestor.
+/// vacuously on `Pages`: a charge that drifted from its *map* is still
+/// consistent with every ancestor.
 pub fn register_pages_reconciler(reconciler: PagesReconciler) {
     PAGES_RECONCILER.store(reconciler as usize, Ordering::Release);
 }
 
 /// Check the ledger against itself, reporting every inconsistency to `report`.
 ///
-/// The runtime form of the equality invariant, and the only mechanism that can
-/// see a forgotten or unwinder-skipped charge. Three checks, each naming a
-/// distinct way the numbers could be lying — see [`LedgerFault`].
+/// The only mechanism that can see a forgotten or unwinder-skipped charge; each
+/// check names a distinct way the numbers could be lying — see [`LedgerFault`].
 ///
 /// Returns the number of faults found. Allocation-free: the walk is bounded by
 /// the arena and by [`MAX_ACCOUNT_DEPTH`], so it is legal anywhere a read is.
@@ -679,9 +613,8 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
             }
 
             // Every direct child debits through this row, so this row's `used`
-            // is at least their sum. Saturating, because a child's own charge
-            // is included in its total and several children can each exceed
-            // what a `u32` sum would hold.
+            // is at least their sum. Saturating: several children can each
+            // exceed what a `u32` sum would hold.
             let mut children = 0u32;
             for (child_slot, child) in ACCOUNTS.iter().enumerate() {
                 if child_slot == slot || !child.live.load(Ordering::Acquire) {
@@ -707,13 +640,11 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
     if let Some(reconcile) =
         crate::util::fn_ptr::fn_ptr_decode_opt::<PagesReconciler>(raw as *mut ())
     {
-        // One account at a time, because the mapping from address space to
-        // account is many-to-one — every kernel-side `process_spawn_root`
-        // shares the root's — and a per-map comparison would report each
-        // sibling as a mismatch against the shared row. Re-driving the walk
-        // per account is O(accounts x maps), which is bounded by two fixed
-        // arena-sized constants and pays no stack: the alternative is a
-        // 257-entry accumulator, and this runs inside the 2 KiB frame cap.
+        // One account at a time, because the address-space-to-account mapping is
+        // many-to-one and a per-map comparison would report each sibling as a
+        // mismatch against the shared row. Re-driving the walk per account is
+        // O(accounts x maps) but pays no stack; the alternative is a 257-entry
+        // accumulator, and this runs inside the 2 KiB frame cap.
         for (slot, row) in ACCOUNTS.iter().enumerate() {
             if !row.live.load(Ordering::Acquire) {
                 continue;
@@ -737,9 +668,7 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
                 continue;
             }
             // Descendants debit through this row too, so `used` is the maps'
-            // own total only after their contribution is taken out. Comparing
-            // the residue against zero is what makes a phantom debit visible
-            // without the walk needing a second pass over the tree.
+            // own total only after their contribution is taken out.
             let idx = ResourceKind::Pages.index();
             let used = row.used[idx].load(Ordering::Acquire);
             let mut descendants = 0u32;
@@ -777,14 +706,12 @@ pub fn account_count() -> usize {
 
 /// Credit exactly one row, skipping its ancestors. Test-fixture only.
 ///
-/// Fabricates the inconsistency a hand-written cancel loop produces when it
-/// misses a level, so the audit's own test can prove the audit rejects rather
-/// than merely accepts.
+/// Fabricates the inconsistency a cancel loop that missed a level produces, so
+/// the audit's own test can prove the audit rejects rather than merely accepts.
 #[cfg(test)]
 pub(super) fn refund_raw_one_level_for_test(account: AccountId, kind: ResourceKind, n: u32) {
-    // Writes the row directly rather than through `release_row`, whose
-    // underflow `debug_assert` would fire on the very corruption being
-    // planted.
+    // Writes the row directly rather than through `release_row`, whose underflow
+    // `debug_assert` would fire on the very corruption being planted.
     if let Some(row) = row_for(account) {
         let idx = kind.index();
         let used = row.used[idx].load(Ordering::Acquire);

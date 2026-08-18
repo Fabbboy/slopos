@@ -151,13 +151,9 @@ mod tests {
         assert_eq!(stats(a, ResourceKind::FdSlot).expect("row").denials, 1);
     }
 
-    /// Releasing an account gives its ancestors back whatever it still holds.
-    ///
     /// The charges outstanding against a released row are exactly the ones
-    /// whose refunds are about to become generation-mismatch no-ops, so the
-    /// ancestors would otherwise keep those debits with nothing left to
-    /// retire them. That leak is unbounded across a boot — measured at 574
-    /// tasks held by the root while every process row read zero.
+    /// whose refunds are about to become generation-mismatch no-ops, so its
+    /// ancestors would otherwise keep debits nothing can retire.
     #[test]
     fn releasing_an_account_hands_its_outstanding_amount_back_up() {
         let _f = fixture();
@@ -177,7 +173,6 @@ mod tests {
         );
         assert_eq!(used(root(), ResourceKind::FdSlot), 0);
 
-        // And the token's own refund, now stale, changes nothing further.
         drop(outlives);
         assert_eq!(used(root(), ResourceKind::FdSlot), 0);
     }
@@ -191,8 +186,6 @@ mod tests {
         let charge = Charge::commit(try_charge::<FdSlot>(first, 5).expect("charge"));
         assert_eq!(used(root(), ResourceKind::FdSlot), 5);
 
-        // The process exits and its row is released while a charge is still
-        // outstanding — an in-flight SCM_RIGHTS FileRef, say.
         account_release(first);
         let second = account(1, root());
         assert_ne!(first, second, "same slot, different generation");
@@ -276,8 +269,6 @@ mod tests {
         assert_eq!(used(a, ResourceKind::FdSlot), 0);
     }
 
-    /// The narrow exception the design allows: an extend against a different
-    /// account would be charge migration, so it is refunded and refused.
     #[test]
     fn extend_across_accounts_does_not_migrate_the_charge() {
         let _f = fixture();
@@ -291,8 +282,8 @@ mod tests {
         drop(charge);
     }
 
-    /// `release` is the exit-latch path: it consumes the token, so the refund
-    /// happens once and there is no later `Drop` to double it.
+    /// `release` is the exit-latch path: it consumes the token, so there is no
+    /// later `Drop` to double the refund.
     #[test]
     fn release_refunds_exactly_once() {
         let _f = fixture();
@@ -303,9 +294,8 @@ mod tests {
         assert_eq!(used(root(), ResourceKind::FdSlot), 0);
     }
 
-    /// A reservation that is never committed refunds itself. This is the
-    /// hierarchical rollback and the "caller changed its mind" path, and they
-    /// are deliberately the same code.
+    /// The hierarchical rollback and the "caller changed its mind" path are
+    /// deliberately the same code.
     #[test]
     fn an_uncommitted_reservation_refunds_on_drop() {
         let _f = fixture();
@@ -333,7 +323,6 @@ mod tests {
         );
     }
 
-    /// The audit is silent on a ledger that is behaving.
     #[test]
     fn the_audit_accepts_a_consistent_ledger() {
         let _f = fixture();
@@ -348,13 +337,9 @@ mod tests {
         assert_eq!(ledger_audit(|f| faults.push(f)), 0);
     }
 
-    /// And it is not vacuous: a row edited behind the token's back is caught.
-    ///
-    /// The failure being modelled is the one the whole design exists to
-    /// eliminate — a refund that reached a descendant but not its ancestor,
-    /// which leaves the ancestor holding less than the sum of the rows
-    /// debiting through it. An audit that could not see this would be a number
-    /// with no reader.
+    /// The modelled failure: a refund that reached a descendant but not its
+    /// ancestor, leaving the ancestor below the sum of the rows debiting
+    /// through it.
     #[test]
     fn the_audit_catches_an_ancestor_that_lost_a_refund() {
         let _f = fixture();
@@ -366,7 +351,7 @@ mod tests {
         assert_eq!(ledger_audit(|f| faults.push(f)), 0, "consistent to start");
 
         // Refund the parent alone, as a hand-written cancel loop that missed a
-        // level would: the child still holds 4, the parent now holds 0.
+        // level would.
         arena::refund_raw_one_level_for_test(parent, ResourceKind::FdSlot, 4);
 
         let mut faults = KVecFaults::default();
@@ -387,7 +372,7 @@ mod tests {
         );
 
         // Undo the planted corruption before the real token drops: its refund
-        // walks the same chain and would underflow the row this test emptied.
+        // walks the same chain and would underflow the emptied row.
         arena::charge_raw_one_level_for_test(parent, ResourceKind::FdSlot, 4);
         drop(held);
     }
@@ -409,13 +394,9 @@ mod tests {
         }
     }
 
-    /// A `ChargeSlot` refunds exactly once however the release is reached.
-    ///
-    /// The shape every kind whose refund point is not its holder's `Drop`
-    /// relies on — `Task` at the exit latch, `Process` at the reap. Both
-    /// latches can fire twice (from `task_terminate` and from the owning CPU's
-    /// post-switch path; from a double reap), so "exactly once" has to be a
-    /// property of the slot rather than of the caller.
+    /// The exit latch of a `Task` and the reap of a `Process` can each fire
+    /// twice, so "refunds exactly once" has to be a property of the slot
+    /// rather than of the caller.
     #[test]
     fn a_charge_slot_releases_exactly_once() {
         let _f = fixture();
@@ -430,14 +411,12 @@ mod tests {
         assert!(!slot.is_occupied());
         assert_eq!(used(a, ResourceKind::FdSlot), 0);
 
-        // The second latch finds an empty slot.
         slot.take();
         assert_eq!(used(a, ResourceKind::FdSlot), 0);
     }
 
-    /// Overwriting an occupied slot refunds the displaced charge rather than
-    /// dropping it on the floor — so a recycled id whose predecessor never
-    /// reached its latch costs nothing rather than one leaked charge.
+    /// A recycled id whose predecessor never reached its latch must cost
+    /// nothing, so an overwrite refunds the charge it displaces.
     #[test]
     fn a_charge_slot_refunds_what_it_displaces() {
         let _f = fixture();
@@ -455,7 +434,6 @@ mod tests {
         assert_eq!(used(a, ResourceKind::FdSlot), 0);
     }
 
-    /// A slot dropped without an explicit release still refunds.
     #[test]
     fn a_dropped_charge_slot_refunds() {
         let _f = fixture();
@@ -468,7 +446,6 @@ mod tests {
         assert_eq!(used(a, ResourceKind::FdSlot), 0);
     }
 
-    /// A charge against an account whose row has gone succeeds vacuously.
     /// Refusing would leave a process that had already been released unable to
     /// close its own descriptors.
     #[test]

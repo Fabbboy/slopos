@@ -312,22 +312,18 @@ const SEL_USER_CODE_RPL3: u64 = 0x23;
 #[cfg(all(target_arch = "x86_64", not(test)))]
 const SEL_USER_DATA_RPL3: u64 = 0x1B;
 
-/// Lower-bound the size of `UserRegs` so an offset typo into the
-/// trampoline asm (which indexes off `[rdi + offset_of!(UserRegs, …)]`)
-/// can't slip past the struct's end.  144 covers the GPR file + RIP /
-/// RFLAGS / FS_BASE / GS_BASE / CS / SS — i.e., every offset the
-/// trampoline reads.
+/// Lower-bound `UserRegs` so an offset typo in the trampoline asm cannot index
+/// past the struct's end. 144 covers the GPR file plus RIP / RFLAGS / FS_BASE /
+/// GS_BASE / CS / SS — every offset the trampoline reads.
 #[cfg(all(target_arch = "x86_64", not(test)))]
 const _: () = assert!(core::mem::size_of::<UserRegs>() >= 144);
 
 #[cfg(all(target_arch = "x86_64", not(test)))]
 #[unsafe(naked)]
 pub unsafe extern "sysv64" fn user_mode_round_trip_asm(_user_regs: *const UserRegs) {
-    // RDI = pointer to UserRegs.  We never touch RSI/RDX/RCX/etc.
-    // before they're read into UserRegs because the inline asm reads
-    // them from `[rdi + …]` rather than treating them as live inputs.
+    // RDI = pointer to UserRegs; every other GPR is read from `[rdi + …]`
+    // rather than treated as a live input.
     core::arch::naked_asm!(
-        // ---- Save kernel callee-saves into pcr.kernel_return_ctx. ----
         "mov gs:[{krc} + {krc_rbx}], rbx",
         "mov gs:[{krc} + {krc_rbp}], rbp",
         "mov gs:[{krc} + {krc_r12}], r12",
@@ -335,29 +331,22 @@ pub unsafe extern "sysv64" fn user_mode_round_trip_asm(_user_regs: *const UserRe
         "mov gs:[{krc} + {krc_r14}], r14",
         "mov gs:[{krc} + {krc_r15}], r15",
 
-        // CRITICAL: pop our own return address off the kernel stack and
-        // stash it in `pcr.kernel_return_ctx.rip`, then save the
-        // post-pop RSP into `pcr.kernel_return_ctx.rsp`.  We cannot
-        // leave the return address on the kernel stack across the
-        // iretq: any interrupt that fires from user mode reuses
-        // `TSS.RSP0` (= the per-task kernel stack top) and the ISR's
-        // pushes overwrite this region.  Asterinas and Linux both
-        // park the return address in per-CPU memory for the same
-        // reason — see `entry_SYSCALL_64` in arch/x86/entry/entry_64.S
-        // and `ostd/src/arch/x86/trap/syscall.rs`.
+        // The return address cannot stay on the kernel stack across the iretq:
+        // any interrupt that fires from user mode reuses `TSS.RSP0` (the
+        // per-task kernel stack top) and the ISR's pushes overwrite this
+        // region.
         "pop rax",
         "mov gs:[{krc} + {krc_rip}], rax",
         "mov gs:[{krc} + {krc_rsp}], rsp",
 
-        // ---- Build IRETQ frame on the kernel stack. ----
-        // Order (top-of-stack last): SS, RSP, RFLAGS, CS, RIP.
+        // IRETQ frame order, top-of-stack last: SS, RSP, RFLAGS, CS, RIP.
         "push {sel_user_data}",
         "push qword ptr [rdi + {ur_rsp}]",
         "push qword ptr [rdi + {ur_rflags}]",
         "push {sel_user_code}",
         "push qword ptr [rdi + {ur_rip}]",
 
-        // ---- Restore user GPRs.  RDI restored last. ----
+        // RDI restored last: every other load indexes off it.
         "mov rax, [rdi + {ur_rax}]",
         "mov rbx, [rdi + {ur_rbx}]",
         "mov rcx, [rdi + {ur_rcx}]",
@@ -374,11 +363,9 @@ pub unsafe extern "sysv64" fn user_mode_round_trip_asm(_user_regs: *const UserRe
         "mov r15, [rdi + {ur_r15}]",
         "mov rdi, [rdi + {ur_rdi}]",
 
-        // ---- swapgs + iretq into user mode. ----
-        // No `100:` label / `ret` epilogue: __ostd_user_return jumps
-        // directly to the saved return address via `jmp gs:[krc_rip]`,
-        // which is in kernel .text (intact across user-mode interrupt
-        // ISR usage of the kernel stack).
+        // No `ret` epilogue: `__ostd_user_return` jumps directly to the saved
+        // return address via `jmp gs:[krc_rip]`, which is in kernel .text and
+        // so survives an ISR's use of the kernel stack.
         "swapgs",
         "iretq",
 
@@ -435,16 +422,10 @@ mod tests {
 
     #[test]
     fn user_mode_borrow_shape() {
-        // Sanity: UserMode::new threads the borrows. We can't
-        // actually `execute` without a registered backend; this just
-        // proves the type compiles + ctx is reachable through the
-        // wrapper.
         let regs = UserRegs::default();
         let ctx = UserContext::new(regs, FpuStateRef::empty());
-        // VmSpace requires a registered allocator + kernel master,
-        // which the per-test fixture sets up. We avoid constructing
-        // one here so this test stays free of fixture coupling.
-        // Simply assert ctx is usable through a shared borrow.
+        // No `VmSpace` here: constructing one needs the allocator fixture, and
+        // this only asserts `ctx` is usable through a shared borrow.
         ctx.set_rip(0x1000);
         assert_eq!(ctx.rip(), 0x1000);
     }

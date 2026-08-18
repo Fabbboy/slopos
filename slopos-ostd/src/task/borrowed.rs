@@ -1,37 +1,9 @@
 //! The borrow-taking task surface — inherent methods on [`TaskInner`].
 //!
-//! # What this is for
-//!
-//! `slopos-ostd/src/task/accessors.rs` is a layer of ~114 functions over
-//! `*mut TaskInner<K, U>`. Each one null-checks a pointer, dereferences it, and
-//! does one small thing. That layer is what the task-ownership migration exists
-//! to remove: a `*mut Task` in a signature carries no lifetime, so the contract
-//! is enforced by review rather than by the compiler, and `check 1` / `check 4`
-//! of `check_task_ownership.sh` count exactly that surface.
-//!
-//! These are the replacements. Every method here takes `&self`, which is the
-//! claim the caller could already make — every accessor call site has a
-//! registry guard, a `CurrentTask`, or a `&Task` in scope, and was converting
-//! it *back* into a pointer to call through the layer.
-//!
-//! # Why they are safe
-//!
-//! Nearly every `unsafe` block in the accessor layer exists for one reason: to
-//! dereference the raw pointer. Nothing else about the operations is unsafe —
-//! they are atomic loads, atomic stores, intrusive-link operations, and reads
-//! of plain fields. Taking `&self` removes the dereference, and with it the
-//! `unsafe`. Every method in this file is safe, and that is the point: the
-//! accessor layer's `unsafe` was never about the operation.
-//!
-//! The one group that will still need it when it moves here is the
-//! `#[repr(C, packed)]` register-state reads through a `TaskOwnCell`'s racy
-//! pointer — and there the unsafety is about *alignment and tearing*, not about
-//! whether the task exists. That group is not in this file yet.
-//!
-//! # Where the orderings come from
-//!
-//! Each method states the ordering it uses, and names the pairing wherever it
-//! is load-bearing.
+//! These replace the `*mut TaskInner` accessor layer: taking `&self` removes
+//! the dereference that was the only reason for that layer's `unsafe`. Each
+//! method states the ordering it uses and names the pairing where it is
+//! load-bearing.
 
 use core::sync::atomic::Ordering;
 
@@ -45,13 +17,10 @@ use crate::task::kernel_task::{SchedPlacement, SignalAction, TaskInner};
 use crate::task::link_roles::{ReclaimRole, RemoteWakeRole};
 
 impl<K, U> TaskInner<K, U> {
-    // ── Dispatch state ────────────────────────────────────────────────
-
     /// Whether a CPU is physically executing this task.
     ///
-    /// Acquire, pairing with the switch tail's Release store: a peer that
-    /// observes `false` must also observe everything the outgoing CPU published
-    /// before clearing it.
+    /// Acquire pairs with the switch tail's Release store: a peer observing
+    /// `false` also observes everything the outgoing CPU published first.
     #[inline]
     pub fn on_cpu(&self) -> bool {
         self.on_cpu.load(Ordering::Acquire)
@@ -63,13 +32,11 @@ impl<K, U> TaskInner<K, U> {
         self.on_cpu.store(on, Ordering::Release);
     }
 
-    /// This task's scheduler placement owner.
     #[inline]
     pub fn sched_placement(&self) -> SchedPlacement {
         SchedPlacement::from_u8(self.sched_placement.load(Ordering::Acquire))
     }
 
-    /// Store the scheduler placement owner unconditionally.
     #[inline]
     pub fn set_sched_placement(&self, placement: SchedPlacement) {
         self.sched_placement
@@ -79,9 +46,9 @@ impl<K, U> TaskInner<K, U> {
     /// Move the placement owner from `expected` to `target`, reporting whether
     /// this caller won.
     ///
-    /// The cross-role gate: it is what stops a task being in a ready queue and
-    /// a remote-wake inbox at once, so the *result* is the interesting part —
-    /// a loser must not proceed as though it had claimed the task.
+    /// The cross-role gate that stops a task being in a ready queue and a
+    /// remote-wake inbox at once: a loser must not proceed as though it had
+    /// claimed the task.
     #[inline]
     pub fn sched_placement_compare_exchange(
         &self,
@@ -113,8 +80,6 @@ impl<K, U> TaskInner<K, U> {
         self.parked_wait_queue.store(queue, Ordering::Release);
     }
 
-    // ── Panic-recovery depths ─────────────────────────────────────────
-
     /// Saved panic-recovery nesting depth. The live value lives in
     /// `PCR.recovery_depth`; this is the copy that travels with the task.
     #[inline]
@@ -140,20 +105,16 @@ impl<K, U> TaskInner<K, U> {
         self.panic_in_flight.store(depth, Ordering::Release);
     }
 
-    // ── Exit bookkeeping ──────────────────────────────────────────────
-
     /// Claim teardown steps, returning the bits *this* caller won.
     ///
     /// Teardown can be split between `task_terminate` and post-switch cleanup,
-    /// so the returned mask — not the flags themselves — is what makes each
-    /// step run exactly once.
+    /// so the returned mask is what makes each step run exactly once.
     #[inline]
     pub fn exit_cleanup_mark(&self, bits: u8) -> u8 {
         let previous = self.exit_cleanup_flags.fetch_or(bits, Ordering::AcqRel);
         bits & !previous
     }
 
-    /// The durable exit-value cell.
     #[inline]
     pub fn exit_info(&self) -> &crate::sync::AtomicCell<ExitInfo> {
         &self.exit_info
@@ -173,9 +134,8 @@ impl<K, U> TaskInner<K, U> {
     ///
     /// The exit code carries the signal a POSIX kernel would have killed the
     /// task with, so `waitpid` can distinguish the causes. `SIGBUS` for an
-    /// out-of-memory demand fault specifically: the mapping exists and the
-    /// access is legal, but the kernel cannot produce a page for it, which is
-    /// the bus-error case rather than the segmentation one.
+    /// out-of-memory demand fault: the mapping exists and the access is legal,
+    /// but no page can be produced, which is the bus-error case.
     #[inline]
     pub fn record_user_fault_exit(&self, reason: TaskFaultReason) -> u32 {
         self.exit_reason
@@ -189,8 +149,6 @@ impl<K, U> TaskInner<K, U> {
         self.exit_code.store(128 + signal as u32, Ordering::Release);
         self.task_id
     }
-
-    // ── Job control ───────────────────────────────────────────────────
 
     /// This task's process-group id. See [`pgid`](TaskInner::pgid) for the
     /// ordering.
@@ -228,9 +186,6 @@ impl<K, U> TaskInner<K, U> {
         sid != 0 && sid == self.task_id
     }
 
-    // ── Signals ───────────────────────────────────────────────────────
-
-    /// Pending-signal bitmask.
     #[inline]
     pub fn signal_pending(&self) -> SigSet {
         self.signal_pending.load(Ordering::Acquire)
@@ -305,8 +260,8 @@ impl<K, U> TaskInner<K, U> {
     /// Publish a whole disposition at signal index `idx`, reporting whether
     /// `idx` named a slot.
     ///
-    /// `false` means nothing was written. A caller that derived `idx` from user
-    /// input must map that to an error rather than treating the install as done.
+    /// `false` means nothing was written; a caller that derived `idx` from user
+    /// input must map that to an error.
     #[inline]
     pub fn set_signal_action(&self, idx: usize, action: SignalAction) -> bool {
         match self.signal_actions.get(idx) {
@@ -318,39 +273,30 @@ impl<K, U> TaskInner<K, U> {
         }
     }
 
-    // ── Diagnostic counters ───────────────────────────────────────────
-    //
-    // Relaxed throughout: nothing is ordered against these. `fetch_add` wraps
-    // at 2^32, which for a tally of yields or migrations is immaterial and
-    // costs one instruction where saturation would cost a compare-exchange
-    // loop.
+    // Relaxed throughout: nothing is ordered against these, and `fetch_add`
+    // wrapping at 2^32 is immaterial for a tally of yields or migrations.
 
-    /// How many times this task has voluntarily yielded.
     #[inline]
     pub fn yield_count(&self) -> u32 {
         self.yield_count.load(Ordering::Relaxed)
     }
 
-    /// Record one voluntary yield.
     #[inline]
     pub fn inc_yield_count(&self) {
         self.yield_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// How many times this task has migrated between CPUs.
     #[inline]
     pub fn migration_count(&self) -> u32 {
         self.migration_count.load(Ordering::Relaxed)
     }
 
     /// Record one migration. Called by the *thief* CPU, which is why the field
-    /// is atomic — see its declaration.
+    /// is atomic.
     #[inline]
     pub fn inc_migration_count(&self) {
         self.migration_count.fetch_add(1, Ordering::Relaxed);
     }
-
-    // ── Runtime accounting ────────────────────────────────────────────
 
     /// Accumulated on-CPU time, in `kdiag_timestamp` ticks.
     #[inline]
@@ -361,9 +307,8 @@ impl<K, U> TaskInner<K, U> {
     /// Add one on-CPU slice, saturating.
     ///
     /// A compare-exchange loop rather than `fetch_add` because this one *does*
-    /// want saturation: the tally is reported to userland as a duration, and a
-    /// wrap would show a task that has run for a few microseconds as having run
-    /// for millennia.
+    /// want saturation: the tally is reported to userland as a duration, where
+    /// a wrap would read as millennia.
     #[inline]
     pub fn add_total_runtime(&self, delta: u64) {
         let _ = self
@@ -372,8 +317,6 @@ impl<K, U> TaskInner<K, U> {
                 Some(current.saturating_add(delta))
             });
     }
-
-    // ── Thread-exit futex address ─────────────────────────────────────
 
     /// The `clear_child_tid` address, or 0 if this task set none.
     #[inline]
@@ -395,8 +338,6 @@ impl<K, U> TaskInner<K, U> {
     pub fn take_clear_child_tid(&self) -> u64 {
         self.clear_child_tid.swap(0, Ordering::Relaxed)
     }
-
-    // ── Wheel of Fate ─────────────────────────────────────────────────
 
     /// Publish a pending outcome. The flag store is Release so a consumer that
     /// sees the flag sees both values.
@@ -433,8 +374,6 @@ impl<K, U> TaskInner<K, U> {
         self.fate_value.store(0, Ordering::Relaxed);
     }
 
-    // ── Stacks and identity ───────────────────────────────────────────
-
     /// Kernel-stack bounds as `(base, top)`. `(0, 0)` when unset.
     ///
     /// The two are read separately and are not published together, so a
@@ -454,10 +393,9 @@ impl<K, U> TaskInner<K, U> {
     /// Take this task's `SYSCALL_TEST_REPORT` ring, leaving the slot empty.
     ///
     /// The taker is a foreign task draining a corpse while the owner installs
-    /// the ring lazily, so the `SpinLock` is what makes the two safe against
-    /// each other. The `KBox` leaves with the return value and is therefore
-    /// dropped by the caller after the guard is released — freeing a ring under
-    /// the lock would put an allocator call in the critical section.
+    /// the ring lazily, hence the `SpinLock`. The `KBox` leaves with the return
+    /// value so the caller drops it after the guard is released, keeping the
+    /// allocator out of the critical section.
     #[inline]
     pub fn take_test_reports(
         &self,
@@ -465,14 +403,10 @@ impl<K, U> TaskInner<K, U> {
         self.test_reports.lock().take()
     }
 
-    // ── Children list ─────────────────────────────────────────────────
-    //
-    // Membership in this list *is* a parked strong reference, so every method
-    // here is half of a placement pair — see `task::placement`. They are
-    // deliberately not `pub` conveniences over the list: linking must stay
-    // paired with a retain, and unlinking with a reclaim.
+    // Membership in this list *is* a parked strong reference: every method here
+    // is half of a placement pair — linking pairs with a retain, unlinking with
+    // a reclaim. See `task::placement`.
 
-    /// Link `child` into this task's children list.
     #[inline]
     pub fn children_push(
         &self,
@@ -481,7 +415,6 @@ impl<K, U> TaskInner<K, U> {
         self.children.push_back(child)
     }
 
-    /// Detach the head child, or `None` when the list is empty.
     #[inline]
     pub fn children_pop(&self) -> Option<core::ptr::NonNull<TaskInner<K, U>>> {
         self.children.pop_front()
@@ -493,7 +426,6 @@ impl<K, U> TaskInner<K, U> {
         self.children.iter().next()
     }
 
-    /// Detach a specific child.
     #[inline]
     pub fn children_remove(
         &self,
@@ -502,23 +434,18 @@ impl<K, U> TaskInner<K, U> {
         self.children.remove(child).map(|_| ())
     }
 
-    /// Whether this task has no children.
     #[inline]
     pub fn children_is_empty(&self) -> bool {
         self.children.is_empty()
     }
 
-    /// How many children this task has.
     #[inline]
     pub fn children_len(&self) -> usize {
         self.children.len()
     }
 
-    // ── Intrusive links ───────────────────────────────────────────────
-    //
-    // Reference in, pointer out: a Treiber successor *is* a raw pointer, and
-    // its lifetime is governed by the parked reference the link represents
-    // rather than by a Rust borrow. That asymmetry is deliberate.
+    // Reference in, pointer out: a Treiber successor's lifetime is governed by
+    // the parked reference the link represents, not by a Rust borrow.
 
     /// This task's remote-wake inbox successor.
     #[inline]
@@ -536,22 +463,14 @@ impl<K, U> TaskInner<K, U> {
         &self.reclaim_link
     }
 
-    // ── Saved register state: racy diagnostic reads ───────────────────
-    //
-    // `TaskContext` is `#[repr(C, packed)]`, so a pointer to one of its `u64`
-    // fields carries no alignment guarantee — hence `read_unaligned` rather
-    // than a plain read, and hence the only `unsafe` in this file. The
-    // unsafety is about alignment and tearing, not about whether the task
-    // exists: `as_ptr_racy` is `TaskOwnCell`'s sanctioned unsynchronised read
-    // path and forms no reference, so a concurrent write by the owning CPU is
-    // a torn value rather than UB.
-    //
-    // Torn is acceptable for every consumer: these feed log lines, the
-    // cr3-identity scan, and stack-probe bounds that range-check each address
-    // they read. A witnessed accessor would be wrong here — the whole point is
-    // to read a task this CPU is *not* running.
+    // `TaskContext` is `#[repr(C, packed)]`, so its `u64` fields carry no
+    // alignment guarantee — hence `read_unaligned`. `as_ptr_racy` forms no
+    // reference, so a concurrent write by the owning CPU tears rather than
+    // being UB, and torn is acceptable: every consumer range-checks what it
+    // reads. Reading a task this CPU is *not* running is the point, so a
+    // witnessed accessor would be wrong here.
 
-    /// The task's saved `CR3`. The address-space identity tag the user-fault
+    /// The task's saved `CR3` — the address-space identity tag the user-fault
     /// dispatcher compares against live `CR3`.
     #[inline]
     pub fn context_cr3(&self) -> u64 {
@@ -561,7 +480,6 @@ impl<K, U> TaskInner<K, U> {
         ))
     }
 
-    /// The task's saved instruction pointer.
     #[inline]
     pub fn context_rip(&self) -> u64 {
         self.read_context_field(core::mem::offset_of!(

@@ -1,24 +1,17 @@
 //! Device-handle primitives.
 //!
-//! This module hosts type-agnostic helpers consumers need when
-//! borrowing device state published as raw pointers — the canonical
-//! example being a kernel-static `AtomicPtr<DeviceHandle>` whose
-//! load is reborrowed as `&DeviceHandle` for the data plane.
-//!
-//! Alongside the [`FromRawPtr`] extension trait (a null-safe `&Self`
-//! reborrow parallel to
-//! [`crate::irq::interrupt_frame::InterruptFrame::from_ptr`]), this module
-//! hosts [`Devres`] — the LIFO managed-resource bag a driver's probe uses to
-//! acquire MMIO/IRQ/DMA resources that auto-release on failure or unbind.
+//! [`FromRawPtr`] is a null-safe `&Self` reborrow for device state published as
+//! a raw pointer (e.g. a kernel-static `AtomicPtr<DeviceHandle>` reborrowed for
+//! the data plane). [`Devres`] is the LIFO managed-resource bag a driver's probe
+//! uses to acquire MMIO/IRQ/DMA resources that auto-release on failure or
+//! unbind.
 
 pub mod devres;
 
 pub use devres::{Devres, DevresError, ResourceObject};
 
-/// Null-safe `&Self` reborrow over a raw pointer.
-///
-/// A blanket `impl<T>` makes the trait method available on any type
-/// once the trait is in scope:
+/// Null-safe `&Self` reborrow over a raw pointer. A blanket `impl<T>` makes the
+/// method available on any type once the trait is in scope:
 ///
 /// ```ignore
 /// use slopos_ostd::dev::FromRawPtr;
@@ -36,32 +29,18 @@ pub use devres::{Devres, DevresError, ResourceObject};
 /// - the allocation is published once and never freed,
 /// - no aliased `&mut Self` ever exists.
 ///
-/// # Why `&'static`, and why there is no `_mut` form
-///
-/// Every user of this trait is a device handle whose backing pointer is
-/// published once at registration and outlives the machine, so `'static` is
-/// what the reference actually is. A caller-chosen `'a` would have been
-/// strictly worse than useless here: the caller picks it, so two calls yield
-/// two references the compiler believes are unrelated, and the blanket impl
-/// makes that available for *every* sized type in the kernel.
-///
-/// The mutable form is gone rather than made `'static`, because `'static`
-/// would not have fixed it — two `&'static mut` to one place is still instant
-/// aliasing UB. A future caller that needs one wants a scoped closure, not
-/// this trait.
+/// `'static` is what the reference actually is: every user is a device handle
+/// published once at registration. A caller-chosen `'a` would let two calls
+/// yield references the compiler believes unrelated, for every sized type in
+/// the kernel. There is no `_mut` form because two `&'static mut` to one place
+/// is aliasing UB; a caller needing one wants a scoped closure.
 pub trait FromRawPtr: Sized + 'static {
     fn from_ptr(ptr: *const Self) -> Option<&'static Self>;
 
     /// Reborrow `ptr` as `&Self` without a null check.
     ///
-    /// Caller invariant: `ptr` is non-null, aligned, dereferenceable
-    /// for `size_of::<Self>()` bytes, and no aliasing `&mut Self`
-    /// exists. Matches the standard `&*ptr` precondition.
-    ///
-    /// Used by device handles whose backing `*const Self` is published
-    /// once at registration and outlives every consumer (e.g. the net
-    /// `DeviceHandle::dev` pointer is valid for the device's
-    /// registered lifetime).
+    /// Caller invariant: `ptr` is non-null, plus the trait-level contract —
+    /// the standard `&*ptr` precondition.
     fn from_ptr_unchecked(ptr: *const Self) -> &'static Self;
 }
 
@@ -71,8 +50,8 @@ impl<T: 'static> FromRawPtr for T {
         if ptr.is_null() {
             None
         } else {
-            // SAFETY: caller-asserted contract per trait docs;
-            // null was just checked.
+            // SAFETY: caller-asserted contract per trait docs; null just
+            // checked.
             Some(unsafe { &*ptr })
         }
     }
@@ -80,8 +59,7 @@ impl<T: 'static> FromRawPtr for T {
     #[inline]
     fn from_ptr_unchecked(ptr: *const Self) -> &'static Self {
         // SAFETY: caller asserts the contract documented on
-        // `from_ptr_unchecked` — non-null, aligned, dereferenceable,
-        // no aliasing mutable borrow.
+        // `from_ptr_unchecked`.
         unsafe { &*ptr }
     }
 }

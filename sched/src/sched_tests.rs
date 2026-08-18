@@ -6576,12 +6576,10 @@ slopos_testing::stest!(
 
 /// A builder that loses its frame releases the child it was building.
 ///
-/// A `PendingTask` is deliberately unregistered — no lookup, no active-task
-/// walk, no census and no shutdown sweep can see it — so a token lost with its
-/// frame is unrecoverable, and the only trace is `allocate_task`'s `num_tasks`
-/// bump never coming back down. The guard's `Drop` is what returns it, which
-/// works because a killed builder now aborts out of whatever it is blocked in
-/// and returns through its own frames.
+/// A `PendingTask` is unregistered — no lookup, no active-task walk, no census
+/// and no shutdown sweep sees it — so a token lost with its frame is
+/// unrecoverable, and the only trace is `allocate_task`'s live count never
+/// coming back down.
 pub fn test_spawn_guard_releases_its_child_when_dropped() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -6605,8 +6603,7 @@ pub fn test_spawn_guard_releases_its_child_when_dropped() -> TestResult {
     }
     crate::task::task_graveyard_drain();
 
-    // The direct leak signature: nothing registered the child, so no walk can
-    // see it and only the census moves.
+    // Nothing registered the child, so only the census can show the leak.
     let (live_after, _, _, _) = task_slot_census();
     if live_after != live_before {
         klog_info!(
@@ -6627,10 +6624,7 @@ slopos_testing::stest!(
 /// A `WaitNode` unlinks itself when its frame unwinds.
 ///
 /// `catch_panic!` unwinds rather than jumping, so destructors run during
-/// recovery — which is what makes the node's own `Drop` a real release path
-/// and not just documentation. A node left linked by a panicking waiter is
-/// the same corruption as one left by a killed waiter: the queue keeps a
-/// pointer into a frame that no longer exists.
+/// recovery; a node left linked keeps a queue pointer into a dead frame.
 pub fn test_wait_node_unlinks_when_its_frame_unwinds() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -6646,8 +6640,7 @@ pub fn test_wait_node_unlinks_when_its_frame_unwinds() -> TestResult {
         outcome = TestResult::Fail;
     }
 
-    // Destroy the node the way an unwind does, then confirm the queue no
-    // longer names it.
+    // Destroyed the way an unwind destroys it.
     drop(node);
     if wq.waiter_count() != 0 {
         klog_info!(
@@ -6656,8 +6649,7 @@ pub fn test_wait_node_unlinks_when_its_frame_unwinds() -> TestResult {
         );
         outcome = TestResult::Fail;
     }
-    // The queue must still be usable: a botched unlink corrupts the list
-    // rather than merely leaving it long.
+    // A botched unlink corrupts the list rather than merely leaving it long.
     if wq.wake_one() {
         klog_info!("SCHED_TEST: the queue woke a node that no longer exists");
         outcome = TestResult::Fail;
@@ -6675,10 +6667,7 @@ slopos_testing::stest!(
 /// A process at its `Task` ceiling is refused, and the refusal refunds.
 ///
 /// `MAX_TASKS` is 8192 global, so without a per-principal bound one process
-/// spends the whole table and every other process is denied — the permanent
-/// silent denial this subsystem exists to delete. Drives one account to its
-/// ceiling, checks the refusal, then checks the row returns to where it
-/// started once the tasks exit.
+/// spends the whole table and denies every other one.
 pub fn test_quota_task_ceiling_refuses_and_refunds() -> TestResult {
     use slopos_abi::quota::{QuotaMode, ResourceKind};
     use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode, stats};
@@ -6697,8 +6686,7 @@ pub fn test_quota_task_ceiling_refuses_and_refunds() -> TestResult {
     set_limit(account, ResourceKind::Task, baseline + CEILING);
 
     // The account is what the ceiling binds, so the charges are taken the way
-    // `task_build` takes them rather than by spawning real tasks: this test is
-    // about the bound and the refund, and a real spawn drags in the scheduler.
+    // `task_build` takes them rather than by spawning real tasks.
     let mut held = slopos_ostd::KVec::new();
     let mut granted = 0u32;
     for _ in 0..CEILING + 4 {
@@ -6719,11 +6707,8 @@ pub fn test_quota_task_ceiling_refuses_and_refunds() -> TestResult {
     let after = stats(account, ResourceKind::Task).map_or(0, |s| s.used);
     set_quota_mode(restore);
 
-    // Retire the scratch process so its row goes dark. Without this the row
-    // survives the test carrying a deliberately-tiny ceiling and the denial
-    // this test *wants*, and the headroom gate reads both as a finding — which
-    // it should: a denial in the dump means a real workload was refused, and a
-    // test must not make that indistinguishable from one.
+    // Retire the scratch process so its row goes dark before the headroom gate
+    // reads it.
     if let Some(handle) = process.handle() {
         slopos_ostd::process::process_retire(handle);
     }
@@ -6758,10 +6743,8 @@ slopos_testing::stest!(
 
 /// A scratch process with its account row, retired on drop.
 ///
-/// Every quota test below needs a principal that is not the caller's, and a
-/// row that goes dark when the test ends: a leftover row carrying a
-/// deliberately-tiny ceiling and a deliberate denial is indistinguishable, to
-/// the headroom gate, from a real workload being refused.
+/// A leftover row carrying a deliberately-tiny ceiling and a deliberate denial
+/// is indistinguishable, to the headroom gate, from a real workload refused.
 struct QuotaScratch {
     process: slopos_ostd::KArc<slopos_ostd::process::Process>,
 }
@@ -6786,12 +6769,8 @@ impl Drop for QuotaScratch {
     }
 }
 
-/// One process at its `Task` ceiling does not deny another.
-///
-/// The property a global `MAX_TASKS` cannot provide: with only a global
-/// bound, the first process to fill the table denies everyone, and the denial
-/// is permanent and silent. Two sibling accounts, one driven to its ceiling,
-/// and the other must still be able to charge.
+/// One process at its `Task` ceiling does not deny another — the property a
+/// global `MAX_TASKS` cannot provide.
 pub fn test_quota_task_cross_process_isolation() -> TestResult {
     use crate::task::task_quota::reserve;
     use slopos_abi::quota::{QuotaMode, ResourceKind};
@@ -6816,9 +6795,9 @@ pub fn test_quota_task_cross_process_isolation() -> TestResult {
             break;
         }
     }
-    // The neighbour is a sibling row under the same root, so it shares every
-    // ancestor with the exhausted one — which is exactly the case a
-    // hierarchical debit could get wrong by refusing at a shared level.
+    // The neighbour shares every ancestor with the exhausted account, which is
+    // the case a hierarchical debit could get wrong by refusing at a shared
+    // level.
     let neighbour_ok = reserve(neighbour.account()).is_some();
     drop(held);
     set_quota_mode(restore);
@@ -6841,9 +6820,8 @@ slopos_testing::stest!(
 
 /// A process at its `Process` ceiling cannot spawn, and the refusal is exact.
 ///
-/// `MAX_PROCESSES` is 256 and is reached long before `MAX_TASKS`, so this is
-/// the tighter global table: without a per-principal bound one process spawns
-/// until nothing else on the machine can.
+/// `MAX_PROCESSES` is 256 and reached long before `MAX_TASKS`, so this is the
+/// tighter global table.
 pub fn test_quota_process_ceiling_refuses_and_refunds() -> TestResult {
     use slopos_abi::quota::{QuotaMode, ResourceKind};
     use slopos_ostd::process::process_spawn;
@@ -6862,8 +6840,8 @@ pub fn test_quota_process_ceiling_refuses_and_refunds() -> TestResult {
     set_quota_mode(QuotaMode::Enforce);
     set_limit(account, ResourceKind::Process, baseline + CEILING);
 
-    // Children are spawned against the scratch account as their accounting
-    // parent, which is the edge a real spawn sets and never re-homes.
+    // The scratch account is the children's accounting parent, the edge a real
+    // spawn sets and never re-homes.
     let mut children = slopos_ostd::KVec::new();
     let mut spawned = 0u32;
     for _ in 0..CEILING + 3 {
@@ -6881,8 +6859,7 @@ pub fn test_quota_process_ceiling_refuses_and_refunds() -> TestResult {
     let at_ceiling = stats(account, ResourceKind::Process).map_or(0, |s| s.used);
     let denials = stats(account, ResourceKind::Process).map_or(0, |s| s.denials);
 
-    // Retire each child so its own row goes dark, then drop the references:
-    // the spawner's charge is released at the reap, not at the final drop.
+    // The spawner's charge is released at the reap, not at the final drop.
     for child in children.iter() {
         if let Some(handle) = child.handle() {
             slopos_ostd::process::process_retire(handle);
@@ -6919,11 +6896,8 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-/// A task's stack pages are charged, and given back at the exit latch.
-///
-/// `KernelMeta` is the largest single consumer the accounting added: 12 pages
-/// per task, and nothing table-shaped bounded it before. This pins both the
-/// amount and the release point.
+/// A task's stack pages are charged, and given back at the exit latch —
+/// `KernelMeta` is the largest single consumer, 12 pages per task.
 pub fn test_quota_kernelmeta_covers_task_stacks() -> TestResult {
     use slopos_abi::quota::{QuotaMode, ResourceKind};
     use slopos_abi::task::{TASK_KERNEL_STACK_SIZE, TASK_UNSAFE_STACK_SIZE};
@@ -6965,21 +6939,12 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-/// The charge path's cost, in nanoseconds per charge+refund round trip.
+/// The charge path's cost per charge+refund round trip, measured at two account
+/// depths because the debit walks *up* the chain — the difference between them
+/// is the per-level cost.
 ///
-/// Residual risk 7 made measurable. Escort measured end-to-end kernel
-/// accounting at 8 % throughput and 15-50 % under load with protection
-/// domains; this tree had no number at all, so a regression of that size would
-/// have passed every gate silently.
-///
-/// Measured at two depths because the debit walks *up* the account chain: a
-/// leaf under the root pays for two rows, one at `MAX_ACCOUNT_DEPTH` pays for
-/// eight. The difference between them is the per-level cost, which is the part
-/// that grows if the hierarchy ever deepens.
-///
-/// Emits `QUOTACOST:` lines rather than asserting a bound here — the ceiling
-/// lives in `scripts/gates/quota/<variant>.txt`, so raising it is a diff on a
-/// tracked file rather than an edit to a test.
+/// Emits `QUOTACOST:` lines rather than asserting a bound: the ceiling lives in
+/// `scripts/gates/quota/<variant>.txt`.
 pub fn test_quota_charge_cost() -> TestResult {
     use slopos_abi::quota::{FdSlot, QuotaMode, ResourceKind};
     use slopos_ostd::process::quota::{Charge, quota_mode, set_quota_mode, try_charge};
@@ -6991,13 +6956,9 @@ pub fn test_quota_charge_cost() -> TestResult {
         return TestResult::Fail;
     };
 
-    // A chain as deep as the arena permits, so the reported per-level cost is
-    // measured over the real maximum rather than extrapolated from two points.
-    // Grown until the arena refuses, not to a computed bound: `account_create`
-    // is what enforces `MAX_ACCOUNT_DEPTH`, and a spawn past it still succeeds
-    // -- it just leaves the process with an account that names no row. Keeping
-    // only children that actually got one is what makes `deepest` the deepest
-    // *charged* account rather than the deepest process.
+    // Grown until the arena refuses rather than to a computed bound:
+    // `account_create` enforces `MAX_ACCOUNT_DEPTH`, and a spawn past it still
+    // succeeds — it just leaves the process with an account that names no row.
     let mut chain = slopos_ostd::KVec::new();
     let mut deepest = shallow.account();
     loop {
@@ -7020,8 +6981,7 @@ pub fn test_quota_charge_cost() -> TestResult {
 
     // A row that does not exist makes `try_charge` return immediately, so a
     // chain built past `MAX_ACCOUNT_DEPTH` would measure the *absence* of a
-    // walk and report it as a fast one. Checking that the deepest account has
-    // a row is what stops this test reporting a number for work it never did.
+    // walk and report it as a fast one.
     if slopos_ostd::process::quota::stats(deepest, ResourceKind::FdSlot).is_none() {
         klog_info!("QUOTACOST: the deepest account has no row; nothing to measure");
         return TestResult::Fail;
@@ -7031,10 +6991,9 @@ pub fn test_quota_charge_cost() -> TestResult {
     set_quota_mode(QuotaMode::Enforce);
 
     let measure = |account| -> u64 {
-        // Warm first, unmeasured. Without it the first loop absorbs the
-        // arena's cold cache lines and the branch predictor's first pass, and
-        // reports them as the cost of whichever depth happened to run first --
-        // which measured a deeper chain as *cheaper* than a shallow one.
+        // Warm first, unmeasured: otherwise the first loop absorbs the arena's
+        // cold cache lines and reports a deeper chain as cheaper than a
+        // shallow one.
         for _ in 0..ITERATIONS / 10 {
             if let Ok(reservation) = try_charge::<FdSlot>(account, 1) {
                 drop(Charge::commit(reservation));
@@ -7042,9 +7001,8 @@ pub fn test_quota_charge_cost() -> TestResult {
         }
         let start = slopos_arch::tsc::rdtsc();
         for _ in 0..ITERATIONS {
-            // Commit and drop, so the measurement covers the whole round trip
-            // a real charge site pays: the walk up, the token, and the walk
-            // back down on refund.
+            // Commit and drop, so the measurement covers the walk up, the
+            // token, and the walk back down on refund.
             if let Ok(reservation) = try_charge::<FdSlot>(account, 1) {
                 drop(Charge::commit(reservation));
             }
@@ -7052,11 +7010,8 @@ pub fn test_quota_charge_cost() -> TestResult {
         slopos_arch::tsc::rdtsc().wrapping_sub(start)
     };
 
-    // Both accounts resolved before either is timed, and the deep one measured
-    // first: the loop that runs first pays for the arena's cold cache lines
-    // however much warming precedes it, and attributing that to whichever
-    // depth happened to go first is what made a depth-8 walk look cheaper than
-    // a depth-1 walk.
+    // The deep one is measured first: the loop that runs first pays for the
+    // arena's cold cache lines however much warming precedes it.
     let shallow_account = shallow.account();
     let deep_cycles = measure(deepest);
     let shallow_cycles = measure(shallow_account);
@@ -7069,17 +7024,13 @@ pub fn test_quota_charge_cost() -> TestResult {
     }
     drop(chain);
 
-    // Reported in **cycles**, not nanoseconds. Converting needs a frequency,
-    // and under TCG the TSC does not track one -- the first attempt divided by
-    // `estimate_cycles_per_ms` and reported a depth-8 walk as five times
-    // cheaper than a depth-1 walk, which is impossible and was the conversion
-    // rather than the measurement. Cycles per charge is the quantity a
-    // regression would move anyway.
+    // Cycles, not nanoseconds: converting needs a frequency, and under TCG the
+    // TSC does not track one.
     let per_charge = |cycles: u64| -> u64 { cycles / ITERATIONS as u64 };
 
-    // Published through the quota report rather than logged here: per-test
-    // klog is captured per test and shown only on failure, and this line has
-    // to reach the raw stream for the gate to parse it.
+    // Published through the quota report rather than logged here: per-test klog
+    // is shown only on failure, and this line has to reach the raw stream for
+    // the gate to parse it.
     crate::quota_console::record_charge_cost(
         per_charge(shallow_cycles),
         depth,

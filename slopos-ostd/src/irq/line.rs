@@ -174,7 +174,6 @@ pub fn register_irq_reserved<'brand>(_token: &BspToken<'brand>, reserved: &[u8])
     }
 }
 
-/// Test-only reset hook.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_test() {
     for word in ALLOC_STATE.allocated.words.iter() {

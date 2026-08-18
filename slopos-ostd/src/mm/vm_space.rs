@@ -688,9 +688,9 @@ impl<'a> CursorMut<'a> {
 
         // Leak the UFrame's ref into the PTE: the count stays at 1,
         // owned by the leaf entry. VERIFIED: the `UFrame<M>` argument
-        // type is the Inv. 4 + Inv. 5 carrier — `broken_map_sensitive_
-        // violates_inv45` proves accepting a raw `Frame` here would let a
-        // sensitive frame land in a user PTE.
+        // type is the Inv. 4 + Inv. 5 carrier —
+        // `broken_map_sensitive_violates_inv45` proves accepting a raw
+        // `Frame` here would let a sensitive frame land in a user PTE.
         let inner = frame.into_frame();
         let paddr = inner.paddr();
         let _slot = inner.into_raw();
@@ -781,21 +781,17 @@ impl<'a> CursorMut<'a> {
     /// Install a leaf over physical memory that has **no** `MetaSlot` —
     /// device MMIO apertures, firmware runtime regions, anything outside
     /// the RAM range `META_SLOTS` is sized for. No frame is consumed and
-    /// no reference is taken, so there is nothing for [`Self::unmap`] to
-    /// reclaim; the leaf carries
-    /// [`PageProperty::SOFTWARE_NO_FRAME_REF`] to say so in the entry
-    /// itself, and the unmap path reads that bit rather than trusting
-    /// the caller to remember.
+    /// no reference is taken; the leaf carries
+    /// [`PageProperty::SOFTWARE_NO_FRAME_REF`] so the unmap path reads
+    /// that bit rather than trusting the caller to remember.
     ///
     /// Guarded to supervisor-only leaves (`!prop.user`): a device
     /// aperture reachable from ring 3 is the sensitive-memory exposure
     /// Inv. 4 and Inv. 5 exist to forbid. Unlike [`Self::map_kernel`]
-    /// this does **not** additionally require the higher half — the
-    /// firmware runtime regions the UEFI `ResetSystem` path needs are
-    /// mapped at their physical address, which is a supervisor-only leaf
-    /// in the low half of the kernel master. Callers own the VA policy;
-    /// `slopos_mm::kernel_mappings::kernel_map_io_4kb` is the one that
-    /// states it.
+    /// this does **not** additionally require the higher half — firmware
+    /// runtime regions are mapped at their physical address, a
+    /// supervisor-only leaf in the low half of the kernel master.
+    /// Callers own the VA policy.
     ///
     /// Errors: as [`Self::map_kernel`], minus the frame-alignment arm.
     pub fn map_io<S: PageSize>(
@@ -851,7 +847,6 @@ impl<'a> CursorMut<'a> {
     }
 
     /// Shared create-mode descent for the three map entry points.
-    /// Returns the leaf table and the index within it.
     fn walk_to_leaf_for_map<S: PageSize>(
         &self,
         user_mapping: bool,
@@ -871,7 +866,7 @@ impl<'a> CursorMut<'a> {
         } = outcome
         else {
             // Create mode never returns NotPresent — it would have
-            // allocated. Treat as corruption.
+            // allocated.
             crate::klog_warn!(
                 "vm_space::map: walk(Create) returned non-leaf va=0x{:x} target_level={:?} \
                  outcome={:?} -> PathCorrupt",
@@ -882,9 +877,8 @@ impl<'a> CursorMut<'a> {
             return Err(MapError::PathCorrupt);
         };
         if leaf_level != S::LEVEL {
-            // walk_to_leaf in Create mode splits any blocking huge
-            // page on the way down; reaching here with a wrong level
-            // means corruption.
+            // Create mode splits any blocking huge page on the way
+            // down, so a wrong level here means corruption.
             crate::klog_warn!(
                 "vm_space::map: leaf level mismatch va=0x{:x} got={:?} want={:?} \
                  (blocking huge page not split) -> PathCorrupt",
@@ -914,7 +908,7 @@ impl<'a> CursorMut<'a> {
     /// Dropping it returns the page to the registered allocator.
     ///
     /// Returns `Ok(None)` for a leaf [`Self::map_io`] installed — that
-    /// entry owns no reference, so there is nothing to hand back.
+    /// entry owns no reference.
     pub fn unmap_kernel<S: PageSize, M: AnyFrameMeta>(
         &mut self,
     ) -> Result<Option<Frame<M>>, MapError> {
@@ -946,10 +940,6 @@ impl<'a> CursorMut<'a> {
             return Ok(None);
         };
         if leaf_level != S::LEVEL {
-            // The entry is at a different page size than the caller
-            // expected — flag it explicitly so the caller can recover
-            // (e.g. by retrying with the right size) instead of
-            // silently dropping the unmap on the floor.
             return Err(MapError::SizeMismatch);
         }
 
@@ -957,8 +947,8 @@ impl<'a> CursorMut<'a> {
         if !pte.is_present() {
             return Ok(None);
         }
-        // Sanity razor: a huge-leaf-sized cursor unmap on a 4 KiB
-        // entry, or vice versa, would have failed `S::LEVEL` above.
+        // A size mismatch would already have failed the `S::LEVEL`
+        // check above.
         debug_assert_eq!(pte.is_huge(), S::HUGE_BIT);
 
         let paddr = pte.address();
@@ -967,27 +957,20 @@ impl<'a> CursorMut<'a> {
             & PageProperty::SOFTWARE_NO_FRAME_REF
             != 0;
         pte.clear();
-        // Local TLB invalidation for the freed leaf. Cross-CPU
-        // shootdown is the consumer's responsibility (slopos-mm wraps
-        // these calls with `tlb_shootdown`).
+        // Local invalidation only; cross-CPU shootdown is the
+        // consumer's responsibility.
         flush_leaf_local::<S>(self.cur);
         self.dirty = true;
 
         if owns_no_ref {
-            // A `map_io` leaf. The physical range it named has no
-            // `MetaSlot` at all, so there is no ref to reclaim and
+            // A `map_io` leaf: its physical range has no `MetaSlot`, so
             // `from_raw_at` below would either fail `OutOfRange` or —
-            // worse, on a machine whose RAM reaches past the aperture —
-            // succeed against a slot naming unrelated memory and hand
-            // a device window to the frame allocator. The bit in the
-            // entry is what makes that unreachable rather than
-            // remembered.
+            // on a machine whose RAM reaches past the aperture —
+            // succeed against a slot naming unrelated memory and hand a
+            // device window to the frame allocator.
             return Ok(None);
         }
 
-        // Fire the cursor-unmap hook for user-space leaves. Slopos-mm
-        // dispatches this into its LUF queue; tests can observe it
-        // for shootdown-coverage assertions.
         if was_user {
             if let Some(hook) = current_cursor_unmap_hook() {
                 hook.after_unmap(
@@ -998,16 +981,13 @@ impl<'a> CursorMut<'a> {
             }
         }
 
-        // Reclaim the leaked UFrame ref.
-        // VERIFIED: `verification/proofs/vm_space_cursor.rs` (REF) proves
-        // `unmap` of a present leaf reclaims exactly one ref
-        // (`ref_map_unmap_exactly_once`) and that the not-present guard
-        // above prevents a double-free; `ref_map_then_unmap_roundtrips`
-        // shows the leak/reclaim pair returns the count to zero.
-        // SAFETY: at `map` time we leaked exactly one ref to this
-        // slot via `Frame::into_raw`; clearing the PTE here removes
-        // the only path that held that ref. `from_raw_at` re-wraps
-        // without bumping the count, so accounting is exact.
+        // VERIFIED: `verification/proofs/vm_space_cursor.rs` (REF)
+        // proves `unmap` of a present leaf reclaims exactly one ref and
+        // that the not-present guard above prevents a double-free.
+        // SAFETY: at `map` time we leaked exactly one ref to this slot
+        // via `Frame::into_raw`; clearing the PTE above removes the only
+        // path that held it, and `from_raw_at` re-wraps without bumping
+        // the count.
         let frame: Frame<M> =
             unsafe { Frame::<M>::from_raw_at(paddr).map_err(|_| MapError::PathCorrupt)? };
         Ok(Some(frame))
@@ -1051,7 +1031,6 @@ impl<'a> CursorMut<'a> {
         if leaf_level != S::LEVEL {
             return Err(MapError::SizeMismatch);
         }
-        // Carry forward the address; refresh access flags.
         let mut flags = prop.to_leaf_flags();
         if !flags.contains(PteFlags::PRESENT) {
             flags |= PteFlags::PRESENT;
@@ -1066,10 +1045,8 @@ impl<'a> CursorMut<'a> {
     }
 }
 
-/// Local-CPU invalidation for a leaf at size `S`. For 4 KiB entries
-/// emits a single INVLPG; for huge leaves the consumer's TLB driver
-/// must invalidate every 4 KiB page in the range (issued via repeated
-/// INVLPG — typed coordinator wraps this).
+/// Local-CPU invalidation for a leaf at size `S`: one INVLPG per 4 KiB
+/// page in the leaf.
 #[inline]
 fn flush_leaf_local<S: PageSize>(start: VirtAddr) {
     let mut offset: u64 = 0;
@@ -1079,10 +1056,6 @@ fn flush_leaf_local<S: PageSize>(start: VirtAddr) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CursorMut range helpers.
-// ---------------------------------------------------------------------------
-
 impl CursorMut<'_> {
     /// Map a sequence of consecutive `S`-sized leaves starting at the
     /// cursor's current vaddr, advancing the cursor by `S::BYTES` after
@@ -1090,10 +1063,8 @@ impl CursorMut<'_> {
     /// number of mappings that were installed (the cursor is left at
     /// the position immediately after the last installed leaf).
     ///
-    /// On success the returned `usize` equals the number of frames the
-    /// iterator produced. Trailing `Ok(())` from `map` requires the
-    /// cursor's `range` to extend at least `frames.len() * S::BYTES`
-    /// bytes from the starting `cur`.
+    /// Requires the cursor's `range` to extend at least
+    /// `frames.len() * S::BYTES` bytes from the starting `cur`.
     pub fn map_range<S, M, I>(&mut self, frames: I, prop: PageProperty) -> Result<usize, MapError>
     where
         S: PageSize,
@@ -1185,37 +1156,17 @@ mod tests {
     }
 }
 
-// ---------------------------------------------------------------------------
-// VmSpace::Drop — flush-free user-half tree teardown.
-// ---------------------------------------------------------------------------
-//
-// A VmSpace is dropped only when its `KArc` refcount hits zero — by
-// construction no CPU is using it (otherwise a `KArc` reference would
-// be live). The user-half walker therefore needs no per-page TLB
-// flush; consumers issue a single up-front `tlb_shootdown(All)` in
-// their teardown path before letting the VmSpace's last `KArc` drop.
-//
-// The walker recurses into every present non-huge intermediate
-// (PDPT/PD/PT) under PML4 indices 0..256, reclaims every leaf frame
-// (4 KiB user pages and any huge leaves), then reclaims the
-// intermediate tables themselves via `reclaim_leaked_frame`. The
-// kernel half (256..512) is intentionally skipped — those entries
-// point into the shared kernel master, which `KERNEL_VM_SPACE` owns
-// (and never drops, since it lives behind a `OnceLock`).
-//
-// Recursion depth is fixed at 3 (PML4 → PDPT → PD → PT), and each
-// frame's stack budget is bounded by the loop counter + a couple of
-// scratch variables — well under the 2 KiB threshold enforced by
-// `scripts/check_stack_sizes.sh`.
+// A VmSpace drops only when its `KArc` refcount hits zero, so no CPU is
+// using it: the user-half walk needs no per-page TLB flush, and
+// consumers issue a single up-front `tlb_shootdown(All)` before the last
+// `KArc` drops. The kernel half (256..512) is skipped — those entries
+// point into the shared kernel master, which `KERNEL_VM_SPACE` owns and
+// never drops. Recursion depth is fixed at 3 (PML4 → PDPT → PD → PT),
+// well under the 2 KiB stack threshold.
 
 impl Drop for VmSpace {
     fn drop(&mut self) {
         drop_user_half_tree(self.pml4.paddr());
-        // `self.pml4: Frame<PageTableMeta>` drops next, decrementing
-        // the PML4 frame's ref count to zero and returning it to the
-        // allocator (or, in the wrapped-kernel-master case, leaving
-        // the OnceLock storage's static lifetime to keep the slot
-        // pinned — KERNEL_VM_SPACE never drops in production).
     }
 }
 
@@ -1230,11 +1181,10 @@ fn drop_user_half_tree(pml4_phys: Paddr) {
             "PML4 huge entry at index {i} — architecturally invalid",
         );
         let child = pte.address();
-        // SAFETY: every present, non-huge PML4 entry was created by
-        // `step_down` (in WalkMode::Create) which leaked exactly one
-        // `Frame<PageTableMeta>` ref into this PTE. The VmSpace's
-        // refcount is zero (we are inside its Drop), so no CPU is
-        // walking this tree concurrently — recursion is safe.
+        // SAFETY: every present, non-huge PML4 entry holds exactly one
+        // `Frame<PageTableMeta>` ref leaked by `step_down` in
+        // `WalkMode::Create`, and the VmSpace's refcount is zero (we are
+        // inside its Drop), so no CPU is walking this tree concurrently.
         recursively_reclaim_subtree(child, PageTableLevel::Three);
     }
 }
@@ -1248,22 +1198,14 @@ fn recursively_reclaim_subtree(table_phys: Paddr, level: PageTableLevel) {
         }
         let child = pte.address();
         if pte.is_huge() {
-            // Huge user-half leaf (2 MiB at level Two, 1 GiB at
-            // level Three). Reclaim the leaked META_SLOTS ref — the
-            // `Frame` Drop resets the slot and then dispatches to the
-            // registered `FrameAlloc::dealloc`. NOTE: today's `Frame<M>` carries
-            // no per-page size, so `dealloc` is invoked with
-            // `size_pages = 1`; the trailing pages of the huge region
-            // are returned to the buddy allocator only when the
-            // consumer's `FrameAlloc` impl tracks the allocation
-            // size in its own bookkeeping (the production allocator
-            // shim does, since allocs go through `alloc_pages_at`).
-            // SAFETY: see drop_user_half_tree's SAFETY comment.
+            // `Frame<M>` carries no per-page size, so `dealloc` sees
+            // `size_pages = 1`; the trailing pages of a huge region come
+            // back only because the consumer's `FrameAlloc` tracks the
+            // allocation size itself.
+            // SAFETY: see `drop_user_half_tree`.
             unsafe { reclaim_leaked_frame(child) };
         } else if level == PageTableLevel::One {
-            // 4 KiB leaf — the common case. Reclaim the leaked
-            // user-frame ref.
-            // SAFETY: see drop_user_half_tree's SAFETY comment.
+            // SAFETY: see `drop_user_half_tree`.
             unsafe { reclaim_leaked_frame(child) };
         } else {
             let next_level = level
@@ -1272,11 +1214,8 @@ fn recursively_reclaim_subtree(table_phys: Paddr, level: PageTableLevel) {
             recursively_reclaim_subtree(child, next_level);
         }
     }
-    // Reclaim this intermediate page-table frame itself.
-    // SAFETY: every intermediate page-table frame was leaked into
-    // its parent PTE by `step_down`. The parent PTE's pre-cleared /
-    // not-cleared state is irrelevant — no CPU is walking the tree
-    // (VmSpace refcount is zero), so the slot can be returned to
-    // the allocator without further coordination.
+    // SAFETY: every intermediate page-table frame was leaked into its
+    // parent PTE by `step_down`, and no CPU is walking the tree
+    // (VmSpace refcount is zero).
     unsafe { reclaim_leaked_frame(table_phys) };
 }

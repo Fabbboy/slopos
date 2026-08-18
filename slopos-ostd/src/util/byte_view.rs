@@ -1,17 +1,13 @@
 //! Safe `&[T] ↔ &[u8]` conversions for `T: Pod`.
 //!
-//! Kernel-half code that copies arrays of POD records to/from user
-//! buffers historically used `unsafe { core::slice::from_raw_parts(p
-//! as *const u8, n * size_of::<T>()) }`. This module centralises the
-//! unsafe behind a typed safe API.
+//! Centralises the `from_raw_parts` casts that copying arrays of POD records
+//! to and from user buffers needs, behind a typed safe API.
 
 use core::mem::MaybeUninit;
 
 use crate::mm::Pod;
 
-/// Reinterpret a `&[T]` as a `&[u8]`. Length scales by
-/// `size_of::<T>()`. Always succeeds — `T: Pod` guarantees any byte
-/// pattern is valid for both directions.
+/// Reinterpret a `&[T]` as a `&[u8]`; length scales by `size_of::<T>()`.
 #[inline]
 pub fn pod_slice_as_bytes<T: Pod>(slice: &[T]) -> &[u8] {
     let len = slice.len() * core::mem::size_of::<T>();
@@ -31,22 +27,14 @@ pub fn pod_slice_as_bytes_mut<T: Pod>(slice: &mut [T]) -> &mut [u8] {
 }
 
 /// Reinterpret a single `&T: Pod` as `&[u8]` of length `size_of::<T>()`.
-///
-/// Sibling of [`pod_slice_as_bytes`] for the common
-/// "expose one struct value to a `copy_bytes_to_user` call" pattern.
 #[inline]
 pub fn pod_as_bytes<T: Pod>(value: &T) -> &[u8] {
     pod_slice_as_bytes(core::slice::from_ref(value))
 }
 
-/// Mutable byte view of a `MaybeUninit<T>`. Sound for **any** `T` —
-/// `MaybeUninit` permits arbitrary byte writes (including padding
-/// bytes) regardless of `T`'s validity invariants. The caller is
-/// responsible for only invoking `assume_init` once the bytes are
-/// known to represent a valid `T`.
-///
-/// Folds the `unsafe { core::slice::from_raw_parts_mut(val.as_mut_ptr()
-/// as *mut u8, size_of::<T>()) }` idiom into a safe helper.
+/// Mutable byte view of a `MaybeUninit<T>`. Sound for **any** `T`, since
+/// `MaybeUninit` permits arbitrary byte writes; the caller must only invoke
+/// `assume_init` once the bytes represent a valid `T`.
 #[inline]
 pub fn maybe_uninit_as_bytes_mut<T>(val: &mut MaybeUninit<T>) -> &mut [u8] {
     // SAFETY: a `MaybeUninit<T>` occupies `size_of::<T>()` bytes of

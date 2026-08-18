@@ -3,58 +3,28 @@
 //! The scheduler's placement containers — the per-CPU ready queue, the
 //! remote-wake inbox, the deferred previous-task slot, and the wait maps — hold
 //! their member task by an intrusive link (or map entry) plus one strong
-//! reference *parked* as a raw pointer. These primitives are the sole
-//! sanctioned way to move a strong reference into and out of such a slot:
-//!
-//! - [`task_placement_clone`] mints a fresh owning [`KArc`] from a still-live
-//!   task pointer (one atomic increment — the enqueue/wake fast path).
-//! - [`task_placement_retain`] parks one owning reference into a container
-//!   without materialising a handle ([`task_placement_clone`] then forget).
-//! - [`task_placement_leak`] parks an owning handle as a raw pointer.
-//! - [`task_placement_reclaim`] takes a parked reference back out as a handle.
-//!
-//! They balance one-to-one: every retain/leak must pair with exactly one
-//! reclaim (or a matching drop of the cloned handle). An unmatched park
-//! inflates the task's strong count forever, so the allocation never returns to
-//! the heap; a double reclaim frees one reference too many.
+//! reference *parked* as a raw pointer, and these primitives are the sole
+//! sanctioned way to move a strong reference into and out of such a slot. They
+//! balance one-to-one: an unmatched park inflates the task's strong count
+//! forever, so the allocation never returns to the heap; a double reclaim frees
+//! one reference too many.
 //!
 //! # The existence reference
 //!
-//! Containers do not cover every state a live task can be in. A blocked kernel
-//! thread sits in no queue, has no parent, and is named by its waiter node only
-//! through an opaque handle; a task holding a placement *reservation* has not
-//! reached its queue yet; a freshly created task is registered before it is
-//! published; a forked child is registered before it joins its parent's list. In
-//! each of those, no container holds a reference.
-//!
-//! So a task also owns one reference to *itself*, handed to it at registration
-//! by [`task_existence_park`] and taken back exactly once, when it is reaped, by
-//! [`task_existence_release`]. Linux gives `task_struct` the same self-reference
-//! and takes it back in `release_task`. Two properties follow, and the rest of
-//! the ownership model leans on both:
+//! No container covers a blocked kernel thread, a task holding a placement
+//! reservation that has not reached its queue, one registered before it is
+//! published, or a forked child before it joins its parent's list. So a task
+//! also owns one reference to *itself*, handed to it at registration by
+//! [`task_existence_park`] and taken back exactly once, when it is reaped, by
+//! [`task_existence_release`]. Linux gives `task_struct` the same
+//! self-reference. Two properties follow:
 //!
 //! - While a task is live, every container's release is provably *not* the final
 //!   one, so it stays a bare atomic decrement — safe under a lock and with
 //!   interrupts disabled.
 //! - A task is registered if and only if it holds this reference, so the
-//!   registry can be a pure weak index: it observes tasks without keeping any
-//!   alive, and a lookup is a liveness-checked upgrade rather than a fabricated
-//!   strong reference.
-//!
-//! # The reclaim token
-//!
-//! Everything above is about a task with references left. [`ParkedTask`] covers
-//! the state after the last one goes: strong count zero, body still intact,
-//! exactly one thread able to reach it. Only the winner of that transition gets
-//! the token, it cannot be constructed from an address, and every operation on
-//! it takes it by value — so a double-destroy does not typecheck, and
-//! [`with_parked`] can hand out a `&TaskInner` with no caller obligation at all.
-//!
-//! That last point is why the token exists rather than a comment. Every kernel
-//! crate outside OSTD compiles under `#![forbid(unsafe_code)]`, so a safe
-//! function here that dereferenced a caller-supplied address would let such a
-//! crate reach undefined behaviour without writing the keyword the discipline
-//! is built to require.
+//!   registry can be a pure weak index and a lookup is a liveness-checked
+//!   upgrade rather than a fabricated strong reference.
 
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
