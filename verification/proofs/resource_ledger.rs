@@ -723,8 +723,8 @@ pub proof fn broken_check_then_charge_violates_l2()
         broken_check_then_charge(s, n, stale).used_leaf > s.limit_leaf);
 }
 
-/// BROKEN 5: hierarchical debit combined with committed child limits. Crediting
-/// a parent's row with each child's *ceiling* at creation time — the
+/// BROKEN 5: hierarchical debit combined with committed child limits.
+/// Crediting a parent's row with each child's *ceiling* at creation time — the
 /// admission-control shape — double-counts: once for the reservation and again
 /// for each real charge walking up. Violates L1.
 ///

@@ -1,21 +1,11 @@
 //! On-screen kernel-log console (fblog) renderer.
 //!
 //! Draws the tail of the serial capture ring ([`slopos_ostd::fblog`]) onto the
-//! Limine framebuffer using the kernel glyph atlas — the panic-screen drawing
-//! path, but for the live boot log. This is the only console available on real
-//! hardware with no serial port.
+//! framebuffer — the only console available on hardware with no serial port.
 //!
-//! **Repaint only on change.** A full-screen clear-then-redraw every frame
-//! flickers (a brief all-background flash at the tick rate). Like `fbcon`, this
-//! redraws only when the log content (or visibility) actually changes — and
-//! while fblog is shown the boot is paused (the Wheel of Fate freezes), so the
-//! log is static and simply isn't repainted, which is what makes it flicker
-//! free. Nothing else draws over it meanwhile: compositor flips are suppressed
-//! and the wheel pauses *before* painting, so there is no bleed to chase.
-//!
-//! The renderer is registered with the ostd core and invoked from the scheduler
-//! timer tick (never from inside a log call), so it works even when userland is
-//! wedged. All shared state is taken with `try_lock`, so it is interrupt-safe.
+//! Redraws only when the log content or visibility changes; a full-screen
+//! clear-then-redraw every tick flickers. Runs from the scheduler timer tick,
+//! never from inside a log call, and takes all shared state with `try_lock`.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use slopos_ostd::lock_class;
@@ -50,11 +40,8 @@ pub fn init() {
 }
 
 fn render() {
-    // Repaint when an ESC toggle happened (`dirty`) or the log content changed;
-    // while the log is shown the boot is paused, so a static log isn't
-    // repainted — that is what makes it flicker free. The dirty flag, set on
-    // every toggle, ensures rapid ESC presses can't leave us stuck not
-    // repainting (a stale `active` comparison would).
+    // The dirty flag is set on every ESC toggle, so rapid presses cannot leave
+    // the screen stale the way comparing against `active` would.
     let dirty = core_fblog::take_render_dirty();
     let active = core_fblog::is_active();
     let seq = core_fblog::ring_seq();
@@ -141,7 +128,6 @@ fn draw_line<C: Canvas>(
         if count >= cols {
             break;
         }
-        // Printable ASCII only; control bytes / stray ANSI render as a space.
         let glyph = if (0x20..0x7f).contains(&b) { b } else { b' ' };
         atlas.draw_char(canvas, x, y, glyph as u32, FG, BG);
         x += cw;

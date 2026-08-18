@@ -49,13 +49,8 @@ static VIDEO_SERVICES: VideoServices = VideoServices {
     set_display_mode: video_set_display_mode,
 };
 
-// =============================================================================
-// GPU control backend (hardware cursor + runtime mode-set)
-//
-// Boot registers the driver's functions here behind a fn-pointer indirection,
-// so the video crate needs no dependency on `slopos-drivers`.
-// =============================================================================
-
+// Boot registers the driver's functions behind this fn-pointer indirection, so
+// the video crate needs no dependency on `slopos-drivers`.
 #[derive(Clone, Copy)]
 struct GpuControl {
     available: fn() -> bool,
@@ -124,29 +119,20 @@ fn task_cleanup_callback(task_id: u32) {
     }
 }
 
-// =============================================================================
-// Initialization
-// =============================================================================
-
 /// Bring up the video subsystem and register the firmware framebuffer as the
 /// default scanout provider.
 ///
-/// `firmware_priority` is the arbitration priority the firmware backing claims
-/// at: normally [`scanout::PRIO_FIRMWARE_FB`], but boot lifts it above every GPU
-/// (via [`scanout::PRIO_CMDLINE_HINT_BUMP`]) when the cmdline forces the passive
-/// framebuffer, so later GPU probes lose arbitration and never reset the device.
+/// `firmware_priority` is normally [`scanout::PRIO_FIRMWARE_FB`]; boot lifts it
+/// above every GPU (via [`scanout::PRIO_CMDLINE_HINT_BUMP`]) when the cmdline
+/// forces the passive framebuffer, so later GPU probes never reset the device.
 pub fn init(framebuffer: Option<FramebufferData>, firmware_priority: i32) {
     register_task_resource_cleanup_hook(task_cleanup_callback);
 
-    // Initialise the font subsystem (atlas + renderer) before any rendering.
     kernel_font::init();
 
-    // Register the on-screen kernel-log (fblog) renderer with the ostd core.
     // Inert until the `fblog=` cmdline knob (or ESC) activates it.
     fblog::init();
 
-    // Expose the scanout install logic to the arbiter so GPU drivers can adopt a
-    // scanout without naming a `video` symbol.
     scanout::register_scanout_installer(install_scanout_provider);
 
     if let Some(fb) = framebuffer {
@@ -158,8 +144,6 @@ pub fn init(framebuffer: Option<FramebufferData>, firmware_priority: i32) {
             fb.info.bytes_per_pixel() * 8
         );
 
-        // Claim and commit the firmware framebuffer as the default scanout owner
-        // before any GPU is probed, then install it.
         scanout::SCANOUT.claim(firmware_priority);
         scanout::SCANOUT.commit_install(
             ScanoutProvider {
@@ -184,10 +168,9 @@ pub fn init(framebuffer: Option<FramebufferData>, firmware_priority: i32) {
 
 /// Paint the boot splash on the current framebuffer and present it.
 ///
-/// Driven by framebuffer availability, not a fixed boot step: called both when
-/// the framebuffer first comes up and after a backend upgrade (virtio-gpu
-/// adoption) so the boot console reappears on the new scanout. No-op while the
-/// on-screen log owns the screen — it repaints itself on its timer tick.
+/// Called both when the framebuffer first comes up and after a backend upgrade,
+/// so the boot console reappears on the new scanout. No-op while the on-screen
+/// log owns the screen — it repaints itself on its timer tick.
 pub fn show_splash() {
     if slopos_ostd::fblog::is_active() {
         return;
@@ -202,20 +185,15 @@ pub fn show_splash() {
     framebuffer::framebuffer_flush(core::ptr::null(), 0);
 }
 
-/// Eviction hook for the firmware framebuffer: nothing to tear down (it is a
-/// passive direct-write backing).
+/// Eviction hook: the firmware framebuffer is a passive direct-write backing
+/// with nothing to tear down.
 fn firmware_evict() {}
 
-/// Adopt a scanout backing and wire the front-end to it. The single install path
-/// for every provider: the firmware framebuffer (`flush`/`gpu_control` both
-/// `None`, a passive direct-write backing) and GPU scanouts alike.
+/// Adopt a scanout backing and wire the front-end to it — the single install
+/// path for every provider, firmware framebuffer and GPU scanout alike.
 ///
 /// Registered with the arbiter via [`scanout::register_scanout_installer`] so GPU
-/// drivers in `slopos-drivers` can drive it through a fn-pointer. Re-points the
-/// framebuffer state at `ctx.fb.address` (so the compositor's `fb_flip` copies
-/// land there), routes presents through `ctx.flush` when present, re-registers
-/// the vconsole on the new backing, exposes the hardware cursor / mode-set, syncs
-/// the mouse bounds, and repaints the boot console. Returns `true` on success.
+/// drivers in `slopos-drivers` can drive it through a fn-pointer.
 fn install_scanout_provider(ctx: &InstallCtx) -> bool {
     if framebuffer::init_with_display_info(ctx.fb.address, &ctx.fb.info) != 0 {
         klog_warn!("scanout: framebuffer adoption failed; staying on previous backend");
@@ -226,9 +204,6 @@ fn install_scanout_provider(ctx: &InstallCtx) -> bool {
         framebuffer::register_flush_callback(flush);
     }
 
-    // The early firmware install already registered the table; register here only
-    // if it was skipped (no early framebuffer). `VIDEO_SERVICES` carries every
-    // field either way.
     if !is_video_initialized() {
         register_video_services(&VIDEO_SERVICES);
     }
