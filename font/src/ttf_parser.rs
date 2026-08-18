@@ -290,7 +290,6 @@ impl<'a> TtfFont<'a> {
             let o1 = read_u16(data, loca + (gid + 1) * 2)? as usize * 2;
             (o0, o1)
         } else {
-            // Long format: offsets are u32
             let o0 = read_u32(data, loca + gid * 4)? as usize;
             let o1 = read_u32(data, loca + (gid + 1) * 4)? as usize;
             (o0, o1)
@@ -303,7 +302,6 @@ impl<'a> TtfFont<'a> {
         Some((self.glyf_offset + off0, off1 - off0))
     }
 
-    /// Parse a glyph outline from the glyf table.
     pub fn glyph_outline(&self, glyph_id: u16) -> Option<GlyphOutline> {
         let (glyph_off, _glyph_len) = self.glyph_offset(glyph_id)?;
         let data = self.data;
@@ -330,7 +328,6 @@ impl<'a> TtfFont<'a> {
             });
         }
 
-        // Read end-of-contour indices
         let mut end_pts: KVec<u16> = KVec::with_capacity(nc).ok()?;
         for i in 0..nc {
             end_pts.push(read_u16(data, glyph_off + 10 + i * 2)?).ok()?;
@@ -339,12 +336,10 @@ impl<'a> TtfFont<'a> {
         let last_point = *end_pts.last()? as usize;
         let num_points = last_point + 1;
 
-        // Skip instructions
         let instr_len_off = glyph_off + 10 + nc * 2;
         let instr_len = read_u16(data, instr_len_off)? as usize;
         let flags_off = instr_len_off + 2 + instr_len;
 
-        // Read flags
         let mut flags: KVec<u8> = KVec::with_capacity(num_points).ok()?;
         let mut pos = flags_off;
         while flags.len() < num_points {
@@ -352,7 +347,7 @@ impl<'a> TtfFont<'a> {
             pos += 1;
             flags.push(flag).ok()?;
             if flag & 0x08 != 0 {
-                // Repeat flag
+                // REPEAT
                 let repeat = read_u8(data, pos)? as usize;
                 pos += 1;
                 for _ in 0..repeat {
@@ -364,7 +359,6 @@ impl<'a> TtfFont<'a> {
             }
         }
 
-        // Read x coordinates
         let mut x_coords: KVec<i16> = KVec::with_capacity(num_points).ok()?;
         let mut x: i16 = 0;
         for &flag in &flags[..num_points] {
@@ -384,7 +378,6 @@ impl<'a> TtfFont<'a> {
             x_coords.push(x).ok()?;
         }
 
-        // Read y coordinates
         let mut y_coords: KVec<i16> = KVec::with_capacity(num_points).ok()?;
         let mut y: i16 = 0;
         for &flag in &flags[..num_points] {
@@ -403,7 +396,6 @@ impl<'a> TtfFont<'a> {
             y_coords.push(y).ok()?;
         }
 
-        // Build contours
         let mut contours: KVec<Contour> = KVec::with_capacity(nc).ok()?;
         let mut start = 0usize;
         for &end in &end_pts {
@@ -452,7 +444,6 @@ impl<'a> TtfFont<'a> {
             let component_glyph_id = read_u16(data, pos + 2)?;
             pos += 4;
 
-            // Read translation
             let (dx, dy) = if flags & 0x0001 != 0 {
                 // ARG_1_AND_2_ARE_WORDS
                 let dx = read_i16(data, pos)?;
@@ -466,7 +457,6 @@ impl<'a> TtfFont<'a> {
                 (dx, dy)
             };
 
-            // Skip scale/transform if present
             if flags & 0x0008 != 0 {
                 // WE_HAVE_A_SCALE
                 pos += 2;
@@ -478,7 +468,6 @@ impl<'a> TtfFont<'a> {
                 pos += 8;
             }
 
-            // Recursively get the component outline and translate
             if let Some(component) = self.glyph_outline(component_glyph_id) {
                 for contour in component.contours {
                     let translated_points: KVec<OutlinePoint> =
@@ -497,7 +486,7 @@ impl<'a> TtfFont<'a> {
             }
 
             if flags & 0x0020 == 0 {
-                // MORE_COMPONENTS flag not set
+                // MORE_COMPONENTS
                 break;
             }
         }
@@ -511,7 +500,6 @@ impl<'a> TtfFont<'a> {
         })
     }
 
-    /// Get the number of glyphs in the font.
     pub fn num_glyphs(&self) -> u16 {
         self.maxp.num_glyphs
     }

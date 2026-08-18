@@ -7,9 +7,8 @@ import (
 	"path/filepath"
 )
 
-// JsonlSink emits one compact JSON object per line, machine-consumable
-// downstream (CI dashboards, JUnit converters, test-history regression
-// detectors). Schema is documented in the public KTAP docs.
+// JsonlSink emits one compact JSON object per line. The schema is documented
+// in the public KTAP docs.
 type JsonlSink struct {
 	path string
 	f    *os.File
@@ -28,9 +27,8 @@ func NewJsonlSink(path string) (*JsonlSink, error) {
 	return &JsonlSink{path: path, f: f}, nil
 }
 
-// Write emits one event. Returns nil for events that are intentionally
-// not surfaced (currently EvNonKtap — too noisy and not stable enough
-// to belong in the machine-consumable stream).
+// Write emits one event; events deliberately kept out of the stream
+// (currently EvNonKtap) are skipped.
 func (s *JsonlSink) Write(ev Event, _ *RunSummary) error {
 	obj := encodeEvent(ev)
 	if obj == nil {
@@ -46,9 +44,7 @@ func (s *JsonlSink) Write(ev Event, _ *RunSummary) error {
 	return nil
 }
 
-// WriteRunEnd is the last event in any run — a `run_end` summary that
-// downstream tools can use to build dashboards / regression history
-// without scanning the full per-test event sequence.
+// WriteRunEnd emits the `run_end` summary, the last event in any run.
 func (s *JsonlSink) WriteRunEnd(summary *RunSummary, exitCode int) error {
 	phases := make([]map[string]any, 0, len(summary.Phases))
 	for _, p := range summary.Phases {
@@ -101,8 +97,8 @@ func (s *JsonlSink) WriteRunEnd(summary *RunSummary, exitCode int) error {
 	return nil
 }
 
-// Close flushes and closes the underlying file. Best-effort fsync so a
-// crashed wrapper doesn't lose the last few events.
+// Close closes the file after a best-effort fsync, so a crashed wrapper
+// doesn't lose the last few events.
 func (s *JsonlSink) Close() error {
 	if s.f == nil {
 		return nil
@@ -113,8 +109,8 @@ func (s *JsonlSink) Close() error {
 	return err
 }
 
-// encodeEvent turns a parser Event into a marshallable map. Returns nil
-// for events deliberately suppressed from the JSONL stream.
+// encodeEvent turns a parser Event into a marshallable map, or nil for events
+// deliberately suppressed from the JSONL stream.
 func encodeEvent(ev Event) map[string]any {
 	switch e := ev.(type) {
 	case *EvPhaseStart:
@@ -140,9 +136,8 @@ func encodeEvent(ev Event) map[string]any {
 				"msg":     s.Msg,
 			})
 		}
-		// Build the dict with `nil` rather than `nil any` so JSON renders
-		// as `null` not omitted — keeps schema parity with the Python
-		// dataclass that always emitted these keys.
+		// The schema keeps every key: an absent field renders as JSON
+		// `null` rather than being omitted.
 		out := map[string]any{
 			"t":                  "test",
 			"phase":              r.PhaseName,
@@ -186,9 +181,6 @@ func encodeEvent(ev Event) map[string]any {
 	return nil
 }
 
-// ptrOrNil unwraps a `*string` into either its value (rendered as a JSON
-// string) or `nil` (rendered as JSON null) — mirroring the Python wrapper's
-// emit of `null`-valued keys for absent fields.
 func ptrOrNil(p *string) any {
 	if p == nil {
 		return nil

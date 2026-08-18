@@ -1,12 +1,8 @@
 //! Regression guard for the i8042 platform-bus driver registration.
 //!
-//! Unlike `platform_binding.rs` (which drives the matchmaker over synthetic
-//! drivers), these tests assert on the *live* `.platform_driver_registry`: the
-//! real `crate::ps2::platform::I8042_KBD` entry must be present, match `PNP0303`,
-//! and carry the architectural fallback that lets the keyboard bind even when a
-//! firmware's DSDT `PNP0303` node cannot be resolved (gated on the FADT 8042
-//! bit). The probe itself does live controller I/O and is exercised at boot
-//! (see the `i8042: bound PNP0303` serial line), so it is not unit-tested here.
+//! Asserts on the *live* `.platform_driver_registry`, unlike `platform_binding.rs`
+//! which drives the matchmaker over synthetic drivers. The probe itself does live
+//! controller I/O and is exercised at boot, so it is not unit-tested here.
 
 use slopos_testing::{TestResult, fail, pass};
 

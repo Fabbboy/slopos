@@ -1,12 +1,9 @@
-// run_tests — host-side wrapper that drives `just _iso-tests` to bake
-// the kernel test cmdline, launches the resulting ISO under QEMU via
-// `scripts/qemu_run.sh test`, parses the kernel's KTAP-grammar serial
-// output line-by-line, and renders a developer-friendly progress bar
-// plus per-failure detail blocks.
+// run_tests — host-side wrapper that drives `just _iso-tests` to bake the
+// kernel test cmdline, launches the resulting ISO under QEMU via
+// `scripts/qemu_run.sh test`, and renders the kernel's KTAP-grammar serial
+// output as a progress bar plus per-failure detail blocks.
 //
-// Wire format documented in the public KTAP docs. Replaces the earlier
-// `scripts/run_tests.py` Phase 4 prototype 1:1 — same flags, same UX,
-// same JSONL event schema, same exit-code policy.
+// Wire format documented in the public KTAP docs.
 package main
 
 import (
@@ -22,10 +19,8 @@ import (
 	"syscall"
 )
 
-// repoRoot resolves to the SlopOS repo root by walking up from the
-// running binary's location until a `justfile` is found. Falls back to
-// the current working directory if none is found (useful for unit
-// tests that don't actually invoke QEMU).
+// repoRoot resolves the SlopOS repo root by walking up for a `justfile`,
+// falling back to the current working directory.
 func repoRoot() string {
 	if cwd, err := os.Getwd(); err == nil {
 		dir := cwd
@@ -56,7 +51,6 @@ func repoRoot() string {
 	return "."
 }
 
-// rendererIface decouples main from the concrete renderer type.
 type rendererIface interface {
 	OnEvent(Event, *RunSummary)
 	Finalize(*RunSummary)
@@ -69,8 +63,7 @@ func main() {
 func run(rawArgv []string) int {
 	args, err := parseArgs(preprocessArgv(rawArgv))
 	if err != nil {
-		// flag.Parse already printed usage on parse errors; for our own
-		// validation errors we print here.
+		// flag.Parse already printed usage on parse errors.
 		if !errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintln(os.Stderr, "run_tests:", err)
 		}
@@ -83,7 +76,6 @@ func run(rawArgv []string) int {
 	defaultFsImage := filepath.Join(root, "fs/assets/ext2-tests.img")
 	lastFailList := filepath.Join(buildDir, "last-fail.list")
 
-	// --- assemble cmdline
 	filters := append([]string(nil), args.Filters...)
 	if args.RerunFailed {
 		names, err := readLastFailList(lastFailList)
@@ -113,7 +105,6 @@ func run(rawArgv []string) int {
 		return 0
 	}
 
-	// --- build ISO
 	if !args.NoBuild {
 		if err := runJustIsoTests(root, cmdline); err != nil {
 			fmt.Fprintln(os.Stderr, "run_tests:", err)
@@ -132,7 +123,6 @@ func run(rawArgv []string) int {
 		return 64
 	}
 
-	// --- set up parser, recorder, renderer, JSONL sink
 	parser := NewKtapParser()
 	recorder := NewRecorder()
 
@@ -168,7 +158,6 @@ func run(rawArgv []string) int {
 		renderer = NewBarRenderer(os.Stdout, verbosityRender, colour, args.WarnMs, tty, cols)
 	}
 
-	// --- driver
 	ctx, cancelSignal := signal.NotifyContext(context.Background(),
 		os.Interrupt, syscall.SIGTERM)
 	defer cancelSignal()
@@ -204,20 +193,18 @@ func run(rawArgv []string) int {
 	recorder.Summary.UserAborted = driverRes.UserAborted
 	recorder.Summary.TimedOut = driverRes.TimedOut
 	recorder.Summary.SilenceHit = driverRes.SilenceHit
-	// Snapshot the parser's klog ring buffer when the run aborted —
-	// without it, summary-verbosity CI failures show a "TIMED OUT"
-	// banner with no kernel context.
+	// Without this snapshot an aborted run renders its banner with no kernel
+	// context at all.
 	if driverRes.TimedOut || driverRes.UserAborted || recorder.Summary.Truncated {
 		recorder.Summary.AbortKlogTail = parser.KlogTail()
 	}
 
 	renderer.Finalize(recorder.Summary)
 
-	// --- compute exit + persist last-fail.list
 	failures := recorder.Summary.Failures()
-	// A run narrowed by the caller is allowed to match nothing; an
-	// unfiltered one is not. `--rerun-failed` counts as a selection, since
-	// `filters` holds the names it read from last-fail.list.
+	// A run narrowed by the caller may match nothing; an unfiltered one may
+	// not. `--rerun-failed` counts as a selection: `filters` holds the names
+	// it read from last-fail.list.
 	hasSelection := len(filters) > 0 || len(args.Skips) > 0
 	verdict := ClassifyRun(recorder.Summary, driverRes, hasSelection)
 	if verdict.QemuStatusWarning != "" {

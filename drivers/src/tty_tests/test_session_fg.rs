@@ -552,7 +552,6 @@ pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
         }
     };
 
-    // get_termios should work.
     let termios = match tty::get_termios(idx) {
         Ok(t) => t,
         Err(e) => {
@@ -560,13 +559,12 @@ pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
             return TestResult::Fail;
         }
     };
-    // Verify it returns a valid termios (ICANON should be set by default).
+    // ICANON is set by default.
     if !termios.c_lflag.contains(LocalFlags::ICANON) {
         klog_info!("TTY_TEST: BUG - termios from console FD missing ICANON");
         return TestResult::Fail;
     }
 
-    // write should succeed (returns byte count).
     match tty::write(idx, b"phase30", false) {
         Ok(n) if n == 7 => {}
         Ok(n) => {
@@ -582,7 +580,6 @@ pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
         }
     }
 
-    // get_session_id should succeed.
     if tty::get_session_id(idx).is_err() {
         klog_info!("TTY_TEST: BUG - get_session_id after open failed");
         return TestResult::Fail;
@@ -596,7 +593,6 @@ pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
 /// accesses an existing controlling terminal, never acquires one.
 pub fn test_open_tty_does_not_modify_session() -> TestResult {
     let idx = TtyIndex(0);
-    // Snapshot session state before opening.
     let (sid_before, fg_before) = {
         let guard = TTY_SLOTS[0].lock();
         match guard.as_ref() {
@@ -616,7 +612,6 @@ pub fn test_open_tty_does_not_modify_session() -> TestResult {
         }
     };
 
-    // Snapshot after.
     let (sid_after, fg_after) = {
         let guard = TTY_SLOTS[0].lock();
         match guard.as_ref() {
@@ -665,9 +660,8 @@ pub fn test_open_tty_invalid_index_returns_error() -> TestResult {
     }
 }
 
-/// Dropping the last open releases the backing — the registry weak then
-/// fails to upgrade, confirming the `/dev/tty` FD lifecycle pairs cleanly
-/// with the device FD.
+/// Dropping the last open releases the backing: the registry weak then fails
+/// to upgrade.
 pub fn test_last_close_releases_backing() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -696,7 +690,6 @@ pub fn test_last_close_releases_backing() -> TestResult {
         return TestResult::Fail;
     }
     drop(con);
-    // Last close releases the backing; the registry weak no longer upgrades.
     if crate::tty::table::TTY_BACKINGS[0]
         .lock()
         .upgrade()
@@ -708,8 +701,6 @@ pub fn test_last_close_releases_backing() -> TestResult {
     TestResult::Pass
 }
 
-/// Multiple opens of the same console index all clone the one backing; the
-/// shared strong count grows with each open.
 pub fn test_sequential_opens_share_backing() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -740,8 +731,6 @@ pub fn test_sequential_opens_share_backing() -> TestResult {
     TestResult::Pass
 }
 
-/// `get_winsize` works identically regardless of whether the FD was
-/// obtained via `/dev/tty` or direct device open (both use the same TTY index).
 pub fn test_dev_tty_winsize_matches_direct() -> TestResult {
     let idx = TtyIndex(0);
     let ws_before = match tty::get_winsize(idx) {
@@ -772,17 +761,11 @@ pub fn test_dev_tty_winsize_matches_direct() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Background Write Protection (SIGTTOU on tcsetattr)
-// ===========================================================================
-
-/// check_write with tostop=true (simulating tcsetattr foreground
-/// check) blocks background processes with BackgroundWrite.
+/// `tcsetattr` always passes tostop=true, so a background caller is blocked.
 pub fn test_tcsetattr_background_blocked() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
-    scope.attach_to(&mut s); // session=10, fg_pgrp=10
-    // Background process (pgid=50), tostop=true (tcsetattr always uses this).
+    scope.attach_to(&mut s);
     match s.check_write(50, 10, true) {
         ForegroundCheck::BackgroundWrite => TestResult::Pass,
         other => {
@@ -795,12 +778,10 @@ pub fn test_tcsetattr_background_blocked() -> TestResult {
     }
 }
 
-/// Foreground process tcsetattr proceeds normally (no signal).
 pub fn test_tcsetattr_foreground_allowed() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
-    scope.attach_to(&mut s); // session=10, fg_pgrp=10
-    // Foreground process (pgid=10), tostop=true.
+    scope.attach_to(&mut s);
     match s.check_write(10, 10, true) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
@@ -813,10 +794,9 @@ pub fn test_tcsetattr_foreground_allowed() -> TestResult {
     }
 }
 
-/// tcsetattr with no session attached is allowed (bootstrap path).
+/// No session attached is the bootstrap path: allowed.
 pub fn test_tcsetattr_no_session_allowed() -> TestResult {
     let s = TtySession::new();
-    // No session — should allow.
     match s.check_write(50, 50, true) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
@@ -829,12 +809,10 @@ pub fn test_tcsetattr_no_session_allowed() -> TestResult {
     }
 }
 
-/// tcsetattr from a different session returns DeniedCrossSession.
 pub fn test_tcsetattr_cross_session_denied() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
     scope.attach_to(&mut s);
-    // Cross-session caller (sid=99) — hard denial.
     match s.check_write(10, 99, true) {
         ForegroundCheck::DeniedCrossSession => TestResult::Pass,
         other => {
@@ -847,7 +825,7 @@ pub fn test_tcsetattr_cross_session_denied() -> TestResult {
     }
 }
 
-/// TtyError::OrphanedProcessGroup maps to EIO (-5).
+/// `OrphanedProcessGroup` maps to EIO, not to a signal error.
 pub fn test_orphaned_pgrp_errno() -> TestResult {
     let errno = TtyError::OrphanedProcessGroup.to_errno();
     if errno != -5 {
@@ -860,13 +838,11 @@ pub fn test_orphaned_pgrp_errno() -> TestResult {
     TestResult::Pass
 }
 
-/// Kernel task (task_id=0) bypasses tcsetattr foreground check.
-/// In the test harness, task_id is always 0, so set_termios should succeed
-/// even if the TTY has a session with a different foreground group.
+/// The harness runs as task_id 0, which bypasses the foreground check, so
+/// `set_termios` succeeds against a session with a different foreground group.
 pub fn test_tcsetattr_kernel_task_bypass() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    // Attach a session with fg_pgrp=10.
     let scope = SessionScope::new(10, 10);
     tty::session::test_install_session(idx, scope.session_weak(), scope.pgrp_weak());
     let saved = match tty::get_termios(idx) {

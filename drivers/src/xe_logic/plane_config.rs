@@ -90,11 +90,10 @@ impl ColorOrder {
     }
 }
 
-/// Hardware pixel-format code carried in the `PLANE_CTL` format field
-/// (bits [27:24]). The silicon uses one 8:8:8:8 code for every 32-bit RGB
-/// framebuffer; whether alpha blends and which channel order applies are
-/// selected elsewhere (blend mode and [`ColorOrder`]), so all the 8888 ABI
-/// formats collapse onto a single code here.
+/// Hardware pixel-format code in the `PLANE_CTL` format field (bits [27:24]).
+/// The silicon has one 8:8:8:8 code for every 32-bit RGB framebuffer — alpha
+/// participation and channel order come from the blend mode and [`ColorOrder`] —
+/// so all the 8888 ABI formats collapse onto a single code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaneFormat {
     /// The 0b0100 8:8:8:8 code (XRGB / ARGB / XBGR / ABGR).
@@ -104,7 +103,6 @@ pub enum PlaneFormat {
 }
 
 impl PlaneFormat {
-    /// Classify the extracted 4-bit format field.
     pub const fn from_field(field: u32) -> Self {
         match field {
             FORMAT_FIELD_RGB8888 => Self::Rgb8888,
@@ -112,7 +110,6 @@ impl PlaneFormat {
         }
     }
 
-    /// The 4-bit format field value for this code.
     pub const fn to_field(self) -> u32 {
         match self {
             Self::Rgb8888 => FORMAT_FIELD_RGB8888,
@@ -120,8 +117,7 @@ impl PlaneFormat {
         }
     }
 
-    /// The hardware code that can scan out a given ABI pixel format, or `None`
-    /// for the 24-bit packed formats the display plane cannot present directly.
+    /// `None` for the 24-bit packed formats the plane cannot present directly.
     pub const fn from_pixel_format(fmt: PixelFormat) -> Option<Self> {
         match fmt {
             PixelFormat::Argb8888
@@ -132,9 +128,8 @@ impl PlaneFormat {
         }
     }
 
-    /// The canonical opaque little-endian ABI format for this code. The code
-    /// alone records neither alpha participation nor channel order, so callers
-    /// that need those consult the blend mode and [`ColorOrder`] separately.
+    /// The canonical opaque little-endian ABI format: the code alone records
+    /// neither alpha participation nor channel order.
     pub const fn to_pixel_format(self) -> Option<PixelFormat> {
         match self {
             Self::Rgb8888 => Some(PixelFormat::Xrgb8888),
@@ -143,7 +138,6 @@ impl PlaneFormat {
     }
 }
 
-/// The fields decoded from a `PLANE_CTL` control word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlaneCtl {
     pub enable: bool,
@@ -153,8 +147,7 @@ pub struct PlaneCtl {
     pub render_decompressed: bool,
 }
 
-/// A snapshot of the live primary-plane configuration, assembled from the plane
-/// control, size, position, stride, and surface registers.
+/// A snapshot of the live primary-plane configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlaneConfig {
     pub enable: bool,
@@ -168,12 +161,11 @@ pub struct PlaneConfig {
     pub height: u32,
     pub x: u32,
     pub y: u32,
-    /// `PLANE_SURF` GGTT address of the scanout surface.
+    /// GGTT address of the scanout surface.
     pub surf_ggtt: u32,
 }
 
 impl PlaneConfig {
-    /// Assemble the full configuration from the raw register read-back.
     pub const fn from_registers(
         plane_ctl: u32,
         plane_size: u32,
@@ -200,7 +192,6 @@ impl PlaneConfig {
     }
 }
 
-/// Decode a `PLANE_CTL` control word into its enable/format/tiling/order fields.
 pub const fn decode_ctl(plane_ctl: u32) -> PlaneCtl {
     PlaneCtl {
         enable: plane_ctl & PLANE_CTL_ENABLE != 0,
@@ -211,56 +202,50 @@ pub const fn decode_ctl(plane_ctl: u32) -> PlaneCtl {
     }
 }
 
-/// Build the `PLANE_CTL` value for the linear repoint target: the requested
-/// format and channel order, linear tiling, and render-decompression cleared.
-/// RGB sources keep YUV range-correction disabled, matching the firmware plane.
+/// The linear repoint target: requested format and channel order, linear tiling,
+/// render-decompression cleared, YUV range correction disabled as the firmware
+/// plane leaves it.
 pub const fn encode_ctl_linear(format: PlaneFormat, color_order: ColorOrder, enable: bool) -> u32 {
     let enable_bit = if enable { PLANE_CTL_ENABLE } else { 0 };
-    // Linear tiling and render-decompression both contribute zero bits and are
-    // therefore left out of the OR rather than spelled as `| 0`.
+    // Linear tiling and render-decompression are both all-zero bits, so they are
+    // left out of the OR rather than spelled `| 0`.
     reg_field_set(PLANE_CTL_FORMAT_MASK, format.to_field())
         | color_order.ctl_bit()
         | PLANE_CTL_YUV_RANGE_CORRECTION_DISABLE
         | enable_bit
 }
 
-/// Decode `PLANE_SIZE` into `(width, height)`. Width occupies the low half,
-/// height the high half, each stored as `value - 1`. Inverse of [`encode_size`].
+/// Width in the low half, height in the high half, each stored as `value - 1`.
 pub const fn decode_size(plane_size: u32) -> (u32, u32) {
     let width = (plane_size & 0xffff) + 1;
     let height = ((plane_size >> 16) & 0xffff) + 1;
     (width, height)
 }
 
-/// Encode `(width, height)` into `PLANE_SIZE` as `((height-1) << 16) | (width-1)`.
 pub const fn encode_size(width: u32, height: u32) -> u32 {
     ((height.wrapping_sub(1) & 0xffff) << 16) | (width.wrapping_sub(1) & 0xffff)
 }
 
-/// Decode `PLANE_POS` into `(x, y)`. X occupies the low half, Y the high half.
+/// X in the low half, Y in the high half.
 pub const fn decode_pos(plane_pos: u32) -> (u32, u32) {
     let x = plane_pos & 0xffff;
     let y = (plane_pos >> 16) & 0xffff;
     (x, y)
 }
 
-/// Encode `(x, y)` into `PLANE_POS` as `(y << 16) | x`.
 pub const fn encode_pos(x: u32, y: u32) -> u32 {
     ((y & 0xffff) << 16) | (x & 0xffff)
 }
 
-/// Convert a linear scanline pitch in bytes to the `PLANE_STRIDE` register value
-/// (a count of 64-byte units). The caller guarantees a 64-byte-aligned pitch.
+/// The caller guarantees a 64-byte-aligned pitch.
 pub const fn linear_stride_reg(pitch_bytes: u32) -> u32 {
     pitch_bytes / LINEAR_STRIDE_UNIT_BYTES
 }
 
-/// Recover the linear scanline pitch in bytes from a `PLANE_STRIDE` value.
 pub const fn linear_stride_bytes(stride_reg: u32) -> u32 {
     stride_reg * LINEAR_STRIDE_UNIT_BYTES
 }
 
-/// Map an ABI pixel format to its placed `PLANE_CTL` format-field bits, or
 /// `None` for formats the plane cannot scan out directly.
 pub const fn pixel_format_to_plane(fmt: PixelFormat) -> Option<u32> {
     match PlaneFormat::from_pixel_format(fmt) {
@@ -272,28 +257,23 @@ pub const fn pixel_format_to_plane(fmt: PixelFormat) -> Option<u32> {
     }
 }
 
-/// Map placed `PLANE_CTL` format-field bits back to a canonical ABI pixel
-/// format, or `None` for an unmodelled code.
+/// `None` for an unmodelled code.
 pub const fn plane_to_pixel_format(plane_format_bits: u32) -> Option<PixelFormat> {
     PlaneFormat::from_field(reg_field_get(PLANE_CTL_FORMAT_MASK, plane_format_bits))
         .to_pixel_format()
 }
 
-// Compile-time proof that each encode/decode pair is an exact inverse for the
-// representative live-panel cases (1920x1080 XRGB/ARGB, linear and tiled). These
-// run on every kernel build, so a regression in the bit math fails the build.
+// Compile-time proof that each encode/decode pair inverts exactly, over the
+// representative live-panel cases; a regression in the bit math fails the build.
 const _: () = {
-    // PLANE_SIZE: width low, height high; both stored biased by one.
     assert!(decode_size(encode_size(1920, 1080)).0 == 1920);
     assert!(decode_size(encode_size(1920, 1080)).1 == 1080);
     assert!(encode_size(1, 1) == 0);
     assert!(decode_size(0).0 == 1 && decode_size(0).1 == 1);
 
-    // PLANE_POS round-trip.
     assert!(decode_pos(encode_pos(64, 48)).0 == 64);
     assert!(decode_pos(encode_pos(64, 48)).1 == 48);
 
-    // Linear PLANE_STRIDE: an aligned pitch round-trips through the 64-byte unit.
     assert!(linear_stride_reg(1920 * 4) == 120);
     assert!(linear_stride_bytes(linear_stride_reg(1920 * 4)) == 1920 * 4);
 

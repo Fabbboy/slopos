@@ -172,21 +172,20 @@ fn panic_dump_backtrace_from(rbp: u64) {
     }
 }
 
-/// Core panic implementation. Called by the kernel's `#[panic_handler]`.
+/// Called by the kernel's `#[panic_handler]`.
 pub fn panic_handler_impl(info: &PanicInfo) -> ! {
     let prior_in_flight = slopos_ostd::panic::panic_in_flight_enter();
 
-    // Check before disabling interrupts so state restores correctly. Recovery
-    // is task-scoped only: unwind only for a first-level panic at a recovery
-    // boundary outside interrupt/exception context. A nested panic
-    // (`prior_in_flight != 0`, e.g. a Drop panicking mid-unwind) falls through
-    // to the fatal path, which carries its own `panic_depth` reentrancy guard.
+    // Recovery is task-scoped: only a first-level panic at a recovery boundary
+    // outside interrupt context unwinds. A nested one — a Drop panicking
+    // mid-unwind — falls through to the fatal path instead. Checked before
+    // interrupts are disabled so the flag restores correctly.
     if prior_in_flight == 0
         && panic_recovery::recovery_is_active()
         && !slopos_ostd::panic::in_interrupt_context()
     {
-        // Only production oopses consume the recovered-panic budget;
-        // test-harness catches are expected control flow.
+        // Test-harness catches are expected control flow, so only production
+        // oopses spend the recovered-panic budget.
         let production = panic_recovery::production_recovery_enabled();
         let (oops_count, limit_reached) = if production {
             panic_recovery::oops_record()
@@ -194,13 +193,11 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
             (0, false)
         };
 
-        // Disable interrupts only temporarily for the message
         let interrupts_were_enabled = cpu::are_interrupts_enabled();
         cpu::disable_interrupts();
 
         if limit_reached {
-            // The limit-crossing panic itself becomes fatal. Interrupts stay
-            // disabled: this CPU is committed to the fatal path below.
+            // Interrupts stay disabled: this CPU is committed to the fatal path.
             let mut buf = MessageBuffer::new();
             let _ = write!(
                 buf,
@@ -224,7 +221,6 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
                 panic_serial_write(buf.as_str());
             }
 
-            // Also print the panic message for diagnostics
             {
                 let mut msg_buf = MessageBuffer::new();
                 if let Some(msg) = info.message().as_str() {
@@ -241,14 +237,9 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
                 panic_serial_write(buf.as_str());
             }
 
-            // Walk from the live rbp: the stashed rbp statics belong to the
-            // fatal/exception path and may be stale here. The walk starts in
-            // this handler, so the panic origin sits below a few
-            // panic-machinery frames.
+            // The live rbp, because the stashed statics belong to the
+            // fatal/exception path and may be stale here.
             panic_dump_backtrace_from(cpu::read_rbp());
-
-            // The unwind is caught at the recovery boundary (syscall/kthread
-            // edge, or `catch_panic!` in the test harness); do not exit here.
 
             // Unwinding restores Rust frames, not the interrupt flag.
             if interrupts_were_enabled {
@@ -266,26 +257,21 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
         }
     }
 
-    // --- Fatal (uncaught) path: the Reliable Abort Core. ---
     cpu::disable_interrupts();
-    // One-way, and *before* the reporter runs. Everything below — the
-    // emergency-stack report, the panic screen, the shutdown ritual —
-    // acquires locks while this CPU still holds whatever it held at the
-    // fault, and the held-stack walk does not run until the very end of
-    // `emergency_report`. A cycle report here would panic inside the panic.
+    // One-way, and before the reporter runs: everything below acquires locks
+    // while this CPU still holds whatever it held at the fault, so a cycle
+    // report here would panic inside the panic.
     slopos_ostd::sync::enter_fatal_bypass();
 
-    // (1) Per-CPU recursion guard. A non-zero prior depth means the fatal path
-    // itself faulted (e.g. the emergency stack overflowed). Do not recurse
-    // through the (now suspect) reporter — degrade to the format-free abort,
-    // which the #PF guard-fault path lands on a fresh IST data stack.
+    // A non-zero prior depth means the fatal path itself faulted, so the
+    // reporter is suspect; degrade to the format-free abort, which the #PF
+    // guard-fault path lands on a fresh IST data stack.
     if slopos_ostd::panic::panic_depth_enter() >= 1 {
         panic_abort_raw("recursive fatal fault — emergency reporter re-entered");
     }
 
-    // (2) Single-owner election: first CAS wins. A peer that loses quietly
-    // self-stops so it neither contends on the console nor holds a lock the
-    // owner needs; the owner's NMI broadcast (below) will halt it for good.
+    // Single-owner election, first CAS wins. A losing peer self-stops so it
+    // neither contends on the console nor holds a lock the owner needs.
     let cpu_id = slopos_arch::get_current_cpu() as u32;
     if !slopos_ostd::panic::claim_panic_owner(cpu_id) {
         loop {
@@ -294,29 +280,24 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
         }
     }
 
-    // (3) Stash what the emergency reporter needs. The switch to the emergency
-    // stacks discards RSP-relative locals, so everything travels via statics;
-    // the PanicInfo itself stays live in the (still-mapped) panicking frame.
-    // The backtrace is walked from the stashed frame pointer inside
-    // `emergency_report`, on the guard-paged emergency stack — the kernel is
-    // built `-C force-frame-pointers=yes`, so every frame carries an rbp.
+    // The switch to the emergency stacks discards RSP-relative locals, so what
+    // the reporter needs travels via statics. The frame-pointer walk works
+    // because the kernel is built `-C force-frame-pointers=yes`.
     PANIC_INFO_PTR.store(info as *const PanicInfo as usize, Ordering::SeqCst);
     PANIC_ORIG_RSP.store(cpu::read_rsp(), Ordering::SeqCst);
     PANIC_ORIG_RBP.store(cpu::read_rbp(), Ordering::SeqCst);
 
-    // (4) Stop the world: NMI all peers (the only delivery that pierces a
-    // wedged IF=0 spin), then wait — bounded — for them to acknowledge before
-    // printing. This is also what dissolves the TLB-shootdown ack wedge.
+    // NMI is the only delivery that pierces a wedged IF=0 spin, and stopping the
+    // peers is also what dissolves a TLB-shootdown ack wedge.
     slopos_arch::pcr::send_nmi_broadcast();
     wait_for_peer_stop();
 
-    // (5) Run the report on this CPU's emergency SAFE + DATA stacks so panic
-    // `core::fmt` has guaranteed headroom and cannot recurse via a guard #PF.
+    // On the emergency stacks, so panic `core::fmt` has guaranteed headroom and
+    // cannot recurse through a guard #PF.
     slopos_ostd::panic::run_on_emergency_stacks(emergency_report)
 }
 
-/// Bounded wait for peer CPUs to acknowledge the panic-stop NMI. Proceeds on
-/// timeout so a stuck CPU can never block the report.
+/// Proceeds on timeout so a stuck CPU can never block the report.
 fn wait_for_peer_stop() {
     let expected = (slopos_arch::pcr::get_pcr_count() as u32).saturating_sub(1);
     if expected == 0 {
@@ -329,10 +310,9 @@ fn wait_for_peer_stop() {
     }
 }
 
-/// The fatal-fault report. Runs on this CPU's emergency SAFE + DATA stacks (via
-/// `run_on_emergency_stacks`), so it is the sole console writer (peers stopped)
-/// with guaranteed stack headroom. `extern "sysv64"` + `-> !` to match the
-/// trampoline's bare-fn entry; all state arrives through statics.
+/// The fatal-fault report: sole console writer, peers already stopped.
+/// `extern "sysv64"` + `-> !` matches the trampoline's bare-fn entry, so all
+/// state arrives through statics.
 extern "sysv64" fn emergency_report() -> ! {
     let (extra_rip, extra_rsp) = take_panic_cpu_state();
     let display_rsp = extra_rsp.unwrap_or_else(|| PANIC_ORIG_RSP.load(Ordering::SeqCst));
@@ -349,8 +329,8 @@ extern "sysv64" fn emergency_report() -> ! {
     let message_str = message_buf.as_str();
     panic_serial_write(message_str);
 
-    // Recovered panics may have left non-RAII kernel state skewed; a
-    // non-zero count marks this report as post-degradation.
+    // Recovered panics may have left non-RAII kernel state skewed, so a non-zero
+    // count marks this report as post-degradation.
     let oopses = panic_recovery::oops_count();
     if oopses > 0 {
         let mut taint_buf = MessageBuffer::new();
@@ -372,8 +352,7 @@ extern "sysv64" fn emergency_report() -> ! {
         panic_serial_write(hex_buf.format_labeled("CR0", cr0));
     }
     {
-        // CR2 = faulting linear address on a #PF; invaluable for diagnosing
-        // bad-pointer derefs on bare metal.
+        // CR2 holds the faulting linear address of a #PF.
         let mut hex_buf = HexBuffer::new();
         panic_serial_write(hex_buf.format_labeled("CR2", cr2));
     }

@@ -50,8 +50,9 @@ pub fn topo_order() -> Result<KVec<&'static HermeticVTable>, RegistryError> {
     let n = entries.len();
     let mut in_degree: KVec<usize> = (0..n).map(|_| 0usize).collect();
 
-    // Compute in-degree: for each entry, count how many of its DEPENDS_ON
-    // entries actually exist in the registry.
+    // TODO(tech-debt): `in_degree` is never read — this loop's only live
+    // effect is the `MissingDep` check; drop the counter or drive the emit
+    // loop below from it.
     for (i, vt) in entries.iter().enumerate() {
         for dep_name in vt.depends_on {
             let mut found = false;
@@ -71,15 +72,12 @@ pub fn topo_order() -> Result<KVec<&'static HermeticVTable>, RegistryError> {
     let mut result: KVec<&'static HermeticVTable> = KVec::new();
     let mut emitted: KVec<bool> = (0..n).map(|_| false).collect();
 
-    // Kahn's: repeatedly emit a vtable whose dependencies are all already
-    // emitted. Stop when nothing more can be emitted.
     loop {
         let mut progress = false;
         for (i, vt) in entries.iter().enumerate() {
             if emitted[i] {
                 continue;
             }
-            // Are all dependencies emitted?
             let mut all_deps_ready = true;
             for dep_name in vt.depends_on {
                 let mut dep_emitted = false;
@@ -106,7 +104,6 @@ pub fn topo_order() -> Result<KVec<&'static HermeticVTable>, RegistryError> {
     }
 
     if result.len() != n {
-        // Some entries never became ready ⇒ cycle.
         return Err(RegistryError::CycleDetected);
     }
 
