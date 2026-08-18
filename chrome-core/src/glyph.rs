@@ -2,9 +2,7 @@
 //!
 //! `gfx::image::draw_image` takes no colour-modulation parameter, so a sprite
 //! sheet would mean one bitmap per ink×badge combination; a rect table is
-//! recoloured per state and carries no third-party icon licence. Every edge is
-//! axis-aligned, so the shape scales by an integer multiplier without
-//! resampling.
+//! recoloured per state and carries no third-party icon licence.
 
 use crate::netstate::NetIndicatorState;
 
@@ -40,8 +38,7 @@ pub enum Badge {
     Warn,
     /// The link itself is broken.
     Error,
-    /// Switched off deliberately. A stroke, not a dot: "off" is not a fault and
-    /// must not borrow a fault's colour.
+    /// Switched off deliberately: not a fault, and must not borrow a fault's colour.
     Slash,
 }
 
@@ -57,14 +54,12 @@ pub struct GlyphRect {
 
 /// The wired glyph: a horizontal bus, three drops, three nodes.
 const WIRED: [GlyphRect; 7] = [
-    // Bus.
     GlyphRect {
         x: 1,
         y: 0,
         w: 12,
         h: 2,
     },
-    // Drops.
     GlyphRect {
         x: 1,
         y: 2,
@@ -83,7 +78,6 @@ const WIRED: [GlyphRect; 7] = [
         w: 2,
         h: 3,
     },
-    // Nodes.
     GlyphRect {
         x: 0,
         y: 5,
@@ -106,7 +100,6 @@ const WIRED: [GlyphRect; 7] = [
 
 pub const WIRED_RECTS: &[GlyphRect] = &WIRED;
 
-/// A shape, an ink and a badge — nothing about pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlyphSpec {
     pub base: GlyphBase,

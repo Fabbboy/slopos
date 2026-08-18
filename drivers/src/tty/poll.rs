@@ -10,7 +10,7 @@ use super::table::{TTY_SLOTS, tty_input_event, tty_output_event};
 use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
 
 /// Waiters park on both queues so a readiness change in either direction wakes
-/// them; true when either registration succeeded.
+/// them.
 fn poll_register_slot(slot: usize) -> bool {
     let input = BUS.subscribe_current(tty_input_event(slot));
     let output = BUS.subscribe_current(tty_output_event(slot));
@@ -171,8 +171,7 @@ pub fn poll_sleep_on(slots: &[u8]) {
     }
 }
 
-/// Slot-less form, for callers that do not pass indices: sleeps on every active
-/// TTY poll waiter.
+/// Slot-less form: sleeps on every active TTY poll waiter.
 pub fn poll_sleep() {
     let mut slots = [0u8; MAX_TTYS];
     let mut count = 0;

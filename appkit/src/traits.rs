@@ -22,9 +22,8 @@ pub struct MeasureCtx<'a> {
 
 /// Identity and geometry every widget carries, owned by the framework.
 ///
-/// `measured` is written only by [`measure_widget`] and `rect` only by
-/// [`place_widget`], so laying a widget out at a fake rect to read its size back
-/// is unwritable.
+/// `measured` is written only by [`measure_widget`], `rect` only by
+/// [`place_widget`].
 #[derive(Debug)]
 pub struct WidgetCore {
     id: WidgetId,
@@ -105,7 +104,6 @@ pub trait Widget {
 
     fn paint(&self, ctx: &mut PaintContext);
 
-    /// Use `sink.emit(msg)` to send messages to the application.
     fn event(
         &mut self,
         event: &WidgetEvent,
@@ -129,12 +127,10 @@ pub trait Widget {
         self.core().id()
     }
 
-    /// The layout rect assigned during the last layout pass.
     fn layout_rect(&self) -> Rect {
         self.core().rect()
     }
 
-    /// The size recorded by the last [`measure_widget`] call.
     fn measured_size(&self) -> Size {
         self.core().measured()
     }
@@ -159,7 +155,6 @@ pub trait Widget {
     fn mark_dirty(&mut self) {}
 }
 
-/// Accessibility role.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Role {
     None,

@@ -30,8 +30,8 @@ fn retire_faulted_cpu(task_ref: TaskRef, reason: TaskFaultReason) -> ! {
     let dstack_top = crate::ist_stacks::exc_dstack_top_current_cpu();
     slopos_arch::pcr::reset_ist_unsafe_sp(dstack_top);
     // This handler diverges into `schedule()`, so the exception-entry preempt
-    // hold from the IST dispatcher would leak — leaving the next task's preempt
-    // count stuck at >=1. Release that single hold explicitly.
+    // hold from the IST dispatcher would leak, leaving the next task's preempt
+    // count stuck at >=1.
     slopos_ostd::cpu::preempt::release_diverging_exception_hold();
     schedule();
     let _ = activate_post_user_fault();
@@ -51,9 +51,8 @@ pub(crate) fn cstr_from_bytes(bytes: &'static [u8]) -> &'static CStr {
 pub(crate) fn resolve_user_fault_task() -> Option<TaskRef> {
     let hw_cr3 = cpu::read_cr3() & !0xFFF;
 
-    // Recoverable fault, not a panic path, so the registry lookups stay.
-    // Resolving the id to a `TaskRef` makes the guard itself the validity proof;
-    // a bootstrap stub has no valid id and falls through to the CR3 scan.
+    // Recoverable fault, not a panic path, so the registry lookups stay; a
+    // bootstrap stub has no valid id and falls through to the CR3 scan.
     if let Some(task_ref) = slopos_sched::task_struct::Current::get()
         .map(|current| current.id())
         .and_then(slopos_sched::task::task_find_by_id)

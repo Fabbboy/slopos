@@ -1,8 +1,7 @@
 //! Userland-test runner.
 //!
-//! Lives in `slopos-core` for the spawn API, the per-task `TestReportRing` and
-//! the wait helpers. The companion [`utest!`](crate::utest) macro lives here
-//! too, so `slopos-testing` need not depend on `slopos-core` and cycle.
+//! The companion [`utest!`](crate::utest) macro lives here too, so
+//! `slopos-testing` need not depend on `slopos-core` and cycle.
 
 use slopos_abi::task::{
     INVALID_TASK_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TaskExitReason, TaskPriority,
@@ -16,11 +15,9 @@ use slopos_sched::scheduler::{sleep_current_task_ms, task_wait_for};
 use slopos_sched::task::{task_consume_zombie, task_find_by_id, task_peek_exit_info};
 use slopos_sched::test_reports::TestReport;
 
-/// Per-utest entry point installed in every `TestDesc::run`. Spawns the binary,
-/// waits for it to terminate, drains its `SYSCALL_TEST_REPORT` ring into one
-/// indented KTAP subtest line per report, then rolls up to a parent outcome.
-/// `catch_panic!` turns a kernel-side panic along that path into a `Panic`
-/// outcome for the parent utest rather than a dead harness.
+/// Per-utest entry point installed in every `TestDesc::run`. `catch_panic!`
+/// turns a kernel-side panic along that path into a `Panic` outcome for the
+/// parent utest rather than a dead harness.
 pub fn run_thunk(desc: &'static TestDesc) -> TestResult {
     let bin = match desc.bin {
         Some(b) => b,
@@ -200,12 +197,11 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
     roll_up(bin, sub_failed, report_vec.len(), exit_info)
 }
 
-/// Decide the parent verdict: any failed subtest, or anything but a clean exit,
-/// is a `Fail`. Userland is built `panic-strategy = abort`, so cases that
-/// already reported must not vouch for ones that never ran; a signal death
-/// arrives as `Normal` with the signal in the exit code, so the code — not the
-/// reason — is what distinguishes it. Split out of `dispatch` to keep that
-/// frame under the 2 KiB gate.
+/// Userland is built `panic-strategy = abort`, so cases that already reported
+/// must not vouch for ones that never ran; a signal death arrives as `Normal`
+/// with the signal in the exit code, so the code — not the reason — is what
+/// distinguishes it. Split out of `dispatch` to keep that frame under the 2 KiB
+/// gate.
 #[inline(never)]
 fn roll_up(
     bin: &str,

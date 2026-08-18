@@ -239,10 +239,6 @@ fn handle_tlb_shootdown_ipi() {
 /// Answer an NMI: the lockup detector's probe, the TLB ladder's, or one
 /// nobody armed.
 ///
-/// Vector 2 stays on `ist = 0`: on x86-64 *any* `IRET` unblocks NMI, so a
-/// nested NMI must push deeper on the same stack rather than reset RSP to an
-/// IST top and overwrite the frame this handler is still using.
-///
 /// A *returning* NMI may take no lock, so output goes through the watchdog's
 /// byte-at-a-time emitter. [`nmi_die`] is exempt: nothing resumes there.
 fn nmi_handler(frame: &slopos_arch::InterruptFrame) {

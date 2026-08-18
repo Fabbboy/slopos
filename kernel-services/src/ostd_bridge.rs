@@ -1,13 +1,6 @@
-//! Bridge that registers OSTD-side wait-queue / RCU / user-mode /
-//! task-runtime backends over the existing `slopos-kernel-services`
-//! facades.
-//!
-//! OSTD does not depend on `slopos-kernel-services`. To wire the
-//! production backends, this module hands OSTD function-pointer ops
-//! tables (for wait-queue and RCU, whose method bodies live on the
-//! kernel-services side) and registers the OSTD-internal default
-//! backends for user-mode and task-runtime (whose method bodies are
-//! OSTD-native and live alongside the trait definitions).
+//! Wait-queue and RCU backends for OSTD, built over the
+//! `slopos-kernel-services` facades. OSTD does not depend on this crate, so it
+//! takes function-pointer ops tables rather than a direct call edge.
 
 use slopos_ostd::sync::rcu::RcuOps;
 use slopos_ostd::sync::wait_queue::WaitQueueOps;
@@ -15,15 +8,12 @@ use slopos_ostd::sync::wait_queue::WaitQueueOps;
 use crate::driver_runtime;
 use crate::platform;
 
-/// No-op RCU log sink. The RCU stall path emits warnings via this
-/// hook; without a reachable logger from this layer (utils depends on
-/// kernel-services, so the inverse direction is unavailable), the
-/// simplest move is a silent drop. Stall warnings are non-fatal.
+/// No-op sink: `slopos-utils` depends on this crate, so no logger is reachable
+/// from here and the non-fatal RCU stall warnings are dropped.
 fn rcu_log_warn_noop(_args: core::fmt::Arguments<'_>) {}
 
-/// Ops table threaded into `slopos_ostd::sync::wait_queue::register_wait_queue_backend`.
-/// `pub` because the boot caller in `boot::early_init::kernel_main_impl`
-/// registers it inline, taking the witness from `&ctx.bsp_token()`.
+/// Ops table for `slopos_ostd::sync::wait_queue::register_wait_queue_backend`;
+/// `pub` because the boot caller registers it inline with a BSP-token witness.
 pub static WAIT_QUEUE_OPS: WaitQueueOps = WaitQueueOps {
     is_runtime_initialised: driver_runtime::is_driver_runtime_initialized,
     current_task_handle: driver_runtime::current_task_handle,
@@ -38,8 +28,7 @@ pub static WAIT_QUEUE_OPS: WaitQueueOps = WaitQueueOps {
     current_task_has_deliverable_signal: driver_runtime::has_pending_signal,
 };
 
-/// Ops table threaded into `slopos_ostd::sync::rcu::register_rcu_backend`.
-/// `pub` for the same reason as `WAIT_QUEUE_OPS` above.
+/// Ops table for `slopos_ostd::sync::rcu::register_rcu_backend`.
 pub static RCU_OPS: RcuOps = RcuOps {
     clock_monotonic_ns: platform::clock_monotonic_ns,
     log_warn: rcu_log_warn_noop,

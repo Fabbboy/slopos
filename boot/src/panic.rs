@@ -34,8 +34,7 @@ static PANIC_ORIG_RBP: AtomicU64 = AtomicU64::new(0);
 /// A stuck peer must never block the report, so the owner proceeds on timeout.
 const PEER_STOP_SPIN_BUDGET: u64 = 50_000_000;
 
-/// `rbp` is the interrupted context's frame pointer; the panic backtrace walks
-/// it so the report shows the faulting call chain.
+/// `rbp` is the interrupted context's frame pointer.
 #[inline]
 pub fn set_panic_cpu_state(rip: u64, rsp: u64, rbp: u64) {
     PANIC_RIP.store(rip, Ordering::SeqCst);
@@ -61,8 +60,8 @@ fn panic_serial_write(s: &str) {
     slopos_ostd::early_console::write_bytes(s.as_bytes());
     slopos_ostd::early_console::write_bytes(b"\n");
     // A full report over a polled UART outlasts a timer tick, and one emitted
-    // line is real progress. The touch cannot mask a wedge: it is bounded by the
-    // string in hand, and a dead UART stops inside `write_bytes` above.
+    // line is real progress. The touch cannot mask a wedge: a dead UART stops
+    // inside `write_bytes` above.
     slopos_ostd::watchdog::touch();
 }
 
@@ -117,8 +116,6 @@ fn panic_capture_backtrace(out: &mut [u64]) -> usize {
 }
 
 fn panic_dump_backtrace() {
-    // Prefer the faulting context's RBP, then the panicking call chain's, then
-    // the live one.
     let frame_rbp = PANIC_FRAME_RBP.load(Ordering::SeqCst);
     let stashed = PANIC_ORIG_RBP.load(Ordering::SeqCst);
     let rbp = if frame_rbp != 0 {
@@ -131,10 +128,8 @@ fn panic_dump_backtrace() {
     panic_dump_backtrace_from(rbp)
 }
 
-/// Shared by the fatal reporter and the task-scoped recovery report. Every frame
-/// is printed, the panic machinery's own included: they symbolize to
-/// self-identifying names, and a fixed skip count would rot as the call shape
-/// changes.
+/// Every frame is printed, the panic machinery's own included: a fixed skip
+/// count would rot as the call shape changes.
 fn panic_dump_backtrace_from(rbp: u64) {
     let mut entries: [StacktraceEntry; PANIC_BACKTRACE_MAX] = [StacktraceEntry {
         frame_pointer: 0,
@@ -177,9 +172,8 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
     let prior_in_flight = slopos_ostd::panic::panic_in_flight_enter();
 
     // Recovery is task-scoped: only a first-level panic at a recovery boundary
-    // outside interrupt context unwinds. A nested one — a Drop panicking
-    // mid-unwind — falls through to the fatal path instead. Checked before
-    // interrupts are disabled so the flag restores correctly.
+    // outside interrupt context unwinds. Checked before interrupts are disabled
+    // so the flag restores correctly.
     if prior_in_flight == 0
         && panic_recovery::recovery_is_active()
         && !slopos_ostd::panic::in_interrupt_context()

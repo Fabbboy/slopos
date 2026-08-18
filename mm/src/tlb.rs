@@ -519,9 +519,7 @@ fn send_shootdown_ipi_per_target(targets: impl IntoIterator<Item = usize>) {
 
 fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize) -> TlbResult {
     // Runs with whatever IF the caller established and never force-enables:
-    // callers legitimately hold IRQ-disabling SpinLocks across a flush. Deadlock
-    // freedom comes from polling — this loop and every contended SpinLock waiter
-    // service their own shootdown queue between spins.
+    // callers legitimately hold IRQ-disabling SpinLocks across a flush.
     let mut result = Ok(());
     'targets: for cpu_idx in targets {
         if cpu_idx >= MAX_CPUS || cpu_idx == initiator_cpu {
@@ -547,9 +545,7 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
                 spin_count = 0;
                 resends += 1;
                 if resends > MAX_RESENDS {
-                    // A CPU spinning on any SpinLock still acks via the relax
-                    // hook, so the target is genuinely wedged; NMI it so its
-                    // watchdog handler dumps the context.
+                    // NMI the target so its watchdog handler dumps the context.
                     klog_warn!(
                         "TLB: CPU {} never acked shootdown after {} re-sends; giving up",
                         cpu_idx,
@@ -608,10 +604,9 @@ pub fn service_local_shootdown_queue() {
     if slot.ack.load(Ordering::Acquire) {
         return;
     }
-    // try_lock, not lock: this runs from inside contended-spin loops, including
-    // the spin in `handle_shootdown_ipi`'s own `queue.lock()`. A blocking acquire
-    // would take a second ticket beneath the outer one and deadlock this CPU
-    // against itself.
+    // try_lock, not lock: this runs from inside contended-spin loops, so a
+    // blocking acquire would take a second ticket beneath the outer one and
+    // deadlock this CPU against itself.
     let Some(mut queue) = slot.queue.try_lock() else {
         return;
     };
@@ -716,8 +711,6 @@ fn queue_request_for_cpu(cpu_idx: usize, flush_type: FlushType, start: u64, end:
     };
     let slot = &TLB_STATE.cpu_state[cpu_idx];
 
-    // The lock must span `push` + `ack=false`; the handler spans `take` +
-    // `ack=true`. That serialisation closes the multi-initiator race.
     let mut queue = slot.queue.lock();
     queue.push(op, asid);
     slot.ack.store(false, Ordering::Relaxed);
@@ -936,8 +929,6 @@ pub fn handle_shootdown_ipi(cpu_idx: usize) {
 
     let slot = &TLB_STATE.cpu_state[cpu_idx];
 
-    // Take + stamp ACK under the lock, pairing with `queue_request_for_cpu`'s
-    // push + clear so a coalesced IPI still gives per-initiator visibility.
     // Acking before the flush is safe because IRETQ is serialising: anything
     // that runs on this CPU afterwards sees the flush completed.
     let (op, asid) = {

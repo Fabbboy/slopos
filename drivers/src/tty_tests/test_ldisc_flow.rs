@@ -1,26 +1,22 @@
-//! Split from test_ldisc.rs: test_ldisc_flow.rs
+//! TTY tests: flow control (IXON/IXOFF), poll readiness, input-buffer policy,
+//! PTY throttle and vconsole state.
 
 use super::fixtures::*;
 
-// ===========================================================================
-// Flow control tests
-// ===========================================================================
-
-/// IXON: Ctrl+S stops output, Ctrl+Q resumes.
 pub fn test_ldisc_flow_control_ixon() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag |= InputFlags::IXON;
     ld.set_termios(&t);
 
-    // Ctrl+S (VSTOP = 0x13) should stop output.
+    // Ctrl+S = VSTOP.
     ld.input_char(0x13);
     if !ld.is_stopped() {
         klog_info!("TTY_TEST: BUG - IXON Ctrl+S did not stop output");
         return TestResult::Fail;
     }
 
-    // Ctrl+Q (VSTART = 0x11) should resume.
+    // Ctrl+Q = VSTART.
     ld.input_char(0x11);
     if ld.is_stopped() {
         klog_info!("TTY_TEST: BUG - IXON Ctrl+Q did not resume output");
@@ -28,17 +24,12 @@ pub fn test_ldisc_flow_control_ixon() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Event-Driven Readiness & IXON Completion
-// ===========================================================================
 
-/// poll_events returns POLLIN when cooked data is available.
 pub fn test_poll_events_pollin_with_data() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Feed a complete canonical line ("a\n") so cooked data is available.
     tty::push_input(idx, b'a');
     tty::push_input(idx, b'\n');
 
@@ -52,7 +43,6 @@ pub fn test_poll_events_pollin_with_data() -> TestResult {
     TestResult::Pass
 }
 
-/// poll_events returns 0 for POLLIN when no cooked data.
 pub fn test_poll_events_no_pollin_without_data() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -67,7 +57,6 @@ pub fn test_poll_events_no_pollin_without_data() -> TestResult {
     TestResult::Pass
 }
 
-/// poll_events returns POLLOUT when output is not stopped.
 pub fn test_poll_events_pollout_when_not_stopped() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -82,13 +71,11 @@ pub fn test_poll_events_pollout_when_not_stopped() -> TestResult {
     TestResult::Pass
 }
 
-/// poll_events returns 0 for POLLOUT when IXON-stopped.
 pub fn test_poll_events_no_pollout_when_stopped() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Enable IXON and send Ctrl+S to stop output.
     {
         let mut guard = TTY_SLOTS[idx.0 as usize].lock();
         if let Some(tty) = guard.as_mut() {
@@ -101,7 +88,6 @@ pub fn test_poll_events_no_pollout_when_stopped() -> TestResult {
 
     let revents = tty::poll_events(idx, slopos_abi::syscall::POLLOUT);
 
-    // Resume output for cleanup.
     tty::push_input(idx, 0x11); // Ctrl+Q = VSTART
     drain_tty_nonblock(idx);
 
@@ -112,13 +98,11 @@ pub fn test_poll_events_no_pollout_when_stopped() -> TestResult {
     TestResult::Pass
 }
 
-/// poll_events returns POLLHUP when TTY is hung up.
 pub fn test_poll_events_pollhup_on_hangup() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Hang up TTY 0.
     let _hangup = HangupScope::hang_up(idx);
 
     let revents = tty::poll_events(
@@ -126,7 +110,6 @@ pub fn test_poll_events_pollhup_on_hangup() -> TestResult {
         slopos_abi::syscall::POLLIN | slopos_abi::syscall::POLLOUT,
     );
 
-    // Restore TTY 0 (re-init).
     tty::table::tty_table_init();
 
     if (revents & slopos_abi::syscall::POLLHUP) == 0 {
@@ -136,7 +119,6 @@ pub fn test_poll_events_pollhup_on_hangup() -> TestResult {
     TestResult::Pass
 }
 
-/// poll_events returns 0 for invalid index.
 pub fn test_poll_events_invalid_index_returns_zero() -> TestResult {
     let revents = tty::poll_events(
         TtyIndex(255),
@@ -149,13 +131,11 @@ pub fn test_poll_events_invalid_index_returns_zero() -> TestResult {
     TestResult::Pass
 }
 
-/// IXON stopped state is tracked in ldisc via push_input.
 pub fn test_ixon_stopped_state_via_push_input() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Enable IXON.
     {
         let mut guard = TTY_SLOTS[idx.0 as usize].lock();
         if let Some(tty) = guard.as_mut() {
@@ -165,7 +145,7 @@ pub fn test_ixon_stopped_state_via_push_input() -> TestResult {
         }
     }
 
-    // Ctrl+S stops output.
+    // Ctrl+S = VSTOP.
     tty::push_input(idx, 0x13);
     let stopped = {
         let guard = TTY_SLOTS[idx.0 as usize].lock();
@@ -176,12 +156,12 @@ pub fn test_ixon_stopped_state_via_push_input() -> TestResult {
     };
     if !stopped {
         klog_info!("TTY_TEST: BUG - Ctrl+S via push_input should set stopped state");
-        tty::push_input(idx, 0x11); // cleanup
+        tty::push_input(idx, 0x11);
         drain_tty_nonblock(idx);
         return TestResult::Fail;
     }
 
-    // Ctrl+Q resumes output.
+    // Ctrl+Q = VSTART.
     tty::push_input(idx, 0x11);
     let stopped_after = {
         let guard = TTY_SLOTS[idx.0 as usize].lock();
@@ -199,13 +179,12 @@ pub fn test_ixon_stopped_state_via_push_input() -> TestResult {
     TestResult::Pass
 }
 
-/// IXON + IXANY: any character resumes stopped output.
 pub fn test_ixon_any_char_resumes() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Enable IXON + IXANY (IXANY required for any-char-resumes per POSIX).
+    // IXANY is required for any-char-resumes, per POSIX.
     {
         let mut guard = TTY_SLOTS[idx.0 as usize].lock();
         if let Some(tty) = guard.as_mut() {
@@ -215,7 +194,7 @@ pub fn test_ixon_any_char_resumes() -> TestResult {
         }
     }
 
-    // Ctrl+S stops, then any printable char resumes (with IXANY set).
+    // Ctrl+S = VSTOP.
     tty::push_input(idx, 0x13);
     tty::push_input(idx, b'x');
 
@@ -235,13 +214,11 @@ pub fn test_ixon_any_char_resumes() -> TestResult {
     TestResult::Pass
 }
 
-/// poll_events only returns events that are requested.
 pub fn test_poll_events_respects_requested_mask() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // With data available, requesting only POLLOUT should not set POLLIN.
     tty::push_input(idx, b'a');
     tty::push_input(idx, b'\n');
 
@@ -271,9 +248,8 @@ pub fn test_pollhup_always_reported() -> TestResult {
 
     let _hangup = HangupScope::hang_up(idx);
 
-    // Request only POLLIN -- POLLHUP should still appear.
     let revents = tty::poll_events(idx, slopos_abi::syscall::POLLIN);
-    tty::table::tty_table_init(); // restore
+    tty::table::tty_table_init();
 
     if (revents & slopos_abi::syscall::POLLHUP) == 0 {
         klog_info!("TTY_TEST: BUG - POLLHUP should always be reported on hung-up TTY");
@@ -282,7 +258,6 @@ pub fn test_pollhup_always_reported() -> TestResult {
     TestResult::Pass
 }
 
-/// PTY peer_closed sets POLLHUP when no data remains.
 pub fn test_poll_events_peer_closed_pollhup() -> TestResult {
     tty::table::tty_table_init();
 
@@ -516,16 +491,11 @@ pub fn test_vconsole_has_framebuffer_default_false() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Input Buffer Policy (IMAXBEL, IXOFF, CREAD)
-// ===========================================================================
 
-/// CREAD enabled (default) — input bytes are processed normally.
 pub fn test_cread_enabled_input_processed() -> TestResult {
     let mut ld = LineDisc::new();
     // CREAD is set by default in LineDisc::new().
     let action = ld.input_char(b'a');
-    // In canonical mode with ECHO, should echo the character.
     let ok = matches!(action, InputAction::Echo { buf, len } if buf[0] == b'a' && len == 1);
     if !ok {
         klog_info!("TTY_TEST: BUG - CREAD enabled should process input normally");
@@ -534,11 +504,9 @@ pub fn test_cread_enabled_input_processed() -> TestResult {
     TestResult::Pass
 }
 
-/// CREAD cleared — all input is silently discarded.
 pub fn test_cread_disabled_input_discarded() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    // Clear CREAD in c_cflag.
     t.c_cflag &= !ControlFlags::CREAD;
     ld.set_termios(&t);
 
@@ -547,7 +515,6 @@ pub fn test_cread_disabled_input_discarded() -> TestResult {
         klog_info!("TTY_TEST: BUG - CREAD disabled should discard input");
         return TestResult::Fail;
     }
-    // Verify nothing was buffered.
     if ld.has_data() || !ld.edit_content().is_empty() {
         klog_info!("TTY_TEST: BUG - CREAD disabled should not buffer any data");
         return TestResult::Fail;
@@ -555,14 +522,12 @@ pub fn test_cread_disabled_input_discarded() -> TestResult {
     TestResult::Pass
 }
 
-/// CREAD gate in RawDisc — discard input when receiver disabled.
 pub fn test_cread_disabled_rawdisc() -> TestResult {
     let mut rd = RawDisc::new();
     let mut t = *rd.termios();
     t.c_cflag |= ControlFlags::CREAD;
     rd.set_termios(&t);
 
-    // With CREAD set, input should be accepted.
     let action = rd.input_char(b'x');
     if !matches!(action, InputAction::None) {
         klog_info!("TTY_TEST: BUG - RawDisc with CREAD should accept input");
@@ -573,7 +538,6 @@ pub fn test_cread_disabled_rawdisc() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Clear CREAD — input should be discarded.
     let mut rd2 = RawDisc::new();
     let mut t2 = *rd2.termios();
     t2.c_cflag &= !ControlFlags::CREAD;
@@ -587,7 +551,6 @@ pub fn test_cread_disabled_rawdisc() -> TestResult {
     TestResult::Pass
 }
 
-/// IMAXBEL set + edit buffer full → InputAction::Bell.
 pub fn test_imaxbel_buffer_full_rings_bell() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -600,7 +563,6 @@ pub fn test_imaxbel_buffer_full_rings_bell() -> TestResult {
         ld.input_char(b'x');
     }
 
-    // Next char should ring the bell.
     let action = ld.input_char(b'z');
     if !matches!(action, InputAction::Bell) {
         klog_info!("TTY_TEST: BUG - IMAXBEL should return Bell when edit buffer full");
@@ -609,21 +571,17 @@ pub fn test_imaxbel_buffer_full_rings_bell() -> TestResult {
     TestResult::Pass
 }
 
-/// IMAXBEL not set + edit buffer full → silent discard (InputAction::None).
 pub fn test_imaxbel_not_set_buffer_full_silent() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
-    // Ensure IMAXBEL is NOT set.
     t.c_iflag &= !InputFlags::IMAXBEL;
     ld.set_termios(&t);
 
-    // Fill the edit buffer.
     for _ in 0..4096 {
         ld.input_char(b'x');
     }
 
-    // Next char should be silently discarded.
     let action = ld.input_char(b'z');
     if !matches!(action, InputAction::None) {
         klog_info!("TTY_TEST: BUG - without IMAXBEL, full buffer should silently discard");
@@ -632,7 +590,6 @@ pub fn test_imaxbel_not_set_buffer_full_silent() -> TestResult {
     TestResult::Pass
 }
 
-/// IMAXBEL set but buffer NOT full — normal echo.
 pub fn test_imaxbel_buffer_not_full_normal() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -649,11 +606,9 @@ pub fn test_imaxbel_buffer_not_full_normal() -> TestResult {
     TestResult::Pass
 }
 
-/// IMAXBEL in non-canonical (raw) mode — bell when cooked buffer full.
 pub fn test_imaxbel_raw_mode_buffer_full() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    // Non-canonical mode with ECHO + IMAXBEL.
     t.c_lflag = LocalFlags::ECHO; // no ICANON
     t.c_iflag |= InputFlags::IMAXBEL;
     ld.set_termios(&t);
@@ -663,7 +618,6 @@ pub fn test_imaxbel_raw_mode_buffer_full() -> TestResult {
         ld.input_char(b'a');
     }
 
-    // Next char should ring the bell.
     let action = ld.input_char(b'z');
     if !matches!(action, InputAction::Bell) {
         klog_info!("TTY_TEST: BUG - IMAXBEL in raw mode should Bell when cooked buffer full");
@@ -672,20 +626,16 @@ pub fn test_imaxbel_raw_mode_buffer_full() -> TestResult {
     TestResult::Pass
 }
 
-/// IXOFF high-water: after enough input, ixoff_check_xoff returns VSTOP byte.
 pub fn test_ixoff_high_water_sends_xoff() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    // Use canonical mode: input fills the edit buffer first, then cooked
-    // after newline.  This lets us exceed the IXOFF high-water mark which
-    // is 80% of (EDIT_BUF_SIZE + COOKED_BUF_SIZE).
+    // IXOFF high-water is 80% of (EDIT_BUF_SIZE + COOKED_BUF_SIZE).
     t.c_lflag = LocalFlags::ICANON; // canonical, no echo
     t.c_iflag |= InputFlags::IXOFF;
-    // Ensure VSTOP is Ctrl+S (0x13) — should be the default.
+    // Ctrl+S, the default.
     t.c_cc[CcIndex::Vstop.as_usize()] = 0x13;
     ld.set_termios(&t);
 
-    // Flush two big lines to cooked.
     for _ in 0..4000 {
         ld.input_char(b'x');
     }
@@ -695,7 +645,6 @@ pub fn test_ixoff_high_water_sends_xoff() -> TestResult {
     }
     ld.input_char(b'\n');
 
-    // Now type more into the edit buffer until pending exceeds high-water.
     // pending = edit_len + cooked_count, must cross IXOFF high-water.
     for _ in 0..1830 {
         ld.input_char(b'y');
@@ -707,7 +656,6 @@ pub fn test_ixoff_high_water_sends_xoff() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Second call should return None (already sent).
     let xoff2 = ld.ixoff_check_xoff();
     if xoff2.is_some() {
         klog_info!("TTY_TEST: BUG - IXOFF should not send XOFF twice");
@@ -716,7 +664,6 @@ pub fn test_ixoff_high_water_sends_xoff() -> TestResult {
     TestResult::Pass
 }
 
-/// IXOFF low-water: after consuming enough input, ixoff_check_xon returns VSTART.
 pub fn test_ixoff_low_water_sends_xon() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -736,7 +683,6 @@ pub fn test_ixoff_low_water_sends_xon() -> TestResult {
     }
     ld.input_char(b'\n');
 
-    // Add chars to edit to hit high-water.
     for _ in 0..1828 {
         ld.input_char(b'y');
     }
@@ -765,7 +711,6 @@ pub fn test_ixoff_low_water_sends_xon() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Second call should return None (already sent).
     let xon2 = ld.ixoff_check_xon();
     if xon2.is_some() {
         klog_info!("TTY_TEST: BUG - IXOFF should not send XON twice");
@@ -774,12 +719,11 @@ pub fn test_ixoff_low_water_sends_xon() -> TestResult {
     TestResult::Pass
 }
 
-/// IXOFF not set — flow control methods always return None.
 pub fn test_ixoff_not_set_no_flow_control() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::empty(); // non-canonical
-    t.c_iflag &= !InputFlags::IXOFF; // ensure IXOFF is off
+    t.c_iflag &= !InputFlags::IXOFF;
     ld.set_termios(&t);
 
     // Fill buffer and overflow by one byte.
@@ -798,7 +742,6 @@ pub fn test_ixoff_not_set_no_flow_control() -> TestResult {
     TestResult::Pass
 }
 
-/// CREAD constant value is 0x80.
 pub fn test_cread_flag_value() -> TestResult {
     if ControlFlags::CREAD.bits() != 0x80 {
         klog_info!("TTY_TEST: BUG - CREAD should be 0x80");
@@ -807,7 +750,6 @@ pub fn test_cread_flag_value() -> TestResult {
     TestResult::Pass
 }
 
-/// IMAXBEL constant value is 0x2000.
 pub fn test_imaxbel_flag_value() -> TestResult {
     if InputFlags::IMAXBEL.bits() != 0x2000 {
         klog_info!("TTY_TEST: BUG - IMAXBEL should be 0x2000");
@@ -815,11 +757,7 @@ pub fn test_imaxbel_flag_value() -> TestResult {
     }
     TestResult::Pass
 }
-// ---------------------------------------------------------------------------
-// PTY Flow Control (Throttle Mechanism) tests
-// ---------------------------------------------------------------------------
 
-/// Throttle watermark constants are sane.
 pub fn test_throttle_watermark_constants() -> TestResult {
     use crate::tty::ldisc::{THROTTLE_HIGH_WATER, THROTTLE_LOW_WATER};
     // High-water must be greater than low-water for hysteresis to work.
@@ -842,7 +780,6 @@ pub fn test_throttle_watermark_constants() -> TestResult {
     TestResult::Pass
 }
 
-/// A freshly allocated PTY slave starts unthrottled.
 pub fn test_pty_initially_unthrottled() -> TestResult {
     tty::table::tty_table_init();
 
@@ -871,7 +808,6 @@ pub fn test_pty_initially_unthrottled() -> TestResult {
     TestResult::Pass
 }
 
-/// Flooding a PTY slave with push_input activates throttle.
 pub fn test_throttle_activates_at_high_water() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
@@ -894,7 +830,6 @@ pub fn test_throttle_activates_at_high_water() -> TestResult {
     raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
-    // Push bytes until we exceed the high-water mark.
     for _ in 0..(THROTTLE_HIGH_WATER + 1) {
         tty::push_input(slave, b'X');
     }
@@ -916,7 +851,6 @@ pub fn test_throttle_activates_at_high_water() -> TestResult {
     TestResult::Pass
 }
 
-/// master_write returns short write when slave is throttled.
 pub fn test_master_write_short_write_when_throttled() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
@@ -933,18 +867,15 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Raw mode so bytes go directly to cooked buffer.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
-    // Fill slave to just below high-water.
     for _ in 0..(THROTTLE_HIGH_WATER - 1) {
         tty::push_input(slave, b'A');
     }
 
-    // Verify not yet throttled.
     {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
         if guard
@@ -958,7 +889,6 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
         }
     }
 
-    // Now get the peer handle from the master to call master_write directly.
     let peer = {
         let guard = TTY_SLOTS[master.0 as usize].lock();
         match guard.as_ref().unwrap().driver {
@@ -970,13 +900,9 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
         }
     };
 
-    // Write a burst of bytes through master_write.  Since the slave is
-    // near high-water, not all should be accepted.
     let burst = [b'B'; 256];
     let accepted = crate::tty::pty::master_write(&peer, &burst);
 
-    // After enough bytes to cross high-water, throttle activates and
-    // master_write stops accepting.  We should get a short write.
     if accepted >= burst.len() {
         klog_info!(
             "TTY_TEST: BUG - master_write accepted all {} bytes despite throttle",
@@ -986,7 +912,6 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
         return TestResult::Fail;
     }
 
-    // accepted should be > 0 (at least the 1 byte to reach high-water).
     if accepted == 0 {
         klog_info!("TTY_TEST: BUG - master_write accepted 0 bytes");
         tty::set_termios(slave, &saved).unwrap();
@@ -997,7 +922,6 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
     TestResult::Pass
 }
 
-/// Reading from a throttled slave unthrottles it.
 pub fn test_read_unthrottles_slave() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
@@ -1014,18 +938,15 @@ pub fn test_read_unthrottles_slave() -> TestResult {
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Raw mode.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
-    // Fill past high-water to activate throttle.
     for _ in 0..(THROTTLE_HIGH_WATER + 64) {
         tty::push_input(slave, b'R');
     }
 
-    // Confirm throttled.
     {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
         if !guard
@@ -1039,7 +960,6 @@ pub fn test_read_unthrottles_slave() -> TestResult {
         }
     }
 
-    // Drain enough data to drop below low-water.
     let mut drain_buf = [0u8; 512];
     let mut drained = 0;
     loop {
@@ -1047,7 +967,6 @@ pub fn test_read_unthrottles_slave() -> TestResult {
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 drained += n;
-                // Check if unthrottled yet.
                 let still_throttled = {
                     let guard = TTY_SLOTS[slave.0 as usize].lock();
                     guard
@@ -1062,7 +981,6 @@ pub fn test_read_unthrottles_slave() -> TestResult {
         }
     }
 
-    // Verify unthrottled.
     let still_throttled = {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
         guard
@@ -1083,7 +1001,6 @@ pub fn test_read_unthrottles_slave() -> TestResult {
     TestResult::Pass
 }
 
-/// Throttle/unthrottle cycle preserves data integrity.
 pub fn test_throttle_cycle_no_data_loss() -> TestResult {
     tty::table::tty_table_init();
 
@@ -1099,13 +1016,11 @@ pub fn test_throttle_cycle_no_data_loss() -> TestResult {
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Raw mode.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
-    // Use master_write to push exactly N bytes, draining in between cycles.
     let peer = {
         let guard = TTY_SLOTS[master.0 as usize].lock();
         match guard.as_ref().unwrap().driver {
@@ -1119,13 +1034,10 @@ pub fn test_throttle_cycle_no_data_loss() -> TestResult {
     let mut total_written: usize = 0;
     let mut total_read: usize = 0;
 
-    // Do 3 fill/drain cycles.
     for _ in 0..3 {
-        // Write a chunk via master_write.
         let accepted = crate::tty::pty::master_write(&peer, &*chunk);
         total_written += accepted;
 
-        // Drain all available data from slave.
         let mut drain_buf: KBox<[u8; 2048]> = KBox::zeroed().expect("alloc");
         loop {
             match tty::read(slave, &mut *drain_buf, true) {
@@ -1149,19 +1061,15 @@ pub fn test_throttle_cycle_no_data_loss() -> TestResult {
     TestResult::Pass
 }
 
-/// Console TTY (non-PTY) is never affected by throttle.
 pub fn test_console_not_throttled() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Push a lot of data into the console TTY.
     for _ in 0..4096 {
         tty::push_input(idx, b'Z');
     }
 
-    // The console has no peer — it's not a PTY, so `throttled` should
-    // either be false or irrelevant (no master to back-pressure).
     let throttled = {
         let guard = TTY_SLOTS[0].lock();
         guard
@@ -1170,19 +1078,13 @@ pub fn test_console_not_throttled() -> TestResult {
             .unwrap_or(false)
     };
 
-    // Even if the flag gets set mechanically, it has no effect on console.
-    // But ideally it shouldn't be set at all because console push_input
-    // goes through the same path. Let's verify the flag state and accept
-    // either way — the important thing is that console writes never block.
-    // (The throttle back-pressure only applies when peer_slave_slot is Some,
-    //  which is only for PtyMaster. Console has SerialConsole/VConsole driver.)
-    let _ = throttled; // flag may or may not be set — no master to block.
+    // Throttle back-pressure only applies when peer_slave_slot is Some (PtyMaster).
+    let _ = throttled;
 
     drain_tty_nonblock(idx);
     TestResult::Pass
 }
 
-/// master_write returns full length when slave is not throttled.
 pub fn test_master_write_full_when_not_throttled() -> TestResult {
     tty::table::tty_table_init();
 
@@ -1198,13 +1100,11 @@ pub fn test_master_write_full_when_not_throttled() -> TestResult {
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Raw mode.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
-    // Get peer handle.
     let peer = {
         let guard = TTY_SLOTS[master.0 as usize].lock();
         match guard.as_ref().unwrap().driver {
@@ -1213,7 +1113,6 @@ pub fn test_master_write_full_when_not_throttled() -> TestResult {
         }
     };
 
-    // Write a small burst — should be fully accepted.
     let small = [b'S'; 64];
     let accepted = crate::tty::pty::master_write(&peer, &small);
     if accepted != small.len() {

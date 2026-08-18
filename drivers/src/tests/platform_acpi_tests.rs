@@ -1,16 +1,14 @@
 //! ACPI platform-bus building blocks: `_CRS` small-descriptor parsing
 //! (`IO`/`FixedIO`/`IRQ`), IAPC_BOOT_ARCH 8042 detection, and EISA id packing.
 //!
-//! Fixture-driven like `madt_tests.rs`; the byte arrays mirror what the Lenovo
-//! keyboard's `_CRS` and the platform FADT actually contain.
+//! The byte fixtures mirror what the Lenovo keyboard's `_CRS` and the platform
+//! FADT actually contain.
 
 use slopos_acpi::aml::eisa_pack;
 use slopos_acpi::aml::resource::{parse_io_ports, parse_irqs};
 use slopos_acpi::fadt::Fadt;
 use slopos_testing::{TestResult, fail, pass};
 
-/// The i8042 keyboard's `_CRS`: `IO 0x60` (len 1), `IO 0x64` (len 1),
-/// `IRQ {1} Edge ActiveHigh`, then the End tag + checksum.
 const KBD_CRS: &[u8] = &[
     0x47, 0x01, 0x60, 0x00, 0x60, 0x00, 0x01, 0x01, // IO Port: base 0x60, len 1
     0x47, 0x01, 0x64, 0x00, 0x64, 0x00, 0x01, 0x01, // IO Port: base 0x64, len 1

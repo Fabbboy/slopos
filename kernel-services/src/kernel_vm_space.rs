@@ -1,71 +1,37 @@
-//! Singleton `KArc<VmSpace>` wrapping the live kernel-master PML4.
+//! Singleton `VmSpace` wrapping the live kernel-master PML4 (built by Limine
+//! before `kernel_main`) via [`VmSpace::wrap_existing`], so kernel-side paging
+//! flows through the same cursor / activate machinery as every per-process
+//! address space without rebuilding the master's HHDM tree under OSTD.
 //!
-//! `slopos-ostd` exposes [`VmSpace::wrap_existing`] precisely so the
-//! kernel master (built by Limine before `kernel_main`) can be folded
-//! into the same cursor / activate / kernel-half-resync machinery as
-//! every per-process address space — without rebuilding the master's
-//! HHDM tree under OSTD.
-//!
-//! # Boot sequence
-//!
-//! 1. `register_kernel_master_pml4(read_cr3())` — `early_init` declares
-//!    where the master lives. Happens before `boot_init_run_all`.
-//! 2. `boot_step_init_meta_slots` (priority 40) — META_SLOTS array
-//!    becomes available, which is the prerequisite for any
-//!    [`Frame::<PageTableMeta>::from_unused`] call.
-//! 3. `boot_step_register_frame_alloc` (priority 50) — registered
-//!    OSTD `FrameAlloc` is the prerequisite for cursor mutations
-//!    (intermediate page-table allocation goes through it).
-//! 4. **boot_step_install_kernel_vm_space_fn** (priority 55) — wraps
-//!    the live kernel-master PML4 with `Pcid::KERNEL`. From here on
-//!    every kernel-side paging mutation can flow through OSTD's
-//!    cursor API. The wrapping happens inline in the boot caller,
-//!    reading the live PML4 paddr from CR3 and threading
-//!    `&ctx.bsp_token()` as the witness; the `KERNEL_VM_SPACE` static
-//!    below is `pub` so the inline call can reach it.
-//!
-//! Use [`kernel_vm_space`] from any post-init code path; the accessor
-//! panics with a clear use-before-init message if invoked before step 4.
+//! Installed by `boot_step_install_kernel_vm_space_fn` (priority 55), after the
+//! META_SLOTS (40) and OSTD `FrameAlloc` (50) boot steps it depends on.
 
 use slopos_ostd::mm::vm_space::VmSpace;
 use slopos_ostd::sync::{OnceLock, SpinLock};
 
-/// Singleton wrapping the live kernel-master PML4. Mutations
-/// (cursor_mut, kernel-half map / unmap / protect) happen across
-/// every CPU at runtime, so the inner `VmSpace` is guarded by a
-/// `SpinLock` — the BSP boot caller takes the lock unconstested,
-/// runtime callers serialise. `pub` because the boot caller in
-/// `boot::boot_memory::boot_step_install_kernel_vm_space_fn` calls
-/// `KERNEL_VM_SPACE.call_once(...)` inline.
+/// `SpinLock` because kernel-half mutations happen from every CPU at runtime;
+/// `pub` so the boot caller can `call_once` it inline.
 pub static KERNEL_VM_SPACE: OnceLock<SpinLock<VmSpace>> = OnceLock::new();
 
-/// Read accessor. Panics with a clear message if invoked before
-/// `boot_step_install_kernel_vm_space_fn` has run. Returns the
-/// `SpinLock`-guarded VmSpace; callers `.lock()` to get a mutable
-/// handle.
+/// Panics if invoked before `boot_step_install_kernel_vm_space_fn` has run.
 pub fn kernel_vm_space() -> &'static SpinLock<VmSpace> {
     KERNEL_VM_SPACE
         .get()
         .expect("kernel_vm_space() called before boot_step_install_kernel_vm_space_fn")
 }
 
-/// Test-friendly variant: returns `None` instead of panicking when
-/// the singleton hasn't been installed yet. Production paths should
-/// stick to [`kernel_vm_space`] for the use-before-init razor.
+/// Returns `None` instead of panicking when the singleton is not installed.
+/// Production paths should use [`kernel_vm_space`] for the use-before-init razor.
 pub fn try_kernel_vm_space() -> Option<&'static SpinLock<VmSpace>> {
     KERNEL_VM_SPACE.get()
 }
 
-/// Park the current CPU on the kernel master VM after a fatal user
-/// fault. Wraps [`VmSpace::activate_kernel_master`] in the post-fault
-/// context where the kernel-half invariant is trivially satisfied
-/// (we're switching onto the master itself), so the safety contract
-/// is upheld locally and the safe-wrapper call site stays here.
+/// Park the current CPU on the kernel master VM after a fatal user fault. The
+/// kernel-half invariant [`VmSpace::activate_kernel_master`] needs holds
+/// trivially here: the target is the master itself.
 ///
-/// Returns `true` if the kernel VM was installed and CR3 was switched;
-/// `false` when `boot_step_install_kernel_vm_space_fn` has not yet run
-/// (pre-init fault — the caller falls back to halting on whatever PML4
-/// is already loaded).
+/// Returns `false` when `boot_step_install_kernel_vm_space_fn` has not yet run,
+/// leaving the caller to halt on whatever PML4 is already loaded.
 pub fn activate_post_user_fault() -> bool {
     let Some(slot) = try_kernel_vm_space() else {
         return false;

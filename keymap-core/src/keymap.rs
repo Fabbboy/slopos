@@ -1,18 +1,10 @@
 //! Keymap / layout layer: canonical usage + modifier/lock state → produced text
-//! codepoint or named key. The single home of keyboard *layout*.
+//! codepoint or named key.
 //!
-//! Resolution is **data-driven**: a [`LayoutTable`] holds the per-key, per-level
-//! glyphs (base / shift / AltGr / shift+AltGr), a per-key caps-affected bit, and
-//! a dead-key compose table. [`resolve`] is the full engine — it picks the level
-//! from the active modifiers/locks, runs the dead-key state machine, and applies
-//! the kernel/TTY Ctrl→control-code transform. Layout-*independent* keys (named
-//! keys, the numeric keypad, NumLock, whitespace control keys) are resolved in
-//! code here and never appear in the table.
-//!
-//! The built-in US-QWERTY layout ([`crate::layout_table::US_QWERTY`]) backs the
-//! historical [`UsQwerty`]/[`char_for`]/[`ui_classify`] entry points so existing
-//! kernel and GUI call sites keep working unchanged while the kernel gains a
-//! runtime-swappable active layout.
+//! [`resolve`] picks the glyph level from the active modifiers/locks against a
+//! [`LayoutTable`], runs the dead-key state machine, and applies the Ctrl→control
+//! transform. Layout-*independent* keys (named keys, the numeric keypad, NumLock,
+//! whitespace control keys) are resolved in code here and never appear in the table.
 
 use slopos_abi::input::keycode::*;
 
@@ -25,13 +17,11 @@ pub struct Mods {
     pub ctrl: bool,
     pub alt: bool,
     pub meta: bool,
-    /// AltGr (right Alt) — selects the level-3 / level-4 glyph columns. Distinct
-    /// from `alt` so a layout can put characters on AltGr without "right Alt"
-    /// also meaning a plain Alt chord.
+    /// AltGr (right Alt) — selects the level-3 / level-4 glyph columns; distinct
+    /// from `alt` so AltGr characters do not also read as a plain Alt chord.
     pub altgr: bool,
 }
 
-/// Active lock states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Locks {
     pub caps: bool,
@@ -42,8 +32,8 @@ pub struct Locks {
 /// What a key produces under the active modifiers/locks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyOutcome {
-    /// A text codepoint. Includes control characters (`'\n'`, `'\t'`, `0x08`,
-    /// `0x1B`) so the legacy ASCII path can be reconstructed exactly.
+    /// A text codepoint, control characters (`'\n'`, `'\t'`, `0x08`, `0x1B`)
+    /// included.
     Text(u32),
     /// A non-text action key (navigation, function, lock).
     Named(NamedKey),
@@ -52,10 +42,6 @@ pub enum KeyOutcome {
 }
 
 /// Per-keyboard dead-key state: the accent awaiting its next key, if any.
-///
-/// Lives wherever the codepoint is computed (the kernel keyboard state, or a
-/// test). A freshly-pressed dead key arms `pending` and produces no text; the
-/// next key composes against it (see [`resolve`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeadKeyState {
     pub pending: Option<u8>,
@@ -66,18 +52,13 @@ impl DeadKeyState {
         Self { pending: None }
     }
 
-    /// Clear any pending dead key (e.g. on focus change or layout swap).
     pub fn reset(&mut self) {
         self.pending = None;
     }
 }
 
-/// The full result of resolving a key against a layout: an optional accent to
-/// emit **before** the main outcome (a dead-key flush), plus the outcome itself.
-///
-/// `flush` is non-zero only when a pending dead key did not compose with this
-/// key and must be emitted as its bare spacing accent first. The kernel routes
-/// it as its own input event ahead of the key's event.
+/// Resolution result: `flush` is a bare spacing accent to emit **before**
+/// `outcome`, non-zero only when a pending dead key did not compose with this key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resolved {
     pub flush: u32,
@@ -113,9 +94,8 @@ impl Resolved {
 }
 
 /// Select the level (0..4) for a key, honoring AltGr and the per-key caps fold.
-///
-/// CapsLock case-folds only caps-affected keys, acting like Shift; Caps+Shift on
-/// such a key cancels back to the base case (Linux `KT_LETTER` semantics).
+/// CapsLock acts like Shift on caps-affected keys; Caps+Shift cancels back to the
+/// base case (Linux `KT_LETTER` semantics).
 fn level_index(mods: Mods, locks: Locks, caps_affected: bool) -> usize {
     let eff_shift = mods.shift ^ (locks.caps && caps_affected);
     match (mods.altgr, eff_shift) {
@@ -126,15 +106,13 @@ fn level_index(mods: Mods, locks: Locks, caps_affected: bool) -> usize {
     }
 }
 
-/// Resolve a key's layout-dependent cell at the active level, falling back to a
-/// lower level when the selected one is empty (XKB-style: missing upper level →
-/// lower). Returns the decoded [`CellKind`] (text literal, dead key, or none).
+/// Resolve a key's layout-dependent cell, falling back to a lower level when the
+/// selected one is empty (XKB-style: missing upper level → lower).
 fn resolve_level(table: &LayoutTable, usage: u16, mods: Mods, locks: Locks) -> CellKind {
     let caps_affected = table.caps_affected(usage);
     let level = level_index(mods, locks, caps_affected);
-    // Fallback chains for an empty selected level: shift+altgr keeps shift
-    // semantics through level 1 (XKB-style), but plain altgr must not pick up
-    // the shifted glyph, so level 2 falls straight to base.
+    // Plain altgr must not pick up the shifted glyph, so level 2 falls straight to
+    // base; shift+altgr keeps shift semantics through level 1 (XKB-style).
     let chain: &[usize] = match level {
         3 => &[3, 2, 1, 0],
         2 => &[2, 0],
@@ -151,8 +129,7 @@ fn resolve_level(table: &LayoutTable, usage: u16, mods: Mods, locks: Locks) -> C
 }
 
 /// The codepoint this key contributes as a dead-key *compose base*: its literal
-/// glyph, or `0x20` for Space. `None` for named/control keys (which end a dead
-/// sequence by flushing the bare accent).
+/// glyph, or `0x20` for Space; `None` for named/control keys.
 fn compose_base(usage: u16, level: CellKind) -> Option<u32> {
     match level {
         CellKind::Literal(cp) => Some(cp),
@@ -167,11 +144,7 @@ fn compose_base(usage: u16, level: CellKind) -> Option<u32> {
     }
 }
 
-/// Resolve a key press against `table`, threading the per-keyboard dead-key
-/// state. This is the full engine used by the kernel keyboard driver.
-///
-/// Modifier keys never reach here (the caller filters them), but are handled
-/// defensively as no-output.
+/// Resolve a key press against `table`, threading the per-keyboard dead-key state.
 pub fn resolve(
     table: &LayoutTable,
     usage: u16,
@@ -185,12 +158,10 @@ pub fn resolve(
 
     let level = resolve_level(table, usage, mods, locks);
 
-    // A dead key is already pending: compose against it.
     if let Some(d) = dead.pending.take() {
         if let CellKind::Dead(d2) = level {
-            // Same dead key twice → emit the accent once, sequence over (the
-            // standard double-press behavior); a *different* dead key chains:
-            // emit the first accent now and arm the new one.
+            // Double-press of one dead key emits the bare accent and ends the
+            // sequence; a different one chains.
             if d2 != d {
                 dead.pending = Some(d2);
             }
@@ -204,14 +175,11 @@ pub fn resolve(
                 // dead + space → the bare spacing accent.
                 return Resolved::text(table.dead_accent_of(d));
             }
-            // No composition: flush the accent, then emit the base normally.
             return finish(usage, mods, locks, level).with_flush(table.dead_accent_of(d));
         }
-        // A named/control key ends the sequence: flush the accent, then handle it.
         return finish(usage, mods, locks, level).with_flush(table.dead_accent_of(d));
     }
 
-    // Fresh press of a dead key: arm it, produce nothing now.
     if let CellKind::Dead(d) = level {
         dead.pending = Some(d);
         return Resolved::none();
@@ -232,7 +200,6 @@ fn finish(usage: u16, mods: Mods, locks: Locks, level: CellKind) -> Resolved {
         return Resolved::text(cp);
     }
 
-    // Layout-independent text keys.
     if let Some(c) = control_char(usage) {
         return Resolved::text(c);
     }
@@ -249,10 +216,8 @@ fn finish(usage: u16, mods: Mods, locks: Locks, level: CellKind) -> Resolved {
     Resolved::none()
 }
 
-/// The classic terminal Ctrl→control-code transform, applied to letters only:
-/// `Ctrl+A` → `0x01` … `Ctrl+Z` → `0x1A`. Driven by the *resolved* glyph (the
-/// layout letter), so on a QWERTZ layout `Ctrl` on the key labelled `Z` sends
-/// `0x1A` regardless of physical position. Non-letters are unaffected.
+/// The terminal Ctrl→control-code transform, letters only: `Ctrl+A` → `0x01` …
+/// `Ctrl+Z` → `0x1A`. Driven by the *resolved* glyph, not the physical key.
 fn ctrl_transform(cp: u32) -> Option<u32> {
     char::from_u32(cp)
         .filter(|c| c.is_ascii_alphabetic())
@@ -270,11 +235,9 @@ fn control_char(usage: u16) -> Option<u32> {
     })
 }
 
-/// A key's classification for a GUI toolkit: a named action key, a printable
-/// character, or nothing. Distinct from [`KeyOutcome`] in that the toolkit
-/// policy treats Enter/Tab/Space/Backspace/Escape as *named* keys (so widgets
-/// can act on them) and never folds Ctrl into the character (so Ctrl+A still
-/// classifies as `'a'` for shortcut matching).
+/// A key's classification for a GUI toolkit. Unlike [`KeyOutcome`], it treats
+/// Enter/Tab/Space/Backspace/Escape as *named* keys and never folds Ctrl into the
+/// character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiKey {
     Named(NamedKey),
@@ -283,9 +246,6 @@ pub enum UiKey {
 }
 
 /// A keyboard layout: maps a canonical usage + state to an outcome.
-///
-/// Retained for source compatibility; the layout *data* now lives in
-/// [`LayoutTable`]. [`UsQwerty`] resolves against the built-in US table.
 pub trait Layout {
     fn map(&self, usage: u16, mods: Mods, locks: Locks) -> KeyOutcome;
 }
@@ -300,11 +260,9 @@ impl Layout for UsQwerty {
     }
 }
 
-/// The printable character a key produces under `mods`/`locks`, **ignoring
-/// Ctrl/Alt** (so Ctrl+A still yields `'a'`), against the given `table`. Returns
-/// `None` for keys that produce only a named action (navigation, function, lock)
-/// or a freshly-pressed dead key. Keypad keys yield their digit only when in
-/// digit mode (`num XOR shift`); operators and KP-Enter are unconditional.
+/// The printable character a key produces under `mods`/`locks` against `table`,
+/// **ignoring Ctrl/Alt**. `None` for named-action keys and a freshly-pressed dead
+/// key; keypad digits need `num XOR shift`, operators and KP-Enter do not.
 pub fn char_for_table(table: &LayoutTable, usage: u16, mods: Mods, locks: Locks) -> Option<char> {
     if let CellKind::Literal(cp) = resolve_level(table, usage, mods, locks) {
         return char::from_u32(cp);
@@ -370,8 +328,7 @@ pub fn named_for(usage: u16, mods: Mods, locks: Locks) -> Option<NamedKey> {
     named_key(usage)
 }
 
-/// Classify a key for a GUI toolkit against `table` (Ctrl-independent character,
-/// named-key policy). See [`UiKey`].
+/// Classify a key for a GUI toolkit against `table`. See [`UiKey`].
 pub fn ui_classify_table(table: &LayoutTable, usage: u16, mods: Mods, locks: Locks) -> UiKey {
     match usage {
         KEY_ENTER | KEY_KP_ENTER => return UiKey::Named(NamedKey::Enter),
@@ -440,8 +397,7 @@ fn digit_or(digit_mode: bool, digit: u8, nav: NamedKey) -> KeyOutcome {
     }
 }
 
-/// Navigation / function / lock usages → named keys. (Text-producing keys are
-/// handled before this is reached.)
+/// Navigation / function / lock usages → named keys.
 fn named_key(usage: u16) -> Option<NamedKey> {
     Some(match usage {
         KEY_LEFT => NamedKey::Left,
@@ -532,15 +488,12 @@ mod tests {
         }
     }
 
-    // --- existing US behavior, via the UsQwerty shim ---
-
     #[test]
     fn letters_shift_and_caps() {
         let km = UsQwerty;
         assert_eq!(text(km.map(KEY_A, NONE, NUM_ON)), b'a' as u32);
         assert_eq!(text(km.map(KEY_A, SHIFT, NUM_ON)), b'A' as u32);
         assert_eq!(text(km.map(KEY_A, NONE, CAPS_ON)), b'A' as u32);
-        // Shift + CapsLock cancels back to lowercase.
         assert_eq!(text(km.map(KEY_A, SHIFT, CAPS_ON)), b'a' as u32);
     }
 
@@ -549,7 +502,6 @@ mod tests {
         let km = UsQwerty;
         assert_eq!(text(km.map(KEY_C, CTRL, NUM_ON)), 0x03); // Ctrl+C
         assert_eq!(text(km.map(KEY_A, CTRL, NUM_ON)), 0x01); // Ctrl+A
-        // Ctrl on a number is unaffected (only letters transform).
         assert_eq!(text(km.map(KEY_1, CTRL, NUM_ON)), b'1' as u32);
     }
 
@@ -615,8 +567,6 @@ mod tests {
         assert_eq!(text(km.map(KEY_KP_SLASH, NONE, NUM_OFF)), b'/' as u32);
         assert_eq!(text(km.map(KEY_KP_ENTER, NONE, NUM_OFF)), '\n' as u32);
     }
-
-    // --- GUI-toolkit classification ---
 
     #[test]
     fn char_for_ignores_ctrl() {
@@ -691,16 +641,13 @@ mod tests {
         assert_eq!(km.map(KEY_RIGHTALT, NONE, NUM_ON), KeyOutcome::None);
     }
 
-    // --- new engine: AltGr levels, dead keys, level fallback ---
-
-    /// A tiny synthetic de_CH-ish layout for engine tests, built programmatically:
-    /// QWERTZ y/z swap, AltGr on `2`/`E`, and an acute dead key on `=`.
+    /// A synthetic de_CH-ish layout for engine tests: QWERTZ y/z swap, AltGr on
+    /// `2`/`E`, and an acute dead key on `=`.
     fn demo_layout() -> LayoutTable {
         const ACUTE: u8 = 0;
         let mut t = us_qwerty();
         t.name = [0; 16];
         t.name[..5].copy_from_slice(b"de_CH");
-        // y/z swap (caps-affected letters).
         t.levels[KEY_Y as usize] = [
             Cell::literal('z' as u32),
             Cell::literal('Z' as u32),
@@ -713,7 +660,6 @@ mod tests {
             Cell::NONE,
             Cell::NONE,
         ];
-        // AltGr+2 = @  (base '2', shift '"', altgr '@').
         t.levels[KEY_2 as usize] = [
             Cell::literal('2' as u32),
             Cell::literal('"' as u32),
@@ -722,7 +668,6 @@ mod tests {
         ];
         // AltGr+E = €.
         t.levels[KEY_E as usize][2] = Cell::literal(0x20AC);
-        // Acute dead key on '=' (base), grave on shift unused here.
         t.dead_accent[ACUTE as usize] = 0x00B4; // ´
         t.levels[KEY_EQUAL as usize] = [Cell::dead(ACUTE), Cell::NONE, Cell::NONE, Cell::NONE];
         t.compose[0] = ComposeEntry {
@@ -753,7 +698,6 @@ mod tests {
             resolve(&t, KEY_E, ALTGR, NUM_ON, &mut d).outcome,
             KeyOutcome::Text(0x20AC)
         );
-        // AltGr on a key with no level-3 falls back to base.
         assert_eq!(
             resolve(&t, KEY_A, ALTGR, NUM_ON, &mut d).outcome,
             KeyOutcome::Text('a' as u32)
@@ -776,8 +720,7 @@ mod tests {
             resolve(&t, KEY_Y, SHIFT, NUM_ON, &mut d).outcome,
             KeyOutcome::Text('Z' as u32)
         );
-        // Ctrl follows the layout letter: Ctrl on the physical-Y key (labelled Z)
-        // sends Ctrl-Z (0x1A), since the resolved glyph is 'z'.
+        // Ctrl follows the resolved glyph: physical Y (labelled Z) sends Ctrl-Z (0x1A).
         assert_eq!(
             resolve(&t, KEY_Y, CTRL, NUM_ON, &mut d).outcome,
             KeyOutcome::Text(0x1A)
@@ -788,12 +731,11 @@ mod tests {
     fn dead_key_composes() {
         let t = demo_layout();
         let mut d = DeadKeyState::new();
-        // Press the acute dead key: no output, armed.
         let r = resolve(&t, KEY_EQUAL, NONE, NUM_ON, &mut d);
         assert_eq!(r.outcome, KeyOutcome::None);
         assert_eq!(r.flush, 0);
         assert_eq!(d.pending, Some(0));
-        // Then 'a' → 'á'.
+        // 'a' → 'á'.
         let r = resolve(&t, KEY_A, NONE, NUM_ON, &mut d);
         assert_eq!(r.outcome, KeyOutcome::Text(0x00E1));
         assert_eq!(r.flush, 0);
@@ -815,7 +757,7 @@ mod tests {
         let t = demo_layout();
         let mut d = DeadKeyState::new();
         resolve(&t, KEY_EQUAL, NONE, NUM_ON, &mut d); // arm acute
-        // 's' has no acute composition: flush ´ then emit 's'.
+        // 's' has no acute composition.
         let r = resolve(&t, KEY_S, NONE, NUM_ON, &mut d);
         assert_eq!(r.flush, 0x00B4);
         assert_eq!(r.outcome, KeyOutcome::Text('s' as u32));
@@ -838,12 +780,10 @@ mod tests {
         let t = demo_layout();
         let mut d = DeadKeyState::new();
         resolve(&t, KEY_EQUAL, NONE, NUM_ON, &mut d); // arm acute
-        // Same dead key again → the bare accent once, pending cleared.
         let r = resolve(&t, KEY_EQUAL, NONE, NUM_ON, &mut d);
         assert_eq!(r.outcome, KeyOutcome::Text(0x00B4)); // ´
         assert_eq!(r.flush, 0);
         assert_eq!(d.pending, None);
-        // The next letter is NOT composed against a stale accent.
         let r = resolve(&t, KEY_A, NONE, NUM_ON, &mut d);
         assert_eq!(r.outcome, KeyOutcome::Text('a' as u32));
     }
@@ -864,12 +804,11 @@ mod tests {
             resolve(&t, KEY_Y, ALTGR_SHIFT, NUM_ON, &mut d).outcome,
             KeyOutcome::Text('Z' as u32)
         );
-        // Plain AltGr still falls to base, never the shifted glyph.
         assert_eq!(
             resolve(&t, KEY_Y, ALTGR, NUM_ON, &mut d).outcome,
             KeyOutcome::Text('z' as u32)
         );
-        // A key with an AltGr level keeps it under AltGr+Shift (3 → 2).
+        // KEY_2 has an AltGr level: AltGr+Shift falls 3 → 2.
         assert_eq!(
             resolve(&t, KEY_2, ALTGR_SHIFT, NUM_ON, &mut d).outcome,
             KeyOutcome::Text('@' as u32)

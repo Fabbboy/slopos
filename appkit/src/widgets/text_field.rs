@@ -149,7 +149,6 @@ impl TextFieldWidget {
             .map(|(start, end)| self.char_substring(start, end))
     }
 
-    /// Move cursor, optionally extending selection with Shift.
     fn move_cursor(&mut self, new_pos: usize, extend_selection: bool) {
         if extend_selection {
             if self.selection_anchor.is_none() {
@@ -435,7 +434,6 @@ impl TextFieldWidget {
                 let new_pos = if modifiers.shift {
                     self.cursor.saturating_sub(1)
                 } else if let Some((start, _)) = self.selection_range() {
-                    // Without shift, collapse selection to its start side.
                     start
                 } else {
                     self.cursor.saturating_sub(1)

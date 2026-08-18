@@ -1,8 +1,7 @@
 //! Per-syscall context.
 //!
 //! Built once by [`crate::syscall::dispatch::syscall_handle`] at syscall entry.
-//! Handler bodies receive `&SyscallContext` and never touch raw register state;
-//! typed arguments are decoded by the macro from `ctx.regs()`. The full
+//! Handler bodies receive `&SyscallContext` and typed arguments; the full
 //! [`UserContext`] is exposed for the handlers that manipulate the whole frame
 //! (`exec`, `fork`, `clone`, `rt_sigreturn`).
 
@@ -27,8 +26,8 @@ use crate::syscall::result::SyscallResult;
 pub type SyscallRegs = [u64; 6];
 
 /// The calling task, its arguments, and its user-mode frame, for the duration
-/// of one syscall. The task is a **borrow** — exactly the claim the syscall
-/// path can honestly make: it is alive because it is executing this code.
+/// of one syscall. The task is a **borrow**: it is alive because it is
+/// executing this code.
 pub struct SyscallContext<'a> {
     task: &'a Task,
     task_id: u32,
@@ -41,8 +40,7 @@ pub struct SyscallContext<'a> {
 
 impl<'a> SyscallContext<'a> {
     /// Build a context for the task this CPU is running. Borrowing the guard
-    /// rather than storing it ties the context's lifetime to it, which is what
-    /// makes the borrow inside sound.
+    /// rather than storing it ties the context's lifetime to it.
     pub fn from_current(current: &'a Current, ctx: &'a UserContext) -> Self {
         Self::new(current.task(), current.id(), ctx)
     }
@@ -68,8 +66,8 @@ impl<'a> SyscallContext<'a> {
         }
     }
 
-    /// Macro-internal hook for `define_syscall!`. Handler bodies never reach
-    /// for raw register slots; typed args flow through `SyscallArg::from_raw`.
+    /// Macro-internal hook for `define_syscall!`; handler bodies take typed
+    /// args through `SyscallArg::from_raw` instead.
     #[inline]
     pub fn regs(&self) -> &SyscallRegs {
         &self.regs
@@ -87,7 +85,7 @@ impl<'a> SyscallContext<'a> {
 
     /// The calling task's process id, or `INVALID_PROCESS_ID` for a task bound
     /// to no process. ABI only — acting on the caller's process needs
-    /// [`require_process`](Self::require_process), which recycling cannot
+    /// [`require_process`](Self::require_process), which id recycling cannot
     /// confuse.
     #[inline]
     pub fn process_id(&self) -> u32 {
@@ -112,8 +110,6 @@ impl<'a> SyscallContext<'a> {
             .ok_or(Errno::ESRCH)
     }
 
-    /// Resolve the caller's [`VmSpace`], or an error when the caller is bound
-    /// to no process or the process has no VM space.
     pub fn vm_space(&self) -> Result<KArc<VmSpace>, Errno> {
         let vm_process = self.require_process()?.process().ok_or(Errno::ESRCH)?;
         slopos_mm::process_vm::process_vm_get_vm_space(vm_process).ok_or(Errno::EFAULT)

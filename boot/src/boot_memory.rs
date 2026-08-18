@@ -25,28 +25,16 @@ fn boot_step_mmu_asid_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
 }
 
 fn boot_step_init_meta_slots_fn(ctx: &mut BootCtx<'_, BspInit>) {
-    // Memory phase priority 5 — runs after the buddy allocator is up
-    // (BOOT_STEP_MEMORY_PRE_TYPESTATE, priority 2) and before
-    // BOOT_STEP_REGISTER_FRAME_ALLOC at priority 6. `install_meta_slots`
-    // itself uses the raw bootstrap escape (`__alloc_page_frames_raw`)
-    // because it is bootstrapping META_SLOTS — the typestate path
-    // physically cannot work yet.
+    // Must run after the buddy allocator and before the frame allocator is
+    // registered: `install_meta_slots` bootstraps META_SLOTS itself, so the
+    // typestate path physically cannot work yet.
     let n_slots = slopos_mm::kernel_meta::install_meta_slots(&ctx.bsp_token());
     klog_info!("OSTD: meta_slots installed ({} entries)", n_slots);
 }
 
 fn boot_step_register_frame_alloc_fn(ctx: &mut BootCtx<'_, BspInit>) {
-    // Memory phase priority 6 — runs after the buddy allocator
-    // (priority 2) and after meta_slots install (priority 5), which
-    // is what the OSTD frame allocator interface needs. After this
-    // step the typestate `Frame::<KernelMeta>::alloc` path is live;
-    // the post-typestate boot step at priority 10 then performs every
-    // remaining kernel page allocation through the typestate gate.
-    //
-    // `slopos_mm::page_alloc::BUDDY_ALLOCATOR` is the production
-    // `FrameAlloc` implementation; the doubly-indirect handle
-    // matches OSTD's setter signature without going through any
-    // adapter struct.
+    // Must follow the buddy allocator and the meta_slots install; after it the
+    // typestate `Frame::<KernelMeta>::alloc` path is live.
     slopos_ostd::mm::frame_alloc::register_frame_allocator(
         &ctx.bsp_token(),
         slopos_mm::page_alloc::frame_alloc_handle(),
@@ -55,16 +43,12 @@ fn boot_step_register_frame_alloc_fn(ctx: &mut BootCtx<'_, BspInit>) {
 }
 
 fn boot_step_install_kernel_vm_space_fn(ctx: &mut BootCtx<'_, BspInit>) {
-    // Memory phase priority 7 — after meta_slots (priority 5) and
-    // frame_alloc (priority 6), which are `wrap_kernel_master`'s only
-    // prerequisites, and *before* the first kernel-half mapping in the
-    // tree (priority 10). Every kernel-half page-table write in the
-    // kernel goes through this VmSpace's cursor, so it has to exist
-    // before the first one, not after.
+    // Must follow meta_slots and frame_alloc — `wrap_kernel_master`'s only
+    // prerequisites — and precede the first kernel-half mapping, because every
+    // kernel-half page-table write goes through this VmSpace's cursor.
     //
-    // The kernel master PML4 paddr was registered with OSTD at
-    // early-init time; CR3 has not been swapped since, so the same
-    // paddr is still the live PML4 and is safe to wrap.
+    // CR3 has not been swapped since early init, so it still names the live
+    // kernel master PML4 and is safe to wrap.
     use slopos_kernel_services::kernel_vm_space::KERNEL_VM_SPACE;
     use slopos_ostd::mm::vm_space::{VmSpace, prepopulate_kernel_half};
     use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
@@ -77,28 +61,17 @@ fn boot_step_install_kernel_vm_space_fn(ctx: &mut BootCtx<'_, BspInit>) {
         "boot_step_install_kernel_vm_space_fn called twice"
     );
     KERNEL_VM_SPACE.call_once(|| {
-        // BspInit BootCtx + boot-step ordering jointly establish the
-        // four wrap-existing safety clauses (pml4_phys names the live
-        // kernel master, META_SLOTS / FrameAlloc are registered at
-        // priorities 5 and 6, we are pre-SMP on the BSP, and PCID is
-        // `Pcid::KERNEL`). `VmSpace::wrap_kernel_master` discharges
-        // them via the `&BspToken`.
         let space = VmSpace::wrap_kernel_master(&bsp, pml4_phys).expect(
             "boot_step_install_kernel_vm_space_fn: wrap_existing failed (pml4 slot already TYPED?)",
         );
-        // LOCK_LEVEL_REGISTRY: kernel-half mutations sit between
-        // resource (per-process state) and allocator levels — they
-        // touch the kernel master PML4 which is shared registry-style
-        // across every address space.
+        // Registry level: the kernel master PML4 is shared across every address
+        // space, so its lock sits between the resource and allocator levels.
         SpinLock::new(space, lock_class!("KERNEL_VM_SPACE", LOCK_LEVEL_REGISTRY))
     });
 
-    // The kernel half now has two names — the root `slopos_mm::paging`
-    // walks and the root the cursor writes. They are the same frame,
-    // and that is a fact worth failing on rather than arguing about:
-    // a CR3 read that kept its PCID or PWT/PCD bits would give one of
-    // them a different value, and both are dereferenced as a table
-    // base.
+    // Two roots name the kernel half — the one `slopos_mm::paging` walks and the
+    // one the cursor writes. A CR3 read that kept its PCID or PWT/PCD bits would
+    // make them differ, and both are dereferenced as a table base.
     assert_eq!(
         slopos_mm::paging::kernel_pml4_phys(),
         pml4_phys,
@@ -119,40 +92,27 @@ fn boot_step_install_kernel_vm_space_fn(ctx: &mut BootCtx<'_, BspInit>) {
 }
 
 fn boot_step_mark_kernel_global_fn(ctx: &mut BootCtx<'_, BspInit>) {
-    // Memory phase priority 55 — after every kernel-half mapping the
-    // memory phase installs (priority 10 and later). The order is
-    // load-bearing: this stamps GLOBAL onto leaves that already exist,
-    // so anything mapped afterwards would miss it.
+    // Must run after every kernel-half mapping: this stamps GLOBAL onto leaves
+    // that already exist, so anything mapped afterwards would miss it.
     use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
 
     let bsp = ctx.bsp_token();
 
-    // Stamp GLOBAL onto every kernel-half leaf via the OSTD cursor,
-    // which handles 4 KiB / 2 MiB / 1 GiB leaves uniformly through
-    // `protect::<S>`. CR4.PGE is enabled at priority 1, so the bit is
-    // already meaningful on the leaves being stamped.
+    // CR4.PGE is enabled earlier in this phase, so the bit is already
+    // meaningful on the leaves being stamped.
     slopos_mm::paging::paging_mark_kernel_global();
 
-    // Force the TLB to re-walk and re-tag kernel entries as global —
-    // Intel SDM §4.10.2.4 says the CPU may have cached kernel entries
-    // before the GLOBAL bit was set, so a CR3 reload drops the
-    // non-global entries. `activate_kernel_master_bsp` is the safe
-    // BSP-init wrapper around the otherwise-unsafe `activate`.
+    // Intel SDM §4.10.2.4: entries cached before the GLOBAL bit was set stay
+    // non-global, so a CR3 reload is what drops them.
     kernel_vm_space().lock().activate_kernel_master_bsp(&bsp);
 
     klog_debug!("OSTD: kernel-half leaves stamped GLOBAL");
 }
 
 fn boot_step_register_luf_hook_fn(ctx: &mut BootCtx<'_, BspInit>) {
-    // Memory phase priority 56 — runs after KERNEL_VM_SPACE is installed
-    // (priority 55) and before any per-process VmSpace cursor mutation
-    // can occur (those happen via `create_process_vm`, which is far
-    // post-boot). Installing the hook now means every subsequent
-    // `CursorMut::unmap` over a USER-flagged leaf and every
-    // `VmSpace::activate` routes into slopos-mm's LUF. OSTD's
-    // `register_cursor_unmap_hook` asserts on double-call. Body
-    // inlined from the former `slopos_mm::mmu::luf_hook::register_with_ostd`
-    // shim.
+    // Must precede any per-process VmSpace cursor mutation, so that every
+    // `CursorMut::unmap` over a USER-flagged leaf and every `VmSpace::activate`
+    // routes into slopos-mm's LUF.
     slopos_ostd::mm::vm_space::register_cursor_unmap_hook(
         &ctx.bsp_token(),
         &slopos_mm::mmu::luf_hook::LUF_HOOK_REF,
@@ -160,12 +120,9 @@ fn boot_step_register_luf_hook_fn(ctx: &mut BootCtx<'_, BspInit>) {
     klog_info!("OSTD: cursor_unmap_hook registered (LufHook)");
 }
 
-/// Wire the reclaim tier.
-///
 /// Registration order is policy: the quarantine goes first because its frames
-/// are already free — nothing references them and releasing one is a splice
-/// into the free lists — so a small shortfall is met without dropping a cache
-/// that costs disk I/O to refill.
+/// are already free, so a small shortfall is met without dropping a cache that
+/// costs disk I/O to refill.
 fn boot_step_register_reclaimers_fn(ctx: &mut BootCtx<'_, BspInit>) {
     let token = ctx.bsp_token();
     slopos_mm::page_alloc::register_reclaim(&token);

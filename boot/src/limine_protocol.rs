@@ -383,7 +383,7 @@ pub fn get_rsdp_phys_address() -> u64 {
         return 0;
     }
     // Base revision 6 returns the RSDP as an HHDM virtual pointer; older
-    // revisions returned a physical address. Normalise to physical.
+    // revisions returned a physical address.
     let addr = info.rsdp_phys_addr;
     if info.flags.hhdm_available && addr >= info.hhdm_offset {
         addr - info.hhdm_offset
@@ -419,8 +419,6 @@ pub fn get_rsdp_address() -> *const c_void {
 
     let addr = info.rsdp_phys_addr;
 
-    // Base revision 6 returns the RSDP as an HHDM virtual pointer; older
-    // revisions returned physical, so detect which form this is.
     if addr >= info.hhdm_offset && info.flags.hhdm_available {
         addr as *const c_void
     } else if info.flags.hhdm_available {

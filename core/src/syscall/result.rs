@@ -1,25 +1,22 @@
 //! Typed syscall return values.
 //!
 //! Handler bodies return any type implementing [`IntoSyscallResult`];
-//! the dispatch glue converts to [`SyscallResult`] and writes the
-//! caller-side register. The dispatcher is the sole site that touches
-//! `rax`; handlers never call `ctx.ok()` / `ctx.err()` again.
+//! the dispatcher converts it to [`SyscallResult`] and is the sole site
+//! that touches `rax`.
 
 use core::convert::Infallible;
 use core::ops::{ControlFlow, FromResidual, Residual, Try};
 
 use slopos_abi::Errno;
 
-/// Final disposition of a syscall handler. Produced by the macro
-/// after running [`IntoSyscallResult::into_syscall_result`] on the body.
+/// Final disposition of a syscall handler.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SyscallResult {
     /// Success — write `rax = value`.
     Ok(u64),
-    /// Failure — write `rax = errno.as_u64()`. The dispatcher detects
-    /// `Errno::ERESTARTSYS` and emits the `ERRNO_ERESTARTSYS` sentinel
-    /// so `handle_erestartsys` can decide between transparent restart
-    /// and `EINTR`.
+    /// Failure — write `rax = errno.as_u64()`; `Errno::ERESTARTSYS` becomes the
+    /// `ERRNO_ERESTARTSYS` sentinel `handle_erestartsys` resolves into a
+    /// transparent restart or `EINTR`.
     Err(Errno),
     /// Handler already wrote (or rewrote) the user-mode register state
     /// or the calling task is gone. Dispatcher leaves `rax` untouched.
@@ -28,15 +25,8 @@ pub enum SyscallResult {
 
 /// Convert a handler body's return type into a [`SyscallResult`].
 ///
-/// Implemented for the natural return shapes that handler bodies use:
-///
-/// * `()` — success returning `0`.
-/// * Unsigned integers — success returning the value.
-/// * Signed integers — success returning the value if `>= 0`, otherwise
-///   `Err(Errno)` constructed from the negative value.
-/// * `Result<T, Errno>` — explicit success / failure.
-/// * `SyscallResult` — passthrough (used by handlers that want
-///   `NoReturn`).
+/// `()` and unsigned integers are successes; a signed integer below zero
+/// becomes `Err(Errno)` constructed from the negative value.
 pub trait IntoSyscallResult {
     fn into_syscall_result(self) -> SyscallResult;
 }
@@ -106,12 +96,8 @@ impl<T: IntoSyscallResult> IntoSyscallResult for Result<T, SyscallResult> {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// `?` interop — let handler bodies use `expr?` on `Result<_, Errno>`
-// while the enclosing function returns `SyscallResult` directly. This
-// keeps the macro's wrapper allocation-free (no inner closure) so the
-// per-handler stack frame stays under the 2 KiB frame gate.
-// ─────────────────────────────────────────────────────────────────────
+// `?` interop — let handler bodies use `expr?` on `Result<_, Errno>` while the
+// enclosing function returns `SyscallResult` directly.
 
 impl Try for SyscallResult {
     type Output = u64;

@@ -3,9 +3,7 @@ use super::types::InodeNum;
 
 /// Handle to a cached inode with dirty tracking.
 ///
-/// Accessing fields via `data()` is read-only. Accessing via `data_mut()` sets
-/// the dirty flag. The caller must call `flush()` (or equivalent) before
-/// dropping a dirty handle — debug builds panic on forgotten flushes.
+/// A dirty handle must be flushed before it is dropped; debug builds panic otherwise.
 pub struct InodeHandle {
     num: InodeNum,
     data: Inode,

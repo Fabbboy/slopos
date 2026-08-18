@@ -1,50 +1,25 @@
 //! TTY backing objects — single-owner lifetime for every TTY/PTY.
 //!
-//! A [`TtyBacking`] is the owning handle for one TTY slot. Every open file
-//! referencing the TTY holds a `KArc<TtyBacking>` clone (transitively via
-//! its `OpenFile`), so the strong count *is* the open count and the
-//! backing's `Drop` *is* the last-close teardown. There is no separate
-//! reference counter to keep balanced and no generation bitmap: a stale
-//! reference is unrepresentable because peers are typed `KArc`/`KWeak`
-//! links, not indices.
+//! A [`TtyBacking`] is the owning handle for one TTY slot: every open file
+//! referencing the TTY holds a `KArc<TtyBacking>` clone, so the strong count
+//! *is* the open count and the backing's `Drop` *is* the last-close teardown.
 //!
 //! # Pair topology
 //!
-//! The master backing holds its slave **strongly** (a PTY pair's slave end
-//! exists as long as the master does); the slave holds its master **weakly**
-//! (`upgrade() == None` ⇔ the master is gone). Both links are built with
-//! [`KArc::try_new_cyclic`] so they are valid from birth.
-//!
-//! Slave **opens** are a separate tier: slave fds own a [`TtySlaveOpen`]
-//! (all opens share one), whose `Drop` is "the last slave fd closed" —
-//! it latches `PEER_CLOSED` on the master so master readers see EOF while
-//! the pair structure (kept by the master's strong link) lives on and the
-//! slave stays reopenable. Without this split, last-slave-close would be
-//! indistinguishable from pair teardown.
-//!
-//! # Teardown (Drop)
-//!
-//! - **Master backing** last-drop: vhangup the slave (flush, detach
-//!   session, SIGHUP + SIGCONT, wake readers/writers/poll) while our
-//!   strong link still pins its slot, then free the master slot. The
-//!   strong slave link drops with the fields — once the last slave open
-//!   is gone too, that cascades into the slave-slot teardown.
-//! - **Slave open** last-drop: latch `PEER_CLOSED` on the master (masters
-//!   see EOF, not a hangup). Frees nothing.
-//! - **Slave backing** last-drop (only reachable once the master is gone
-//!   and no slave open holds it): free the slave slot.
-//! - **Console** last-drop: HUPCL hangup if a session is attached, else
-//!   flush + detach; the console slot itself persists and a later open
-//!   mints a fresh backing.
+//! The master backing holds its slave **strongly**; the slave holds its master
+//! **weakly** (`upgrade() == None` ⇔ the master is gone). Both links are built
+//! with [`KArc::try_new_cyclic`] so they are valid from birth. Slave **opens**
+//! are a separate tier: all slave fds share one [`TtySlaveOpen`] whose `Drop`
+//! latches `PEER_CLOSED` on the master, so last-slave-close (master sees EOF,
+//! slave stays reopenable) stays distinguishable from pair teardown.
 //!
 //! # Lock ordering
 //!
 //! `TTY_BACKINGS[i]` / `TTY_SLAVE_OPENS[i]` → `TTY_SLOTS[j]`. Drop bodies
 //! take only per-slot locks, never `PTY_ALLOC_LOCK`. Because teardown
-//! retakes a slot's registry locks (`free_slot`, and the console close
-//! serialising against reopen), a strong backing reference must never be
-//! dropped while its own slot's registry lock is held — open paths
-//! release the guard first or pin an alias past it.
+//! retakes a slot's registry locks, a strong backing reference must never be
+//! dropped while its own slot's registry lock is held — open paths release
+//! the guard first or pin an alias past it.
 
 use slopos_abi::quota::ObjectRow;
 use slopos_abi::syscall::ControlFlags;
@@ -59,8 +34,7 @@ use super::pty;
 use super::table::{TTY_BACKINGS, TTY_SLAVE_OPENS, TTY_SLOTS, free_slot};
 use super::{MAX_TTYS, TtyError, TtyFlags, TtyIndex};
 
-/// Owning handle for one TTY slot. See the module docs for the lifetime
-/// model.
+/// Owning handle for one TTY slot.
 ///
 /// The charge accounts for the **slot**, and a PTY pair genuinely occupies
 /// two of them — `pty_alloc` draws `find_free_slot` twice — so each backing
@@ -77,9 +51,7 @@ pub struct TtyBacking {
 enum PeerLink {
     /// Serial or virtual console — no peer.
     Console,
-    /// This backing is a PTY master; the link keeps the slave end alive.
     MasterOf(KArc<TtyBacking>),
-    /// This backing is a PTY slave; `upgrade() == None` ⇔ master gone.
     SlaveOf(KWeak<TtyBacking>),
 }
 
@@ -116,25 +88,19 @@ impl TtyBacking {
         }
     }
 
-    /// Build a linked master/slave backing pair — master strong→slave,
-    /// slave weak→master, both links valid from birth (the slave is
-    /// constructed inside the master's cyclic initialiser).
+    /// Build a linked master/slave backing pair; the slave is constructed
+    /// inside the master's cyclic initialiser, so both links are valid from
+    /// birth.
     pub(crate) fn new_pair(
         master_idx: TtyIndex,
         slave_idx: TtyIndex,
         account: AccountId,
     ) -> Option<(KArc<TtyBacking>, KArc<TtyBacking>)> {
         // Both slots are charged before either object exists, so a refusal
-        // never leaves half a pair built.
-        //
-        // The pair is charged as **one** two-unit token held by the master
-        // rather than one token each. `try_new_cyclic`'s initialiser is
-        // `FnOnce` but not statically known to run once, so moving a distinct
-        // slave token into it would need an `Option` — and an
-        // `Option<Charge<_>>` is exactly the safe separation the linearity
-        // rule forbids. One token on the master is also the truer statement:
-        // the two slots live and die together, and the master's `Drop` is
-        // what frees both.
+        // never leaves half a pair built. One two-unit token on the master
+        // rather than one each: `try_new_cyclic`'s initialiser is `FnOnce` but
+        // not statically known to run once, so a distinct slave token would
+        // need an `Option<Charge<_>>` — the separation linearity forbids.
         let master_charge = Charge::commit(try_charge::<ObjectRow>(account, 2).ok()?);
         let mut slave_alloc_failed = false;
         let master = KArc::try_new_cyclic(|master_weak| {
@@ -176,10 +142,8 @@ impl Drop for TtyBacking {
         match &self.peer {
             PeerLink::Console => console_last_close(self.idx),
             PeerLink::MasterOf(slave) => {
-                // Hang up the slave while our strong link still pins its
-                // slot, then free our own. The link drops with the fields;
-                // once the last slave open is gone too, that cascades into
-                // the slave backing's own drop below.
+                // Hang up the slave while our strong link still pins its slot,
+                // then free our own.
                 super::lifecycle::hangup(slave.index());
                 free_slot(self.idx);
             }
@@ -192,16 +156,13 @@ impl Drop for TtyBacking {
     }
 }
 
-/// Shared open-tracking object for a PTY slave: every slave fd owns an
-/// alias of one `TtySlaveOpen`. Its `Drop` is "the last slave fd closed"
-/// — the master sees EOF — while the pair structure survives (the master
-/// keeps the slave backing alive) and the slave stays reopenable.
+/// Shared open-tracking object for a PTY slave: every slave fd owns an alias
+/// of one of these, so its `Drop` is the last slave fd closing.
 #[derive(slopos_ostd::Charged)]
 pub struct TtySlaveOpen {
     backing: KArc<TtyBacking>,
-    /// Every slave fd holds an alias of one of these, so a charge here would
-    /// be per-fd rather than per-object. The slot it names is charged on the
-    /// [`TtyBacking`] it points at.
+    /// A charge here would be per-fd rather than per-object; the slot it names
+    /// is charged on the [`TtyBacking`] it points at.
     object_charge: AliasOf,
 }
 
@@ -227,13 +188,12 @@ impl Drop for TtySlaveOpen {
 /// up; otherwise flush and detach in place. The slot is never freed —
 /// consoles are permanent.
 ///
-/// The slot mutation runs under the slot's backing-registry lock, which
-/// also serialises `open_tty`'s mint of a replacement backing. A close
-/// that observes a live registry entry belongs to a superseded backing —
-/// the fresh owner's state must not be torn down under it — so it bows
-/// out. Liveness is read as `strong_count() > 0` rather than `upgrade()`:
-/// a transient strong reference dropped here could itself become the last
-/// one and re-enter this function under the registry lock.
+/// The slot mutation runs under the slot's backing-registry lock, which also
+/// serialises `open_tty`'s mint of a replacement backing: a close observing a
+/// live registry entry is superseded and bows out. Liveness is
+/// `strong_count() > 0` rather than `upgrade()` — a transient strong reference
+/// dropped here could itself become the last one and re-enter this function
+/// under the registry lock.
 fn console_last_close(idx: TtyIndex) {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -253,10 +213,9 @@ fn console_last_close(idx: TtyIndex) {
                 .control_flags()
                 .contains(ControlFlags::HUPCL);
             let sid = tty.session.session_id();
-            // HUPCL fires only when a session is attached (sid != 0). Without
-            // a session there is no process group to receive SIGHUP and no DTR
-            // line to drop (QEMU serial is virtual). POSIX allows this: HUPCL
-            // is "implementation-defined" for terminals without modem control.
+            // Without a session there is no process group to receive SIGHUP and
+            // no DTR line to drop; POSIX leaves HUPCL implementation-defined
+            // for terminals without modem control.
             if hupcl && sid != 0 {
                 tty.flags.remove(TtyFlags::EXCLUSIVE);
                 true
@@ -280,10 +239,6 @@ fn console_last_close(idx: TtyIndex) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Open paths — every fd-facing open mints or clones an owner here
-// ---------------------------------------------------------------------------
-
 /// Open the TTY at `idx`: share the live owner, or mint a fresh one for a
 /// console slot whose previous backing has fully closed. PTY pairs cannot
 /// be resurrected — a dead backing means the pair is (mid-)gone. Slave
@@ -303,9 +258,9 @@ pub fn open_tty(idx: TtyIndex) -> Result<KArc<dyn FileBacking>, TtyError> {
                     return Ok(open_slave_shared(existing)?);
                 }
                 if let Err(e) = exclusive_gate(&existing) {
-                    // Release the registry lock before `existing` drops:
-                    // were this upgrade the last strong reference, its
-                    // teardown retakes the same lock.
+                    // Release the registry lock before `existing` drops: were
+                    // this upgrade the last strong reference, its teardown
+                    // retakes the same lock.
                     drop(reg);
                     return Err(e);
                 }
@@ -324,12 +279,10 @@ pub fn open_tty(idx: TtyIndex) -> Result<KArc<dyn FileBacking>, TtyError> {
         }
 
         // Allocate with no lock held: a failed allocation drops a console
-        // backing whose teardown takes the registry lock.
-        //
-        // Charged to the root, explicitly: a console slot is a fixed boot
-        // resource that every process shares and no process created, so
-        // billing whoever happened to open it first would make a shell's
-        // budget depend on boot ordering.
+        // backing whose teardown takes the registry lock. Charged to the root
+        // because a console slot is a fixed boot resource no process created,
+        // so billing the first opener would make a shell's budget depend on
+        // boot ordering.
         let backing = KArc::try_new(TtyBacking {
             idx,
             peer: PeerLink::Console,
@@ -350,8 +303,7 @@ pub fn open_tty(idx: TtyIndex) -> Result<KArc<dyn FileBacking>, TtyError> {
             }
         }
         // A concurrent open registered its backing first; ours tears down
-        // harmlessly (the live registration makes its close bow out) and
-        // the retry adopts the winner.
+        // harmlessly and the retry adopts the winner.
         drop(backing);
     }
 }
@@ -394,25 +346,22 @@ pub fn pty_open_peer(master_idx: TtyIndex) -> Result<(TtyIndex, KArc<dyn FileBac
     Ok((slave_idx, open_slave_shared(slave)?))
 }
 
-/// Share (or mint) the slave's open-tracking object. All slave fds hold
-/// aliases of one [`TtySlaveOpen`]; the first open after every-fd-closed
-/// mints a fresh one, giving the master a new EOF edge for the next
-/// last-close.
+/// Share (or mint) the slave's open-tracking object: the first open after
+/// every fd closed mints a fresh one, giving the master a new EOF edge for
+/// the next last-close.
 pub(crate) fn open_slave_shared(backing: KArc<TtyBacking>) -> Result<KArc<TtySlaveOpen>, TtyError> {
     let slot = backing.idx.0 as usize;
     let exclusive = {
         let guard = TTY_SLOTS[slot].lock();
         matches!(guard.as_ref(), Some(tty) if tty.flags.contains(TtyFlags::EXCLUSIVE))
     };
-    // Failure paths below can drop the last alias of the slave backing
-    // while the registry lock is held; its teardown frees the slot, which
-    // retakes this lock. This alias outlives the guard so the backing's
-    // teardown can only ever run after release.
+    // A failure path below can drop the last alias of the slave backing under
+    // the registry lock, and its teardown retakes that lock. This pin outlives
+    // the guard, so the teardown can only run after release.
     let _pin = backing.clone();
     let mut reg = TTY_SLAVE_OPENS[slot].lock();
     if let Some(existing) = reg.upgrade() {
-        // TIOCEXCL: an exclusive slave that is already open rejects
-        // further opens.
+        // TIOCEXCL: an already-open exclusive slave rejects further opens.
         if exclusive {
             return Err(TtyError::DeviceBusy);
         }
@@ -436,12 +385,10 @@ fn slave_locked(slot: usize) -> bool {
     matches!(guard.as_ref(), Some(tty) if tty.flags.contains(TtyFlags::SLAVE_LOCKED))
 }
 
-/// TIOCEXCL for consoles and masters: reject opens of an exclusive TTY
-/// that is already open. "Already open" is any strong reference beyond
-/// the caller's fresh clone. Transient data-path pins can inflate the
-/// count for the duration of a cross-end write, so a concurrent writer
-/// may surface a spurious `DeviceBusy` — acceptable for an advisory
-/// exclusivity latch.
+/// TIOCEXCL for consoles and masters: reject opens of an exclusive TTY that
+/// is already open — any strong reference beyond the caller's fresh clone.
+/// Transient data-path pins inflate the count during a cross-end write, so a
+/// concurrent writer may surface a spurious `DeviceBusy`.
 fn exclusive_gate(backing: &KArc<TtyBacking>) -> Result<(), TtyError> {
     let slot = backing.index().0 as usize;
     let exclusive = {
@@ -454,8 +401,6 @@ fn exclusive_gate(backing: &KArc<TtyBacking>) -> Result<(), TtyError> {
     Ok(())
 }
 
-/// Re-open semantics for consoles and masters: clear the hung-up /
-/// peer-closed latches on the slot itself.
 fn clear_own_latches(slot: usize) {
     let mut guard = TTY_SLOTS[slot].lock();
     if let Some(tty) = guard.as_mut() {

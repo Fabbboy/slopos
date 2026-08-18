@@ -2,9 +2,8 @@
 //! and the idle-loop input callback.
 //!
 //! Echo is staged under the slot lock and drained by `super::output` under
-//! `TTY_WRITE_LOCKS[slot]` after the guard drops.  That staging is what keeps
-//! the write lock outside every slot lock, and it serialises echo against user
-//! output at the byte level (POSIX §11.1.9).
+//! `TTY_WRITE_LOCKS[slot]` after the guard drops: the write lock stays outside
+//! every slot lock, and echo serialises against user output (POSIX §11.1.9).
 
 use core::ffi::c_int;
 use core::sync::atomic::Ordering;
@@ -25,8 +24,6 @@ use slopos_kernel_services::driver_runtime::{
 use slopos_ostd::sync::{BUS, WaitAbort};
 
 impl Tty {
-    /// Drain pending hardware input into the line discipline.
-    ///
     /// Caller holds the per-TTY lock.  Echo, any IXOFF byte and any generated
     /// signal are registered with `deferred` for emission once the caller drops
     /// the slot guard.
@@ -133,8 +130,7 @@ pub(crate) fn push_input_batch_nested(idx: TtyIndex, events: &[InputEvent], nest
             if let Some(pg) = tty.session.fg_pgrp_handle() {
                 deferred.add_signal(pg, sig);
             }
-            // Unless NOFLSH, a signal char discards the foreground job's pending
-            // I/O. The signal is posted ahead of the output-event wakes in
+            // The signal is posted ahead of the output-event wakes in
             // `deferred.execute()`, so a writer blocked on the flushed queue
             // observes it the moment its wait predicate re-runs.
             if flush {
@@ -164,9 +160,9 @@ pub(crate) fn push_input_batch_nested(idx: TtyIndex, events: &[InputEvent], nest
                     master.ldisc.flush_input();
                 }
             }
-            // TCOFLUSH: drop the slave's inflight accounting with the buffer.
-            // PTY-only — synchronous backends (vconsole, serial) complete output
-            // inline, so a reset there would only corrupt the counter.
+            // TCOFLUSH is PTY-only: synchronous backends (vconsole, serial)
+            // complete output inline, so resetting inflight there would corrupt
+            // the counter.
             TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
             deferred.wake_output_and_poll(master_slot);
         }
@@ -203,9 +199,9 @@ fn check_read_foreground(tty: &Tty, caller_pgid: u32, caller_sid: u32) -> Result
 /// Surface result of a *same-session* background read, by blocking mode.
 ///
 /// Not-yet-foreground is transient, so a non-blocking probe parks as
-/// `WouldBlock` and self-heals — surfacing `BackgroundRead` (-EIO) would poison
-/// an armed slop-ring `OP_READ` permanently and re-raise SIGTTIN on every
-/// re-probe.  A blocking read keeps the POSIX `BackgroundRead` surface.
+/// `WouldBlock`: `BackgroundRead` (-EIO) would poison an armed slop-ring
+/// `OP_READ` and re-raise SIGTTIN on every re-probe.  A blocking read keeps the
+/// POSIX `BackgroundRead` surface.
 pub(crate) fn background_read_surface(nonblock: bool) -> TtyError {
     if nonblock {
         TtyError::WouldBlock
@@ -312,9 +308,8 @@ pub fn read(idx: TtyIndex, buf: &mut [u8], nonblock: bool) -> Result<usize, TtyE
     read_with_attach(idx, buf, nonblock, true)
 }
 
-/// `_auto_attach` is dead: a read never claims a controlling terminal.  The
-/// parameter stays for ABI compatibility with the kernel services trait
-/// (`read_cooked_with_attach`).
+/// `_auto_attach` is dead: a read never claims a controlling terminal.  It stays
+/// for ABI compatibility with the kernel-services `read_cooked_with_attach`.
 
 pub fn read_with_attach(
     idx: TtyIndex,

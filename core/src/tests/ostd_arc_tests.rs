@@ -53,7 +53,6 @@ pub fn test_kweak_downgrade_upgrade_round_trip() -> TestResult {
     TestResult::Pass
 }
 
-/// A node holding a `KWeak` back at itself, established by `try_new_cyclic`.
 struct CyclicNode {
     payload: u32,
     self_link: KWeak<CyclicNode>,
@@ -140,8 +139,8 @@ pub fn test_karc_strong_count_saturates() -> TestResult {
         KArc::strong_count(&strong) == KArc::<u8>::max_refcount_for_test(),
         "drop must not undo strong-count saturation"
     );
-    // A saturated allocation is immortal by design; releasing the last handle
-    // confirms Drop takes the saturation path.
+    // A saturated allocation is immortal by design; this exercises Drop's
+    // saturation path.
     drop(strong);
     TestResult::Pass
 }
@@ -149,9 +148,8 @@ pub fn test_karc_strong_count_saturates() -> TestResult {
 /// `RcuArcSlot::load` mints exactly one reference per call, and the handles it
 /// mints stay valid after the slot has been published over.
 ///
-/// Kernel-side because both halves open an RCU read-side section, and
-/// `rcu_read_lock`'s gs-relative increment faults without a PCR, so the host
-/// suite can only reach the exclusive paths.
+/// Kernel-side because `rcu_read_lock`'s gs-relative increment faults without a
+/// PCR, which leaves the host suite only the exclusive paths.
 pub fn test_rcu_arc_slot_load_mints_one_reference() -> TestResult {
     let slot: RcuArcSlot<u64> = RcuArcSlot::empty();
     assert_test!(slot.load().is_none(), "an empty slot loads nothing");
@@ -183,8 +181,7 @@ pub fn test_rcu_arc_slot_load_mints_one_reference() -> TestResult {
         "both loads name the same allocation"
     );
 
-    // Publish over the slot: the displaced reference is released only after a
-    // grace period, and the already-minted handles are independent of it.
+    // The displaced reference is released only after a grace period.
     let Ok(replacement) = KArc::try_new(0x1234_u64) else {
         return TestResult::Fail;
     };
@@ -197,8 +194,8 @@ pub fn test_rcu_arc_slot_load_mints_one_reference() -> TestResult {
     drop(first);
     drop(second);
     slot.store(None);
-    // `call_rcu` only queues, and an idle CPU may drain concurrently, so poll
-    // for the effect rather than assuming one manual drain observes it.
+    // `call_rcu` only queues, and an idle CPU may drain concurrently, so one
+    // manual drain is not enough to observe the effect.
     assert_test!(
         crate::tests::rcu_cb_tests::drain_until(|| observer.upgrade().is_none()),
         "every reference the slot handed out was released exactly once"

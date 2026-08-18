@@ -165,7 +165,6 @@ pub fn random_next() -> u64 {
     u64::from_le_bytes(buf)
 }
 
-/// RDRAND where available, else mixed TSC samples.
 fn emergency_seed() -> [u8; 32] {
     use slopos_arch::cpu::rdrand;
     use slopos_arch::tsc;

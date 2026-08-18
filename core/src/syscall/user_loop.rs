@@ -1,19 +1,11 @@
 //! Kernel-side wrapper that drives the OSTD `UserMode::execute()` round-trip on
 //! every user task.
 //!
-//! [`user_task_first_run`] is what the scheduler dispatches into for a new
-//! (forked, cloned) user task; [`user_task_loop`] then loops on
-//! `UserMode::execute()` and hands each user→kernel return to
-//! [`crate::syscall::dispatch::syscall_handle`].
-//!
-//! # Stack discipline
-//!
 //! [`user_task_loop`]'s frame must survive every iretq → user → SYSCALL round
 //! trip, but `TSS.RSP0` points at the same per-task kernel stack, so IRQ pushes
 //! from user mode land on it. Task creation therefore seeds
-//! [`slopos_sched::task_struct::SwitchContext::rsp`] `SUPERVISOR_RESERVE` bytes
-//! below `kernel_stack_top`, reserving the top region for the IRQ chain; see
-//! `task_lifecycle::SUPERVISOR_RESERVE` for the budget sizing.
+//! `SwitchContext::rsp` `SUPERVISOR_RESERVE` bytes below `kernel_stack_top`,
+//! reserving the top region for the IRQ chain.
 
 use slopos_ostd::KArc;
 use slopos_ostd::klog_info;
@@ -25,9 +17,8 @@ use slopos_ostd::user::mode::{ReturnReason, UserMode};
 use slopos_sched::scheduler::scheduler_task_exit_impl;
 use slopos_sched::task_struct::Current;
 
-/// Single shared `VmSpace` handle used by every user task: the trusted-side
-/// `UserModeBackend` activates the supplied `&VmSpace` as a no-op, CR3 staying
-/// under legacy-kernel control.
+/// Shared by every user task: the trusted-side `UserModeBackend` activates the
+/// supplied `&VmSpace` as a no-op, CR3 staying under legacy-kernel control.
 static GLOBAL_VM_SPACE: OnceLock<KArc<VmSpace>> = OnceLock::new();
 
 fn placeholder_vm_space() -> &'static KArc<VmSpace> {
@@ -57,20 +48,18 @@ pub fn install_user_task_entry<'b>(token: &slopos_ostd::sync::BspToken<'b>) {
 
 fn user_task_loop() -> ! {
     let space = placeholder_vm_space();
-    // The task's own outermost frame, so one guard names it for the whole loop.
-    // It is the witness that authorises handing the task's register snapshot to
-    // `UserMode`, whose address is stable for the task's life.
+    // The outermost frame, so one guard names the task for the whole loop: it is
+    // the witness authorising the register snapshot handed to `UserMode`.
     let current = Current::get().expect("user_task_loop: dispatched with no current task");
     let user_ctx = current.task().user_ctx(&current);
     loop {
-        // The return-to-user tail: interrupts on, no lock held, preempt count
-        // back at baseline — where a loaded task pays for the deferred work its
-        // syscalls queued, instead of waiting for a CPU to go idle.
+        // The return-to-user tail: interrupts on, no lock held, preempt count at
+        // baseline — a loaded task pays here for the work its syscalls deferred.
         slopos_ostd::sync::bh::run_pending_if_due();
 
-        // Killed before ever reaching userland, or since the last syscall exit:
-        // leave through the task's own exit path, routed via delivery so the
-        // exit code comes from the pending signal's own disposition.
+        // Killed before reaching userland, or since the last syscall exit: leave
+        // through the task's own exit path, routed via delivery so the exit code
+        // comes from the pending signal's disposition.
         if current.task().is_killed() {
             crate::syscall::signal::deliver_pending_signal(&current, user_ctx);
             scheduler_task_exit_impl();

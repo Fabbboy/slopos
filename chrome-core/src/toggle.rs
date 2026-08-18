@@ -15,7 +15,6 @@ pub const TOGGLE_ON: i32 = 256;
 /// Inset of the knob from the track's edge on every side.
 pub const TOGGLE_PADDING: i32 = 2;
 
-/// Where the parts of a switch go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToggleGeometry {
     pub track: Rect,

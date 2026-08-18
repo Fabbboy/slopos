@@ -97,9 +97,7 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
 fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     register_fs_hooks();
 
-    // The FS takes an exclusive write capability on disk0 and holds it for the
-    // kernel's lifetime, so nothing else can open a second writer. Absence is
-    // not an error: on real hardware the root came from the initramfs.
+    // Absence is not an error: on real hardware the root came from the initramfs.
     if let Some(disk0) = virtio_blk::blk_device_by_index(BlockDeviceIndex(0)) {
         if virtio_blk::blk_is_ready(disk0) {
             match virtio_blk::open_writer(disk0) {
@@ -121,8 +119,6 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         }
     }
 
-    // Initramfs path: `/` is already the RAM root, so the ext2 disk becomes a
-    // `/mnt` secondary instead.
     if ROOTFS_IS_RAMFS.load(Ordering::Relaxed) {
         if ext2_vfs_is_initialized() {
             match mount(b"/mnt", &EXT2_VFS_STATIC, 0) {
@@ -137,7 +133,7 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         if ext2_vfs_is_initialized() {
             // The kernel-test phase may already have mounted RamFs at `/` and
             // tripped the one-shot init flag, so the call above returned without
-            // mounting ext2. Force-replace that root with the live ext2 backing.
+            // mounting ext2.
             let _ = unmount(b"/");
             match mount(b"/", &EXT2_VFS_STATIC, 0) {
                 Ok(_) => {

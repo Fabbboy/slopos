@@ -4,15 +4,8 @@ use slopos_abi::pixel::PixelFormat;
 
 use crate::DamageTracker;
 
-/// A safe, heap-free pixel buffer that implements [`Canvas`].
-///
-/// `DrawBuffer` wraps a caller-supplied `&mut [u8]` slice and provides
-/// bounds-checked pixel writes, automatic damage tracking, and block-level
-/// operations such as blitting and scrolling.
-///
-/// Both the kernel (via framebuffer MMIO) and userland (via shared-memory
-/// surfaces) can construct a `DrawBuffer` over any appropriately-sized
-/// byte slice.
+/// A heap-free [`Canvas`] over a caller-supplied `&mut [u8]`, with
+/// bounds-checked writes and damage tracking.
 pub struct DrawBuffer<'a> {
     data: &'a mut [u8],
     width: u32,

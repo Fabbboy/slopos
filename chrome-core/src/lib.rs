@@ -3,7 +3,7 @@
 //!
 //! Split out of the compositor crate because `userland/Cargo.toml` sets
 //! `test = false` on its `[lib]` target, so a `#[cfg(test)]` there never
-//! compiles. Free of `alloc`, `unsafe` and any syscall surface.
+//! compiles.
 
 #![no_std]
 #![forbid(unsafe_code)]

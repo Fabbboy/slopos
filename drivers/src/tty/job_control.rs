@@ -74,7 +74,6 @@ pub fn set_foreground_pgrp_checked(
         return Err(TtyError::InvalidIndex);
     }
 
-    // Clearing is always allowed; a named group with no living members is not.
     let fg = if pgid == 0 {
         KWeak::new()
     } else {
@@ -99,7 +98,6 @@ pub fn set_foreground_pgrp_checked(
     };
 
     if changed && scheduler_is_enabled() != 0 {
-        // Poll waiters park on the input queue too, so one publish covers both.
         BUS.publish(tty_input_event(slot));
     }
     Ok(())
@@ -132,8 +130,8 @@ pub fn attach_session(idx: TtyIndex, leader_pid: u32, leader_pgid: u32) {
     }
 }
 
-/// Makes the caller's session controlling. The session is derived from the
-/// passed foreground group, which pins it.
+/// The controlling session is derived from the passed foreground group, which
+/// pins it.
 pub fn acquire_controlling_terminal(
     idx: TtyIndex,
     fg: KWeak<ProcessGroup>,
@@ -155,7 +153,6 @@ pub fn acquire_controlling_terminal(
         None => return Err(TtyError::NotAllocated),
     };
 
-    // POSIX: PTY masters cannot become controlling terminals.
     if !tty.driver.can_be_controlling_terminal() {
         return Err(TtyError::PermissionDenied);
     }
@@ -223,8 +220,7 @@ pub fn detach_controlling_terminal(
         return Ok(false);
     }
 
-    // Pinning the group across the off-lock signal keeps its identity stable,
-    // closing the reused-pid window.
+    // Pinning the group across the off-lock signal closes the reused-pid window.
     let (fg_pgrp, session_id) = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {

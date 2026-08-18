@@ -33,9 +33,7 @@ pub enum MenuItemKind {
 
 #[derive(Copy, Clone, Debug)]
 pub enum TableColumnWidth {
-    /// Fixed pixel width.
     Fixed(i32),
-    /// Proportional flex weight.
     Flex(u16),
 }
 
@@ -83,8 +81,7 @@ pub struct TableColumn {
 }
 
 /// Declarative tree an app builds in `view()`; the framework diffs it against
-/// the previous one to update retained widgets. Widgets emit the application's
-/// own message type `M` rather than opaque integer IDs.
+/// the previous one to update retained widgets.
 pub enum Node<M> {
     Label {
         text: String,
@@ -262,7 +259,6 @@ pub trait App {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Action {
     None,
-    /// Rebuild the widget tree on the next frame.
     Rebuild,
     Exit,
 }

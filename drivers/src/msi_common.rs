@@ -12,7 +12,6 @@ pub const LAPIC_MSG_ADDR_DEST_SHIFT: u32 = 12;
 /// Fixed delivery mode: 000b in message-data bits [10:8].
 pub const LAPIC_MSG_DATA_DELIVERY_FIXED: u32 = 0b000 << 8;
 
-/// Edge trigger: 0 in message-data bit 15.
 pub const LAPIC_MSG_DATA_TRIGGER_EDGE: u32 = 0 << 15;
 
 /// Vectors 0–31 are reserved for x86 CPU exceptions and are never deliverable.

@@ -1,20 +1,15 @@
-//! Split from test_ldisc.rs: test_ldisc_flags.rs
+//! Line-discipline tests for termios flag processing: ICRNL, IGNCR, INLCR,
+//! ISTRIP, OPOST, ECHOCTL, VLNEXT, VWERASE, ECHOPRT, IUCLC and OLCUC.
 
 use super::fixtures::*;
-
-// ===========================================================================
-// Input flag processing tests
-// ===========================================================================
 
 /// ICRNL: CR (0x0D) is mapped to NL (0x0A) when ICRNL is set.
 pub fn test_ldisc_icrnl() -> TestResult {
     let mut ld = LineDisc::new();
-    // Enable ICRNL in c_iflag.
     let mut t = *ld.termios();
     t.c_iflag |= InputFlags::ICRNL;
     ld.set_termios(&t);
 
-    // Feed CR — should be treated as NL and flush edit buffer.
     ld.input_char(b'a');
     ld.input_char(b'b');
     ld.input_char(0x0D); // CR
@@ -25,7 +20,6 @@ pub fn test_ldisc_icrnl() -> TestResult {
     }
     let mut buf = [0u8; 16];
     let n = ld.read(&mut buf);
-    // Should get "ab\n" (3 bytes) — CR was converted to NL.
     if n != 3 || buf[2] != b'\n' {
         klog_info!(
             "TTY_TEST: BUG - ICRNL mismatch (n={}, b2=0x{:02x})",
@@ -44,13 +38,11 @@ pub fn test_ldisc_igncr() -> TestResult {
     t.c_iflag |= InputFlags::IGNCR;
     ld.set_termios(&t);
 
-    // Feed CR — should be silently discarded.
     for &c in b"abc" {
         ld.input_char(c);
     }
-    ld.input_char(0x0D); // CR — should be ignored
+    ld.input_char(0x0D); // CR
 
-    // No newline was delivered, so canonical mode should NOT have flushed.
     if ld.has_data() {
         klog_info!("TTY_TEST: BUG - IGNCR did not discard CR");
         return TestResult::Fail;
@@ -67,7 +59,7 @@ pub fn test_ldisc_inlcr() -> TestResult {
     t.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&t);
 
-    ld.input_char(b'\n'); // NL — should become CR
+    ld.input_char(b'\n');
     let mut buf = [0u8; 4];
     let n = ld.read(&mut buf);
     if n != 1 || buf[0] != b'\r' {
@@ -88,7 +80,7 @@ pub fn test_ldisc_istrip() -> TestResult {
     t.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&t);
 
-    ld.input_char(0xC1); // 0xC1 with bit 7 set -> 0x41 = 'A'
+    ld.input_char(0xC1); // 'A' with bit 7 set
     let mut buf = [0u8; 4];
     let n = ld.read(&mut buf);
     if n != 1 || buf[0] != 0x41 {
@@ -100,9 +92,6 @@ pub fn test_ldisc_istrip() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Output processing tests
-// ===========================================================================
 
 /// OPOST+ONLCR: NL is converted to CR+NL on output.
 pub fn test_ldisc_opost_onlcr() -> TestResult {
@@ -151,7 +140,7 @@ pub fn test_ldisc_opost_ocrnl() -> TestResult {
 /// No OPOST: bytes pass through unmodified.
 pub fn test_ldisc_output_raw() -> TestResult {
     let mut ld = LineDisc::new();
-    // Explicitly disable OPOST (default now has OPOST|ONLCR).
+    // Default termios has OPOST|ONLCR.
     let mut t = *ld.termios();
     t.c_oflag = OutputFlags::empty();
     ld.set_termios(&t);
@@ -174,9 +163,6 @@ pub fn test_ldisc_output_raw() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// ECHOCTL tests
-// ===========================================================================
 
 /// ECHOCTL: control characters are echoed as ^X.
 pub fn test_ldisc_echoctl() -> TestResult {
@@ -187,8 +173,7 @@ pub fn test_ldisc_echoctl() -> TestResult {
     t.c_lflag &= !LocalFlags::ISIG;
     ld.set_termios(&t);
 
-    // Feed Ctrl+C (0x03) — should echo ^C (2 bytes).
-    let action = ld.input_char(0x03);
+    let action = ld.input_char(0x03); // Ctrl+C
     match action {
         InputAction::Echo { buf, len } => {
             if len != 2 || buf[0] != b'^' || buf[1] != b'C' {
@@ -208,9 +193,6 @@ pub fn test_ldisc_echoctl() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// VLNEXT (literal next) tests
-// ===========================================================================
 
 /// VLNEXT: Ctrl+V makes the next character literal.
 pub fn test_ldisc_vlnext() -> TestResult {
@@ -219,24 +201,20 @@ pub fn test_ldisc_vlnext() -> TestResult {
     t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
-    // Press Ctrl+V (VLNEXT = 0x16).
-    ld.input_char(0x16);
+    ld.input_char(0x16); // Ctrl+V
 
-    // Now press Ctrl+C (0x03) — should be inserted literally, not generate signal.
-    let action = ld.input_char(0x03);
+    let action = ld.input_char(0x03); // Ctrl+C
     match action {
         InputAction::Signal(_) => {
             klog_info!("TTY_TEST: BUG - VLNEXT did not prevent signal");
             return TestResult::Fail;
         }
-        _ => {} // Any non-signal action is correct.
+        _ => {}
     }
 
-    // Flush and read — should contain 0x03 as a literal byte.
     ld.input_char(b'\n');
     let mut buf = [0u8; 16];
     let n = ld.read(&mut buf);
-    // Expect: 0x03 + '\n' = 2 bytes.
     if n < 2 || buf[0] != 0x03 {
         klog_info!(
             "TTY_TEST: BUG - VLNEXT literal byte missing (n={}, b0=0x{:02x})",
@@ -247,9 +225,6 @@ pub fn test_ldisc_vlnext() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// VWERASE (word erase) tests
-// ===========================================================================
 
 /// VWERASE: Ctrl+W erases the previous word.
 pub fn test_ldisc_vwerase() -> TestResult {
@@ -258,20 +233,16 @@ pub fn test_ldisc_vwerase() -> TestResult {
     t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
-    // Type "hello world".
     for &c in b"hello world" {
         ld.input_char(c);
     }
 
-    // Ctrl+W (VWERASE = 0x17) should erase "world".
-    ld.input_char(0x17);
+    ld.input_char(0x17); // Ctrl+W
 
-    // Now press Enter — should get "hello \n" (the trailing space stays
-    // because word erase only removes the word, not trailing spaces before it).
+    // Word erase removes the word but not the space before it.
     ld.input_char(b'\n');
     let mut buf = [0u8; 32];
     let n = ld.read(&mut buf);
-    // "hello " + NL = 7 bytes.
     if n != 7 || &buf[..6] != b"hello " {
         klog_info!(
             "TTY_TEST: BUG - VWERASE mismatch (n={}, data={:?})",
@@ -282,11 +253,7 @@ pub fn test_ldisc_vwerase() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// edit_content() for ReprintLine
-// ===========================================================================
 
-/// edit_content returns current edit buffer contents.
 pub fn test_ldisc_edit_content() -> TestResult {
     let mut ld = LineDisc::new();
     for &c in b"hello" {
@@ -299,9 +266,6 @@ pub fn test_ldisc_edit_content() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Legacy Termios Completion (ECHOPRT, IUCLC, OLCUC)
-// ===========================================================================
 
 /// ECHOPRT: first erase produces `\` then erased char.
 pub fn test_echoprt_erase_format() -> TestResult {
@@ -312,12 +276,10 @@ pub fn test_echoprt_erase_format() -> TestResult {
     t.c_lflag &= !LocalFlags::ECHOE;
     ld.set_termios(&t);
 
-    // Type "abc".
     for &c in b"abc" {
         ld.input_char(c);
     }
 
-    // Erase 'c' — expect `\c` (backslash then the erased char).
     let action = ld.input_char(0x7F); // DEL = VERASE default
     match action {
         InputAction::Echo { buf, len } => {
@@ -339,8 +301,7 @@ pub fn test_echoprt_erase_format() -> TestResult {
         }
     }
 
-    // Erase 'b' — continuing sequence, expect just `b` (no leading \\).
-    let action = ld.input_char(0x7F);
+    let action = ld.input_char(0x7F); // DEL
     match action {
         InputAction::Echo { buf, len } => {
             if len != 1 || buf[0] != b'b' {
@@ -369,12 +330,10 @@ pub fn test_echoprt_close_on_input() -> TestResult {
     t.c_lflag &= !LocalFlags::ECHOE;
     ld.set_termios(&t);
 
-    // Type "ab", erase 'b', then type 'x'.
     ld.input_char(b'a');
     ld.input_char(b'b');
-    ld.input_char(0x7F); // erase 'b' → starts erase sequence
+    ld.input_char(0x7F); // DEL
 
-    // Type 'x' — should close erase sequence with '/' prepended.
     let action = ld.input_char(b'x');
     match action {
         InputAction::Echo { buf, len } => {
@@ -404,7 +363,6 @@ pub fn test_iuclc_maps_upper_to_lower() -> TestResult {
     t.c_iflag |= InputFlags::IUCLC;
     ld.set_termios(&t);
 
-    // Type 'H' — should be mapped to 'h'.
     let action = ld.input_char(b'H');
     match action {
         InputAction::Echo { buf, len } => {
@@ -423,7 +381,6 @@ pub fn test_iuclc_maps_upper_to_lower() -> TestResult {
         }
     }
 
-    // Flush and verify the cooked buffer contains 'h'.
     ld.input_char(b'\n');
     let mut buf = [0u8; 8];
     let n = ld.read(&mut buf);
@@ -446,7 +403,6 @@ pub fn test_iuclc_no_effect_non_alpha() -> TestResult {
     t.c_iflag |= InputFlags::IUCLC;
     ld.set_termios(&t);
 
-    // Type 'a' (already lowercase) — should remain 'a'.
     let action = ld.input_char(b'a');
     match action {
         InputAction::Echo { buf, len } => {
@@ -461,7 +417,6 @@ pub fn test_iuclc_no_effect_non_alpha() -> TestResult {
         }
     }
 
-    // Type '5' (digit) — should remain '5'.
     let action = ld.input_char(b'5');
     match action {
         InputAction::Echo { buf, len } => {
@@ -486,7 +441,6 @@ pub fn test_olcuc_maps_lower_to_upper() -> TestResult {
     t.c_oflag = OutputFlags::OPOST | OutputFlags::OLCUC;
     ld.set_termios(&t);
 
-    // Process 'h' through output — should become 'H'.
     let action = ld.process_output_byte(b'h');
     match action {
         OutputAction::Emit { buf, len } => {
@@ -505,7 +459,6 @@ pub fn test_olcuc_maps_lower_to_upper() -> TestResult {
         }
     }
 
-    // Process 'Z' (uppercase) — should remain 'Z'.
     let action = ld.process_output_byte(b'Z');
     match action {
         OutputAction::Emit { buf, len } => {
@@ -520,7 +473,6 @@ pub fn test_olcuc_maps_lower_to_upper() -> TestResult {
         }
     }
 
-    // Process '5' (digit) — should remain '5'.
     let action = ld.process_output_byte(b'5');
     match action {
         OutputAction::Emit { buf, len } => {
@@ -538,24 +490,20 @@ pub fn test_olcuc_maps_lower_to_upper() -> TestResult {
     TestResult::Pass
 }
 
-/// All three flags disabled by default (no effect in default termios).
 pub fn test_flags_disabled_by_default() -> TestResult {
     let ld = LineDisc::new();
     let t = ld.termios();
 
-    // ECHOPRT should not be in default c_lflag.
     if t.local_flags().contains(LocalFlags::ECHOPRT) {
         klog_info!("TTY_TEST: BUG - ECHOPRT should not be in default c_lflag");
         return TestResult::Fail;
     }
 
-    // IUCLC should not be in default c_iflag.
     if t.input_flags().contains(InputFlags::IUCLC) {
         klog_info!("TTY_TEST: BUG - IUCLC should not be in default c_iflag");
         return TestResult::Fail;
     }
 
-    // OLCUC should not be in default c_oflag.
     if t.output_flags().contains(OutputFlags::OLCUC) {
         klog_info!("TTY_TEST: BUG - OLCUC should not be in default c_oflag");
         return TestResult::Fail;

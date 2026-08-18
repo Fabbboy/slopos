@@ -1,18 +1,13 @@
-//! Non-PCI **platform (ACPI) device-driver bus**, mirroring `pci.rs`.
-//!
-//! Some devices the kernel must drive are not on the PCI bus — the i8042 PS/2
-//! keyboard, for one, which ACPI describes as a `PNP0303` device under the LPC
-//! bridge with fixed I/O ports and a legacy IRQ in its `_CRS`. This module
-//! binds such devices: a link-section driver registry (the [`platform_driver!`]
-//! macro), an ACPI-namespace enumerator that finds each registered driver's
-//! device by `_HID`/`_CID` and decodes its resources, and a priority-ordered
+//! Non-PCI **platform (ACPI) device-driver bus**, mirroring `pci.rs`: a
+//! link-section driver registry (the [`platform_driver!`] macro), an
+//! ACPI-namespace enumerator that finds each registered driver's device by
+//! `_HID`/`_CID` and decodes its `_CRS` resources, and a priority-ordered
 //! matchmaker that binds exactly one driver per device with devres-managed
-//! resource ownership — the same lifecycle as the PCI bus, reusing
-//! [`crate::driver_core::platform_bound::BoundPlatformDevice`] and [`Devres`].
+//! resource ownership.
 //!
-//! The matchmaker core ([`matchmake`]) is decoupled from the live ACPI
-//! enumeration and the global claim table so it is exercisable over synthetic
-//! devices + drivers in-QEMU (see `tests/platform_binding.rs`).
+//! [`matchmake`] is decoupled from the live ACPI enumeration and the global
+//! claim table so it is exercisable over synthetic devices + drivers in-QEMU
+//! (see `tests/platform_binding.rs`).
 
 use slopos_acpi::aml::{self, AcpiPlatformDevice, HhdmHost};
 use slopos_acpi::fadt::Fadt;
@@ -27,12 +22,7 @@ pub use crate::pci::ProbeOutcome;
 
 /// Maximum I/O-port windows recorded per platform device (the keyboard uses 2).
 pub const MAX_PLATFORM_IO: usize = 4;
-/// Upper bound on platform devices the claim table tracks.
 pub const MAX_PLATFORM_DEVICES: usize = 32;
-
-// ---------------------------------------------------------------------------
-// Device + driver descriptors.
-// ---------------------------------------------------------------------------
 
 /// One I/O-port window from a device's `_CRS`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,8 +41,7 @@ pub struct PlatformIrq {
 
 /// Enumeration record for one discovered ACPI platform device.
 ///
-/// `Copy` (like `PciDeviceInfo`) so a probe snapshots it freely. `matched_id`
-/// is the `'static` driver-supplied id the device matched (e.g. `b"PNP0303"`).
+/// `Copy` so a probe snapshots it freely.
 #[derive(Clone, Copy)]
 pub struct PlatformDeviceInfo {
     /// The `_HID`/`_CID` id this device matched (a `'static` driver id).
@@ -67,12 +56,10 @@ pub struct PlatformDeviceInfo {
 }
 
 impl PlatformDeviceInfo {
-    /// The valid I/O-port windows.
     pub fn io_ports(&self) -> &[PlatformIoWindow] {
         &self.io[..self.io_count as usize]
     }
 
-    /// Whether `port` falls inside any declared I/O window.
     pub fn has_io_port(&self, port: u16) -> bool {
         self.io_ports().iter().any(|w| {
             let end = w.base as u32 + (w.len.max(1)) as u32;
@@ -89,14 +76,12 @@ pub enum PlatformMatch {
 }
 
 impl PlatformMatch {
-    /// Whether this rule matches `dev`.
     pub fn matches(&self, dev: &PlatformDeviceInfo) -> bool {
         match self {
             PlatformMatch::HidCid(id) => *id == dev.matched_id,
         }
     }
 
-    /// The id this rule searches for.
     pub fn id(&self) -> &'static [u8] {
         match self {
             PlatformMatch::HidCid(id) => id,
@@ -104,34 +89,27 @@ impl PlatformMatch {
     }
 }
 
-/// Reason a platform probe rejected a device (mirrors `PciProbeError`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlatformProbeError {
     /// Matched, but post-inspection rules rejected it.
     Mismatch,
-    /// Resource allocation failed during probe.
     OutOfMemory,
-    /// The device reported a fault / bad state.
     DeviceFault,
-    /// A required facility is unavailable.
     Unsupported,
 }
 
-/// Static, link-section-resident platform-driver descriptor (the non-PCI
-/// sibling of `PciDriverEntry`).
+/// Static, link-section-resident platform-driver descriptor.
 #[repr(C)]
 pub struct PlatformDriverEntry {
-    /// Human-readable driver name.
     pub name: &'static str,
     /// Declarative match rules; the driver matches when any rule matches.
     pub match_table: &'static [PlatformMatch],
     /// Bind order, ascending (lower binds first). Default 128 via the macro.
     pub priority: u8,
-    /// Optional legacy fallback: when ACPI enumeration finds no device for any
-    /// of `match_table`'s ids, this is consulted to synthesize one from
-    /// fixed/architectural resources. The argument is whether the FADT
-    /// advertises an 8042 (`IAPC_BOOT_ARCH` bit 1). `None` (the macro default)
-    /// means the driver only binds an ACPI-discovered device.
+    /// Consulted when ACPI enumeration finds no device for any of
+    /// `match_table`'s ids, to synthesize one from fixed/architectural
+    /// resources. The argument is whether the FADT advertises an 8042
+    /// (`IAPC_BOOT_ARCH` bit 1); `None` binds ACPI-discovered devices only.
     pub fallback: Option<fn(bool) -> Option<PlatformDeviceInfo>>,
     /// Probe the matched device, acquiring resources through the capability.
     pub probe: fn(&mut BoundPlatformDevice<'_>) -> Result<ProbeOutcome, PlatformProbeError>,
@@ -143,16 +121,11 @@ impl PlatformDriverEntry {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Link-section driver registry.
-// ---------------------------------------------------------------------------
-
 impl slopos_ostd::ffi::registry::RegistryEntry for PlatformDriverEntry {
     const REGISTRIES: &'static [slopos_ostd::ffi::registry::RegistryId] =
         &[slopos_ostd::ffi::registry::RegistryId::PlatformDrivers];
 }
 
-/// Borrow the linker-built `[PlatformDriverEntry]` slice.
 pub fn driver_registry_iter() -> impl Iterator<Item = &'static PlatformDriverEntry> {
     slopos_ostd::ffi::registry::registry_slice::<PlatformDriverEntry>(
         slopos_ostd::ffi::registry::RegistryId::PlatformDrivers,
@@ -211,11 +184,6 @@ macro_rules! platform_driver {
     };
 }
 
-// ---------------------------------------------------------------------------
-// ACPI enumeration.
-// ---------------------------------------------------------------------------
-
-/// Build a `PlatformDeviceInfo` from a raw ACPI discovery result.
 fn build_info(matched_id: &'static [u8], dev: &AcpiPlatformDevice) -> PlatformDeviceInfo {
     let mut io = [PlatformIoWindow::default(); MAX_PLATFORM_IO];
     let mut io_count = 0u8;
@@ -244,10 +212,9 @@ fn build_info(matched_id: &'static [u8], dev: &AcpiPlatformDevice) -> PlatformDe
     }
 }
 
-/// Discover the ACPI device for each registered driver's match ids (deduped by
-/// matched id), returning the device-info records. A driver that matches no
-/// ACPI device but supplies a `fallback` gets a synthesized record when the
-/// fallback returns one (gated on the FADT 8042 bit for the i8042).
+/// Discover the ACPI device for each registered driver's match ids, deduped by
+/// matched id. A driver that matches no ACPI device but supplies a `fallback`
+/// gets a synthesized record instead.
 fn enumerate(tables: &AcpiTables, debug: bool) -> Result<KVec<PlatformDeviceInfo>, AllocError> {
     let host = HhdmHost;
     let has_8042 = tables
@@ -260,8 +227,8 @@ fn enumerate(tables: &AcpiTables, debug: bool) -> Result<KVec<PlatformDeviceInfo
         let mut matched = false;
         for m in drv.match_table {
             let id = m.id();
-            // Already discovered for an earlier driver — offered to both via the
-            // matchmaker, so just note the match and skip a redundant walk.
+            // Already discovered for an earlier driver; the matchmaker offers
+            // one record to both, so skip the redundant namespace walk.
             if devices.iter().any(|d| d.matched_id == id) {
                 matched = true;
                 continue;
@@ -285,7 +252,6 @@ fn enumerate(tables: &AcpiTables, debug: bool) -> Result<KVec<PlatformDeviceInfo
 }
 
 /// Whether the FADT advertises an i8042 controller (IAPC_BOOT_ARCH bit 1).
-/// Used by the keyboard probe as one presence signal.
 pub fn acpi_has_8042(rsdp_phys: u64) -> bool {
     let Some(tables) = AcpiTables::from_phys(rsdp_phys) else {
         return false;
@@ -298,17 +264,13 @@ pub fn acpi_has_8042(rsdp_phys: u64) -> bool {
         .unwrap_or(false)
 }
 
-// ---------------------------------------------------------------------------
-// Per-device claim table + matchmaker.
-// ---------------------------------------------------------------------------
-
 enum ClaimSlot {
     Unclaimed,
     Claimed {
         #[allow(dead_code)]
         name: &'static str,
-        // Owned for its `Drop`: holds the device's resources alive for the
-        // binding's lifetime. Live purely as RAII until a future unbind path.
+        // Held for its `Drop`: keeps the device's resources alive for the
+        // binding's lifetime.
         #[allow(dead_code)]
         devres: Devres,
     },
@@ -341,8 +303,7 @@ static CLAIMED_BY: SpinLock<ClaimTable> = SpinLock::new(
     lock_class!("platform.CLAIMED_BY", LOCK_LEVEL_RESOURCE),
 );
 
-/// Records device claims for the matchmaker, abstracting the live `CLAIMED_BY`
-/// static (boot) from a heap-backed sink (unit tests).
+/// Abstracts the live `CLAIMED_BY` static (boot) from a heap-backed sink (tests).
 pub(crate) trait PlatformClaimSink {
     fn is_claimed(&self, dev_idx: usize) -> bool;
     fn record(&self, dev_idx: usize, name: &'static str, devres: Devres);
@@ -361,8 +322,7 @@ impl PlatformClaimSink for GlobalClaims {
 
 /// Offer each device to its candidate drivers in priority order, binding the
 /// first that returns `Bound`. Probe runs with no lock held; the resource bag
-/// drops (releasing everything) on `Declined`/`Err`, or moves into the claim
-/// slot on `Bound`.
+/// drops on `Declined`/`Err`, or moves into the claim slot on `Bound`.
 pub(crate) fn matchmake(
     devices: &[PlatformDeviceInfo],
     drivers: &[&'static PlatformDriverEntry],
@@ -411,8 +371,7 @@ pub(crate) fn matchmake(
     Ok(())
 }
 
-/// Enumerate ACPI platform devices and bind drivers to them. Runs once at boot
-/// on the BSP (after `pci_probe_drivers`). `rsdp_phys` is the ACPI RSDP address.
+/// Runs once at boot on the BSP, after `pci_probe_drivers`.
 pub fn probe_drivers(rsdp_phys: u64, debug: bool) {
     let Some(tables) = AcpiTables::from_phys(rsdp_phys) else {
         klog_warn!("platform: ACPI tables unavailable; skipping platform-device probe");

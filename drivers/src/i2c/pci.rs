@@ -1,10 +1,8 @@
 //! PCI bind glue for the Intel LPSS / DesignWare I²C controllers.
 //!
-//! The LPSS I²C controllers live at PCI device `0x15` (functions 0–3) and
-//! `0x19`, class `0x0c80` ("serial bus, other"). Those slots are matched
-//! specifically rather than all of class `0x0c80`, which also covers the
-//! PCH SPI-flash controller (a different register layout that must not be
-//! poked). [`DesignWareI2c::init`] re-verifies the `IC_COMP_TYPE` magic.
+//! Class `0x0c80` also covers the PCH SPI-flash controller, whose different
+//! register layout must not be poked, so the LPSS slots (device `0x15`
+//! functions 0–3, and `0x19`) are matched specifically instead of the class.
 
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
@@ -22,17 +20,15 @@ use crate::pci::{
 use crate::pci_defs::PciDeviceInfo;
 use crate::pci_defs::{PCI_BAR0_OFFSET, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET};
 
-/// PCI Power Management capability ID.
 const PCI_CAP_ID_PM: u8 = 0x01;
 /// PMCSR (power management control/status) offset within the PM capability.
 const PCI_PM_CTRL: u16 = 0x04;
 /// Power-state field within PMCSR (`0` = D0, `3` = D3hot).
 const PCI_PM_STATE_MASK: u16 = 0x03;
 
-/// Transition the function to D0 (full power). LPSS controllers can come up
-/// in D3hot, where their MMIO BARs do not decode, so this must run before
-/// any MMIO access. Clears the PMCSR power-state field and waits the
-/// mandatory 10 ms D3hot→D0 settle.
+/// LPSS controllers can come up in D3hot, where their MMIO BARs do not decode,
+/// so this must run before any MMIO access. The 10 ms D3hot→D0 settle is
+/// mandatory.
 fn set_power_d0(info: &PciDeviceInfo) {
     let Some(pm_cap) = pci_find_capability(info.bus, info.device, info.function, PCI_CAP_ID_PM)
     else {
@@ -51,8 +47,7 @@ fn set_power_d0(info: &PciDeviceInfo) {
     }
 }
 
-/// Program a (possibly 64-bit) MMIO BAR0 with `base`, preserving the BAR's
-/// read-only low type bits.
+/// Preserves the BAR's read-only low type bits.
 fn program_bar0(info: &PciDeviceInfo, base: u64, is_64bit: bool) {
     let orig_lo = pci_config_read32(info.bus, info.device, info.function, PCI_BAR0_OFFSET);
     let lo = ((base & 0xffff_ffff) as u32 & 0xffff_fff0) | (orig_lo & 0x0f);
@@ -71,7 +66,6 @@ fn program_bar0(info: &PciDeviceInfo, base: u64, is_64bit: bool) {
 const PCI_VENDOR_INTEL: u16 = 0x8086;
 const PCI_CLASS_SERIAL_BUS: u8 = 0x0c;
 const PCI_SUBCLASS_SERIAL_OTHER: u8 = 0x80;
-/// Intel client-PCH PCI device numbers hosting the LPSS I²C functions.
 const LPSS_I2C_PCI_DEVICES: [u8; 2] = [0x15, 0x19];
 
 fn lpss_i2c_matches(info: &PciDeviceInfo) -> bool {
@@ -91,12 +85,9 @@ fn lpss_i2c_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeE
         return Err(PciProbeError::Unsupported);
     }
 
-    // Power the function up to D0 BEFORE touching its BAR — LPSS boots in
-    // D3hot and won't decode MMIO otherwise.
     set_power_d0(&info);
 
-    // Firmware may leave the LPSS BAR unassigned (base == 0); assign a free
-    // MMIO region and program the BAR.
+    // Firmware may leave the LPSS BAR unassigned (base == 0).
     let base = if bar.base != 0 {
         bar.base
     } else {
@@ -133,8 +124,8 @@ fn lpss_i2c_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeE
     match ctrl.init() {
         Ok(()) => {}
         Err(I2cError::NotDesignWare) => {
-            // Matched the slot but the core isn't a DesignWare I²C — leave
-            // it alone and let other drivers have a crack.
+            // Slot matched but the core isn't DesignWare; leave it for
+            // another driver.
             return Err(PciProbeError::Unsupported);
         }
         Err(e) => {
@@ -167,9 +158,8 @@ fn lpss_i2c_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeE
 crate::pci_driver! {
     pub static LPSS_I2C_DRIVER = {
         name: "i2c-lpss-designware",
-        // The match needs a cmdline gate and a device-slot list that no
-        // declarative rule can express, so the whole predicate lives in the
-        // imperative fallback.
+        // The cmdline gate and slot list are not expressible declaratively, so
+        // the whole predicate lives in the fallback.
         match_table: &[],
         fallback: Some(lpss_i2c_matches),
         probe: lpss_i2c_probe,

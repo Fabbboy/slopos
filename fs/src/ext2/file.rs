@@ -6,7 +6,6 @@ use super::types::{BlockNum, FileBlock};
 use crate::blockdev::BlockDevice;
 use core::cmp;
 
-/// Read file data using the block cache.
 pub fn read_file(
     inode: &Inode,
     offset: u64,
@@ -47,7 +46,6 @@ pub fn read_file(
     Ok(read_total)
 }
 
-/// Write file data using the block cache.
 pub fn write_file(
     inode: &mut Inode,
     offset: u64,
@@ -101,7 +99,6 @@ pub fn write_file(
     Ok(written)
 }
 
-/// Truncate a file to `new_size` bytes.
 pub fn truncate(
     inode: &mut Inode,
     new_size: u64,

@@ -19,64 +19,46 @@ use crate::limine_protocol;
 const AP_STARTED_MAGIC: u64 = 0x4150_5354_4152_5444;
 const MAX_CPUS: usize = 256;
 
-/// Per-CPU completion signals.  The BSP passes each AP its index into this
-/// array via `MpInfo::bootstrap(ap_entry, slot)`.  The AP stores
-/// `AP_STARTED_MAGIC` here once it is fully initialised so the BSP can
-/// spin-wait for it—replacing the now-private `MpInfo::extra_argument` field
-/// that limine 0.6 no longer exposes for writing.
+/// Per-CPU completion signals, indexed by the slot the BSP passes each AP via
+/// `MpInfo::bootstrap`. The AP stores `AP_STARTED_MAGIC` once fully initialised.
 static AP_SIGNALS: [AtomicU64; MAX_CPUS] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; MAX_CPUS]
 };
 
-/// Kernel-side AP late entry. Registered with OSTD's
-/// `slopos_ostd::boot::smp::AP_LATE_ENTRY` before any AP is started;
-/// the OSTD `ap_early_entry` tail-calls this once the AP's GS_BASE is
-/// installed and `MpInfo.extra` has been decoded.
+/// Kernel-side AP late entry; the OSTD `ap_early_entry` tail-calls this once
+/// the AP's GS_BASE is installed.
 ///
-/// `cpu_idx` is the 1-based slot the BSP encoded in `cpu.extra`. The
-/// naked trampoline already selected `AP_PCRS[cpu_idx - 1]` and
-/// installed GS_BASE to it; this function MUST use the same index
-/// when re-installing the per-CPU PCR via `ApPcrHandle::init` or the
-/// AP would point at a different PCR mid-boot, silently swapping the
-/// SafeStack data-SP slot.
+/// `cpu_idx` is the 1-based slot the BSP encoded in `cpu.extra`. The naked
+/// trampoline already installed GS_BASE from `AP_PCRS[cpu_idx - 1]`, so
+/// `ApPcrHandle::init` must use the same index or the AP swaps PCRs mid-boot,
+/// silently changing the SafeStack data-SP slot.
 fn ap_late_entry(cpu_idx: usize) -> ! {
     cpu::disable_interrupts();
     cpu::enable_sse();
 
-    // Enter the per-AP init scope: mint an `ApToken<'brand>` whose
-    // brand is invariant in the HRTB closure, and thread it through
-    // every per-CPU init call below. `enter_scheduler` stays OUTSIDE
-    // the closure (its `-> !` divergence keeps the closure-return
-    // path unreachable in practice).
     slopos_ostd::sync::run_ap_init(cpu_idx, |ap_token| {
-        // Replicate the BSP's XSAVE configuration (CR4.OSXSAVE + XCR0).
         slopos_arch::cpu::xsave::enable_on_current_cpu();
 
-        // Match the BSP supervisor-mode feature mask (CR4.PGE + SMEP + SMAP).
         // Must happen before this AP's first CR3 reload so global kernel
         // mappings are tagged consistently with the BSP.
         slopos_arch::cpu::security::enable_supervisor_features();
 
-        // Enable CR4.PCIDE on this AP if the BSP decided PCID is live.
         // Must run before any CR3 load that embeds a non-zero PCID.
         slopos_mm::mmu::init_ap();
 
-        // Limine may start APs in x2APIC mode (MSR-based register access).
-        // The kernel uses xAPIC MMIO for all LAPIC access, so if x2APIC is
-        // active we must transition back: x2APIC → disabled → xAPIC.
-        // This must happen before apic::enable() which uses MMIO write_register.
+        // Limine may start APs in x2APIC mode; the kernel uses xAPIC MMIO for
+        // all LAPIC access, and the transition back must go x2APIC → disabled →
+        // xAPIC. Must precede `apic::enable()`, which writes through MMIO.
         {
             use slopos_arch::cpu::apic_msr::ApicBaseMsr;
             use slopos_arch::cpu::msr::Msr;
             let msr_val = cpu::read_msr(Msr::APIC_BASE);
             if msr_val & ApicBaseMsr::X2APIC_ENABLE != 0 {
-                // Step 1: disable APIC entirely (clear both GLOBAL_ENABLE and X2APIC_ENABLE)
                 cpu::write_msr(
                     Msr::APIC_BASE,
                     msr_val & !(ApicBaseMsr::GLOBAL_ENABLE | ApicBaseMsr::X2APIC_ENABLE),
                 );
-                // Step 2: re-enable in xAPIC mode (set GLOBAL_ENABLE, leave X2APIC_ENABLE clear)
                 cpu::write_msr(
                     Msr::APIC_BASE,
                     (msr_val & !ApicBaseMsr::X2APIC_ENABLE) | ApicBaseMsr::GLOBAL_ENABLE,
@@ -90,8 +72,8 @@ fn ap_late_entry(cpu_idx: usize) -> ! {
 
         pcr::ApPcrHandle::init(ap_token, apic_id).init_gdt_and_install();
 
-        // APs have per-CPU TSS structures; re-bind IST pointers after installing
-        // the AP GDT/TSS so exceptions (notably #PF) do not enter with IST=0.
+        // Re-bind IST pointers after installing the AP GDT/TSS so exceptions
+        // do not enter with IST=0.
         let mut ap_boot_ctx = slopos_hermetic::take_for_ap(ap_token);
         ist_stacks::ist_bind_current_cpu(&mut ap_boot_ctx);
 
@@ -99,29 +81,22 @@ fn ap_late_entry(cpu_idx: usize) -> ! {
         syscall_msr_init(ap_token);
         slopos_hermetic::return_after_ap(cpu_idx, ap_boot_ctx);
 
-        // Initialize the per-CPU scheduler and create the idle task BEFORE
-        // enabling interrupts.  The previous order (enable_interrupts → init)
-        // opened a race window where timer IPIs, TLB shootdowns, or reschedule
-        // IPIs could arrive and touch uninitialised per-CPU scheduler state.
+        // Must precede `enable_interrupts`: a timer, shootdown or reschedule
+        // IPI arriving first would touch uninitialised per-CPU scheduler state.
         init_scheduler_for_ap(cpu_idx);
 
-        // AP LAPIC timer is started later by deferred_start_ap_timer() in the
-        // scheduler loop, after the BSP completes HPET init + LAPIC calibration.
-        // Interrupts are enabled here only after all per-CPU state is ready.
+        // The AP LAPIC timer starts later, from the scheduler loop, once the
+        // BSP has finished HPET init and LAPIC calibration.
         cpu::enable_interrupts();
 
-        // An AP must be able to *service* a TLB shootdown IPI (interrupts
-        // enabled, IDT loaded) before any initiator may *target* it.
-        // Joining the shootdown set before enabling interrupts leaves a
-        // window where it is a target that can never ack — and a stalled
-        // AP would stay that way, wedging the initiator forever. Discard
-        // any stale kernel translation, then join the set.
+        // An AP must be able to *service* a TLB shootdown IPI before any
+        // initiator may *target* it: joining the set before interrupts are
+        // enabled leaves it a target that can never ack, wedging the initiator.
         tlb::flush_local_all();
         tlb::notify_cpu_online_id(cpu_idx);
 
-        // Signal the BSP that this AP is a live, ack-capable shootdown
-        // target. The BSP's bounded wait must not release until this
-        // point, so it never proceeds with a half-joined AP in the set.
+        // The BSP's bounded wait must not release until this point, so it never
+        // proceeds with a half-joined AP in the shootdown set.
         AP_SIGNALS[cpu_idx].store(AP_STARTED_MAGIC, Ordering::Release);
 
         klog_info!("MP: CPU online (idx {}, apic 0x{:x})", cpu_idx, apic_id);
@@ -169,27 +144,18 @@ pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspI
         );
     }
 
-    // Seed each AP PCR's self_ref + current_task so the OSTD-side
-    // `ap_entry` naked trampoline can install GS_BASE and have
-    // `__safestack_pointer_address` find a valid bootstrap Task on the
-    // very first instrumented call.  Limited to MAX_STATIC_APS — if
-    // the platform reports more APs we only start the first N.
+    // Seeds each AP PCR so `__safestack_pointer_address` finds a valid
+    // bootstrap Task on the AP's very first instrumented call.
     const MAX_STATIC_APS: usize = safestack_rt::MAX_STATIC_APS;
     safestack_rt::init_bootstrap_tasks();
 
-    // Register the kernel-side AP late entry with OSTD before any AP
-    // is fired. The OSTD trampoline waits on this `OnceLock` after
-    // installing `IA32_GS_BASE`; firing an AP before registration
-    // would spin forever in `OnceLock::wait`.
+    // Must precede firing any AP: the OSTD trampoline waits on this `OnceLock`
+    // after installing `IA32_GS_BASE`, and would otherwise spin forever.
     register_ap_late_entry(&ctx.bsp_token(), ap_late_entry);
 
-    // Route the SafeStack-runtime hook + AP boot trampoline through
-    // OSTD's safe wrappers under the outer `run_bsp_init` scope opened
-    // in `kernel_main_impl`. `install_ap_trampoline_as::<MpGotoFunction>`
-    // returns the OSTD `ApTrampolineFn` already reinterpreted as
-    // limine's `MpGotoFunction`; both are `extern "C" fn(<single
-    // pointer>) -> !`, so the transmute is centralised inside OSTD and
-    // boot stays unsafe-free.
+    // OSTD's `ApTrampolineFn` and limine's `MpGotoFunction` are both
+    // `extern "C" fn(<single pointer>) -> !`; the transmute is centralised
+    // inside OSTD so boot stays unsafe-free.
     let ap_trampoline: MpGotoFunction = {
         let bsp = ctx.bsp_token();
         install_safestack_runtime(&bsp);
@@ -197,9 +163,7 @@ pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspI
     };
 
     let ap_task_ptrs = safestack_rt::ap_bootstrap_task_ptrs();
-    // `init_ap_pcr_lookup` must run exactly once before any AP boots;
-    // `smp_init` is the single caller and runs on the BSP only — the
-    // `&BspToken` witness from `ctx.bsp_token()` carries that proof.
+    // Must run exactly once, before any AP boots.
     pcr::init_ap_pcr_lookup(&ctx.bsp_token(), &ap_task_ptrs);
 
     let ap_count = cpus
@@ -213,17 +177,12 @@ pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspI
         return;
     }
 
-    // Map every CPU's IST, exception and emergency stacks here, on the BSP,
-    // while it is the only CPU running. `premap_cpus` documents why that is
-    // the only safe place to link them.
+    // Must run on the BSP while it is still the only CPU running.
     ist_stacks::premap_cpus(1 + ap_count);
 
-    // AP_SIGNALS is indexed uniformly by `ap_slot` (the 1-based
-    // non-BSP-CPU counter that we also thread through
-    // `cpu.bootstrap(..., ap_slot)`). The AP-side write at
-    // `boot/src/smp.rs:116` uses `cpu_idx = ap_slot`; this BSP-side
-    // zero/wait must match. Using the limine `enumerate` index here
-    // would mis-align whenever the BSP isn't `cpus[0]`.
+    // `ap_slot` is the 1-based non-BSP counter, matching the index the AP
+    // writes to `AP_SIGNALS`. The limine `enumerate` index would mis-align
+    // whenever the BSP is not `cpus[0]`.
     let mut ap_slot = 0u64;
     for cpu in cpus.iter() {
         if cpu.lapic_id == bsp_lapic {
@@ -246,8 +205,6 @@ pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspI
 
     let mut started_count = 0usize;
 
-    // Re-walk under the same ap_slot mapping the spawn loop above used,
-    // so the wait reads the same AP_SIGNALS slot the AP wrote to.
     let mut ap_slot = 0u64;
     for cpu in cpus.iter() {
         if cpu.lapic_id == bsp_lapic {

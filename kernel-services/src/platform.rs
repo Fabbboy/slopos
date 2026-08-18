@@ -8,30 +8,22 @@ slopos_service_core::define_service! {
         timer_sleep_ms(ms: u32);
         timer_enable_irq();
         timer_disable_irq();
-        /// Arm a **one-shot** LAPIC timer to fire after `ms`
-        /// milliseconds. Returns `true` on success. Used by the
-        /// tickless-idle path before HLT so kernel-IO tasks wake
-        /// on their sleep deadline rather than the next periodic
-        /// boundary. The next ISR (whether the one we armed or any
-        /// unrelated IRQ) restores periodic mode via
-        /// [`timer_restore_periodic`], so the system converges
-        /// back to the 100 Hz baseline whenever a tick fires.
+        /// Arm a **one-shot** LAPIC timer to fire after `ms` milliseconds, so
+        /// the tickless-idle path wakes on a sleep deadline rather than the
+        /// next periodic boundary. The next ISR — armed or unrelated —
+        /// restores periodic mode via [`timer_restore_periodic`].
         timer_program_next_wakeup_ms(ms: u32) -> bool;
-        /// Re-arm the LAPIC timer in periodic mode at the default
-        /// preempt-tick interval. Idempotent. Called from the
-        /// scheduler timer ISR after a one-shot fires (and
-        /// defensively on every tick).
+        /// Re-arm the LAPIC timer in periodic mode at the default preempt-tick
+        /// interval. Idempotent.
         timer_restore_periodic();
 
         console_putc(c: u8);
         /// Write to the console without taking any lock. For the fault and
         /// panic paths, which may already hold the one below.
         @no_wrapper console_puts(s: &[u8]);
-        /// Write to the console atomically with respect to klog.
-        ///
-        /// The path every other writer must use: bypassing it byte-interleaves
-        /// into concurrent klog output, and in a test boot that is the KTAP
-        /// wire format the harness parses.
+        /// Write to the console atomically with respect to klog. Every other
+        /// writer must use this: bypassing it byte-interleaves into concurrent
+        /// klog output, which in a test boot is the KTAP wire format.
         @no_wrapper console_write_serialized(s: &[u8]);
 
         rng_next() -> u64;
@@ -82,7 +74,6 @@ pub fn get_time_ms() -> u64 {
     if ns != 0 {
         return ns / 1_000_000;
     }
-    // Pre-HPET fallback: derive from tick counter.
     let ticks = timer_ticks();
     let freq = timer_frequency();
     if freq == 0 {
@@ -94,7 +85,6 @@ pub fn get_time_ms() -> u64 {
 #[inline(always)]
 pub fn clock_monotonic_ns() -> u64 {
     if !is_platform_initialized() {
-        // Fallback: tick-based approximation when platform services not yet wired.
         return 0;
     }
     (platform_services().clock_monotonic_ns)()

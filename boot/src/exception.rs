@@ -132,8 +132,8 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
         );
     }
 
-    // The fatal-fault reporter exhausted its own emergency stack. This #PF lands
-    // on a fresh IST stack, so the format-free abort still has a usable one.
+    // This #PF lands on a fresh IST stack, so the format-free abort still has a
+    // usable one.
     if ist_stacks::emergency_stack_guard_fault(fault_addr).is_some() {
         crate::panic::panic_abort_raw(
             "emergency stack overflow: the fatal-fault reporter exhausted its per-CPU emergency stack",
@@ -184,7 +184,7 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
     }
 
     // Error-code bit 4: supervisor instruction fetch, so a return address was
-    // likely corrupted — dump the stack words around RSP.
+    // likely corrupted.
     if (frame_ref.error_code & 0x10) != 0 {
         klog_info!("=== STACK DUMP at RSP 0x{:x} ===", frame_ref.rsp);
 
@@ -251,8 +251,6 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
     let mut ctx_rsp = 0u64;
 
     let task_ref = resolve_user_fault_task();
-    // Not the panic path: a user page fault is recoverable, so the registry
-    // lookup in `resolve_user_fault_task` is allowed here.
     if let Some(task_ref) = task_ref {
         let task_pid = task_ref.process_id;
         // The task's own process, never a lookup by pid: ids recycle, and

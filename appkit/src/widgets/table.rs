@@ -227,8 +227,7 @@ impl Widget for TableWidget {
         let h = constraints.max_height;
         self.resolve_col_widths(w);
 
-        // Cells are sized by their column, so measuring them here keeps layout
-        // to pure placement.
+        // Cells are sized by their column, so layout stays pure placement.
         for row in &mut self.rows {
             for (col_idx, cell) in row.iter_mut().enumerate() {
                 let cw = self.col_widths.get(col_idx).copied().unwrap_or(0);
@@ -401,8 +400,7 @@ impl Widget for TableWidget {
                 if !rect.contains(*x, *y) {
                     return EventResponse::Ignored;
                 }
-                // Header: sorting is a primary-button action; a secondary
-                // click there addresses no row, so it has nothing to open.
+                // A secondary click on the header addresses no row, so it opens nothing.
                 if *y < rect.y + self.header_height {
                     if *button != PointerButton::Left {
                         return EventResponse::Ignored;

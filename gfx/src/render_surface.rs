@@ -1,11 +1,5 @@
 //! Render surface abstraction — decouples rendering from the windowing protocol.
 //!
-//! [`RenderSurface`] captures the universal buffer lifecycle:
-//! 1. [`frame()`](RenderSurface::frame) — acquire a `DrawBuffer` for the current frame
-//! 2. Render into the `DrawBuffer` (caller owns it exclusively)
-//! 3. Drop the `DrawBuffer` (release mutable borrow)
-//! 4. [`present()`](RenderSurface::present) — signal that the frame is ready
-//!
 //! Implementations include compositor-backed SHM surfaces and
 //! [`HeadlessSurface`] for testing without a display server.
 
@@ -15,42 +9,30 @@ use slopos_abi::pixel::PixelFormat;
 /// Error from render surface operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderError {
-    /// Invalid dimensions (zero width/height or overflow).
+    /// Zero width/height, or a pitch that overflows `usize`.
     BadSize,
-    /// Buffer could not be allocated or the surface is unavailable.
     BufferUnavailable,
 }
 
-/// A rendering target that provides CPU pixel buffers and frame presentation.
-///
-/// Decouples rendering from the windowing/compositor protocol. Consumers draw
-/// into a [`DrawBuffer`] obtained from [`frame()`](Self::frame) and call
-/// [`present()`](Self::present) when the frame is complete.
+/// A rendering target that hands out CPU pixel buffers and presents frames.
 pub trait RenderSurface {
     /// Borrow a [`DrawBuffer`] for the current frame.
     ///
-    /// Returns `None` if the surface is in an inconsistent state.
-    /// The caller must drop the `DrawBuffer` before calling [`present()`](Self::present).
+    /// The caller must drop it before calling [`present()`](Self::present).
     fn frame(&mut self) -> Option<DrawBuffer<'_>>;
 
-    /// Present the completed frame (full surface damage).
+    /// Present the completed frame, damaging the whole surface.
     fn present(&mut self);
 
-    /// Present a sub-region of the frame.
     fn present_region(&mut self, x: i32, y: i32, w: i32, h: i32);
 
-    /// Resize the backing buffer to new dimensions.
-    ///
-    /// Invalidates any previously obtained `DrawBuffer`.
+    /// Resize the backing buffer, invalidating any previously obtained `DrawBuffer`.
     fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError>;
 
-    /// Current width in pixels.
     fn width(&self) -> u32;
 
-    /// Current height in pixels.
     fn height(&self) -> u32;
 
-    /// Pixel format of the surface.
     fn pixel_format(&self) -> PixelFormat;
 
     /// Bytes per pixel (3 or 4).
@@ -60,19 +42,12 @@ pub trait RenderSurface {
     fn pitch(&self) -> usize;
 }
 
-// ---------------------------------------------------------------------------
-// HeadlessSurface — heap-backed, no compositor
-// ---------------------------------------------------------------------------
-
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
 /// A render surface backed by a heap-allocated buffer, with no compositor.
 ///
-/// `present()` and `present_region()` are no-ops. Useful for:
-/// - Widget rendering tests without QEMU
-/// - Off-screen rendering / screenshot capture
-/// - Headless CI pipelines
+/// `present()` and `present_region()` are no-ops.
 #[cfg(feature = "alloc")]
 pub struct HeadlessSurface {
     data: alloc::vec::Vec<u8>,
@@ -85,7 +60,6 @@ pub struct HeadlessSurface {
 
 #[cfg(feature = "alloc")]
 impl HeadlessSurface {
-    /// Create a new headless surface with the given dimensions and pixel format.
     pub fn new(width: u32, height: u32, pixel_format: PixelFormat) -> Result<Self, RenderError> {
         if width == 0 || height == 0 {
             return Err(RenderError::BadSize);
@@ -109,9 +83,7 @@ impl HeadlessSurface {
         })
     }
 
-    /// Read the raw color value at `(x, y)` decoded to `Color32` (0xAARRGGBB).
-    ///
-    /// Returns `None` if coordinates are out of bounds.
+    /// Decoded pixel at `(x, y)`, or `None` if out of bounds.
     pub fn pixel_at(&self, x: u32, y: u32) -> Option<slopos_abi::draw::Color32> {
         if x >= self.width || y >= self.height {
             return None;
@@ -136,7 +108,6 @@ impl HeadlessSurface {
         Some(self.pixel_format.decode(raw))
     }
 
-    /// Direct access to the backing buffer bytes.
     pub fn data(&self) -> &[u8] {
         &self.data
     }
@@ -156,13 +127,9 @@ impl RenderSurface for HeadlessSurface {
         Some(buf)
     }
 
-    fn present(&mut self) {
-        // No-op — headless surfaces have no display to present to.
-    }
+    fn present(&mut self) {}
 
-    fn present_region(&mut self, _x: i32, _y: i32, _w: i32, _h: i32) {
-        // No-op.
-    }
+    fn present_region(&mut self, _x: i32, _y: i32, _w: i32, _h: i32) {}
 
     fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
         if width == 0 || height == 0 {

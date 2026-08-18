@@ -1,9 +1,8 @@
 //! UEFI Runtime Services region mapping.
 //!
-//! Runtime Services stay callable after `ExitBootServices` only while their
-//! memory is mapped, and the kernel runs on its own page tables. Each region is
-//! mapped at both its identity and its HHDM address: firmware's own pointers may
-//! be physical while Limine reports the system table at its HHDM alias.
+//! Each region is mapped at both its identity and its HHDM address: firmware's
+//! own pointers may be physical while Limine reports the system table at its
+//! HHDM alias.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_mm::kernel_mappings::{kernel_is_mapped, kernel_map_io_4kb};
@@ -19,23 +18,20 @@ const DESC_PHYSICAL_START: usize = 8;
 const DESC_NUMBER_OF_PAGES: usize = 24;
 const DESC_ATTRIBUTE: usize = 32;
 
-/// `EFI_MEMORY_RUNTIME` — the region must remain mapped for runtime calls.
+/// The region must remain mapped for runtime calls.
 const EFI_MEMORY_RUNTIME: u64 = 0x8000_0000_0000_0000;
 
 const EFI_MEMORY_MAPPED_IO: u32 = 11;
-// EFI I/O *port* space: accessed via `in`/`out`, not memory — its
-// `PhysicalStart` is a port range, so it must not be page-mapped.
+// `PhysicalStart` is an I/O port range, not memory, so it must not be page-mapped.
 const EFI_MEMORY_MAPPED_IO_PORT_SPACE: u32 = 12;
 
 /// Bounds a corrupt descriptor without aborting the whole map; real runtime
-/// regions are a few MiB at most, and truncation is logged.
+/// regions are a few MiB at most.
 const MAX_PAGES_PER_DESC: u64 = 0x10000; // 256 MiB
 
 /// Install one alias of a runtime-services page, unless the address already
-/// resolves.
-///
-/// Firmware memory is not allocator memory — the buddy has never owned these
-/// pages and must never be handed them — so the mapping owns no frame reference.
+/// resolves. Firmware memory is not allocator memory, so the mapping owns no
+/// frame reference.
 fn map_alias_if_absent(virt: VirtAddr, phys: PhysAddr, flags: u64) {
     if kernel_is_mapped(virt) {
         return;
@@ -76,8 +72,7 @@ pub fn map_runtime_regions(hhdm_offset: u64) {
             continue;
         }
 
-        // Runtime code must execute, so code/data gets KERNEL_RW (NX clear);
-        // device MMIO is uncached + NX.
+        // Runtime code must execute, so code/data gets KERNEL_RW (NX clear).
         let flags = if typ == EFI_MEMORY_MAPPED_IO {
             PageFlags::MMIO.bits()
         } else {

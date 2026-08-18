@@ -662,9 +662,8 @@ impl LineDisc {
         self.echo.discard();
     }
 
-    /// Stage `bytes` for emission. What does not fit is dropped: a terminal
-    /// whose echo outruns its own driver has already lost the display, and
-    /// stalling input to preserve it would be worse.
+    /// Stage `bytes` for emission. What does not fit is dropped rather than
+    /// stalling input.
     #[inline]
     pub fn echo_stage(&mut self, bytes: &[u8]) {
         self.echo.extend(bytes);
@@ -808,7 +807,6 @@ impl LineDisc {
             }
         }
 
-        // A NUL is taken as a break condition when any break flag is set.
         if apply_break_heuristic
             && c == 0x00
             && iflag.intersects(InputFlags::IGNBRK | InputFlags::BRKINT | InputFlags::PARMRK)
@@ -887,8 +885,8 @@ impl LineDisc {
                     return self.word_erase(lflag);
                 }
                 if c == self.cc(CcIndex::Vreprint) {
-                    // An explicit VREPRINT clears the deferred one, else we
-                    // would echo the line twice.
+                    // An explicit VREPRINT clears the deferred one, else the
+                    // line echoes twice.
                     self.pending_reprint = false;
                     return InputAction::ReprintLine;
                 }
@@ -1040,9 +1038,8 @@ impl LineDisc {
             return InputAction::Signal(SIGINT);
         }
         if iflag.contains(InputFlags::PARMRK) {
-            // POSIX encodes a break as \xff \x00 \x00, and all three bytes must
-            // land atomically: a partial sequence reads to userland as a stray
-            // 0xFF or a different PARMRK encoding. No room means drop it whole.
+            // POSIX encodes a break as \xff \x00 \x00; a partial sequence reads
+            // to userland as a stray 0xFF, so no room means drop it whole.
             if self.cooked_free() < 3 {
                 if iflag.contains(InputFlags::IMAXBEL) {
                     return InputAction::Bell;
@@ -1062,7 +1059,6 @@ impl LineDisc {
             return self.erase_char(lflag);
         }
 
-        // Any non-erase input closes an ECHOPRT `\...` sequence with `/`.
         let close_erase = self.in_erase_seq;
         if close_erase {
             self.in_erase_seq = false;
@@ -1124,7 +1120,6 @@ impl LineDisc {
         self.insert_char(c, lflag, close_erase)
     }
 
-    /// Insert a character into the edit buffer and produce an echo action.
     /// `close_erase` prepends `/` to close an ECHOPRT `\...` erase sequence.
     fn insert_char(&mut self, c: u8, lflag: LocalFlags, close_erase: bool) -> InputAction {
         if self.edit_len >= EDIT_BUF_SIZE {
@@ -1152,7 +1147,6 @@ impl LineDisc {
             return InputAction::None;
         }
 
-        // ECHOCTL echoes control characters other than TAB and NL as ^X.
         if lflag.contains(LocalFlags::ECHOCTL) && c < 0x20 && c != b'\t' && c != b'\n' {
             self.column += 2;
             if close_erase {
@@ -1189,7 +1183,6 @@ impl LineDisc {
                     self.column += utf8_char_width(cp) as usize;
                 }
             } else {
-                // Orphan continuation byte — width 1.
                 self.column += 1;
             }
         } else {
@@ -1197,7 +1190,6 @@ impl LineDisc {
             if total > 1 {
                 self.utf8_remaining = (total - 1) as u8;
             } else {
-                // Invalid leading byte — width 1.
                 self.column += 1;
             }
         }
@@ -1377,9 +1369,8 @@ impl LineDisc {
         c.is_ascii_alphanumeric() || c == b'_'
     }
 
-    /// Word erase (VWERASE): erase back over one word. Boundaries are
-    /// alphanumeric + underscore rather than whitespace, so `/usr/local/bin`
-    /// erases one path component at a time as on most POSIX terminals.
+    /// Word erase (VWERASE). Boundaries are alphanumeric + underscore rather
+    /// than whitespace, so `/usr/local/bin` erases one path component at a time.
     fn word_erase(&mut self, lflag: LocalFlags) -> InputAction {
         if self.edit_len == 0 {
             return InputAction::None;
@@ -1504,8 +1495,7 @@ impl LineDisc {
         }
     }
 
-    /// Push one byte into the cooked ring. `false` means the ring was full: the
-    /// byte is dropped, `no_room` set and `overflow_count` bumped.
+    /// Push one byte into the cooked ring. `false` means full and the byte dropped.
     pub(crate) fn push_cooked(&mut self, c: u8) -> bool {
         if self.cooked.is_full() {
             self.no_room = true;
@@ -1517,8 +1507,6 @@ impl LineDisc {
         true
     }
 
-    /// Free bytes in the cooked ring — checked before a multi-byte sequence
-    /// such as PARMRK's break encoding, which must go in whole or not at all.
     fn cooked_free(&self) -> usize {
         self.cooked.free()
     }
@@ -1540,10 +1528,8 @@ impl LineDisc {
         }
     }
 
-    /// Allow the IXOFF stop to be generated again. `ixoff_check_xoff` latches
-    /// at generation time, so a stop discarded before it reached the peer would
-    /// otherwise never be re-sent. The queue is still over the water mark, so
-    /// the stop is re-armed rather than cancelled.
+    /// Allow the IXOFF stop to be generated again: `ixoff_check_xoff` latches at
+    /// generation time, so a stop discarded before it reached the peer is lost.
     #[inline]
     pub fn ixoff_rearm(&mut self) {
         self.xoff_sent = false;
@@ -1596,9 +1582,6 @@ impl LineDisc {
 
     /// Process a batch of input events, staging echo and capturing at most one
     /// signal — processing stops at the first signal-generating character.
-    ///
-    /// Echo goes into this discipline's own queue, not to a driver: the caller
-    /// holds the slot lock, and emission has to wait until it drops.
     pub fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
         let mut result = BatchResult::new();
         for &event in events {
@@ -1611,9 +1594,8 @@ impl LineDisc {
                 }
                 InputAction::Signal(sig) => {
                     let lflag = self.termios.local_flags();
-                    // A typed signal char echoes its caret form before the
-                    // signal is delivered: the core drains echo ahead of
-                    // dispatching `result.signal`. A break carries no keypress.
+                    // The caret form echoes before the signal: the core drains
+                    // echo ahead of dispatching it. A break carries no keypress.
                     if lflag.contains(LocalFlags::ECHO | LocalFlags::ECHOCTL)
                         && event.status == InputStatus::Normal
                     {
@@ -1627,8 +1609,8 @@ impl LineDisc {
                 }
                 InputAction::ReprintLine => {
                     self.echo.push(b'\n');
-                    // Split borrow: the redisplay reads a field of the same
-                    // struct as the queue it feeds.
+                    // Split borrow: the redisplay source and the queue it feeds
+                    // share a struct.
                     let Self {
                         edit_buf,
                         edit_len,
@@ -1683,9 +1665,8 @@ impl RawDisc {
             c_lflag: LocalFlags::empty(),
             c_line: N_RAW as u8,
             c_cc: {
-                // VMIN=1 so a raw read blocks rather than returning the VMIN=0
-                // empty `Ok(0)`: a PTY master's `read() == 0` must mean exactly
-                // "peer hung up". tcsetattr can still opt in to VMIN=0 polling.
+                // VMIN=1 so a raw read blocks: a PTY master's `read() == 0` must
+                // mean "peer hung up". tcsetattr can still select VMIN=0.
                 let mut cc = [0u8; NCCS];
                 cc[CcIndex::Vmin as usize] = 1;
                 cc
@@ -1696,8 +1677,7 @@ impl RawDisc {
     }
 
     /// Allocate a default `RawDisc` straight onto the heap, avoiding the ~4 KiB
-    /// stack temporary a `Self`-returning constructor produces. See
-    /// [`LineDisc::new_pinned`].
+    /// stack temporary a `Self`-returning constructor produces.
     pub fn new_pinned() -> Result<PinBox<Self>, AllocError> {
         let mut pb = PinBox::<Self>::zeroed()?;
         pb.termios = Self::default_termios();
@@ -1852,12 +1832,9 @@ impl RawDisc {
 /// SLIP/PPP) get raw passthrough while terminals get full N_TTY processing.
 ///
 /// The state (`LineDisc` ≈ 12 KiB, `RawDisc` ≈ 4 KiB) lives on the heap, so a
-/// `Tty` costs a handful of stack bytes and can be built in a syscall path
-/// without running the kernel stack into its guard page.
+/// `Tty` can be built in a syscall path without hitting the stack guard page.
 pub enum LdiscKind {
-    /// Full N_TTY processing (canonical, echo, signals, etc.)
     NTty(PinBox<LineDisc>),
-    /// Raw passthrough (for PTY master, future SLIP/PPP).
     Raw(PinBox<RawDisc>),
 }
 

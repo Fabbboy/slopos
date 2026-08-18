@@ -1,9 +1,5 @@
 use super::*;
 
-// ===========================================================================
-// VConsole Unicode & Broadened Xterm Emulation
-// ===========================================================================
-
 pub fn test_utf8_2byte_renders_codepoint() -> TestResult {
     let mut parser = VtParser::new();
     // é = U+00E9 = 0xC3 0xA9
@@ -51,7 +47,6 @@ pub fn test_utf8_4byte_renders_codepoint() -> TestResult {
 
 pub fn test_utf8_invalid_byte_emits_replacement() -> TestResult {
     let mut parser = VtParser::new();
-    // 0xFF is an invalid UTF-8 lead byte.
     let a = parser.advance(0xFF);
     if a != VtAction::Print(0xFFFD) {
         klog_info!("TTY_TEST: expected replacement char, got {:?}", a);
@@ -62,20 +57,16 @@ pub fn test_utf8_invalid_byte_emits_replacement() -> TestResult {
 
 pub fn test_utf8_truncated_sequence_emits_replacement() -> TestResult {
     let mut parser = VtParser::new();
-    // Start a 2-byte sequence but send ASCII instead of continuation.
     let a1 = parser.advance(0xC3);
     if a1 != VtAction::Nop {
         return TestResult::Fail;
     }
-    // Send ASCII 'A' instead of continuation byte — should emit replacement
-    // then re-process 'A'.
     let a2 = parser.advance(b'A');
     if a2 != VtAction::Print(0xFFFD) {
         klog_info!("TTY_TEST: expected replacement, got {:?}", a2);
         return TestResult::Fail;
     }
-    // The re-processed 'A' should come from the pending queue.
-    let a3 = parser.advance(0); // Feed dummy to drain pending.
+    let a3 = parser.advance(0); // Dummy byte to drain the pending queue.
     if a3 != VtAction::Print(b'A' as u32) {
         klog_info!("TTY_TEST: expected re-processed 'A', got {:?}", a3);
         return TestResult::Fail;
@@ -85,8 +76,7 @@ pub fn test_utf8_truncated_sequence_emits_replacement() -> TestResult {
 
 pub fn test_utf8_overlong_rejected() -> TestResult {
     let mut parser = VtParser::new();
-    // Overlong encoding of '/' (U+002F): 0xC0 0xAF
-    // 0xC0 is an invalid lead byte (overlong), should emit replacement.
+    // 0xC0 = lead byte of the overlong encoding of '/' (U+002F).
     let a = parser.advance(0xC0);
     if a != VtAction::Print(0xFFFD) {
         klog_info!("TTY_TEST: expected replacement for 0xC0, got {:?}", a);
@@ -174,12 +164,11 @@ pub fn test_sgr_truecolor_background() -> TestResult {
 
 pub fn test_vconsole_256_color_sets_fg() -> TestResult {
     let mut state = boxed_vconsole_state();
-    // ESC[38;5;1m then write 'X'
     for &b in b"\x1b[38;5;1m" {
         state.process_byte(b);
     }
     state.process_byte(b'X');
-    // 256-color index 1 = ANSI red = 0x00AA0000
+    // 256-colour index 1 = ANSI red = 0x00AA0000
     if state.cells.get(0, 0).attrs.fg != 0x00AA0000 {
         klog_info!(
             "TTY_TEST: expected fg 0x00AA0000, got 0x{:08x}",
@@ -241,14 +230,12 @@ pub fn test_decawm_default_on() -> TestResult {
 
 pub fn test_decawm_toggle() -> TestResult {
     let mut p = VtParser::new();
-    // Disable DECAWM: ESC[?7l
     for &b in b"\x1b[?7l" {
         p.advance(b);
     }
     if p.auto_wrap {
         return TestResult::Fail;
     }
-    // Re-enable: ESC[?7h
     for &b in b"\x1b[?7h" {
         p.advance(b);
     }
@@ -349,8 +336,7 @@ pub fn test_cell_model_u32() -> TestResult {
 
 pub fn test_vconsole_utf8_hello_renders() -> TestResult {
     let mut state = boxed_vconsole_state();
-    // "Héllo" = H é l l o
-    // H = 0x48, é = 0xC3 0xA9, l = 0x6C, l = 0x6C, o = 0x6F
+    // "Héllo": é = U+00E9 = 0xC3 0xA9
     for &b in b"H\xc3\xa9llo" {
         state.process_byte(b);
     }
@@ -380,7 +366,7 @@ pub fn test_vconsole_utf8_hello_renders() -> TestResult {
 
 pub fn test_double_width_cjk() -> TestResult {
     let mut state = boxed_vconsole_state();
-    // 中 = U+4E2D = 0xE4 0xB8 0xAD — double-width CJK character
+    // 中 = U+4E2D = 0xE4 0xB8 0xAD
     for &b in &[0xE4u8, 0xB8, 0xAD] {
         state.process_byte(b);
     }
@@ -391,7 +377,7 @@ pub fn test_double_width_cjk() -> TestResult {
         );
         return TestResult::Fail;
     }
-    // Second cell should be continuation marker.
+    // 0xFFFF_FFFF = double-width continuation marker.
     if state.cells.get(0, 1).codepoint != 0xFFFF_FFFF {
         klog_info!(
             "TTY_TEST: cell[0][1] = 0x{:08x}, expected continuation",
@@ -399,7 +385,6 @@ pub fn test_double_width_cjk() -> TestResult {
         );
         return TestResult::Fail;
     }
-    // Cursor should advance by 2.
     if state.cursor_col != 2 {
         klog_info!("TTY_TEST: cursor_col = {}, expected 2", state.cursor_col);
         return TestResult::Fail;
@@ -409,7 +394,6 @@ pub fn test_double_width_cjk() -> TestResult {
 
 pub fn test_invalid_utf8_in_vconsole() -> TestResult {
     let mut state = boxed_vconsole_state();
-    // 0xFF is invalid — should render replacement character (U+FFFD).
     state.process_byte(0xFF);
     if state.cells.get(0, 0).codepoint != 0xFFFD {
         klog_info!(
@@ -423,7 +407,7 @@ pub fn test_invalid_utf8_in_vconsole() -> TestResult {
 
 pub fn test_mixed_ascii_utf8_escapes() -> TestResult {
     let mut state = boxed_vconsole_state();
-    // Write "A", then ESC[31m (red), then "é", then ESC[0m (reset), then "B"
+    // 0xC3 0xA9 = é; fg 0x00AA0000 = red, 0x00AAAAAA = default.
     state.process_byte(b'A');
     for &b in b"\x1b[31m" {
         state.process_byte(b);
@@ -436,11 +420,9 @@ pub fn test_mixed_ascii_utf8_escapes() -> TestResult {
     }
     state.process_byte(b'B');
 
-    // Cell 0 = 'A' with default fg
     if state.cells.get(0, 0).codepoint != b'A' as u32 {
         return TestResult::Fail;
     }
-    // Cell 1 = é (0xE9) with red fg
     if state.cells.get(0, 1).codepoint != 0xE9 {
         return TestResult::Fail;
     }
@@ -451,7 +433,6 @@ pub fn test_mixed_ascii_utf8_escapes() -> TestResult {
         );
         return TestResult::Fail;
     }
-    // Cell 2 = 'B' with default fg
     if state.cells.get(0, 2).codepoint != b'B' as u32 {
         return TestResult::Fail;
     }
@@ -463,8 +444,7 @@ pub fn test_mixed_ascii_utf8_escapes() -> TestResult {
 
 pub fn test_256color_cube_mapping() -> TestResult {
     let mut state = boxed_vconsole_state();
-    // Index 16 = rgb(0,0,0), index 21 = rgb(0,0,255), index 196 = rgb(255,0,0)
-    // Test index 21: 16 + 36*0 + 6*0 + 5 = 21 → b=5*51=255, g=0, r=0
+    // Cube index 21 = 16 + 36*0 + 6*0 + 5 → b = 5*51 = 255, g = 0, r = 0.
     for &b in b"\x1b[38;5;21m" {
         state.process_byte(b);
     }
@@ -483,7 +463,7 @@ pub fn test_256color_cube_mapping() -> TestResult {
 
 pub fn test_256color_grayscale_mapping() -> TestResult {
     let mut state = boxed_vconsole_state();
-    // Index 232 = first grayscale = 8 + 10*0 = 8 → rgb(8,8,8)
+    // Index 232 = first grayscale = 8 + 10*0 = 8 → rgb(8,8,8).
     for &b in b"\x1b[38;5;232m" {
         state.process_byte(b);
     }
@@ -515,11 +495,11 @@ pub fn test_is_double_width_ranges() -> TestResult {
     if !is_double_width(0xFF21) {
         return TestResult::Fail;
     }
-    // ASCII 'A' is NOT double width
+    // ASCII 'A'
     if is_double_width(0x41) {
         return TestResult::Fail;
     }
-    // Latin é is NOT double width
+    // Latin é
     if is_double_width(0xE9) {
         return TestResult::Fail;
     }

@@ -57,7 +57,7 @@ fn create_minimal_elf_header() -> [u8; MINIMAL_ELF_SIZE] {
     elf[18..20].copy_from_slice(&0x3Eu16.to_le_bytes()); // e_machine: x86_64
     elf[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
     elf[24..32].copy_from_slice(&PROCESS_CODE_START_VA.to_le_bytes()); // e_entry
-    elf[32..40].copy_from_slice(&64u64.to_le_bytes()); // e_phoff (program headers at offset 64)
+    elf[32..40].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
     elf[52..54].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
     elf[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
     elf[56..58].copy_from_slice(&0u16.to_le_bytes()); // e_phnum: 0 segments
@@ -94,7 +94,6 @@ fn create_elf_with_load_segment(vaddr: u64, memsz: u64, filesz: u64, offset: u64
     elf
 }
 
-/// Resolve a pid this test just created into the designator `mm` takes.
 fn resolve_pid(pid: u32) -> slopos_ostd::process::ProcessId {
     slopos_ostd::process::ProcessId::resolve(pid).expect("a pid this test just created")
 }
@@ -260,7 +259,7 @@ pub fn test_elf_kernel_address_entry() -> TestResult {
 
     let validator = match ElfValidator::new(&elf) {
         Ok(v) => v.with_load_base(PROCESS_CODE_START_VA),
-        Err(_) => return TestResult::Pass, // Header rejection is also acceptable
+        Err(_) => return TestResult::Pass,
     };
 
     if validator.validate_load_segments().is_ok() {
@@ -330,8 +329,8 @@ pub fn test_translate_address_user_passthrough() -> TestResult {
 }
 
 /// No address space is handed out for a process that does not exist. The
-/// reachable form is a designator that *outlived* its process: a pid naming
-/// nothing cannot be resolved into one at all.
+/// reachable form is a designator that *outlived* its process — a pid naming
+/// nothing never resolves into one.
 pub fn test_process_vm_root_absent_for_a_reaped_process() -> TestResult {
     if slopos_ostd::process::ProcessId::resolve(9999).is_some() {
         klog_info!("EXEC_TEST: BUG - a pid naming no process resolved");
@@ -738,10 +737,9 @@ slopos_testing::stest!(
     suite = exec
 );
 
-/// The kernel confers privilege by program identity, and the grant table is the
-/// sole source of those bits for a user-initiated spawn. `/sbin/init` is the
-/// load-bearing negative case: naming it here would let any task re-spawn it
-/// and inherit console administration.
+/// The grant table is the sole source of privilege bits for a user-initiated
+/// spawn. `/sbin/init` is the load-bearing negative case: granting it would let
+/// any task re-spawn it and inherit console administration.
 pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
     use slopos_abi::task::{TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TaskPriority};
     use slopos_testing::assert_test;

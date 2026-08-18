@@ -12,11 +12,10 @@ use slopos_ostd::klog_info;
 
 use crate::{apic, ioapic, ps2};
 
-/// Reserve the IDT vector for a legacy IRQ line, wire the PS/2 dispatch closure,
-/// leak both handles for the kernel's lifetime, and unmask the IOAPIC route —
-/// `setup_ioapic_routes` programs the RTE masked, so without the unmask the
-/// callback is wired but the line stays gated. Used only by the `i8042.legacy`
-/// escape hatch.
+/// Wire the PS/2 dispatch closure onto a legacy IRQ line, leak both handles for
+/// the kernel's lifetime, and unmask the IOAPIC route — `setup_ioapic_routes`
+/// programs the RTE masked, so without the unmask the callback is wired but the
+/// line stays gated.
 fn register_legacy_irq(irq_line: u8) {
     let vector = IRQ_BASE_VECTOR.wrapping_add(irq_line);
     let line = match IrqAllocator::reserve_specific(vector) {

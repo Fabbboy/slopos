@@ -23,15 +23,13 @@ fn runtime_current_task_pgrp_handle() -> Option<slopos_ostd::KWeak<ProcessGroup>
         .map(KArc::downgrade)
 }
 
-/// Wake the task named by `task_id`. The id is resolved through the registry
-/// rather than dereferenced: a waiter killed while parked never unwinds its own
-/// stack, so its wait node can outlive it.
+/// The id is resolved through the registry rather than dereferenced: a waiter
+/// killed while parked never unwinds its own stack, so its wait node can
+/// outlive it.
 fn runtime_unblock_task(task_id: u32) -> i32 {
     scheduler::unblock_task_id(task_id)
 }
 
-/// Post `signum` to every member of `pgid`, waking blocked members. True if at
-/// least one member matched.
 fn runtime_signal_process_group(pgid: u32, signum: u8) -> bool {
     if pgid == 0 {
         return false;

@@ -20,8 +20,7 @@
 //! ```
 
 #![feature(restricted_std)]
-// Many widget fields are read by run_app and tree reconciliation, not by the
-// widget impls themselves.
+// Widget fields are read by run_app and tree reconciliation, not by the impls.
 #![allow(dead_code)]
 
 pub mod platform;

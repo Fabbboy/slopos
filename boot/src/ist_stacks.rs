@@ -290,9 +290,8 @@ fn map_stack_pages(stack: &IstStackConfig, stack_base: u64) {
     assert_bsp_is_mapping("an IST stack");
     for page in 0..EXCEPTION_STACK_PAGES {
         let virt_addr = stack_base + page * PAGE_SIZE_4KB;
-        // The handle goes straight to the mapper: an IST stack lives as long as
-        // the kernel, so the leaf entry holds the never-released reference
-        // rather than `into_phys` leaving it held by nobody.
+        // An IST stack lives as long as the kernel, so the handle goes straight
+        // to the mapper and the leaf entry holds the never-released reference.
         let frame = Frame::<KernelMeta>::alloc_zeroed().unwrap_or_else(|| {
             panic!(
                 "ist_stacks_init: Failed to allocate zeroed page for {} stack",
@@ -496,8 +495,6 @@ pub fn emergency_stack_guard_fault(fault_addr: u64) -> Option<usize> {
     None
 }
 
-/// Initializes all IST stacks.
-///
 /// # Panics
 /// Panics if memory allocation or mapping fails.
 ///

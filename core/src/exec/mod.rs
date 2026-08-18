@@ -58,8 +58,8 @@ pub enum ExecError {
     NameTooLong = -36,
 }
 
-/// A decoded spawn file action (kernel-owned; `Open` paths are copied from
-/// user memory in the syscall handler before crossing into `exec`).
+/// A decoded spawn file action; `Open` paths are already copied out of user
+/// memory by the syscall handler.
 pub enum FdAction {
     /// Share the parent's `src_fd` description into the child's `target_fd`.
     Clone {
@@ -96,8 +96,8 @@ fn trim_nul_bytes(bytes: &[u8]) -> &[u8] {
 /// before it runs.
 static INIT_TASK_ID: AtomicU32 = AtomicU32::new(INVALID_TASK_ID);
 
-/// Which task is init. There is no structural marker — ids never recycle and
-/// `TASK_FLAG_SYSTEM` is shared with the utest runner — so the launch id names it.
+/// Which task is init. There is no structural marker — `TASK_FLAG_SYSTEM` is
+/// shared with the utest runner — so the launch id names it.
 pub fn init_task_id() -> u32 {
     INIT_TASK_ID.load(Ordering::Acquire)
 }
@@ -118,9 +118,9 @@ pub fn launch_init() -> Result<u32, ExecError> {
     Ok(task_id)
 }
 
-/// Apply the spawn fd-action allow-list to the child's empty, unpublished
-/// table. All-or-nothing: `Transfer` installs a shared alias first and empties
-/// its parent slot only after the whole list applied, so any failure leaves the
+/// Apply the spawn fd-action list to the child's empty, unpublished table.
+/// All-or-nothing: `Transfer` installs a shared alias first and empties its
+/// parent slot only once the whole list applied, so any failure leaves the
 /// parent holding every descriptor.
 pub(crate) fn apply_fd_actions(
     parent_table: FdTable,
@@ -198,7 +198,6 @@ fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], ExecError
     Ok(name)
 }
 
-/// The job-control identity a spawned child inherits from its parent.
 struct InheritedJobControl {
     pgid: u32,
     sid: u32,
@@ -273,7 +272,7 @@ pub fn spawn_program_with_attrs(
             return Err(ExecError::NoMem);
         };
         // Nothing else can find the orphan, so every exit from here — `?`, a
-        // panic, or a kill aborting the blocking calls — must release it here.
+        // panic, a kill aborting the blocking calls — must release it here.
         let mut spawn = SpawnGuard::new(pending);
         let task_id = spawn.child_id();
 
@@ -317,8 +316,8 @@ pub fn spawn_program_with_attrs(
         let parent_ref = task_find_by_id(parent_task_id);
 
         // Resolved — and for NEW_PGRP allocated — before the child borrow
-        // opens: that borrow runs preempt-disabled, where a fallible
-        // allocation has no business.
+        // opens: that borrow runs preempt-disabled, where a fallible allocation
+        // has no business.
         let inherited = parent_ref
             .as_ref()
             .map(|parent| resolve_inherited_job_control(parent, task_id, flags));
@@ -383,13 +382,12 @@ pub fn spawn_program_with_attrs(
         if let Some((ctty, child_pgid, child_sid)) = fg_handoff {
             use slopos_kernel_services::syscall_services::tty;
             // Checked variant: session match and set under one TTY lock, no
-            // read-then-write TOCTOU. Resolving the target group walks the
-            // registry, which is why this follows the commit above.
+            // read-then-write TOCTOU.
             let _ = tty::set_foreground_pgrp_checked(ctty, child_pgid, child_sid);
         }
 
-        // The Release status store inside `publish_new_task` is what makes
-        // every write above visible to the CPU that runs this task.
+        // `publish_new_task`'s Release status store is what makes every write
+        // above visible to the CPU that runs this task.
         if publish_new_task(&registered) != 0 {
             task_terminate(task_id);
             return Err(ExecError::NoMem);

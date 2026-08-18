@@ -1,23 +1,7 @@
-//! Kernel-half VA mapping helpers built on the OSTD `VmSpace` cursor.
-//!
-//! Every kernel-half page-table write in the kernel goes through here.
-//! The mutating helpers take `kernel_vm_space().lock()` and drive a
-//! `CursorMut` over the same physical PML4 OSTD wraps via
-//! `KERNEL_VM_SPACE`; the lock is what mints the `&mut VmSpace` the
-//! borrow checker then makes exclusive, so the master has exactly one
-//! writer at a time. Reads use `cursor()` so multiple callers can probe
-//! the kernel half concurrently.
-//!
-//! Two map entry points, split by who owns the physical memory:
-//!
-//! * [`kernel_map_4kb`] / [`kernel_map_4kb_frame`] install RAM the
-//!   frame allocator handed out. The leaf owns one `Frame<KernelMeta>`
-//!   reference, and [`kernel_unmap_4kb`] hands it back — dropping it
-//!   returns the page.
-//! * [`kernel_map_io_4kb`] installs physical memory the kernel does not
-//!   own: device apertures with no `MetaSlot` at all, and firmware
-//!   regions that must never reach the buddy allocator. Those leaves own
-//!   nothing and reclaim nothing.
+//! Kernel-half VA mapping helpers built on the OSTD `VmSpace` cursor. Every
+//! kernel-half page-table write goes through here; `kernel_vm_space().lock()`
+//! is what mints the `&mut VmSpace`, so the master has exactly one writer at a
+//! time, while reads take the shared `cursor()`.
 
 use core::ffi::c_int;
 

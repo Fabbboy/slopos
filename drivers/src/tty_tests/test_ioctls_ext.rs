@@ -1,15 +1,8 @@
-//! Split from test_ldisc.rs: test_ioctls_ext.rs
+//! TTY ioctl tests: drain, hangup, `c_cflag`, TCFLSH/TCSBRK/TCXONC, TIOCOUTQ,
+//! packet mode, and exclusive-open/HUPCL behaviour.
 
 use super::fixtures::*;
 
-// ===========================================================================
-// Real TCSETSW/TCSETSF Drain Semantics
-// ===========================================================================
-
-/// The `is_output_idle` function returns `true` when no output
-/// is in flight and the driver reports no pending output.  For synchronous
-/// backends (serial, vconsole) this should always be `true` when no write
-/// is in progress.
 pub fn test_is_output_idle_initially_true() -> TestResult {
     tty::table::tty_table_init();
     match tty::is_output_idle(TtyIndex(0)) {
@@ -24,7 +17,6 @@ pub fn test_is_output_idle_initially_true() -> TestResult {
     }
 }
 
-/// The inflight counter starts at zero for all TTY slots.
 pub fn test_inflight_counter_initial_zero() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
@@ -42,14 +34,11 @@ pub fn test_inflight_counter_initial_zero() -> TestResult {
     TestResult::Pass
 }
 
-/// After a write completes, the inflight counter is back to zero
-/// and `is_output_idle` returns true.
 pub fn test_write_updates_inflight_counter() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
-    // Write some data.
     let data = b"hello drain";
     let result = tty::write(TtyIndex(0), data, false);
     match result {
@@ -63,7 +52,6 @@ pub fn test_write_updates_inflight_counter() -> TestResult {
         }
     }
 
-    // After write completes, inflight should be zero.
     let inflight = TTY_OUTPUT_INFLIGHT[0].load(Ordering::Relaxed);
     if inflight != 0 {
         klog_info!(
@@ -73,7 +61,6 @@ pub fn test_write_updates_inflight_counter() -> TestResult {
         return TestResult::Fail;
     }
 
-    // is_output_idle should return true.
     match tty::is_output_idle(TtyIndex(0)) {
         Ok(true) => TestResult::Pass,
         other => {
@@ -86,13 +73,10 @@ pub fn test_write_updates_inflight_counter() -> TestResult {
     }
 }
 
-/// `TCSETSW` (set_termios_wait) applies termios after drain and
-/// preserves pending input (does not flush).
 pub fn test_tcsetsw_preserves_input_after_drain() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
-    // Switch to raw mode so we can observe single-byte input.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !LocalFlags::ICANON;
@@ -100,16 +84,13 @@ pub fn test_tcsetsw_preserves_input_after_drain() -> TestResult {
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
-    // Push input, then perform a write (creating output to "drain").
     tty::push_input(TtyIndex(0), b'x');
     let _ = tty::write(TtyIndex(0), b"output", false);
 
-    // Now use TCSETSW to change termios.  Input should survive.
     let mut changed = raw;
     changed.c_lflag &= !LocalFlags::ECHO;
     tty::set_termios_wait(TtyIndex(0), &changed).unwrap();
 
-    // Verify input byte is still available.
     let mut out = [0u8; 8];
     let result = tty::read(TtyIndex(0), &mut out, true);
     tty::set_termios(TtyIndex(0), &saved).unwrap();
@@ -126,8 +107,6 @@ pub fn test_tcsetsw_preserves_input_after_drain() -> TestResult {
     }
 }
 
-/// `TCSETSF` (set_termios_flush) applies termios after drain and
-/// flushes pending input.
 pub fn test_tcsetsf_flushes_input_after_drain() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
@@ -139,16 +118,13 @@ pub fn test_tcsetsf_flushes_input_after_drain() -> TestResult {
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
-    // Push input, then perform a write.
     tty::push_input(TtyIndex(0), b'y');
     let _ = tty::write(TtyIndex(0), b"output", false);
 
-    // Use TCSETSF — should drain output AND flush input.
     let mut changed = raw;
     changed.c_lflag &= !LocalFlags::ECHO;
     tty::set_termios_flush(TtyIndex(0), &changed).unwrap();
 
-    // Verify input has been flushed.
     let mut out = [0u8; 8];
     let result = tty::read(TtyIndex(0), &mut out, true);
     tty::set_termios(TtyIndex(0), &saved).unwrap();
@@ -165,7 +141,6 @@ pub fn test_tcsetsf_flushes_input_after_drain() -> TestResult {
     }
 }
 
-/// `is_output_idle` returns an error for an invalid index.
 pub fn test_is_output_idle_invalid_index() -> TestResult {
     match tty::is_output_idle(TtyIndex(255)) {
         Err(TtyError::InvalidIndex) => TestResult::Pass,
@@ -179,10 +154,8 @@ pub fn test_is_output_idle_invalid_index() -> TestResult {
     }
 }
 
-/// `is_output_idle` returns an error for an unallocated slot.
 pub fn test_is_output_idle_unallocated() -> TestResult {
     tty::table::tty_table_init();
-    // Slot 7 is never allocated by default.
     match tty::is_output_idle(TtyIndex(7)) {
         Err(TtyError::NotAllocated) => TestResult::Pass,
         other => {
@@ -195,8 +168,6 @@ pub fn test_is_output_idle_unallocated() -> TestResult {
     }
 }
 
-/// `wait_output_idle` (via `set_termios_wait`) returns an error
-/// for an invalid TTY index.
 pub fn test_drain_invalid_index_error() -> TestResult {
     let t = slopos_abi::syscall::UserTermios::default();
     match tty::set_termios_wait(TtyIndex(255), &t) {
@@ -211,18 +182,15 @@ pub fn test_drain_invalid_index_error() -> TestResult {
     }
 }
 
-/// The `TtyDriver` trait default `output_pending()` returns `false`.
 pub fn test_driver_output_pending_default_false() -> TestResult {
     use crate::tty::driver::TtyDriver;
 
-    // SerialConsoleDriver uses the default implementation.
     let serial = crate::tty::driver::SerialConsoleDriver;
     if serial.output_pending() {
         klog_info!("TTY_TEST: BUG - SerialConsoleDriver.output_pending() should be false");
         return TestResult::Fail;
     }
 
-    // VConsoleDriver uses the default implementation.
     let vc = VConsoleDriver;
     if vc.output_pending() {
         klog_info!("TTY_TEST: BUG - VConsoleDriver.output_pending() should be false");
@@ -232,8 +200,6 @@ pub fn test_driver_output_pending_default_false() -> TestResult {
     TestResult::Pass
 }
 
-/// `TtyDriverKind::output_pending()` dispatches correctly for all
-/// driver variants.
 pub fn test_driver_kind_output_pending_dispatch() -> TestResult {
     use crate::tty::driver::SerialConsoleDriver;
 
@@ -270,12 +236,9 @@ pub fn test_driver_kind_output_pending_dispatch() -> TestResult {
     TestResult::Pass
 }
 
-/// PTY drain is immediate — `is_output_idle` returns `true` right
-/// after writing to a PTY master/slave pair.
 pub fn test_pty_output_idle_immediate() -> TestResult {
     tty::table::tty_table_init();
 
-    // Allocate a PTY pair.
     let (master_idx, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(_) => {
@@ -291,13 +254,10 @@ pub fn test_pty_output_idle_immediate() -> TestResult {
         }
     };
 
-    // Open the slave so the pair stays alive.
     let slave_backing = tty::open_tty(slave_idx).unwrap();
 
-    // Write to master (goes to slave's input buffer).
     let _ = tty::write(master_idx, b"pty drain test", false);
 
-    // Output should be idle immediately (PTY has no hardware latency).
     match tty::is_output_idle(master_idx) {
         Ok(true) => {}
         other => {
@@ -311,7 +271,6 @@ pub fn test_pty_output_idle_immediate() -> TestResult {
         }
     }
 
-    // TCSETSW on slave should complete immediately.
     let termios = tty::get_termios(slave_idx).unwrap();
     match tty::set_termios_wait(slave_idx, &termios) {
         Ok(()) => {}
@@ -326,22 +285,18 @@ pub fn test_pty_output_idle_immediate() -> TestResult {
         }
     }
 
-    // Clean up.
     drop(slave_backing);
     drop(master_backing);
     TestResult::Pass
 }
 
-/// `TCSETSW` on console completes immediately because the serial
-/// driver is synchronous (all output is "drained" instantly).
+/// Drain is immediate because the serial driver is synchronous.
 pub fn test_console_drain_immediate() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
-    // Write output to create something to "drain".
     let _ = tty::write(TtyIndex(0), b"drain test output\r\n", false);
 
-    // `is_output_idle` should be true immediately.
     match tty::is_output_idle(TtyIndex(0)) {
         Ok(true) => {}
         other => {
@@ -353,7 +308,6 @@ pub fn test_console_drain_immediate() -> TestResult {
         }
     }
 
-    // TCSETSW should complete without blocking.
     let termios = tty::get_termios(TtyIndex(0)).unwrap();
     match tty::set_termios_wait(TtyIndex(0), &termios) {
         Ok(()) => TestResult::Pass,
@@ -367,8 +321,6 @@ pub fn test_console_drain_immediate() -> TestResult {
     }
 }
 
-/// `set_termios_mode` with `Now` does NOT call `wait_output_idle`
-/// — it applies termios immediately regardless of pending output.
 pub fn test_tcsets_now_skips_drain() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
@@ -380,10 +332,8 @@ pub fn test_tcsets_now_skips_drain() -> TestResult {
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
-    // Push input.
     tty::push_input(TtyIndex(0), b'z');
 
-    // TCSETS (Now) should apply immediately, input preserved.
     let mut changed = raw;
     changed.c_lflag &= !LocalFlags::ECHO;
     tty::set_termios(TtyIndex(0), &changed).unwrap();
@@ -403,12 +353,6 @@ pub fn test_tcsets_now_skips_drain() -> TestResult {
         }
     }
 }
-// ===========================================================================
-// Post-Hangup I/O Hardening regression tests
-// ===========================================================================
-
-/// read() on a hung-up TTY with no buffered data returns EOF (0
-/// bytes), regardless of blocking/nonblock mode.
 pub fn test_hangup_read_returns_eof() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -416,10 +360,8 @@ pub fn test_hangup_read_returns_eof() -> TestResult {
     let _hangup = HangupScope::hang_up(idx);
 
     let mut out = [0u8; 8];
-    // Nonblocking read on hung-up TTY.
     let result = tty::read(idx, &mut out, true);
 
-    // Re-init before checking.
     drop(con);
     tty::table::tty_table_init();
 
@@ -435,7 +377,6 @@ pub fn test_hangup_read_returns_eof() -> TestResult {
     }
 }
 
-/// write() on a hung-up TTY returns Err(HungUp) which maps to EIO.
 pub fn test_hangup_write_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -459,7 +400,6 @@ pub fn test_hangup_write_returns_eio() -> TestResult {
     }
 }
 
-/// poll_events() on a hung-up TTY returns POLLHUP | POLLIN.
 pub fn test_hangup_poll_returns_pollhup_pollin() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -489,7 +429,6 @@ pub fn test_hangup_poll_returns_pollhup_pollin() -> TestResult {
     TestResult::Pass
 }
 
-/// set_termios on a hung-up TTY returns Err(HungUp) / EIO.
 pub fn test_hangup_set_termios_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -500,8 +439,7 @@ pub fn test_hangup_set_termios_returns_eio() -> TestResult {
     let result = match termios {
         Ok(t) => tty::set_termios(idx, &t),
         Err(_) => {
-            // get_termios may also fail on hung-up — that's fine, but
-            // set_termios is the one we're testing.
+            // get_termios may also fail on hung-up; set_termios is what this tests.
             let t = slopos_abi::syscall::UserTermios::default();
             tty::set_termios(idx, &t)
         }
@@ -522,7 +460,6 @@ pub fn test_hangup_set_termios_returns_eio() -> TestResult {
     }
 }
 
-/// set_winsize on a hung-up TTY returns Err(HungUp) / EIO.
 pub fn test_hangup_set_winsize_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -552,7 +489,6 @@ pub fn test_hangup_set_winsize_returns_eio() -> TestResult {
     }
 }
 
-/// set_ldisc on a hung-up TTY returns Err(HungUp) / EIO.
 pub fn test_hangup_set_ldisc_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -576,17 +512,14 @@ pub fn test_hangup_set_ldisc_returns_eio() -> TestResult {
     }
 }
 
-/// get_foreground_pgrp is a hangup-safe ioctl — still works after
-/// hangup so shells can query job control state during session cleanup.
+/// Hangup-safe ioctl: shells still query job-control state during session cleanup.
 pub fn test_hangup_get_fg_pgrp_still_works() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let con = tty::open_tty(idx).unwrap();
-    // Set a foreground pgrp before hangup.
     let _ = tty::set_foreground_pgrp(idx, 42);
     let _hangup = HangupScope::hang_up(idx);
 
-    // get_foreground_pgrp should still succeed after hangup.
     let result = tty::get_foreground_pgrp(idx);
 
     drop(con);
@@ -604,12 +537,9 @@ pub fn test_hangup_get_fg_pgrp_still_works() -> TestResult {
     }
 }
 
-/// PTY master close → slave read returns EOF, slave write returns
-/// EIO.  Validates cross-end hangup propagation.
 pub fn test_pty_master_close_slave_eof_eio() -> TestResult {
     tty::table::tty_table_init();
 
-    // Allocate a PTY pair. The returned backing is the sole master open.
     let (master_idx, master_backing) =
         match crate::tty::pty::pty_alloc(slopos_ostd::process::quota::root()) {
             Ok(pair) => pair,
@@ -621,10 +551,8 @@ pub fn test_pty_master_close_slave_eof_eio() -> TestResult {
 
     let slave_idx = TtyIndex(tty::get_pty_number(master_idx).unwrap() as u8);
 
-    // Unlock the slave so it can be opened.
     crate::tty::set_pty_lock(master_idx, false).unwrap();
 
-    // Open slave.
     let slave_backing = match tty::pty_open_slave(slave_idx) {
         Ok(backing) => backing,
         Err(e) => {
@@ -633,14 +561,12 @@ pub fn test_pty_master_close_slave_eof_eio() -> TestResult {
         }
     };
 
-    // Close the last master open — hangs up the slave.
+    // Dropping the last master open hangs up the slave.
     drop(master_backing);
 
-    // Slave read should return EOF (0 bytes).
     let mut out = [0u8; 8];
     let read_result = tty::read(slave_idx, &mut out, true);
 
-    // Slave write should return EIO.
     let write_result = tty::write(slave_idx, b"test", false);
 
     drop(slave_backing);
@@ -665,8 +591,7 @@ pub fn test_pty_master_close_slave_eof_eio() -> TestResult {
     TestResult::Pass
 }
 
-/// hung_up flag is never cleared — a hung-up TTY is permanently dead
-/// until the slot is reclaimed.  Verify multiple reads all return EOF.
+/// The hung-up flag is never cleared until the slot is reclaimed.
 pub fn test_hangup_permanent_eof() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -694,7 +619,6 @@ pub fn test_hangup_permanent_eof() -> TestResult {
     TestResult::Pass
 }
 
-/// PTY slave poll returns POLLHUP after master closes.
 pub fn test_pty_slave_poll_pollhup_after_master_close() -> TestResult {
     tty::table::tty_table_init();
 
@@ -709,7 +633,6 @@ pub fn test_pty_slave_poll_pollhup_after_master_close() -> TestResult {
 
     let slave_idx = TtyIndex(tty::get_pty_number(master_idx).unwrap() as u8);
 
-    // Unlock the slave so it can be opened.
     crate::tty::set_pty_lock(master_idx, false).unwrap();
 
     let slave_backing = match tty::pty_open_slave(slave_idx) {
@@ -717,10 +640,8 @@ pub fn test_pty_slave_poll_pollhup_after_master_close() -> TestResult {
         Err(_) => return TestResult::Fail,
     };
 
-    // Close the last master open — hangs up the slave.
     drop(master_backing);
 
-    // Poll slave.
     let revents = tty::poll_events(
         slave_idx,
         slopos_abi::syscall::POLLIN | slopos_abi::syscall::POLLOUT,
@@ -735,7 +656,6 @@ pub fn test_pty_slave_poll_pollhup_after_master_close() -> TestResult {
     TestResult::Pass
 }
 
-/// TtyError::HungUp maps to errno -5 (EIO).
 pub fn test_hungup_errno_is_eio() -> TestResult {
     let errno = TtyError::HungUp.to_errno();
     if errno == -5 {
@@ -748,14 +668,8 @@ pub fn test_hungup_errno_is_eio() -> TestResult {
         TestResult::Fail
     }
 }
-// ---------------------------------------------------------------------------
-// c_cflag ABI Completion tests
-// ---------------------------------------------------------------------------
-
-/// ControlFlags constants have correct octal values.
 pub fn test_control_flag_values() -> TestResult {
     use slopos_abi::syscall::*;
-    // Character size.
     if ControlFlags::CS5.bits() != 0o000000
         || ControlFlags::CS6.bits() != 0o000020
         || ControlFlags::CS7.bits() != 0o000040
@@ -768,12 +682,10 @@ pub fn test_control_flag_values() -> TestResult {
         klog_info!("TTY_TEST: BUG - CSIZE value wrong");
         return TestResult::Fail;
     }
-    // Parity.
     if ControlFlags::PARENB.bits() != 0o000400 || ControlFlags::PARODD.bits() != 0o001000 {
         klog_info!("TTY_TEST: BUG - PARENB/PARODD values wrong");
         return TestResult::Fail;
     }
-    // Stop/modem.
     if ControlFlags::CSTOPB.bits() != 0o000100
         || ControlFlags::HUPCL.bits() != 0o002000
         || ControlFlags::CLOCAL.bits() != 0o004000
@@ -781,7 +693,6 @@ pub fn test_control_flag_values() -> TestResult {
         klog_info!("TTY_TEST: BUG - CSTOPB/HUPCL/CLOCAL values wrong");
         return TestResult::Fail;
     }
-    // Baud.
     if B0 != 0 || B9600 != 0o000015 || B38400 != 0o000017 || B115200 != 0o010002 {
         klog_info!("TTY_TEST: BUG - baud rate constants wrong");
         return TestResult::Fail;
@@ -790,7 +701,6 @@ pub fn test_control_flag_values() -> TestResult {
         klog_info!("TTY_TEST: BUG - CBAUD/CBAUDEX wrong");
         return TestResult::Fail;
     }
-    // Hardware flow control.
     if ControlFlags::CRTSCTS.bits() != 0o020000000 {
         klog_info!("TTY_TEST: BUG - CRTSCTS value wrong");
         return TestResult::Fail;
@@ -798,7 +708,6 @@ pub fn test_control_flag_values() -> TestResult {
     TestResult::Pass
 }
 
-/// Default termios c_cflag contains CS8|CREAD|HUPCL|B38400.
 pub fn test_default_cflag() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
@@ -817,7 +726,6 @@ pub fn test_default_cflag() -> TestResult {
     TestResult::Pass
 }
 
-/// tcsetattr with CS7|PARENB roundtrips through tcgetattr.
 pub fn test_cflag_roundtrip() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
@@ -845,7 +753,6 @@ pub fn test_cflag_roundtrip() -> TestResult {
     TestResult::Pass
 }
 
-/// c_ispeed/c_ospeed populated from default baud (38400).
 pub fn test_speed_fields_populated() -> TestResult {
     tty::table::tty_table_init();
     let t = tty::get_termios(TtyIndex(0)).unwrap();
@@ -860,7 +767,6 @@ pub fn test_speed_fields_populated() -> TestResult {
     TestResult::Pass
 }
 
-/// Changing baud rate updates c_ispeed/c_ospeed.
 pub fn test_speed_follows_baud_change() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
@@ -868,7 +774,6 @@ pub fn test_speed_follows_baud_change() -> TestResult {
     let saved = tty::get_termios(idx).unwrap();
 
     let mut t = saved;
-    // Clear old baud bits and set B9600.
     t.c_cflag = ControlFlags::from_bits_retain((t.c_cflag.bits() & !CBAUD) | B9600);
     tty::set_termios(idx, &t).unwrap();
 
@@ -887,9 +792,7 @@ pub fn test_speed_follows_baud_change() -> TestResult {
     TestResult::Pass
 }
 
-/// CREAD value preserved after ABI update.
 pub fn test_cread_value_preserved() -> TestResult {
-    // CREAD was 0x80 before, now 0o000200 = 128 = 0x80. Same value.
     use slopos_abi::syscall::ControlFlags;
     let cread = ControlFlags::CREAD;
     if cread.bits() != 0x80 {
@@ -901,11 +804,6 @@ pub fn test_cread_value_preserved() -> TestResult {
     }
     TestResult::Pass
 }
-// ---------------------------------------------------------------------------
-// Missing Ioctls (TCFLSH, TCSBRK, TCXONC) tests
-// ---------------------------------------------------------------------------
-
-/// ABI constants have correct values.
 pub fn test_flush_flow_ioctl_constants() -> TestResult {
     use slopos_abi::syscall::*;
     if TCSBRK != 0x5409 {
@@ -931,25 +829,22 @@ pub fn test_flush_flow_ioctl_constants() -> TestResult {
     TestResult::Pass
 }
 
-/// TCFLSH with TCIFLUSH clears input.
 pub fn test_tcflush_input() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Push some data (canonical: need newline to commit to cooked).
+    // Canonical mode: the newline is what commits the line to the cooked buffer.
     tty::push_input(idx, b'H');
     tty::push_input(idx, b'i');
     tty::push_input(idx, b'\n');
 
-    // Data should be available.
     if !tty::has_data(idx) {
         klog_info!("TTY_TEST: BUG - no data after push_input");
         drain_tty_nonblock(idx);
         return TestResult::Fail;
     }
 
-    // Flush input.
     match tty::tcflush(idx, slopos_abi::syscall::TCIFLUSH) {
         Ok(()) => {}
         Err(e) => {
@@ -959,7 +854,6 @@ pub fn test_tcflush_input() -> TestResult {
         }
     }
 
-    // Now read should return 0 (no data).
     let mut buf = [0u8; 64];
     match tty::read(idx, &mut buf, true) {
         Ok(0) | Err(_) => {}
@@ -974,17 +868,14 @@ pub fn test_tcflush_input() -> TestResult {
     TestResult::Pass
 }
 
-/// TCFLSH with TCOFLUSH resets output inflight.
 pub fn test_tcflush_output() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let slot = idx.0 as usize;
 
-    // Artificially set inflight counter.
     crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].store(5, Ordering::Release);
 
-    // Flush output.
     tty::tcflush(idx, slopos_abi::syscall::TCOFLUSH).unwrap();
 
     let val = crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire);
@@ -995,7 +886,6 @@ pub fn test_tcflush_output() -> TestResult {
     TestResult::Pass
 }
 
-/// TCFLSH with TCIOFLUSH clears both input and output.
 pub fn test_tcflush_both() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
@@ -1003,17 +893,13 @@ pub fn test_tcflush_both() -> TestResult {
     let slot = idx.0 as usize;
     drain_tty_nonblock(idx);
 
-    // Push data.
     tty::push_input(idx, b'A');
     tty::push_input(idx, b'\n');
 
-    // Set inflight.
     crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].store(3, Ordering::Release);
 
-    // Flush both.
     tty::tcflush(idx, slopos_abi::syscall::TCIOFLUSH).unwrap();
 
-    // Input cleared.
     let mut buf = [0u8; 64];
     match tty::read(idx, &mut buf, true) {
         Ok(0) | Err(_) => {}
@@ -1024,7 +910,6 @@ pub fn test_tcflush_both() -> TestResult {
         }
     }
 
-    // Output cleared.
     let val = crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire);
     if val != 0 {
         klog_info!("TTY_TEST: BUG - inflight={} after TCIOFLUSH", val);
@@ -1035,7 +920,6 @@ pub fn test_tcflush_both() -> TestResult {
     TestResult::Pass
 }
 
-/// TCFLSH with invalid argument returns error.
 pub fn test_tcflush_invalid_arg() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1051,7 +935,6 @@ pub fn test_tcflush_invalid_arg() -> TestResult {
     }
 }
 
-/// TCSBRK with arg=0 returns success (no-op).
 pub fn test_tcsbrk_noop() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1064,7 +947,6 @@ pub fn test_tcsbrk_noop() -> TestResult {
     }
 }
 
-/// TCSBRK with arg>0 drains output (succeeds).
 pub fn test_tcsbrk_drain() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1077,7 +959,6 @@ pub fn test_tcsbrk_drain() -> TestResult {
     }
 }
 
-/// TCXONC with all four actions returns success.
 pub fn test_tcxonc_all_actions() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1092,24 +973,16 @@ pub fn test_tcxonc_all_actions() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// TCXONC Behavioral Completion tests
-// ===========================================================================
-
-/// TCOOFF sets output_stopped, nonblocking write returns
-/// WouldBlock on a console TTY.
 pub fn test_tcooff_blocks_nonblock_write() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Suspend output via TCOOFF.
     if let Err(e) = tty::tcxonc(idx, slopos_abi::syscall::TCOOFF) {
         klog_info!("TTY_TEST: BUG - tcxonc(TCOOFF) failed: {:?}", e);
         return TestResult::Fail;
     }
 
-    // Non-blocking write should return WouldBlock (no bytes written yet).
     match tty::write(idx, b"hello", true) {
         Err(TtyError::WouldBlock) => {}
         other => {
@@ -1117,28 +990,22 @@ pub fn test_tcooff_blocks_nonblock_write() -> TestResult {
                 "TTY_TEST: BUG - nonblock write under TCOOFF should return WouldBlock, got {:?}",
                 other
             );
-            // Clean up: resume output before returning.
             let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON);
             return TestResult::Fail;
         }
     }
 
-    // Resume output for cleanup.
     let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON);
     TestResult::Pass
 }
 
-/// TCOON clears output_stopped, nonblocking write
-/// succeeds after resume.
 pub fn test_tcoon_resumes_write() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Stop output.
     tty::tcxonc(idx, slopos_abi::syscall::TCOOFF).unwrap();
 
-    // Verify stopped.
     match tty::write(idx, b"test", true) {
         Err(TtyError::WouldBlock) => {}
         other => {
@@ -1151,10 +1018,8 @@ pub fn test_tcoon_resumes_write() -> TestResult {
         }
     }
 
-    // Resume output.
     tty::tcxonc(idx, slopos_abi::syscall::TCOON).unwrap();
 
-    // Write should now succeed.
     match tty::write(idx, b"hello", true) {
         Ok(n) if n == 5 => {}
         other => {
@@ -1169,7 +1034,6 @@ pub fn test_tcoon_resumes_write() -> TestResult {
     TestResult::Pass
 }
 
-/// Double TCOOFF is idempotent (does not error).
 pub fn test_tcooff_idempotent() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1177,7 +1041,6 @@ pub fn test_tcooff_idempotent() -> TestResult {
     tty::tcxonc(idx, slopos_abi::syscall::TCOOFF).unwrap();
     tty::tcxonc(idx, slopos_abi::syscall::TCOOFF).unwrap();
 
-    // Still stopped — verify.
     match tty::write(idx, b"x", true) {
         Err(TtyError::WouldBlock) => {}
         other => {
@@ -1190,22 +1053,17 @@ pub fn test_tcooff_idempotent() -> TestResult {
         }
     }
 
-    // Resume.
     tty::tcxonc(idx, slopos_abi::syscall::TCOON).unwrap();
     TestResult::Pass
 }
 
-/// Double TCOON is idempotent (does not error).
 pub fn test_tcoon_idempotent() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
-    // Start with a clean state.
     tty::tcxonc(idx, slopos_abi::syscall::TCOON).unwrap();
-    // Calling TCOON again when already running is fine.
     tty::tcxonc(idx, slopos_abi::syscall::TCOON).unwrap();
 
-    // Write should succeed.
     match tty::write(idx, b"ok", true) {
         Ok(n) if n == 2 => {}
         other => {
@@ -1220,13 +1078,11 @@ pub fn test_tcoon_idempotent() -> TestResult {
     TestResult::Pass
 }
 
-/// TCOOFF then TCOON cycle — write works after resume.
 pub fn test_stop_resume_cycle() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Cycle 1: stop → verify blocked → resume → verify working.
     tty::tcxonc(idx, slopos_abi::syscall::TCOOFF).unwrap();
     if tty::write(idx, b"a", true) != Err(TtyError::WouldBlock) {
         klog_info!("TTY_TEST: BUG - cycle 1 stop did not block");
@@ -1239,7 +1095,6 @@ pub fn test_stop_resume_cycle() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Cycle 2: same thing again — no residual state.
     tty::tcxonc(idx, slopos_abi::syscall::TCOOFF).unwrap();
     if tty::write(idx, b"b", true) != Err(TtyError::WouldBlock) {
         klog_info!("TTY_TEST: BUG - cycle 2 stop did not block");
@@ -1255,18 +1110,15 @@ pub fn test_stop_resume_cycle() -> TestResult {
     TestResult::Pass
 }
 
-/// TCIOFF and TCION succeed (control-byte path).
 pub fn test_tcioff_tcion_succeed() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
-    // TCIOFF: transmit STOP byte — should succeed.
     if let Err(e) = tty::tcxonc(idx, slopos_abi::syscall::TCIOFF) {
         klog_info!("TTY_TEST: BUG - tcxonc(TCIOFF) failed: {:?}", e);
         return TestResult::Fail;
     }
 
-    // TCION: transmit START byte — should succeed.
     if let Err(e) = tty::tcxonc(idx, slopos_abi::syscall::TCION) {
         klog_info!("TTY_TEST: BUG - tcxonc(TCION) failed: {:?}", e);
         return TestResult::Fail;
@@ -1275,16 +1127,13 @@ pub fn test_tcioff_tcion_succeed() -> TestResult {
     TestResult::Pass
 }
 
-/// TCIOFF/TCION do not affect output_stopped state.
 pub fn test_tcioff_tcion_no_output_stop() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Ensure output is running.
     tty::tcxonc(idx, slopos_abi::syscall::TCOON).unwrap();
 
-    // TCIOFF should not block output.
     tty::tcxonc(idx, slopos_abi::syscall::TCIOFF).unwrap();
     match tty::write(idx, b"data", true) {
         Ok(4) => {}
@@ -1297,7 +1146,6 @@ pub fn test_tcioff_tcion_no_output_stop() -> TestResult {
         }
     }
 
-    // TCION should also not affect output.
     tty::tcxonc(idx, slopos_abi::syscall::TCION).unwrap();
     match tty::write(idx, b"data", true) {
         Ok(4) => {}
@@ -1313,8 +1161,6 @@ pub fn test_tcioff_tcion_no_output_stop() -> TestResult {
     TestResult::Pass
 }
 
-/// Invalid TCXONC actions still return InvalidArg.
-/// (Regression test for validation preservation.)
 pub fn test_invalid_action_still_errors() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1336,16 +1182,12 @@ pub fn test_invalid_action_still_errors() -> TestResult {
     TestResult::Pass
 }
 
-/// TCOOFF on a PTY slave stops nonblocking writes to that
-/// slave.
 pub fn test_tcooff_pty_slave_write() -> TestResult {
     let pair = open_pty_pair();
     let slave = pair.slave;
 
-    // Stop output on the slave.
     tty::tcxonc(slave, slopos_abi::syscall::TCOOFF).unwrap();
 
-    // Non-blocking write to slave should return WouldBlock.
     match tty::write(slave, b"blocked", true) {
         Err(TtyError::WouldBlock) => {}
         other => {
@@ -1358,7 +1200,6 @@ pub fn test_tcooff_pty_slave_write() -> TestResult {
         }
     }
 
-    // Resume and verify write works.
     tty::tcxonc(slave, slopos_abi::syscall::TCOON).unwrap();
     match tty::write(slave, b"ok", true) {
         Ok(n) if n > 0 => {}
@@ -1374,17 +1215,12 @@ pub fn test_tcooff_pty_slave_write() -> TestResult {
     TestResult::Pass
 }
 
-/// output_stopped is independent of ldisc IXON stopped.
 pub fn test_output_stopped_independent_of_ixon() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Verify that output_stopped (TCXONC) and IXON stopped are separate.
-    // TCOOFF should block even when IXON flow control is not active.
-    // The default termios does NOT have IXON set (no keyboard flow
-    // control), so ldisc.is_stopped() is false.  TCOOFF should still
-    // block writes.
+    // Default termios leaves IXON clear, so ldisc.is_stopped() is false here.
     tty::tcxonc(idx, slopos_abi::syscall::TCOOFF).unwrap();
 
     match tty::write(idx, b"x", true) {
@@ -1403,10 +1239,8 @@ pub fn test_output_stopped_independent_of_ixon() -> TestResult {
     TestResult::Pass
 }
 
-/// TCXONC on unallocated slot returns NotAllocated.
 pub fn test_tcxonc_unallocated_slot() -> TestResult {
     tty::table::tty_table_init();
-    // Slot 30 should not be allocated after init.
     let idx = TtyIndex(30);
 
     for action in 0..=3i32 {

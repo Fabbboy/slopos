@@ -87,15 +87,13 @@ pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
     }
 }
 
-/// Wait until all in-flight output has been transmitted to the hardware.
-///
-/// The **single authoritative drain path**: `tcsbrk(arg > 0)` and
+/// The single authoritative drain path: `tcsbrk(arg > 0)` and
 /// `set_termios_mode(Drain | DrainAndFlushInput)` both delegate here, and no
 /// other path may implement drain logic of its own.
 ///
 /// Staged echo has no drainer of its own — whichever CPU stages it flushes it —
 /// so this drives the flush rather than waiting on work nobody is committed to
-/// doing. A hung-up or deallocated slot drains vacuously.
+/// doing.
 fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -119,8 +117,8 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
             output::flush_echo(slot, WriteNesting::Toplevel);
             match waiter.wait_event_interruptible(|| output_settled(slot)) {
                 Ok(()) | Err(WaitAbort::Timeout) => {}
-                // No blocking surface at all — nothing can make progress on
-                // this task's behalf, so the drain is as complete as it gets.
+                // No blocking surface: nothing can make progress on this
+                // task's behalf.
                 Err(WaitAbort::NoRuntime) => return Ok(()),
                 Err(WaitAbort::Interrupted) => return Err(TtyError::Restart),
                 // Never Restart for a dying task: the killed bit is not
@@ -133,7 +131,6 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
         }
     }
 
-    // Pre-scheduler fallback: busy-poll (very early boot only).
     loop {
         output::flush_echo(slot, WriteNesting::Toplevel);
         if output_settled(slot) {
@@ -143,9 +140,7 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
     }
 }
 
-/// Whether every byte this TTY owes a driver has reached one: staged echo, the
-/// in-flight count between queue and driver, and the driver's own backlog must
-/// all be empty. A vanished or hung-up slot settles vacuously.
+/// A vanished or hung-up slot settles vacuously.
 ///
 /// The staged count and the in-flight count are read in one critical section
 /// because a byte moves between them under this very lock; sampling either one
@@ -160,8 +155,6 @@ fn output_settled(slot: usize) -> bool {
     drained_locally && TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) == 0
 }
 
-/// Applies termios changes with optional drain and input-flush semantics.
-///
 /// Per POSIX a background process calling `tcsetattr` receives `SIGTTOU` unless
 /// the signal is blocked or ignored; an orphaned background group gets `EIO`
 /// instead, since no parent could continue it after a stop.
@@ -317,8 +310,6 @@ pub fn get_ldisc(idx: TtyIndex) -> Result<u32, TtyError> {
     }
 }
 
-/// Switch the line discipline for a TTY.
-///
 /// An unsupported `ldisc_id` leaves the current discipline untouched — no
 /// flush, no state change — because `LdiscKind::from_id` constructs the
 /// replacement before anything is mutated.
@@ -337,7 +328,6 @@ pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
             None => return Err(TtyError::NotAllocated),
         };
 
-        // POSIX: a state-changing ioctl on a hung-up TTY returns EIO.
         if tty.flags.contains(TtyFlags::HUNG_UP) {
             return Err(TtyError::HungUp);
         }
@@ -365,7 +355,6 @@ pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
         Ok(())
     };
 
-    // Queued after the lock is released.
     if did_flush {
         pty::queue_packet_event(idx, slopos_abi::syscall::TIOCPKT_FLUSHREAD);
     }
@@ -395,7 +384,6 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
         return Err(TtyError::InvalidIndex);
     }
 
-    // POSIX: a state-changing ioctl on a hung-up TTY returns EIO.
     {
         let guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_ref() {
@@ -426,8 +414,6 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
                     }
                     TtyDriverKind::PtySlave { peer } => {
                         peer_pin = peer.upgrade().map(|pin| (pin, false));
-                        // Slave targeted directly: its own session carries the
-                        // foreground job.
                         if changed {
                             if let Some(pg) = tty.session.fg_pgrp_handle() {
                                 deferred.add_signal(pg, SIGWINCH);
@@ -468,19 +454,14 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
     Ok(())
 }
 
-/// Drop everything queued for output on `slot`: the discipline's staged echo
-/// and the in-flight accounting that tracks it. Nothing here reaches a
-/// driver-level hardware TX FIFO.
+/// Nothing here reaches a driver-level hardware TX FIFO.
 ///
 /// The IXOFF stop is re-armed rather than dropped with the rest: the stop
-/// latches when generated, so discarding it silently would leave the peer never
-/// told to stop and — the latch still set — never told to resume either. The
-/// input queue is untouched, so it stays over the water mark and the next check
-/// re-sends the stop.
+/// latches when generated, so discarding it would leave the peer never told to
+/// stop and — the latch still set — never told to resume either.
 ///
 /// Zeroing the in-flight count also discards bytes a concurrent emission still
-/// owns, so a drain racing this flush under-reports the slot. `TCOFLUSH` is a
-/// discard; that is the bargain.
+/// owns, so a drain racing this flush under-reports the slot.
 fn discard_pending_output(slot: usize) {
     {
         let mut guard = TTY_SLOTS[slot].lock();
@@ -548,7 +529,6 @@ pub fn tcsbrk(idx: TtyIndex, arg: i32) -> Result<(), TtyError> {
         return Err(TtyError::InvalidIndex);
     }
 
-    // POSIX: a state-changing ioctl on a hung-up TTY returns EIO.
     {
         let guard = TTY_SLOTS[slot].lock();
         match guard.as_ref() {
@@ -561,7 +541,6 @@ pub fn tcsbrk(idx: TtyIndex, arg: i32) -> Result<(), TtyError> {
     if arg > 0 {
         wait_output_idle(idx)?;
     }
-    // arg == 0 is a hardware break — no-op for virtual terminals.
     Ok(())
 }
 
@@ -600,7 +579,6 @@ pub fn tcxonc(idx: TtyIndex, action: i32) -> Result<(), TtyError> {
                 tty.flags.remove(TtyFlags::OUTPUT_STOPPED);
                 prev
             };
-            // Published unconditionally: a spurious wake is harmless.
             BUS.publish(tty_output_event(slot));
             if was_stopped {
                 pty::queue_packet_event(idx, slopos_abi::syscall::TIOCPKT_START);

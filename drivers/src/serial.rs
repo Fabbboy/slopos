@@ -1,8 +1,5 @@
-//! Early-boot serial driver.
-//!
-//! Funnels through `slopos_ostd::early_console` plus the safe
-//! `slopos_ostd::io::UartRegs` register window. Every port-I/O `unsafe`
-//! lives interior to OSTD; this file stays `unsafe`-free.
+//! Early-boot serial driver, funnelling through `slopos_ostd::early_console`
+//! and the safe `slopos_ostd::io::UartRegs` register window.
 
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicU16, Ordering};
@@ -39,12 +36,10 @@ pub struct UartCapabilities {
     pub fifo_size: usize,
 }
 
-// SERIAL and INPUT_BUFFER are diagnostic leaf locks: the panic handler
-// writes through SERIAL while arbitrary kernel locks may still be
-// held. Tagging them UNORDERED bypasses the OSTD walker's ordering
-// check so panic-time `panic_serial_write` cannot trip a recursive
-// ordering violation. Self-deadlock (same lock re-acquired) is still
-// caught by the ticket mechanism in SpinLock.
+// Diagnostic leaf locks: the panic handler writes through SERIAL while
+// arbitrary kernel locks may still be held, so UNORDERED bypasses the OSTD
+// walker's ordering check. Self-deadlock is still caught by SpinLock's ticket
+// mechanism.
 static SERIAL: SpinLock<SerialPort> = SpinLock::new(
     SerialPort::new(COM1),
     lock_class!("SERIAL", LOCK_LEVEL_UNORDERED),
@@ -68,25 +63,17 @@ pub fn init() {
 
 /// PCR-independent **ticket lock** for klog serial output.
 ///
-/// `SpinLock` depends on the PCR (Per-CPU Record) via `PreemptGuard`, which
-/// is unavailable during AP boot.  This lock uses only `cli`/`sti` + a ticket
-/// pair (`AtomicU16`), providing FIFO fairness without any PCR dependency.
-///
-/// Every code path that writes to COM1 outside the early-boot fallback —
-/// the klog backend (`serial_klog_backend`) and the vconsole serial mirror
-/// (via `serial_locked_write_bytes`) — must funnel through `with_klog_lock`
-/// so writes do not byte-interleave on the wire.
+/// `SpinLock` depends on the PCR via `PreemptGuard`, which is unavailable
+/// during AP boot; this lock uses only `cli`/`sti` plus a ticket pair.  Every
+/// code path that writes to COM1 outside the early-boot fallback must funnel
+/// through `with_klog_lock` so writes do not byte-interleave on the wire.
 static KLOG_NEXT_TICKET: AtomicU16 = AtomicU16::new(0);
 static KLOG_NOW_SERVING: AtomicU16 = AtomicU16::new(0);
 
-/// A taken ticket, released in a destructor.
-///
-/// The release is owed from the moment `KLOG_NEXT_TICKET` is bumped, and a
-/// panic while the lock is held unwinds past any release written as a tail
-/// statement. A ticket that is never served leaves `KLOG_NOW_SERVING`
-/// permanently short of it, and every later `klog_*!` on every CPU then spins
-/// on it forever with interrupts disabled — one recoverable panic becomes a
-/// silent whole-machine stop, on the exact path that would have reported it.
+/// A taken ticket, released in a destructor: a panic while the lock is held
+/// unwinds past any release written as a tail statement, and a ticket that is
+/// never served leaves every later `klog_*!` on every CPU spinning on it forever
+/// with interrupts disabled.
 struct KlogTicket {
     saved_flags: u64,
 }
@@ -99,12 +86,10 @@ impl Drop for KlogTicket {
     }
 }
 
-/// Acquire the COM1 ticket lock with interrupts disabled, run `f` while
-/// holding exclusive access to the UART, then release.
+/// Run `f` holding the COM1 ticket lock, with interrupts disabled.
 #[inline]
 fn with_klog_lock<F: FnOnce()>(f: F) {
     let saved_flags = cpu::save_flags_cli();
-    // Take a ticket and spin until served (FIFO order, wrapping-safe).
     let my_ticket = KLOG_NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
     let _ticket = KlogTicket { saved_flags };
     loop {
@@ -112,12 +97,11 @@ fn with_klog_lock<F: FnOnce()>(f: F) {
         if serving == my_ticket {
             break;
         }
-        // This is a hand-rolled interrupts-off wait on a peer CPU, so it owes
-        // the same shootdown service the lock primitives perform for their own
-        // waiters: without it, a holder blocked on this CPU's TLB ack and this
-        // CPU blocked on that holder's ticket are a closed cycle.
+        // A hand-rolled interrupts-off wait owes the same shootdown service the
+        // lock primitives perform for their own waiters: without it, a holder
+        // blocked on this CPU's TLB ack and this CPU blocked on that holder's
+        // ticket are a closed cycle.
         slopos_ostd::sync::spin_relax();
-        // Proportional backoff: pause more when further from being served.
         let distance = my_ticket.wrapping_sub(serving) as u32;
         for _ in 0..distance.min(64) {
             core::hint::spin_loop();
@@ -144,16 +128,10 @@ fn serial_klog_backend(args: fmt::Arguments<'_>) {
 
 /// Write `bytes` to COM1 atomically with respect to klog output.
 ///
-/// Routes through the same ticket lock as `serial_klog_backend`, so a TTY
-/// driver that mirrors its output to serial cannot byte-interleave with
-/// concurrent `klog_info!` invocations from any CPU. Bytes pass through
-/// `serial_write_bytes` which handles the standard `\n -> \r\n`
-/// translation expected by host serial consoles.
-///
-/// This is the **only** sanctioned path for non-klog code to write to COM1
-/// outside the early-boot fallback. Direct `serial_write_batch` /
-/// `serial_putc` calls bypass the lock and can corrupt klog output —
-/// notably the test harness's KTAP wire format.
+/// The **only** sanctioned path for non-klog code to write to COM1 outside the
+/// early-boot fallback: it takes the same ticket lock as `serial_klog_backend`,
+/// so direct `serial_write_batch` / `serial_putc` calls bypass that lock and can
+/// corrupt klog output — notably the test harness's KTAP wire format.
 pub fn serial_locked_write_bytes(bytes: &[u8]) {
     if bytes.is_empty() {
         return;
@@ -207,9 +185,6 @@ pub(crate) enum SerialAction {
 }
 
 /// Whether a break is waiting for its command key.
-///
-/// Serial-only state, so it lives with the reader that produces it rather than
-/// in the console.
 static BREAK_ARMED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Classify one `(LSR, byte)` pair against the break-armed state.
@@ -217,8 +192,7 @@ static BREAK_ARMED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicB
 /// The window is one byte rather than a deadline: the reader is polled from
 /// contexts that exist before the clock service does, and reading a clock that
 /// may not be registered is a worse failure than a trigger that expires on the
-/// next character instead of after five seconds. It also matches what an
-/// operator does — send a break, press a key.
+/// next character.
 pub(crate) fn serial_console_step(
     lsr: u8,
     byte: u8,
@@ -288,8 +262,8 @@ pub fn serial_buffer_read(port: u16, out: *mut u8) -> i32 {
     }
 }
 
-/// Lock the serial INPUT_BUFFER directly, without polling the UART first.
-/// The caller is expected to have called `serial_poll_receive` already.
+/// Lock the serial INPUT_BUFFER without polling the UART; the caller is
+/// expected to have called `serial_poll_receive` already.
 pub fn input_buffer_lock() -> slopos_ostd::sync::SpinLockGuard<'static, SerialBuffer> {
     INPUT_BUFFER.lock()
 }
@@ -378,7 +352,8 @@ impl SerialPort {
     }
 
     fn write_byte(&mut self, byte: u8) {
-        // `self.regs` is COM1 by construction (see `init_port`).
+        // TODO(tech-debt): writes via `early_console`, not `self.regs` — a
+        // non-COM1 port would land on COM1.
         let _ = self.regs;
         slopos_ostd::early_console::write_byte(byte);
     }

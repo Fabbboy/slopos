@@ -1,26 +1,5 @@
 //! MCFG / ECAM regression tests.
 //!
-//! Discovery and state tests verify:
-//! - MCFG discovery ran and populated ECAM state on QEMU q35
-//! - Primary ECAM entry covers segment 0 with expected base address
-//! - Cached entry fields are valid (non-zero base, sane bus ranges)
-//! - `McfgEntry::region_size()` returns correct byte count
-//! - `McfgEntry::ecam_offset()` computes correct BDF offsets
-//! - `ecam_offset()` rejects out-of-range bus, device, and function values
-//! - `pci_ecam_find_entry()` locates the right entry for a given segment/bus
-//! - Lock-free accessors agree with mutex-protected state
-//! - Multiple reads return deterministic results
-//! - ECAM base address is page-aligned (4 KiB)
-//!
-//! MMIO access tests verify:
-//! - ECAM MMIO region is mapped and accessible
-//! - ECAM reads via MMIO return stable standard-config values
-//! - ECAM backend is active after successful mapping
-//! - Sub-DWORD ECAM reads (8-bit, 16-bit) return correct values
-//! - Extended config space (offset >= 0x100) is accessible through ECAM
-//! - Misaligned and out-of-range ECAM reads correctly return None
-//! - Write-readback through ECAM produces consistent results
-//!
 //! All tests run after PCI enumeration in the test harness.  QEMU q35 exposes
 //! a single MCFG entry for segment 0, buses 0–255, at physical address
 //! 0xB000_0000 or 0xE000_0000 (depends on QEMU version/config).
@@ -33,10 +12,6 @@ use crate::pci::{
     pci_ecam_mapped_region, pci_ecam_primary_virt, pci_ecam_read8, pci_ecam_read16,
     pci_ecam_read32, pci_get_device, pci_get_device_count,
 };
-
-// =============================================================================
-// 1. MCFG discovery sanity
-// =============================================================================
 
 pub fn test_ecam_available() -> TestResult {
     if !pci_ecam_available() {
@@ -52,10 +27,6 @@ pub fn test_ecam_entry_count_nonzero() -> TestResult {
     }
     pass!()
 }
-
-// =============================================================================
-// 2. Primary entry validation
-// =============================================================================
 
 pub fn test_ecam_base_nonzero() -> TestResult {
     let base = pci_ecam_base();
@@ -94,10 +65,6 @@ pub fn test_primary_entry_covers_bus_zero() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 3. Entry field validity
-// =============================================================================
-
 pub fn test_all_entries_base_nonzero() -> TestResult {
     let count = pci_ecam_entry_count();
     for i in 0..count as usize {
@@ -130,10 +97,6 @@ pub fn test_all_entries_bus_range_valid() -> TestResult {
     }
     pass!()
 }
-
-// =============================================================================
-// 4. McfgEntry::region_size() correctness
-// =============================================================================
 
 pub fn test_region_size_formula() -> TestResult {
     let count = pci_ecam_entry_count();
@@ -177,10 +140,6 @@ pub fn test_region_size_full_range() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 5. McfgEntry::ecam_offset() correctness
-// =============================================================================
-
 pub fn test_ecam_offset_zero_bdf() -> TestResult {
     let entry = match pci_ecam_entry(0) {
         Some(e) => e,
@@ -220,10 +179,6 @@ pub fn test_ecam_offset_known_bdf() -> TestResult {
     }
     pass!()
 }
-
-// =============================================================================
-// 6. ecam_offset() boundary checks
-// =============================================================================
 
 pub fn test_ecam_offset_bus_below_range() -> TestResult {
     let entry = match pci_ecam_entry(0) {
@@ -285,10 +240,6 @@ pub fn test_ecam_offset_function_out_of_range() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 7. pci_ecam_find_entry() lookup
-// =============================================================================
-
 pub fn test_find_entry_segment0_bus0() -> TestResult {
     let entry = match pci_ecam_find_entry(0, 0) {
         Some(e) => e,
@@ -309,10 +260,6 @@ pub fn test_find_entry_nonexistent_segment() -> TestResult {
     }
     pass!()
 }
-
-// =============================================================================
-// 8. Lock-free vs mutex consistency
-// =============================================================================
 
 pub fn test_ecam_base_matches_primary_entry() -> TestResult {
     let base = pci_ecam_base();
@@ -354,10 +301,6 @@ pub fn test_entry_count_matches_indexable() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 9. Deterministic reads
-// =============================================================================
-
 pub fn test_ecam_state_deterministic() -> TestResult {
     let base1 = pci_ecam_base();
     let count1 = pci_ecam_entry_count();
@@ -397,10 +340,6 @@ pub fn test_ecam_state_deterministic() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 10. ECAM MMIO mapping
-// =============================================================================
-
 pub fn test_ecam_mmio_is_active() -> TestResult {
     if !pci_ecam_available() {
         return fail!("pci_ecam_available() returned false — ECAM MMIO not mapped on q35");
@@ -436,10 +375,6 @@ pub fn test_ecam_mapped_region_exists() -> TestResult {
     }
     pass!()
 }
-
-// =============================================================================
-// 11. ECAM MMIO reads cross-validated against enumerated devices
-// =============================================================================
 
 pub fn test_ecam_read32_vendor_device_id() -> TestResult {
     let dev_count = pci_get_device_count();
@@ -558,10 +493,6 @@ pub fn test_ecam_read8_revision() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 12. Extended config space
-// =============================================================================
-
 pub fn test_ecam_extended_config_readable() -> TestResult {
     let dev = match pci_get_device(0) {
         Some(d) => d,
@@ -575,9 +506,8 @@ pub fn test_ecam_extended_config_readable() -> TestResult {
             );
         }
     };
-    // 0x100 is the PCIe extended capability header. On QEMU, this is either
-    // a valid capability (non-zero) or 0x00000000 / 0xFFFFFFFF (no ext caps).
-    // We just verify it's readable without faulting.
+    // 0x100 is the PCIe extended capability header; QEMU may legitimately
+    // report no ext caps, so only readability is checked.
     let _ = val;
     pass!()
 }
@@ -595,10 +525,6 @@ pub fn test_ecam_extended_config_end_boundary() -> TestResult {
     let _ = val;
     pass!()
 }
-
-// =============================================================================
-// 13. ECAM boundary/error handling
-// =============================================================================
 
 pub fn test_ecam_read32_misaligned_returns_none() -> TestResult {
     if pci_ecam_read32(0, 0, 0, 0x01).is_some() {
@@ -621,7 +547,6 @@ pub fn test_ecam_read16_misaligned_returns_none() -> TestResult {
 }
 
 pub fn test_ecam_read32_overflow_returns_none() -> TestResult {
-    // Offset 0xFFD would require reading bytes 0xFFD..0x1000, which is out of bounds.
     if pci_ecam_read32(0, 0, 0, 0xFFD).is_some() {
         return fail!("pci_ecam_read32 at offset 0xFFD should return None (would overflow 4096)");
     }
@@ -641,10 +566,6 @@ pub fn test_ecam_read_invalid_function_returns_none() -> TestResult {
     }
     pass!()
 }
-
-// =============================================================================
-// 14. ECAM read determinism
-// =============================================================================
 
 pub fn test_ecam_reads_deterministic() -> TestResult {
     let dev = match pci_get_device(0) {
@@ -682,10 +603,6 @@ pub fn test_ecam_reads_deterministic() -> TestResult {
     }
     pass!()
 }
-
-// =============================================================================
-// 15. All-device ECAM sweep
-// =============================================================================
 
 pub fn test_ecam_sweep_all_devices() -> TestResult {
     let count = pci_get_device_count();
@@ -742,54 +659,37 @@ pub fn test_ecam_sweep_all_devices() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Suite registration
-// =============================================================================
-
-// MCFG discovery sanity
 slopos_testing::stest!(name = test_ecam_available, suite = ecam);
 slopos_testing::stest!(name = test_ecam_entry_count_nonzero, suite = ecam);
-// Primary entry validation
 slopos_testing::stest!(name = test_ecam_base_nonzero, suite = ecam);
 slopos_testing::stest!(name = test_ecam_base_page_aligned, suite = ecam);
 slopos_testing::stest!(name = test_primary_entry_covers_bus_zero, suite = ecam);
-// Entry field validity
 slopos_testing::stest!(name = test_all_entries_base_nonzero, suite = ecam);
 slopos_testing::stest!(name = test_all_entries_bus_range_valid, suite = ecam);
-// region_size() correctness
 slopos_testing::stest!(name = test_region_size_formula, suite = ecam);
 slopos_testing::stest!(name = test_region_size_full_range, suite = ecam);
-// ecam_offset() correctness
 slopos_testing::stest!(name = test_ecam_offset_zero_bdf, suite = ecam);
 slopos_testing::stest!(name = test_ecam_offset_known_bdf, suite = ecam);
-// ecam_offset() boundary checks
 slopos_testing::stest!(name = test_ecam_offset_bus_below_range, suite = ecam);
 slopos_testing::stest!(name = test_ecam_offset_bus_above_range, suite = ecam);
 slopos_testing::stest!(name = test_ecam_offset_device_out_of_range, suite = ecam);
 slopos_testing::stest!(name = test_ecam_offset_function_out_of_range, suite = ecam);
-// find_entry() lookup
 slopos_testing::stest!(name = test_find_entry_segment0_bus0, suite = ecam);
 slopos_testing::stest!(name = test_find_entry_nonexistent_segment, suite = ecam);
-// Lock-free vs mutex consistency
 slopos_testing::stest!(name = test_ecam_base_matches_primary_entry, suite = ecam);
 slopos_testing::stest!(name = test_entry_count_matches_indexable, suite = ecam);
-// Deterministic reads
 slopos_testing::stest!(name = test_ecam_state_deterministic, suite = ecam);
-// ECAM MMIO mapping
 slopos_testing::stest!(name = test_ecam_mmio_is_active, suite = ecam);
 slopos_testing::stest!(name = test_ecam_backend_is_ecam, suite = ecam);
 slopos_testing::stest!(name = test_ecam_primary_virt_nonzero, suite = ecam);
 slopos_testing::stest!(name = test_ecam_mapped_region_exists, suite = ecam);
-// Cross-validated MMIO reads
 slopos_testing::stest!(name = test_ecam_read32_vendor_device_id, suite = ecam);
 slopos_testing::stest!(name = test_ecam_read16_vendor_id, suite = ecam);
 slopos_testing::stest!(name = test_ecam_read16_device_id, suite = ecam);
 slopos_testing::stest!(name = test_ecam_read8_class_code, suite = ecam);
 slopos_testing::stest!(name = test_ecam_read8_revision, suite = ecam);
-// Extended config space
 slopos_testing::stest!(name = test_ecam_extended_config_readable, suite = ecam);
 slopos_testing::stest!(name = test_ecam_extended_config_end_boundary, suite = ecam);
-// Boundary/error handling
 slopos_testing::stest!(
     name = test_ecam_read32_misaligned_returns_none,
     suite = ecam
@@ -807,7 +707,5 @@ slopos_testing::stest!(
     name = test_ecam_read_invalid_function_returns_none,
     suite = ecam
 );
-// Read determinism
 slopos_testing::stest!(name = test_ecam_reads_deterministic, suite = ecam);
-// All-device sweep
 slopos_testing::stest!(name = test_ecam_sweep_all_devices, suite = ecam);
