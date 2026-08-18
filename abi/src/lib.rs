@@ -1,12 +1,7 @@
 //! SlopOS Kernel-Userland ABI Types
 //!
-//! This crate provides the canonical definitions for all types shared between
-//! the kernel and userland. Having a single source of truth eliminates:
-//! - Duplicate type definitions
-//! - ABI mismatches between kernel and userland
-//! - The need for unsafe FFI conversions
-//!
-//! All types in this crate are `#[repr(C)]` for ABI stability.
+//! Canonical definitions for every type shared between kernel and userland.
+//! All types are `#[repr(C)]` for ABI stability.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -41,7 +36,6 @@ pub mod unix;
 pub mod video_traits;
 pub mod window;
 
-/// Standard 4KB page size for userland memory calculations.
 pub const PAGE_SIZE: u64 = 0x1000;
 
 pub use addr::*;

@@ -23,9 +23,9 @@ type QemuDriver struct {
 	Iso            string
 	FsImage        string
 	WallTimeoutSec float64
-	// SilenceSec aborts the run when the QEMU stdout pipe stays
-	// completely silent for this many seconds. 0 disables. Catches
-	// inter-phase wedges that would otherwise burn the full WallTimeoutSec.
+	// SilenceSec aborts the run when the QEMU stdout pipe stays silent for
+	// this many seconds; 0 disables. Catches inter-phase wedges that would
+	// otherwise burn the full WallTimeoutSec.
 	SilenceSec float64
 }
 
@@ -38,14 +38,12 @@ type DriverResult struct {
 }
 
 // Run streams QEMU's stdout line-by-line through `onLine`, enforcing the
-// configured wall timeout and SIGINT (Ctrl-C) handling. Returns when the
-// child exits or is killed.
+// configured wall timeout and SIGINT (Ctrl-C) handling.
 func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult, error) {
 	cmd := exec.Command(
 		d.RepoRoot+"/scripts/qemu_run.sh", "test", d.Iso, d.FsImage,
 	)
-	// Forward every env var from the parent — qemu_run.sh and its callees
-	// honour QEMU_BIN/QEMU_SMP/etc.
+	// qemu_run.sh and its callees honour QEMU_BIN/QEMU_SMP/etc.
 	cmd.Env = os.Environ()
 	cmd.Stderr = os.Stderr
 
@@ -63,16 +61,12 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 		return DriverResult{}, fmt.Errorf("driver: stdout pipe: %w", err)
 	}
 
-	// Place the child in its own process group so we can signal the whole
-	// tree on cancel. Without this, sending SIGTERM/SIGKILL to qemu_run.sh
-	// (a bash script) leaves QEMU orphaned — the kernel reparents it to
-	// PID 1 and it keeps the stdout pipe open forever, blocking our
-	// scanner. (Reproduced on GitHub Actions: a 905s wall-timeout fired
-	// but the wrapper hung indefinitely afterwards.)
+	// Own process group so cancel signals the whole tree: signalling the
+	// qemu_run.sh bash script alone leaves QEMU orphaned, holding the stdout
+	// pipe open forever and blocking the scanner.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	// Wall-clock guard. When WallTimeoutSec > 0, set a deadline; otherwise
-	// inherit the caller's context. SIGINT fires the parent context.
+	// SIGINT fires the parent context.
 	runCtx := ctx
 	var runCancel context.CancelFunc
 	if d.WallTimeoutSec > 0 {
@@ -87,13 +81,11 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 	}
 	pgid := cmd.Process.Pid // matches the child's PID since Setpgid+no Pgid set
 
-	// Single goroutine owns cmd.Wait. Result lands on `waitCh`.
+	// Single goroutine owns cmd.Wait.
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 
-	// Silence watchdog. lastLine is the monotonic time of the last byte
-	// received from QEMU. Watcher goroutine polls it and trips when the
-	// pipe goes dead longer than SilenceSec.
+	// lastLine is the monotonic time of the last byte received from QEMU.
 	var lastLine atomic.Int64
 	lastLine.Store(time.Now().UnixNano())
 	silenceCtx, silenceCancel := context.WithCancel(context.Background())
@@ -126,10 +118,8 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 		}()
 	}
 
-	// Watcher goroutine: cancels on context (wall-timeout / SIGINT) or on
-	// silence trip by signaling the entire process group with SIGTERM,
-	// then SIGKILL after a 5-second grace. Killing the pgrp closes QEMU's
-	// stdout, which lets the scanner loop below return.
+	// Killing the process group closes QEMU's stdout, which is what lets the
+	// scanner loop below return.
 	type abortFlags struct {
 		userAborted bool
 		timedOut    bool
@@ -153,7 +143,6 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 			abortCh <- af
 			return
 		}
-		// Signal the whole process group, not just bash, so QEMU dies too.
 		_ = syscall.Kill(-pgid, syscall.SIGTERM)
 		grace := time.NewTimer(5 * time.Second)
 		defer grace.Stop()
@@ -165,16 +154,15 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 		abortCh <- af
 	}()
 
-	// Line loop. bufio.Scanner with 1 MiB ceiling — KTAP lines + log
-	// blocks fit comfortably; only a wedge would exceed it.
+	// 1 MiB line ceiling: KTAP lines + log blocks fit comfortably; only a
+	// wedge would exceed it.
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for scanner.Scan() {
 		lastLine.Store(time.Now().UnixNano())
 		line := scanner.Text()
-		// Belt-and-suspenders: kernel klog occasionally emits a stray
-		// non-UTF-8 byte under load. Replace each with U+FFFD so the
-		// renderer / parser see valid strings only.
+		// Kernel klog occasionally emits a stray non-UTF-8 byte under
+		// load; the renderer and parser must see valid strings only.
 		if !isASCII(line) {
 			line = strings.ToValidUTF8(line, "�")
 		}
@@ -185,7 +173,6 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 		_ = scanErr
 	}
 
-	// Wait for child exit, then stop the watcher.
 	waitErr := <-waitCh
 	silenceCancel()
 	close(stopWatcher)
@@ -209,8 +196,7 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 	return res, nil
 }
 
-// isASCII reports whether every byte of s is < 0x80 (avoids ToValidUTF8
-// on the common pure-ASCII klog hot path).
+// isASCII avoids the ToValidUTF8 call on the common pure-ASCII klog hot path.
 func isASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= 0x80 {

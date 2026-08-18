@@ -9,15 +9,13 @@
 #   - RDI/RSI/RDX/R10/R8/R9 = syscall args (Linux x86_64 ABI)
 #   - User RSP intact; user GS intact (SWAPGS not yet performed).
 #
-# The trampoline saves user state (including the syscall number in RAX)
-# into the per-task `UserContext` stashed by
-# `PcrUserModeBackend::execute_round_trip`, then unwinds back to the
-# caller of `execute_round_trip` by restoring the saved kernel
+# The trampoline saves user state into the per-task `UserContext`
+# stashed by `PcrUserModeBackend::execute_round_trip`, then unwinds back
+# to the caller of `execute_round_trip` by restoring the saved kernel
 # callee-save snapshot from `pcr.kernel_return_ctx` and `jmp`ing to the
 # saved RIP.  The return reason is derived from that per-task
-# `UserContext` (always a syscall on this path) — there is no per-CPU
-# return-reason slot, so a preemption/migration after the `sti` below
-# cannot corrupt it.
+# `UserContext` — there is no per-CPU return-reason slot, so a
+# preemption/migration after the `sti` below cannot corrupt it.
 #
 # Every offset below is a `const offset_of!` operand supplied by the
 # `global_asm!` invocation that includes this file, so the names here
@@ -78,28 +76,21 @@ __ostd_user_return:
     # Switch to kernel GS so gs:[…] addresses the local PCR.
     swapgs
 
-    # CRITICAL: spill user RAX into a per-CPU PCR scratch slot rather
-    # than pushing onto the kernel stack at `kernel_rsp - 8`.  That
-    # address is the SS slot of the next CPU-pushed IRET frame at
-    # TSS.RSP0; pushing user RAX there silently corrupts the SS field
-    # for any subsequent interrupt that finds the slot before being
-    # CPU-pushed-over.  Asterinas / Linux use the equivalent per-CPU
-    # scratch.
+    # Spill user RAX into a per-CPU PCR scratch slot rather than pushing
+    # onto the kernel stack at `kernel_rsp - 8`.  That address is the SS
+    # slot of the next CPU-pushed IRET frame at TSS.RSP0; pushing user RAX
+    # there silently corrupts the SS field for any subsequent interrupt
+    # that finds the slot before being CPU-pushed-over.
     movq %rax, %gs:PCR_USER_RAX_TMP
 
-    # Stash user RSP into a separate per-CPU slot, then switch %rsp
-    # to the per-task kernel stack top.  We deliberately do NOT push
-    # anything onto this stack — `pushq` here would write to
-    # `kernel_rsp - 8`, which is the SS slot of the next CPU-pushed
-    # IRET frame.  All scratch goes through PCR slots; the final
-    # RSP/RIP come from `pcr.kernel_return_ctx` so this stack value
-    # is only valid for the brief window before we `jmp` away.
+    # Nothing is ever pushed onto this stack: `pushq` would land on the
+    # SS slot of the next CPU-pushed IRET frame.  All scratch goes
+    # through PCR slots.
     movq %rsp, %gs:PCR_USER_RSP_TMP
     movq %gs:PCR_KERNEL_RSP, %rsp
 
-    # Load active UserContext pointer.  If `execute_round_trip` did its
-    # job, this is non-null; otherwise we fault here (which is exactly
-    # what we want — it surfaces a configuration error immediately).
+    # If `execute_round_trip` did its job, this is non-null; otherwise we
+    # fault here, which surfaces a configuration error immediately.
     movq %gs:PCR_USER_CTX_PTR, %rax
 
     # Save user GPRs (RAX comes from PCR scratch slot below).
@@ -127,20 +118,14 @@ __ostd_user_return:
     movq %rdx, UR_RSP(%rax)
 
     # ctx.rax = saved user RAX (from PCR scratch slot) = the syscall
-    # number.  This per-task write is the sole record of the return
-    # reason: `execute_round_trip` reads it back from the UserContext
-    # after the jmp, so no per-CPU return-reason slot is needed (the
-    # per-task value is migration-safe across the trampoline's `sti`).
+    # number, which `execute_round_trip` reads back as the return reason.
     movq %gs:PCR_USER_RAX_TMP, %rdx
     movq %rdx, UR_RAX(%rax)
 
-    # Restore kernel data segments (matches what the kernel left them
-    # as on the way out — the exception-handler asm does the same).
     movw $SEL_KERNEL_DATA, %ax
     movw %ax, %ds
     movw %ax, %es
 
-    # Restore kernel callee-saves from kernel_return_ctx.
     movq %gs:(PCR_KERNEL_RETURN_CTX + KRC_RBX), %rbx
     movq %gs:(PCR_KERNEL_RETURN_CTX + KRC_RBP), %rbp
     movq %gs:(PCR_KERNEL_RETURN_CTX + KRC_R12), %r12
@@ -148,22 +133,11 @@ __ostd_user_return:
     movq %gs:(PCR_KERNEL_RETURN_CTX + KRC_R14), %r14
     movq %gs:(PCR_KERNEL_RETURN_CTX + KRC_R15), %r15
 
-    # Restore RSP back to where execute_round_trip left it (just below
-    # the call that entered user_mode_round_trip_asm), then re-enable
-    # IRQs and jmp to the saved return RIP.
-    #
     # `sti` is essential: SFMASK clears IF on SYSCALL entry, so we land
-    # here with interrupts disabled.  Without re-enabling, all
-    # kernel-side syscall handler work runs with IF=0 — no timer ticks
-    # fire on this CPU, the per-CPU tick counter falls behind the
-    # global counter (incremented by other CPUs), and the cross-CPU
-    # watchdog at `core::scheduler::runtime::check_watchdog_for_neighbor`
-    # eventually NMIs us as "stuck".  The legacy `syscall_entry` issued
-    # `sti` before calling into Rust for the same reason; Linux's
-    # `entry_SYSCALL_64` does the equivalent `ENABLE_INTERRUPTS` after
-    # publishing the user pt_regs.  The `sti` shadow inhibits IRQs
-    # until the immediately-following `jmpq` completes, so this is safe
-    # to do as the last step before the jmp.
+    # here with interrupts disabled and every kernel-side syscall handler
+    # would run with IF=0 — no timer tick fires on this CPU and the
+    # cross-CPU watchdog eventually NMIs us as "stuck".  The `sti` shadow
+    # inhibits IRQs until the immediately-following `jmpq` completes.
     movq %gs:(PCR_KERNEL_RETURN_CTX + KRC_RIP), %rax
     movq %gs:(PCR_KERNEL_RETURN_CTX + KRC_RSP), %rsp
     sti

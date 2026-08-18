@@ -1908,14 +1908,10 @@ pub fn compositor_acquire_fb() {
     COMPOSITOR_OWNS_FB.store(true, Ordering::Release);
 }
 
-/// Return framebuffer ownership to the vconsole (compositor crash recovery).
-///
-/// Re-enables `flush_dirty()` and immediately blits the shadow buffer to
-/// restore the kernel console display, matching Linux's fbcon re-bind on
-/// DRM master drop.
+/// Return framebuffer ownership to the vconsole (compositor crash recovery):
+/// re-enables `flush_dirty()` and blits the shadow buffer back to the display.
 pub fn compositor_release_fb() {
     COMPOSITOR_OWNS_FB.store(false, Ordering::Release);
-    // Full shadow → FB blit to restore the console display.
     let mut state = VCONSOLE_STATE.lock();
     state.mark_all_dirty();
     state.flush_dirty();

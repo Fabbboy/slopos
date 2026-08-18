@@ -1,10 +1,8 @@
 //! Kernel-side tests for RCU deferred-callback reclamation.
 //!
-//! `call_rcu` only queues. Something else has to invoke the callback, and these
-//! tests are what say that something is reachable from a context the kernel
-//! actually runs: they never call the drain by hand. A queue whose consumer is
-//! unreachable looks exactly like a working one from the producer's side, and
-//! leaks every deferred object for the life of the boot.
+//! `call_rcu` only queues, so these tests never call the drain by hand: a queue
+//! whose consumer is unreachable looks exactly like a working one from the
+//! producer's side, and leaks every deferred object for the life of the boot.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -14,27 +12,19 @@ use slopos_ostd::sync::RcuArcSlot;
 use slopos_testing::TestResult;
 use slopos_testing::fail;
 
-/// How long to give the drain before calling it unreachable.
-///
-/// The drain runs when a CPU finds nothing to dispatch, so the bound is a
-/// scheduling property rather than a timer one; this is far longer than the
-/// hundreds of microseconds an idle CPU needs, and short enough that a genuine
-/// regression fails the suite rather than hanging it.
+/// How long to give the drain before calling it unreachable. The drain runs
+/// when a CPU finds nothing to dispatch, so the bound is a scheduling property
+/// rather than a timer one.
 const RECLAIM_DEADLINE_MS: u32 = 400;
 
-/// Poll interval. A polled delay rather than a sleep: the kernel test phase runs
-/// on the BSP before it enters the scheduler, so this task cannot block — which
-/// is also what makes the wait a faithful test of a busy CPU 0.
+/// Poll interval. Polled rather than slept: the kernel test phase runs on the
+/// BSP before it enters the scheduler, so this task cannot block.
 const POLL_INTERVAL_MS: u32 = 10;
 
 /// Drive the RCU drain until `done` holds, or the deadline expires. Returns
-/// whether it held.
-///
-/// A test that queues a callback and then calls the drain once is asserting
-/// that *it* performed the invocation, which stops being true the moment an
-/// idle CPU drains concurrently: a CPU that has already detached the chain
-/// leaves nothing for the manual call to find while the callback is still in
-/// flight. Polling for the effect is the assertion that survives.
+/// whether it held. Polls for the effect rather than claiming the manual call
+/// did the invoking: a CPU that already detached the chain leaves nothing for
+/// that call to find while the callback is still in flight.
 pub fn drain_until(done: impl Fn() -> bool) -> bool {
     let mut waited = 0;
     loop {
@@ -62,10 +52,8 @@ impl Drop for DropCounted {
 }
 
 /// A callback queued by `call_rcu` is invoked without anyone driving the drain.
-///
-/// This is the reachability test. `RcuArcSlot::store` defers the displaced
-/// reference through `call_rcu`, so the payload's `Drop` runs only if the
-/// callback does.
+/// `RcuArcSlot::store` defers the displaced reference through `call_rcu`, so
+/// the payload's `Drop` runs only if the callback does.
 pub fn test_rcu_callbacks_are_invoked_without_a_manual_drain() -> TestResult {
     let before = DROPPED.load(Ordering::Acquire);
 
@@ -92,11 +80,9 @@ pub fn test_rcu_callbacks_are_invoked_without_a_manual_drain() -> TestResult {
     )
 }
 
-/// `synchronize_rcu` reaches no allocator.
-///
-/// It is called from the reclaim path, including `call_rcu`'s own
-/// out-of-memory fallback, so an allocation here is a failure exactly when
-/// there is nothing to allocate from.
+/// `synchronize_rcu` reaches no allocator: it is called from the reclaim path,
+/// including `call_rcu`'s own out-of-memory fallback, so an allocation here
+/// fails exactly when there is nothing to allocate from.
 pub fn test_synchronize_rcu_allocates_nothing() -> TestResult {
     let before = slopos_mm::slab::get_heap_stats_owned();
     slopos_ostd::sync::synchronize_rcu();
@@ -111,10 +97,8 @@ pub fn test_synchronize_rcu_allocates_nothing() -> TestResult {
     TestResult::Pass
 }
 
-/// A grace period elapses, and the caller observes it having elapsed.
-///
-/// The counterpart to the arithmetic tests in `slopos_ostd::sync::rcu`: those
-/// say the target is computed correctly, this says a real machine reaches it.
+/// A grace period elapses, and the caller observes it having elapsed — the
+/// runtime counterpart to the arithmetic tests in `slopos_ostd::sync::rcu`.
 pub fn test_synchronize_rcu_completes_a_grace_period() -> TestResult {
     let before = slopos_ostd::sync::rcu_gp_seq();
     slopos_ostd::sync::synchronize_rcu();
@@ -130,12 +114,8 @@ pub fn test_synchronize_rcu_completes_a_grace_period() -> TestResult {
 }
 
 /// A drain pass invokes what is ready and returns; it never takes a grace
-/// period inline.
-///
-/// This is the invariant the segmented list exists to establish, and the one a
-/// refactor is most likely to lose — putting the wait back would still pass
-/// every correctness test, and only show up as latency on whatever path drains.
-/// Timing the passes is what notices.
+/// period inline. Putting the wait back would still pass every correctness
+/// test and show up only as latency, so the passes are timed.
 pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
     const PASSES: u32 = 32;
     // 32 passes each taking a grace period would be seconds, not milliseconds.
@@ -170,10 +150,9 @@ pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
     TestResult::Pass
 }
 
-/// `rcu_barrier` waits for invocation, not merely for a grace period.
-///
-/// Once the drain is asynchronous those stop being the same fact, and a caller
-/// tearing down the thing a callback is about to touch needs the second one.
+/// `rcu_barrier` waits for invocation, not merely for a grace period — once
+/// the drain is asynchronous those stop being the same fact, and a caller
+/// tearing down what a callback will touch needs the first.
 pub fn test_rcu_barrier_waits_for_invocation() -> TestResult {
     let before = DROPPED.load(Ordering::Acquire);
 

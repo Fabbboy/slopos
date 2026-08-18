@@ -1,11 +1,8 @@
 //! Cross-crate tests for the two halves of a process identity.
 //!
-//! A process id names an address space *and* a descriptor table. mm owns
-//! the first and fs the second, and neither crate can see the other's
-//! half — mm sits below fs in the crate graph. These tests live in `core`
-//! because it is the lowest crate that can name both, and they assert the
-//! property that keeps a recycled id from inheriting its predecessor's
-//! open files.
+//! A process id names an address space *and* a descriptor table. mm owns the
+//! first and fs the second, and neither crate can see the other's half, so
+//! these live in `core` — the lowest crate that can name both.
 
 use core::ffi::c_int;
 
@@ -19,12 +16,9 @@ use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::assert_test;
 
-/// A pid that already carries a descriptor table is refused a second one.
-///
-/// Answering "success" without creating anything is only harmless while
-/// ids are never reused. Once they are, the second caller is a different
-/// process, and it would start life holding the first one's descriptors —
-/// including its stdin, its sockets and its open files.
+/// A pid that already carries a descriptor table is refused a second one: once
+/// ids recycle, the second caller is a different process and would start life
+/// holding the first one's stdin, sockets and open files.
 pub fn test_fileio_create_table_rejects_a_bound_process() -> TestResult {
     let Ok(process) = slopos_ostd::process::process_spawn_root() else {
         klog_info!("PROC_ID_TEST: could not register a process");

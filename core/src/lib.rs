@@ -17,16 +17,8 @@ pub mod utests;
 
 /// Register a userland test binary as a `TestDesc` in `.test_registry`.
 ///
-/// The kernel-side runner ([`exec::utest::run_thunk`]) spawns `bin`, blocks
-/// until it exits, drains structured per-subtest reports submitted via
-/// `SYSCALL_TEST_REPORT`, then emits one parent KTAP line plus one indented
-/// subtest line per drained report.
-///
-/// Lives in `slopos-core` (rather than `slopos-testing`) because the runner
-/// needs core-internal APIs (spawn, wait, exit-record, drain). Putting the
-/// macro alongside the runner keeps the dep graph one-way: core → testing
-/// (for `TestDesc` shape and KTAP emission) and avoids the cycle a
-/// testing → core dep would create.
+/// Lives here rather than in `slopos-testing` because the runner needs
+/// core-internal APIs; a testing → core dep would cycle.
 ///
 /// ```ignore
 /// slopos_core::utest!(name = utest_heap_allocator, bin = "/bin/heap_allocator_test");

@@ -150,7 +150,7 @@ fn pts_path_for(number: u32) -> Option<[u8; 11]> {
     Some(path)
 }
 
-/// Resolve a pid this test just created into the designator `mm` now takes.
+/// Resolve a pid this test just created into the designator `mm` takes.
 fn resolve_pid(pid: u32) -> slopos_ostd::process::ProcessId {
     slopos_ostd::process::ProcessId::resolve(pid).expect("a pid this test just created")
 }

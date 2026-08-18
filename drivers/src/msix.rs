@@ -168,10 +168,6 @@ pub enum MsixError {
     TableNotMapped,
 }
 
-// =============================================================================
-// Capability parsing
-// =============================================================================
-
 /// Read and parse the MSI-X capability structure from PCI configuration space.
 ///
 /// `cap_offset` is the config-space byte offset of the MSI-X capability header
@@ -200,15 +196,7 @@ pub fn msix_read_capability(bus: u8, dev: u8, func: u8, cap_offset: u16) -> Msix
     }
 }
 
-// =============================================================================
-// Table mapping
-// =============================================================================
-
 /// Map the MSI-X table and Pending Bit Array into kernel virtual memory.
-///
-/// Reads the BAR addresses from `device` and maps the MMIO regions for both
-/// the MSI-X table and PBA.  The returned [`MsixTable`] is used for all
-/// subsequent entry configuration via [`msix_configure`].
 ///
 /// # Errors
 ///
@@ -218,7 +206,6 @@ pub fn msix_map_table(
     device: &PciDeviceInfo,
     cap: &MsixCapability,
 ) -> Result<MsixTable, MsixError> {
-    // --- Map the MSI-X table region ---
     let table_bar_idx = cap.table_bar as usize;
     if table_bar_idx >= PCI_MAX_BARS {
         return Err(MsixError::BarNotAvailable);
@@ -232,7 +219,6 @@ pub fn msix_map_table(
     let table_phys = PhysAddr::new(table_bar.base.wrapping_add(cap.table_offset as u64));
     let table_region = MmioRegion::map(table_phys, table_bytes).ok_or(MsixError::MappingFailed)?;
 
-    // --- Map the PBA region ---
     let pba_bar_idx = cap.pba_bar as usize;
     if pba_bar_idx >= PCI_MAX_BARS {
         return Err(MsixError::BarNotAvailable);
@@ -266,23 +252,10 @@ pub fn msix_map_table(
     })
 }
 
-// =============================================================================
-// Configuration
-// =============================================================================
-
 /// Configure a single MSI-X table entry to deliver an interrupt.
 ///
-/// Programs the table entry at `entry_idx` with the x86 LAPIC message address
-/// and data for the specified `vector` and `target_apic_id`.  The entry is
-/// masked during programming and unmasked once the address/data are written.
-///
-/// # Programming sequence
-///
-/// 1. Mask the entry (set vector control bit 0).
-/// 2. Write Message Address (LAPIC base + destination APIC ID).
-/// 3. Write Message Upper Address (always 0 on x86).
-/// 4. Write Message Data (vector + fixed delivery + edge trigger).
-/// 5. Unmask the entry (clear vector control bit 0).
+/// The entry is masked during programming and unmasked once the address/data
+/// are written.
 ///
 /// # Errors
 ///
@@ -307,24 +280,20 @@ pub fn msix_configure(
 
     let base = (entry_idx as usize) * MSIX_ENTRY_SIZE;
 
-    // 1. Mask the entry while programming.
     table
         .table
         .write::<u32>(base + MSIX_ENTRY_VECTOR_CTRL, MSIX_ENTRY_CTRL_MASK);
 
-    // 2–3. Message Address (lo = LAPIC target, hi = 0 on x86).
     table.table.write::<u32>(
         base + MSIX_ENTRY_ADDR_LO,
         msi_common::lapic_msg_addr(target_apic_id),
     );
     table.table.write::<u32>(base + MSIX_ENTRY_ADDR_HI, 0);
 
-    // 4. Message Data.
     table
         .table
         .write::<u32>(base + MSIX_ENTRY_DATA, msi_common::lapic_msg_data(vector));
 
-    // 5. Unmask the entry.
     table.table.write::<u32>(base + MSIX_ENTRY_VECTOR_CTRL, 0);
 
     Ok(())
@@ -360,22 +329,9 @@ pub fn msix_unmask_entry(table: &MsixTable, entry_idx: u16) -> bool {
     true
 }
 
-// =============================================================================
-// Enable / Disable
-// =============================================================================
-
 /// Enable MSI-X for a device and disable legacy INTx.
 ///
-/// Sets the MSI-X enable bit in Message Control and clears the function mask
-/// so that individually-unmasked table entries can deliver interrupts.
-/// Also disables legacy INTx in the PCI Command register, since the two
-/// mechanisms must not be active simultaneously.
-///
-/// Typical initialization order:
-/// 1. Parse capability ([`msix_read_capability`]).
-/// 2. Map table ([`msix_map_table`]).
-/// 3. Configure entries ([`msix_configure`]).
-/// 4. Enable MSI-X ([`msix_enable`]).
+/// The two mechanisms must not be active simultaneously.
 pub fn msix_enable(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
     let cap_off = cap.cap_offset;
 
@@ -410,9 +366,7 @@ pub fn msix_disable(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
 
 /// Set the function-level mask for all MSI-X table entries.
 ///
-/// When the function mask is set, no MSI-X interrupts are delivered regardless
-/// of individual per-vector mask bits.  Useful for atomic reconfiguration of
-/// multiple table entries without spurious interrupts.
+/// Allows reconfiguring several entries without spurious interrupts.
 pub fn msix_set_function_mask(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
     let cap_off = cap.cap_offset;
     let mut ctrl = pci_config_read16(bus, dev, func, cap_off + MSIX_REG_CONTROL);
@@ -421,9 +375,6 @@ pub fn msix_set_function_mask(bus: u8, dev: u8, func: u8, cap: &MsixCapability) 
 }
 
 /// Clear the function-level mask for all MSI-X table entries.
-///
-/// After clearing, each table entry's individual mask bit determines whether
-/// that entry can deliver interrupts.
 pub fn msix_clear_function_mask(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
     let cap_off = cap.cap_offset;
     let mut ctrl = pci_config_read16(bus, dev, func, cap_off + MSIX_REG_CONTROL);

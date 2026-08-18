@@ -62,12 +62,18 @@ pub enum ExecError {
 /// user memory in the syscall handler before crossing into `exec`).
 pub enum FdAction {
     /// Share the parent's `src_fd` description into the child's `target_fd`.
-    Clone { src_fd: i32, target_fd: i32 },
+    Clone {
+        src_fd: i32,
+        target_fd: i32,
+    },
     /// Move the parent's `src_fd` into the child's `target_fd`.
-    Transfer { src_fd: i32, target_fd: i32 },
-    /// Close the child's `target_fd`.
-    Close { target_fd: i32 },
-    /// Open `path` into the child's `target_fd`.
+    Transfer {
+        src_fd: i32,
+        target_fd: i32,
+    },
+    Close {
+        target_fd: i32,
+    },
     Open {
         target_fd: i32,
         path: KVec<u8>,
@@ -90,12 +96,8 @@ fn trim_nul_bytes(bytes: &[u8]) -> &[u8] {
 /// before it runs.
 static INIT_TASK_ID: AtomicU32 = AtomicU32::new(INVALID_TASK_ID);
 
-/// Which task is init.
-///
-/// Init has no structural marker: task ids are monotonic and never recycled,
-/// so it is whatever the boot sequence handed it, and `TASK_FLAG_SYSTEM` is
-/// shared with the userland test runner. Recording the id at launch is the
-/// only way to name it later.
+/// Which task is init. There is no structural marker — ids never recycle and
+/// `TASK_FLAG_SYSTEM` is shared with the utest runner — so the launch id names it.
 pub fn init_task_id() -> u32 {
     INIT_TASK_ID.load(Ordering::Acquire)
 }
@@ -117,11 +119,9 @@ pub fn launch_init() -> Result<u32, ExecError> {
 }
 
 /// Apply the spawn fd-action allow-list to the child's empty, unpublished
-/// table. `Clone`/`Transfer` resolve against the parent; `Open` opens a path;
-/// each installs at an explicit child fd. Any failure aborts with the parent
-/// table untouched: `Transfer` installs a shared alias first and empties its
-/// parent slot only after the whole list has applied, so the caller tears the
-/// child down (all-or-nothing) while the parent keeps every descriptor.
+/// table. All-or-nothing: `Transfer` installs a shared alias first and empties
+/// its parent slot only after the whole list applied, so any failure leaves the
+/// parent holding every descriptor.
 pub(crate) fn apply_fd_actions(
     parent_table: FdTable,
     child_table: FdTable,
@@ -152,8 +152,7 @@ pub(crate) fn apply_fd_actions(
             }
             FdAction::Close { target_fd } => {
                 let rc = file_close_fd(child_table, *target_fd);
-                // A fresh child table holds nothing at most fds; closing an
-                // absent one is a no-op success.
+                // A fresh child table holds nothing at most fds; closing an absent one succeeds.
                 if rc == Errno::EBADF.raw() { 0 } else { rc }
             }
             FdAction::Open {
@@ -171,9 +170,7 @@ pub(crate) fn apply_fd_actions(
             });
         }
     }
-    // Every action applied — only now do transfers empty their parent slots.
-    // The identity match skips a slot the parent concurrently closed or
-    // repopulated; the taken alias drops here, lock-free.
+    // The identity match skips a slot the parent concurrently closed or repopulated.
     for (src_fd, moved) in transfers.iter() {
         drop(fileio_take_file_ref_matching(parent_table, *src_fd, moved));
     }
@@ -202,12 +199,6 @@ fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], ExecError
 }
 
 /// The job-control identity a spawned child inherits from its parent.
-///
-/// Split out because minting a group for `TASK_FLAG_NEW_PGRP` allocates, and
-/// the field block it used to sit in now runs preempt-disabled inside
-/// `SpawnGuard::with_child`. Depends only on the parent and the child's id —
-/// never on the child — which is what makes the hoist a pure move rather than a
-/// reordering.
 struct InheritedJobControl {
     pgid: u32,
     sid: u32,
@@ -215,9 +206,7 @@ struct InheritedJobControl {
     group: Option<slopos_ostd::KArc<slopos_ostd::task::ProcessGroup>>,
 }
 
-/// Point the child's group at the same identity its inherited pgid names: a
-/// fresh group in the parent's session for `NEW_PGRP`, otherwise the parent's
-/// own group.
+/// Point the child's group at the identity its inherited pgid names.
 fn resolve_inherited_job_control(
     parent: &slopos_sched::task_struct::Task,
     child_task_id: u32,
@@ -259,12 +248,9 @@ pub fn spawn_program_with_attrs(
             return Err(ExecError::NameTooLong);
         }
 
-        // Privilege enters a spawn here and nowhere else. The syscall boundary
-        // has already refused every privileged bit the caller asked for, so
-        // what the child holds is a function of which program is being loaded,
-        // not of who asked for it. Kernel callers (`launch_init`, the utest
-        // runner) pass their own flags in and are not reachable from a syscall,
-        // which is why `SYSTEM` is not in the table.
+        // Privilege enters a spawn only here — the syscall boundary already
+        // refused every privileged bit the caller asked for, so flags follow
+        // the program, not the requester.
         let (granted_flags, granted_priority) = grants::grant_for(normalized_path);
         flags |= granted_flags;
         if let Some(granted) = granted_priority {
@@ -275,12 +261,8 @@ pub fn spawn_program_with_attrs(
         let task_name = task_name_from_path(normalized_path)?;
         let user_code_entry: TaskEntry = task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
 
-        // The token owns the task outright — it has no registry entry, so
-        // everything below runs where no lookup, no active-task walk and no
-        // other CPU can observe the task, and `task_commit` makes it reachable
-        // already complete. That is what lets the field writes be a plain
-        // exclusive borrow rather than an unwitnessed write into a published
-        // allocation.
+        // Unregistered and singly owned until `task_commit`, so no lookup,
+        // walk or other CPU can observe the field writes below.
         let Some(pending) = task_build(
             task_name.as_ptr() as *const c_char,
             user_code_entry,
@@ -290,11 +272,8 @@ pub fn spawn_program_with_attrs(
         ) else {
             return Err(ExecError::NoMem);
         };
-        // The token is the only reference to a child that already owns its
-        // kernel stack, data stack and process VM, and it is unregistered, so
-        // nothing else can find the orphan if this frame loses it. Every exit
-        // from here on — `?`, an early return, a panic, or a kill that aborts
-        // the blocking calls below — releases it through the guard.
+        // Nothing else can find the orphan, so every exit from here — `?`, a
+        // panic, or a kill aborting the blocking calls — must release it here.
         let mut spawn = SpawnGuard::new(pending);
         let task_id = spawn.child_id();
 
@@ -318,14 +297,11 @@ pub fn spawn_program_with_attrs(
             &mut tls_tp,
         )?;
 
-        // Build the child's fd table from the action allow-list. The child
-        // starts empty; each action installs exactly what it inherits. A caller
-        // with no parent process (`launch_init`) keeps its console bootstrap
-        // table untouched.
+        // A caller with no parent process (`launch_init`) keeps its console
+        // bootstrap table untouched.
         if let Some(parent_table) = parent_table {
-            // The child's own table, taken from the guard rather than
-            // re-resolved: its id could have been returned to the allocator by
-            // a failure between the two lookups.
+            // Taken from the guard rather than re-resolved: the id could have
+            // been returned to the allocator between the two lookups.
             let Some(FdTable::Process(child_process)) = spawn.child_table() else {
                 return Err(ExecError::NoMem);
             };
@@ -336,18 +312,13 @@ pub fn spawn_program_with_attrs(
             apply_fd_actions(parent_table, FdTable::Process(child_process), actions)?;
         }
 
-        // Job control is inherited from the parent task so spawned children
-        // participate in the parent's session. This matches fork semantics and
-        // is required for proper job control: without it, the child is in its
-        // own session and the shell cannot set it as the foreground group.
-        // Resolved before the child borrow opens, so the two live at once.
+        // Inherited so the child joins the parent's session; without it the
+        // shell cannot make the child its foreground group.
         let parent_ref = task_find_by_id(parent_task_id);
 
-        // Resolved — and, for NEW_PGRP, allocated — before the child borrow
-        // opens. The borrow below runs preempt-disabled so the frame cannot be
-        // torn down while it holds the token, and a fresh group object is a
-        // fallible allocation that has no business inside an otherwise
-        // infallible run of field writes.
+        // Resolved — and for NEW_PGRP allocated — before the child borrow
+        // opens: that borrow runs preempt-disabled, where a fallible
+        // allocation has no business.
         let inherited = parent_ref
             .as_ref()
             .map(|parent| resolve_inherited_job_control(parent, task_id, flags));
@@ -358,11 +329,8 @@ pub fn spawn_program_with_attrs(
             child.context.get_mut().rsp = stack_ptr;
             child.set_fs_base(tls_tp);
 
-            // OSTD user-mode entry: re-seed the task's `UserContext` with the
-            // post-load entry / stack pointers. The kernel stack itself stays
-            // as `task_build` left it (just a return-address slot pointing at
-            // `user_task_first_run`); the iretq frame is rebuilt from
-            // `user_ctx` on every round trip by `user_mode_round_trip_asm`.
+            // The kernel stack stays as `task_build` left it; the iretq frame
+            // is rebuilt from `user_ctx` on every round trip.
             slopos_sched::task::init_user_ctx_for_new_task(
                 child.user_ctx.get_mut(),
                 entry,
@@ -370,8 +338,7 @@ pub fn spawn_program_with_attrs(
                 0,
             );
 
-            // POSIX_SPAWN_SETSIGDEF: force the named signals to their default
-            // disposition in the child.
+            // POSIX_SPAWN_SETSIGDEF.
             if sigdefault_mask != 0 {
                 task_default_signals_in_mask(child, sigdefault_mask);
             }
@@ -382,10 +349,9 @@ pub fn spawn_program_with_attrs(
             child.set_pgid(inherited.pgid);
             child.set_sid(inherited.sid);
             child.set_controlling_tty(inherited.ctty);
-            // Exclusive rather than an RCU store — the child is unreachable, so
-            // there is no reader to defer a release past. The displaced handle
-            // travels out: dropping a `KArc` here could reach the buddy
-            // allocator's reuse path, which is what the preempt guard forbids.
+            // Exclusive rather than RCU: no reader can observe the child yet.
+            // The displaced handle travels out because dropping a `KArc` under
+            // the preempt guard could reach the buddy allocator's reuse path.
             let displaced = child.process_group.replace_exclusive(inherited.group);
 
             let fg = (flags & slopos_abi::task::TASK_FLAG_FOREGROUND != 0 && inherited.pgid != 0)
@@ -398,45 +364,32 @@ pub fn spawn_program_with_attrs(
         };
         drop(displaced_group);
 
-        // Every field the spawn owns is written, so the task can become
-        // reachable. It is findable from here but still not runnable:
-        // `publish_new_task` below is the sole schedulable edge, matching
-        // Linux's wake_up_new_task() pattern.
+        // Findable from here but still not runnable: `publish_new_task` below
+        // is the sole schedulable edge.
         let Some(registered) = spawn.commit() else {
             return Err(ExecError::NoMem);
         };
 
-        // Publish the parent→child ownership edge (parent id + children-list
-        // membership) now that the child is a live registry entry. `link_child`
-        // reads the parent, and `parent_ref` is the registry guard already in
-        // scope, so no pointer needs laundering back into a borrow.
+        // Only after `commit`: the edge must point at a live registry entry.
         if let Some(parent) = parent_ref.as_ref()
             && let Some(child_nn) = core::ptr::NonNull::new(registered.as_ptr())
         {
             link_child(parent, child_nn);
         }
 
-        // Atomic foreground handoff (TASK_FLAG_FOREGROUND): make the child's
-        // process group the controlling terminal's foreground group *before*
-        // the Ready-publish below.  Doing it parent-side after spawn returns
-        // (a `tcsetpgrp` round-trip) leaves a window where the child is
-        // already schedulable but still a background process — its first
-        // terminal read then fails the foreground check and poisons async
-        // readers.  Session-validated: a child whose session does not own the
-        // terminal must not steal the foreground.
+        // Must precede the Ready-publish: a parent-side `tcsetpgrp` after spawn
+        // returns leaves a window where the child is schedulable but still
+        // background, and its first terminal read fails the foreground check.
         if let Some((ctty, child_pgid, child_sid)) = fg_handoff {
             use slopos_kernel_services::syscall_services::tty;
-            // The checked variant validates the session match and performs
-            // the set under one TTY lock acquisition (no read-then-write
-            // TOCTOU); a child whose session does not own the terminal is
-            // refused. Resolving the target group walks the registry for a
-            // member, which is why this follows the commit above.
+            // Checked variant: session match and set under one TTY lock, no
+            // read-then-write TOCTOU. Resolving the target group walks the
+            // registry, which is why this follows the commit above.
             let _ = tty::set_foreground_pgrp_checked(ctty, child_pgid, child_sid);
         }
 
-        // The Release ordering on the status store inside `publish_new_task`
-        // is what makes every write above visible to the CPU that eventually
-        // runs this task.
+        // The Release status store inside `publish_new_task` is what makes
+        // every write above visible to the CPU that runs this task.
         if publish_new_task(&registered) != 0 {
             task_terminate(task_id);
             return Err(ExecError::NoMem);
@@ -583,10 +536,6 @@ fn setup_user_stack(
     sp &= !0xF;
 
     // SysV ABI: rsp must be 16-byte aligned at _start with argc at [rsp].
-    // Total 8-byte slots below this point: auxv (12) + envp_null (1) + envc +
-    // argv_null (1) + argc_slots (argc) + argc_word (1) = argc + envc + 15.
-    // If that total is odd, insert one 8-byte padding slot here (between the
-    // string area and auxv) so the final sp stays 16-byte aligned.
     let total_slots = argc + envc + 15; // 12 auxv + 3 sentinel/argc
     if total_slots % 2 != 0 {
         sp = sp.wrapping_sub(8);
