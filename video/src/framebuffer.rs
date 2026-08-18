@@ -59,8 +59,6 @@ impl FbState {
         if base.is_null() {
             return None;
         }
-        // Offset and len bounds-checked against framebuffer size
-        // above; ptr_add lifts the unsafe interior to OSTD.
         Some(slopos_ostd::util::ptr_buf::ptr_add(base, offset))
     }
 }
@@ -186,11 +184,10 @@ pub fn register_flush_callback(callback: FlushCallback) {
 
 /// Present the (optionally damage-scoped) frame through the registered backend.
 ///
-/// The callback pointer is copied out and the lock released **before** the
-/// callback runs: the backend may touch its own device locks / submit GPU
-/// commands, which must not happen while holding this IRQ-disabling `SpinLock`.
-/// Returns the backend's present-result code (see [`PRESENT_SHOWN`] /
-/// [`PRESENT_SUPPRESSED`]).
+/// The callback pointer is copied out and the lock released before the callback
+/// runs: the backend may take device locks or submit GPU commands, which must
+/// not happen under this IRQ-disabling `SpinLock`. Returns the backend's
+/// [`PRESENT_SHOWN`] / [`PRESENT_SUPPRESSED`] code.
 pub fn framebuffer_flush(damage: *const DamageRect, damage_count: u32) -> c_int {
     let cb = *FRAMEBUFFER_FLUSH.lock();
     match cb {
@@ -245,8 +242,7 @@ fn copy_rect_from_shm(
         let Some(dst_ptr) = fb.checked_ptr(dst_off, row_bytes) else {
             return false;
         };
-        // src range is checked against shm_size, dst range checked
-        // by checked_ptr; non-overlap follows from FB ≠ SHM mappings.
+        // copy_bytes needs non-overlap: the FB and SHM mappings are distinct.
         let src_ptr = slopos_ostd::util::ptr_buf::ptr_add_const(shm_virt, src_off);
         slopos_ostd::util::ptr_buf::copy_bytes(dst_ptr, src_ptr, row_bytes);
     }
@@ -268,12 +264,10 @@ pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize) -> c_int {
     fb_flip_from_shm_damage(shm_phys, size, core::ptr::null(), 0)
 }
 
-/// Present-result codes returned to the compositor via the fb_flip syscall.
-/// `0` (`PRESENT_SHOWN`) = the frame reached the scanout. `PRESENT_SUPPRESSED`
-/// (positive) = the frame was deliberately not shown (the kernel log owns the
-/// screen, or a prior present is still in flight). Negative = a hard failure.
-/// The compositor keeps a frame's damage pending on any nonzero result, so a
-/// suppressed or failed frame is retried rather than cleared as if shown.
+/// Present-result codes returned to the compositor via the fb_flip syscall:
+/// `0` reached the scanout, positive was deliberately not shown, negative is a
+/// hard failure. The compositor keeps a frame's damage pending on any nonzero
+/// result, so it is retried rather than cleared as if shown.
 pub const PRESENT_SHOWN: c_int = 0;
 pub const PRESENT_SUPPRESSED: c_int = 1;
 
@@ -283,24 +277,20 @@ pub fn fb_flip_from_shm_damage(
     damage: *const slopos_abi::damage::DamageRect,
     damage_count: u32,
 ) -> c_int {
-    // While the on-screen kernel log owns the screen, drop the compositor's
-    // frame so the log isn't overwritten. The compositor keeps rendering to its
-    // memfd; presentation resumes the moment the log is dismissed. Reported as
-    // suppressed so the compositor keeps the frame's damage pending.
+    // Drop the frame while the kernel log owns the screen; suppressed rather
+    // than failed so the compositor keeps the damage pending and retries.
     if slopos_ostd::fblog::is_active() {
         return PRESENT_SUPPRESSED;
     }
 
-    // On first compositor flip, take framebuffer ownership from the vconsole.
     if !COMPOSITOR_FB_ACQUIRED.swap(true, core::sync::atomic::Ordering::Relaxed) {
         slopos_drivers::tty::vconsole::compositor_acquire_fb();
-        // The desktop is now presenting: boot is over, so ESC stops toggling
-        // the kernel log and is handed back to userland applications.
+        // Boot is over: ESC stops toggling the log and goes back to userland.
         slopos_ostd::fblog::notify_desktop_presented();
     }
 
-    // If the kernel log was just dismissed it painted the whole screen, so this
-    // present must be full-screen to erase it rather than a damage-only update.
+    // A just-dismissed kernel log covered the whole screen, so erasing it needs
+    // a full present rather than a damage-only update.
     let force_full = slopos_ostd::fblog::take_force_full_present();
 
     let fb = match FRAMEBUFFER.lock().fb {
@@ -325,8 +315,7 @@ pub fn fb_flip_from_shm_damage(
         let Some(dst_ptr) = fb.checked_ptr(0, copy_size) else {
             return -1;
         };
-        // Source and destination have been validated and are
-        // non-overlapping.
+        // copy_bytes needs non-overlap: the FB and SHM mappings are distinct.
         slopos_ostd::util::ptr_buf::copy_bytes(dst_ptr, shm_ptr, copy_size);
         return framebuffer_flush(core::ptr::null(), 0);
     }
@@ -342,8 +331,7 @@ pub fn fb_flip_from_shm_damage(
             }
             if !copy_rect_from_shm(&fb, shm_ptr, copy_size, rect.x0, rect.y0, rect.x1, rect.y1) {
                 any_failed = true;
-                // Continue processing remaining rects instead of aborting —
-                // partial presentation is better than no presentation.
+                // Partial presentation beats none, so keep going.
             }
         }
         any_failed

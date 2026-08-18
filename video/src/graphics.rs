@@ -27,10 +27,7 @@ impl GraphicsContext {
         self.fb.height()
     }
 
-    /// Flush the framebuffer to the display backend.
-    ///
-    /// Invokes the registered flush callback (e.g. the Xe driver's scanout
-    /// trigger). Returns 0 on success or if no callback is registered.
+    /// Flush the framebuffer to the display backend; 0 if none is registered.
     pub fn flush(&self) -> c_int {
         // Kernel-side draws (splash / roulette / fblog) present the whole frame.
         framebuffer::framebuffer_flush(core::ptr::null(), 0)
