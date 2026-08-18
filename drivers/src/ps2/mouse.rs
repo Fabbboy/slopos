@@ -42,7 +42,6 @@ static STATE: SpinLock<MouseState> = SpinLock::new(
     lock_class!("ps2mouse.STATE", LOCK_LEVEL_RESOURCE),
 );
 
-/// Attempt IntelliMouse (ImPS/2) detection.
 /// Magic sequence: SET_SAMPLE_RATE 200, 100, 80 → GET_ID → expect 3.
 fn probe_intellimouse() -> u8 {
     ps2::write_aux_set_sample_rate(200);
@@ -58,8 +57,8 @@ fn probe_intellimouse() -> u8 {
     }
 }
 
-/// Attempt IntelliMouse Explorer (ImExPS/2) detection.
-/// Requires ImPS/2 already active. Magic: SET_SAMPLE_RATE 200, 200, 80 → GET_ID → expect 4.
+/// Requires ImPS/2 already active.
+/// Magic sequence: SET_SAMPLE_RATE 200, 200, 80 → GET_ID → expect 4.
 fn probe_intellimouse_explorer() -> u8 {
     ps2::write_aux_set_sample_rate(200);
     ps2::write_aux_set_sample_rate(200);
@@ -74,19 +73,14 @@ fn probe_intellimouse_explorer() -> u8 {
     }
 }
 
-/// Initialise the PS/2 mouse device.
-///
-/// Expects that `ps2::init_controller()` has already run (ports enabled,
-/// clean config written with IRQs off).  Sends set-defaults and enable-
-/// reporting commands via the AUX-aware ACK path so we never accidentally
-/// consume a keyboard byte as a mouse ACK.
+/// Requires `ps2::init_controller()` to have run already. Commands go through
+/// the AUX-aware ACK path so a keyboard byte is never consumed as a mouse ACK.
 pub fn init() {
     klog_info!("PS/2 mouse: initialising device");
 
-    // Set defaults (sample rate, resolution, scaling)
     ps2::write_aux_acked(ps2::DEV_CMD_DEFAULTS);
 
-    // Probe for IntelliMouse extensions (must happen before enable)
+    // Must happen before reporting is enabled.
     let mut mouse_type: u8 = probe_intellimouse();
     if mouse_type == 3 {
         mouse_type = probe_intellimouse_explorer();
@@ -105,10 +99,9 @@ pub fn init() {
         packet_size,
     );
 
-    // Enable data reporting
     ps2::write_aux_acked(ps2::DEV_CMD_ENABLE);
 
-    // Flush any trailing bytes the mouse may have sent during init
+    // The mouse may have sent trailing bytes during init.
     ps2::flush();
 
     let (x, y) = {
@@ -138,17 +131,11 @@ pub fn set_bounds(width: i32, height: i32) {
     state.y = state.y.clamp(0, height - 1);
 }
 
-/// Process a single mouse data byte from the IRQ handler.
-///
-/// The byte is accumulated into a 3- or 4-byte packet (depending on the
-/// detected mouse protocol).  Byte 0 is validated: bit 3 must be set
-/// (PS/2 protocol), and overflow bits (6:7) must be clear.  For ImPS/2
-/// and ImExPS/2 mice the fourth byte carries scroll and extra button data.
 pub fn handle_irq(data: u8) {
     let mut state = STATE.lock();
     let byte_num = state.packet_byte;
 
-    // Byte 0 sync: bit 3 must be set (PS/2 protocol marker)
+    // Byte 0 sync: bit 3 is the PS/2 protocol marker and must be set.
     if byte_num == 0 && data & 0x08 == 0 {
         return;
     }
@@ -156,7 +143,6 @@ pub fn handle_irq(data: u8) {
     state.packet[byte_num as usize] = data;
     state.packet_byte += 1;
 
-    // Wait for full packet (3 or 4 bytes depending on protocol)
     if state.packet_byte < state.packet_size {
         return;
     }
@@ -166,7 +152,7 @@ pub fn handle_irq(data: u8) {
     let dx_raw = state.packet[1];
     let dy_raw = state.packet[2];
 
-    // Overflow bits set — discard entire packet
+    // Bits 7:6 are the overflow flags; discard the whole packet when set.
     if packet_flags & 0xC0 != 0 {
         return;
     }
@@ -192,7 +178,6 @@ pub fn handle_irq(data: u8) {
     state.x = state.x.clamp(0, state.max_x - 1);
     state.y = state.y.clamp(0, state.max_y - 1);
 
-    // Parse scroll data from byte 3 (IntelliMouse only)
     let mut dz: i32 = 0;
     let mut dw: i32 = 0;
 
@@ -203,7 +188,7 @@ pub fn handle_irq(data: u8) {
                 // ImPS/2: lower 4 bits are signed Z scroll
                 let mut z = (b3 & 0x0F) as i8;
                 if b3 & 0x08 != 0 {
-                    z |= -16_i8; // sign-extend from 4 bits
+                    z |= -16_i8;
                 }
                 dz = z as i32;
             }
@@ -261,7 +246,7 @@ pub fn handle_irq(data: u8) {
         }
     }
 
-    // Route scroll axis events (value120: one click = ±120)
+    // value120 axis units: one detent click is ±120.
     if dz != 0 {
         input_event::input_route_pointer_axis(0, dz * 120, timestamp_ms);
     }

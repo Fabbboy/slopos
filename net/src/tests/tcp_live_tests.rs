@@ -14,8 +14,8 @@ const GATEWAY_PORT: u16 = 7;
 
 fn restore_boot_routes() {
     use crate::route::RouteEntry;
-    // Capture the default route before the reset wipes it: the route table is
-    // the only record of the DHCP-learned gateway.
+    // The route table is the only record of the DHCP-learned gateway, so it has
+    // to be captured before the reset wipes it.
     let saved_gateway = ROUTE_TABLE
         .all_routes()
         .iter()
@@ -29,10 +29,8 @@ fn restore_boot_routes() {
         dev: DevIndex(0),
         metric: 0,
     });
-    // The NIC's own routes are rebuilt from its interface's address, which is
-    // the only place that address lives. The gateway comes from the saved
-    // default route rather than from the interface, because the route table is
-    // the authority for forwarding.
+    // The gateway comes from the saved default route rather than the interface:
+    // the route table is the authority for forwarding.
     if let Some(nic) = iface::get_by_dev(DevIndex(1))
         && let Some(addr) = nic.primary_addr()
     {
@@ -123,12 +121,9 @@ fn test_arp_resolve_gateway() -> TestResult {
 
 /// An external destination must take its source IP from the NIC.
 ///
-/// `first_ipv4()` returns the first iface in registration order and loopback
-/// registers before any NIC, so selecting a source that way sends external
-/// traffic with `src_ip = 127.0.0.1`; QEMU SLIRP's TCP forwarder drops replies
-/// to 127.0.0.1, which surfaces as a recv timeout in curl. `source_ip_for(dst)`
-/// route-looks-up instead and returns the egress device's IP — the NIC's
-/// DHCP-assigned address for external traffic.
+/// `first_ipv4()` returns registration order and loopback registers before any
+/// NIC, so sourcing that way sends external traffic with `src_ip = 127.0.0.1`,
+/// whose replies QEMU SLIRP's TCP forwarder drops.
 fn test_source_ip_for_external_uses_nic() -> TestResult {
     let external = Ipv4Addr(GATEWAY_IP);
     let src = match iface::source_ip_for(external) {
@@ -152,9 +147,8 @@ fn test_source_ip_for_external_uses_nic() -> TestResult {
     pass!()
 }
 
-/// Loopback destinations must still resolve through the loopback
-/// interface, not the NIC. Confirms `source_ip_for` is route-aware
-/// rather than blanket-blacklisting loopback.
+/// Loopback destinations must still resolve through the loopback interface:
+/// `source_ip_for` is route-aware, not blanket-blacklisting loopback.
 fn test_source_ip_for_loopback_uses_loopback() -> TestResult {
     let lo = Ipv4Addr([127, 0, 0, 1]);
     let src = match iface::source_ip_for(lo) {

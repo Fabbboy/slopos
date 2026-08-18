@@ -1,7 +1,4 @@
 //! RFC 5961 RST validation and challenge ACK tests.
-//!
-//! Covers: DataState (all 6 close phases), SynRecv, TimeWait, rate limiter,
-//! wrapping sequence arithmetic, and zero-window edge case.
 
 use slopos_testing::{TestResult, assert_eq_test, assert_test, pass};
 
@@ -16,10 +13,6 @@ use crate::tcp::pcb::{Pcb, PcbState};
 use crate::tcp::seq::SeqNum;
 use crate::tcp::tuple::TcpTuple;
 
-// =============================================================================
-// Constants
-// =============================================================================
-
 const LOCAL_IP: [u8; 4] = [10, 0, 0, 1];
 const REMOTE_IP: [u8; 4] = [10, 0, 0, 2];
 const LOCAL_PORT: u16 = 49_152;
@@ -30,10 +23,6 @@ const PEER_IRS: u32 = 20_000;
 
 const LAST_RCV_NXT: u32 = 12_345;
 const LAST_SND_NXT: u32 = 67_890;
-
-// =============================================================================
-// Helpers
-// =============================================================================
 
 fn tuple() -> TcpTuple {
     TcpTuple {
@@ -106,10 +95,6 @@ fn make_time_wait_pcb() -> Pcb {
     )
 }
 
-// =============================================================================
-// classify_rst unit tests
-// =============================================================================
-
 pub fn test_classify_rst_exact_match() -> TestResult {
     assert_eq_test!(
         challenge_ack::classify_rst(100, 100, 32768),
@@ -155,19 +140,16 @@ pub fn test_classify_rst_wrapping_seq() -> TestResult {
     // rcv_nxt near wrap point, window spans across 0.
     let rcv_nxt: u32 = 0xFFFF_FFF0;
     let window: u32 = 32;
-    // seq just past wrap — should be in window.
     assert_eq_test!(
         challenge_ack::classify_rst(0x0000_0005, rcv_nxt, window),
         RstAction::ChallengeAck,
         "wrapped in-window"
     );
-    // seq far before — outside window.
     assert_eq_test!(
         challenge_ack::classify_rst(0x8000_0000, rcv_nxt, window),
         RstAction::Drop,
         "wrapped out-of-window"
     );
-    // exact match at wrap point.
     assert_eq_test!(
         challenge_ack::classify_rst(rcv_nxt, rcv_nxt, window),
         RstAction::Accept,
@@ -175,10 +157,6 @@ pub fn test_classify_rst_wrapping_seq() -> TestResult {
     );
     pass!()
 }
-
-// =============================================================================
-// DataState RST tests
-// =============================================================================
 
 pub fn test_data_rst_exact_seq_tears_down() -> TestResult {
     let mut pcb = make_data_pcb(ClosePhase::Established);
@@ -204,7 +182,6 @@ pub fn test_data_rst_in_window_sends_challenge_ack() -> TestResult {
     challenge_ack::reset_for_tests();
     let mut pcb = make_data_pcb(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
-    // In-window but not exact: rcv_nxt + 100.
     let in_window_seq = (PEER_IRS + 1).wrapping_add(100);
     let actions = DataState::on_segment(
         &mut pcb,
@@ -227,7 +204,6 @@ pub fn test_data_rst_in_window_sends_challenge_ack() -> TestResult {
 pub fn test_data_rst_outside_window_dropped() -> TestResult {
     let mut pcb = make_data_pcb(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
-    // Far outside window.
     let outside_seq = (PEER_IRS + 1).wrapping_add(50_000);
     let actions = DataState::on_segment(
         &mut pcb,
@@ -298,10 +274,6 @@ pub fn test_data_rst_exact_seq_each_close_phase() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// SynRecv RST tests
-// =============================================================================
-
 pub fn test_syn_recv_rst_in_window_releases() -> TestResult {
     let mut pcb = make_syn_recv_pcb();
     let rcv_nxt = PEER_IRS + 1;
@@ -316,19 +288,13 @@ pub fn test_syn_recv_rst_in_window_releases() -> TestResult {
 
 pub fn test_syn_recv_rst_outside_window_dropped() -> TestResult {
     let mut pcb = make_syn_recv_pcb();
-    // Sequence far outside the initial window.
     let outside_seq = (PEER_IRS + 1).wrapping_add(50_000);
     let actions = SynRecvState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, outside_seq, 0), 0);
     assert_test!(!actions.release, "out-of-window RST does not release");
     assert_eq_test!(actions.segments_len, 0, "no segments emitted");
-    // PCB should still be in SynRecv.
     assert_test!(matches!(pcb.state, PcbState::SynRecv(_)), "still SynRecv");
     pass!()
 }
-
-// =============================================================================
-// TimeWait RST tests
-// =============================================================================
 
 pub fn test_time_wait_rst_in_window_releases() -> TestResult {
     let mut pcb = make_time_wait_pcb();
@@ -346,24 +312,17 @@ pub fn test_time_wait_rst_outside_window_dropped() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Challenge ACK rate limiter tests
-// =============================================================================
-
 pub fn test_challenge_ack_rate_limit() -> TestResult {
     challenge_ack::reset_for_tests();
-    // Exhaust the limit.
     for _ in 0..1000 {
         assert_test!(challenge_ack::try_challenge_ack(1000), "within limit");
     }
-    // 1001st should be rate-limited.
     assert_test!(!challenge_ack::try_challenge_ack(1000), "1001st blocked");
     pass!()
 }
 
 pub fn test_challenge_ack_rate_resets_after_epoch() -> TestResult {
     challenge_ack::reset_for_tests();
-    // Exhaust at t=1000.
     for _ in 0..1000 {
         challenge_ack::try_challenge_ack(1000);
     }
@@ -371,7 +330,6 @@ pub fn test_challenge_ack_rate_resets_after_epoch() -> TestResult {
         !challenge_ack::try_challenge_ack(1000),
         "exhausted at t=1000"
     );
-    // New epoch at t=2001.
     assert_test!(
         challenge_ack::try_challenge_ack(2001),
         "allowed in new epoch"
@@ -379,11 +337,6 @@ pub fn test_challenge_ack_rate_resets_after_epoch() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Test suite registration
-// =============================================================================
-
-// classify_rst unit tests
 slopos_testing::stest!(
     name = test_classify_rst_exact_match,
     suite = tcp_rst_validation
@@ -404,7 +357,6 @@ slopos_testing::stest!(
     name = test_classify_rst_wrapping_seq,
     suite = tcp_rst_validation
 );
-// DataState RST
 slopos_testing::stest!(
     name = test_data_rst_exact_seq_tears_down,
     suite = tcp_rst_validation
@@ -425,7 +377,6 @@ slopos_testing::stest!(
     name = test_data_rst_exact_seq_each_close_phase,
     suite = tcp_rst_validation
 );
-// SynRecv RST
 slopos_testing::stest!(
     name = test_syn_recv_rst_in_window_releases,
     suite = tcp_rst_validation
@@ -434,7 +385,6 @@ slopos_testing::stest!(
     name = test_syn_recv_rst_outside_window_dropped,
     suite = tcp_rst_validation
 );
-// TimeWait RST
 slopos_testing::stest!(
     name = test_time_wait_rst_in_window_releases,
     suite = tcp_rst_validation
@@ -443,7 +393,6 @@ slopos_testing::stest!(
     name = test_time_wait_rst_outside_window_dropped,
     suite = tcp_rst_validation
 );
-// Rate limiter
 slopos_testing::stest!(
     name = test_challenge_ack_rate_limit,
     suite = tcp_rst_validation

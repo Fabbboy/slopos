@@ -15,8 +15,6 @@ use crate::user_mappings::{
 
 /// Copy a full 4 KiB page through the HHDM mapping. Both `src` and `dst`
 /// must be live HHDM-mapped virtual addresses pointing at distinct pages.
-/// Delegates to OSTD's [`slopos_ostd::mm::hhdm_bytes::copy_page`] so the
-/// interior `unsafe` lives there.
 #[inline]
 fn copy_full_page(src: VirtAddr, dst: VirtAddr) {
     let _ = slopos_ostd::mm::hhdm_bytes::copy_page(src, dst);
@@ -50,10 +48,6 @@ fn resolve_single_ref(
     vm_space: &mut KArc<VmSpace>,
     aligned_vaddr: VirtAddr,
 ) -> Result<(), MmError> {
-    // Sole owner: just flip PTE flags in-place (clear COW software bit,
-    // set WRITABLE). `ostd_resolve_cow_4kb` does that atomically through
-    // the cursor's `protect::<Size4Kb>` and never disturbs the backing
-    // frame.
     if !ostd_resolve_cow_4kb(vm_space, aligned_vaddr).map_err(|_| MmError::MappingFailed)? {
         return Err(MmError::MappingFailed);
     }
@@ -82,10 +76,6 @@ fn resolve_multi_ref(
 
     let new_flags = PageFlags::USER_RW;
 
-    // Drop the old mapping (decrements META_SLOTS for `old_phys`; if
-    // this was the last reference the OSTD allocator path frees it,
-    // otherwise other processes still hold their own mappings) and
-    // install the freshly-allocated copy.
     if let Err(err) = ostd_unmap_4kb_user(vm_space, aligned_vaddr) {
         slopos_ostd::klog_info!("cow::resolve_multi_ref: OSTD unmap failed: {:?}", err);
         free_page_frame(new_phys);

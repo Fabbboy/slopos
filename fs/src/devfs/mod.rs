@@ -46,7 +46,6 @@ static DEVICES: [DeviceEntry; 5] = [
     DeviceEntry::new(b"zero", ZERO_INODE, 1, 5),
     DeviceEntry::new(b"random", RANDOM_INODE, 1, 8),
     DeviceEntry::new(b"console", CONSOLE_INODE, 5, 1),
-    // Kernel log ring buffer, readable from userland (major 1, minor 11).
     DeviceEntry::new(b"kmsg", KMSG_INODE, 1, 11),
 ];
 
@@ -109,8 +108,7 @@ impl FileSystem for DevFs {
         match inode {
             NULL_INODE => Ok(0),
 
-            // Kernel log: serve the in-memory ring buffer by offset so a
-            // plain `cat /dev/kmsg` streams the whole log to EOF.
+            // Served by offset so a plain `cat /dev/kmsg` streams to EOF.
             KMSG_INODE => Ok(slopos_ostd::klog::klog_read(offset as usize, buf)),
 
             ZERO_INODE => {
@@ -119,7 +117,6 @@ impl FileSystem for DevFs {
             }
 
             RANDOM_INODE => {
-                // Reads from the kernel CSPRNG via the platform service.
                 let mut pos = 0;
                 while pos < buf.len() {
                     let val = slopos_kernel_services::platform::rng_next();
@@ -141,12 +138,11 @@ impl FileSystem for DevFs {
 
     fn write(&self, inode: InodeId, _offset: u64, buf: &[u8]) -> VfsResult<usize> {
         match inode {
-            // kmsg is read-only from userland; accept+discard writes so a
-            // stray redirect doesn't error.
+            // kmsg is read-only; writes are discarded so a stray redirect does
+            // not error.
             NULL_INODE | ZERO_INODE | KMSG_INODE => Ok(buf.len()),
 
-            // Accept and discard writes to /dev/random (entropy injection is
-            // not meaningful with a properly-seeded CSPRNG).
+            // Entropy injection is not meaningful with a seeded CSPRNG.
             RANDOM_INODE => Ok(buf.len()),
 
             CONSOLE_INODE => Ok(buf.len()),

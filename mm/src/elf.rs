@@ -1,152 +1,88 @@
-//! Secure ELF loader with comprehensive validation.
+//! ELF64 parsing and validation for user binaries.
 //!
-//! This module provides type-safe ELF parsing and validation for loading
-//! user-space binaries. It implements defense-in-depth against malicious
-//! ELF files with:
-//!
-//! - Bounds checking on all header fields
-//! - Integer overflow prevention using checked arithmetic
-//! - Segment overlap detection
-//! - Address space validation (preventing kernel address loading)
-//! - Alignment requirements enforcement
-//!
-//! # Security Model
-//!
-//! The ELF loader assumes the input is untrusted. All fields are validated
-//! before use, and the loader fails safely on any validation error.
+//! Input is untrusted: every field is validated before use and any failure
+//! aborts the load.
 
 use core::fmt;
 
 use crate::memory_layout_defs::{KERNEL_SPACE_START_VA, USER_SPACE_END_VA, USER_SPACE_START_VA};
 use crate::paging_defs::PAGE_SIZE_4KB;
 
-// =============================================================================
-// ELF Constants
-// =============================================================================
-
-/// ELF magic bytes: 0x7f 'E' 'L' 'F'
 pub const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 
-/// ELF class: 64-bit
 pub const ELFCLASS64: u8 = 2;
 
-/// ELF data encoding: Little-endian
 pub const ELFDATA2LSB: u8 = 1;
 
-/// ELF version: Current
 pub const EV_CURRENT: u8 = 1;
 
-/// ELF OS/ABI: System V
 pub const ELFOSABI_NONE: u8 = 0;
 
-/// ELF type: Executable
 pub const ET_EXEC: u16 = 2;
 
-/// ELF type: Shared object (position-independent executable)
+/// Shared object; also how a position-independent executable is encoded.
 pub const ET_DYN: u16 = 3;
 
-/// ELF machine: x86-64
 pub const EM_X86_64: u16 = 0x3E;
 
-/// Program header type: Loadable segment
 pub const PT_LOAD: u32 = 1;
 
-/// Program header type: Dynamic linking info
 pub const PT_DYNAMIC: u32 = 2;
 
-/// Program header type: Interpreter path
 pub const PT_INTERP: u32 = 3;
 
-/// Program header type: Note section
 pub const PT_NOTE: u32 = 4;
 
-/// Program header type: Program header table
 pub const PT_PHDR: u32 = 6;
 
-/// Program header type: Thread-local storage
 pub const PT_TLS: u32 = 7;
 
-/// Program header type: GNU stack
 pub const PT_GNU_STACK: u32 = 0x6474_e551;
 
-/// Program header type: GNU relro
 pub const PT_GNU_RELRO: u32 = 0x6474_e552;
 
-/// Segment flag: Executable
 pub const PF_X: u32 = 0x1;
 
-/// Segment flag: Writable
 pub const PF_W: u32 = 0x2;
 
-/// Segment flag: Readable
 pub const PF_R: u32 = 0x4;
 
-/// Maximum number of program headers we'll process (DoS protection)
+/// DoS bound on the number of program headers parsed.
 pub const MAX_PROGRAM_HEADERS: usize = 128;
 
-/// Maximum number of PT_LOAD segments we'll process
 pub const MAX_LOAD_SEGMENTS: usize = 16;
 
-/// Maximum total mapped size (256 MB - DoS protection)
+/// DoS bound on the total mapped size of an image.
 pub const MAX_TOTAL_MAPPED_SIZE: u64 = 256 * 1024 * 1024;
 
-/// Minimum ELF header size
 pub const MIN_ELF_SIZE: usize = 64;
-
-// =============================================================================
-// Error Types
-// =============================================================================
 
 /// Errors that can occur during ELF validation and loading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {
-    /// Input buffer is too small to contain an ELF header
     BufferTooSmall,
-    /// Invalid ELF magic bytes
     InvalidMagic,
-    /// Not a 64-bit ELF file
     Not64Bit,
-    /// Not little-endian
     NotLittleEndian,
-    /// Invalid ELF version
     InvalidVersion,
-    /// Not an executable or shared object
     NotExecutable,
-    /// Not for x86-64 architecture
     WrongArchitecture,
-    /// Program header offset is invalid
     InvalidPhdrOffset,
-    /// Program header size is invalid
     InvalidPhdrSize,
-    /// Too many program headers
     TooManyProgramHeaders,
-    /// Program header table extends beyond file
     PhdrTableOverflow,
-    /// Segment offset is invalid (extends beyond file)
     InvalidSegmentOffset,
-    /// Segment file size larger than memory size
     FileSizeExceedsMemSize,
-    /// Segment size overflow (vaddr + memsz wraps)
     SegmentSizeOverflow,
-    /// Segment alignment is invalid (not power of two or zero)
     InvalidAlignment,
-    /// Segment maps to kernel address space
     KernelAddressViolation,
-    /// Segment maps outside user address space
     AddressOutOfBounds,
-    /// Two segments overlap in virtual address space
     SegmentOverlap,
-    /// Total mapped size exceeds limit
     TotalSizeExceeded,
-    /// Entry point is outside any loaded segment
     EntryPointInvalid,
-    /// Too many PT_LOAD segments
     TooManyLoadSegments,
-    /// No PT_LOAD segments found
     NoLoadSegments,
-    /// Null pointer passed
     NullPointer,
-    /// Dynamic linking (PT_INTERP) not supported
     DynamicNotSupported,
 }
 
@@ -181,49 +117,27 @@ impl fmt::Display for ElfError {
     }
 }
 
-/// Result type for ELF operations
 pub type ElfResult<T> = Result<T, ElfError>;
 
-// =============================================================================
-// ELF Header Structures (validated wrappers)
-// =============================================================================
-
-/// Validated 64-bit ELF header.
-///
-/// This struct is created only after all header fields have been validated.
-/// It provides safe accessors to header data.
+/// Validated 64-bit ELF header; built only after every field has been checked.
 #[derive(Debug, Clone, Copy)]
 pub struct Elf64Header {
-    /// ELF type (ET_EXEC or ET_DYN)
     pub e_type: u16,
-    /// Target architecture (should be EM_X86_64)
     pub e_machine: u16,
-    /// ELF version
     pub e_version: u32,
-    /// Entry point virtual address
     pub e_entry: u64,
-    /// Program header table offset
     pub e_phoff: u64,
-    /// Section header table offset
     pub e_shoff: u64,
-    /// Processor-specific flags
     pub e_flags: u32,
-    /// ELF header size
     pub e_ehsize: u16,
-    /// Program header entry size
     pub e_phentsize: u16,
-    /// Number of program headers
     pub e_phnum: u16,
-    /// Section header entry size
     pub e_shentsize: u16,
-    /// Number of section headers
     pub e_shnum: u16,
-    /// Section name string table index
     pub e_shstrndx: u16,
 }
 
 impl Elf64Header {
-    /// Expected program header entry size
     pub const PHDR_SIZE: u16 = 56;
 
     /// Parse and validate an ELF header from raw bytes.
@@ -237,27 +151,22 @@ impl Elf64Header {
             return Err(ElfError::BufferTooSmall);
         }
 
-        // Validate magic bytes
         if data[0..4] != ELF_MAGIC {
             return Err(ElfError::InvalidMagic);
         }
 
-        // Validate ELF class (64-bit)
         if data[4] != ELFCLASS64 {
             return Err(ElfError::Not64Bit);
         }
 
-        // Validate data encoding (little-endian)
         if data[5] != ELFDATA2LSB {
             return Err(ElfError::NotLittleEndian);
         }
 
-        // Validate ELF version
         if data[6] != EV_CURRENT {
             return Err(ElfError::InvalidVersion);
         }
 
-        // Parse header fields (little-endian)
         let e_type = u16::from_le_bytes([data[16], data[17]]);
         let e_machine = u16::from_le_bytes([data[18], data[19]]);
         let e_version = u32::from_le_bytes([data[20], data[21], data[22], data[23]]);
@@ -278,27 +187,22 @@ impl Elf64Header {
         let e_shnum = u16::from_le_bytes([data[60], data[61]]);
         let e_shstrndx = u16::from_le_bytes([data[62], data[63]]);
 
-        // Validate ELF type (must be executable or shared object)
         if e_type != ET_EXEC && e_type != ET_DYN {
             return Err(ElfError::NotExecutable);
         }
 
-        // Validate architecture (must be x86-64)
         if e_machine != EM_X86_64 {
             return Err(ElfError::WrongArchitecture);
         }
 
-        // Validate program header offset
         if e_phoff == 0 {
             return Err(ElfError::InvalidPhdrOffset);
         }
 
-        // Validate program header entry size
         if e_phentsize < Self::PHDR_SIZE {
             return Err(ElfError::InvalidPhdrSize);
         }
 
-        // Validate number of program headers
         if e_phnum == 0 {
             return Err(ElfError::NoLoadSegments);
         }
@@ -323,12 +227,10 @@ impl Elf64Header {
         })
     }
 
-    /// Calculate the total size of the program header table.
     pub fn phdr_table_size(&self) -> usize {
         self.e_phnum as usize * self.e_phentsize as usize
     }
 
-    /// Check if the program header table fits within the file.
     pub fn validate_phdr_table(&self, file_size: usize) -> ElfResult<()> {
         let phdr_end = self
             .e_phoff
@@ -342,35 +244,24 @@ impl Elf64Header {
         Ok(())
     }
 
-    /// Returns true if this is a position-independent executable.
     pub fn is_pie(&self) -> bool {
         self.e_type == ET_DYN
     }
 }
 
-/// Validated 64-bit program header.
 #[derive(Debug, Clone, Copy)]
 pub struct Elf64Phdr {
-    /// Segment type
     pub p_type: u32,
-    /// Segment flags (PF_R, PF_W, PF_X)
     pub p_flags: u32,
-    /// Offset in file
     pub p_offset: u64,
-    /// Virtual address in memory
     pub p_vaddr: u64,
-    /// Physical address (unused in user space)
     pub p_paddr: u64,
-    /// Size in file
     pub p_filesz: u64,
-    /// Size in memory
     pub p_memsz: u64,
-    /// Alignment (must be power of 2)
     pub p_align: u64,
 }
 
 impl Elf64Phdr {
-    /// Parse a program header from raw bytes.
     pub fn parse(data: &[u8]) -> ElfResult<Self> {
         if data.len() < 56 {
             return Err(ElfError::BufferTooSmall);
@@ -409,63 +300,45 @@ impl Elf64Phdr {
         })
     }
 
-    /// Check if this is a loadable segment.
     pub fn is_load(&self) -> bool {
         self.p_type == PT_LOAD
     }
 
-    /// Check if segment is readable.
     pub fn is_readable(&self) -> bool {
         (self.p_flags & PF_R) != 0
     }
 
-    /// Check if segment is writable.
     pub fn is_writable(&self) -> bool {
         (self.p_flags & PF_W) != 0
     }
 
-    /// Check if segment is executable.
     pub fn is_executable(&self) -> bool {
         (self.p_flags & PF_X) != 0
     }
 
-    /// Calculate the end address (vaddr + memsz) with overflow checking.
     pub fn end_address(&self) -> ElfResult<u64> {
         self.p_vaddr
             .checked_add(self.p_memsz)
             .ok_or(ElfError::SegmentSizeOverflow)
     }
 
-    /// Calculate the file end offset (offset + filesz) with overflow checking.
     pub fn file_end(&self) -> ElfResult<u64> {
         self.p_offset
             .checked_add(self.p_filesz)
             .ok_or(ElfError::InvalidSegmentOffset)
     }
 
-    /// Get the page-aligned start address.
     pub fn aligned_start(&self) -> u64 {
         self.p_vaddr & !(PAGE_SIZE_4KB - 1)
     }
 
-    /// Get the page-aligned end address.
     pub fn aligned_end(&self) -> ElfResult<u64> {
         let end = self.end_address()?;
         Ok((end + PAGE_SIZE_4KB - 1) & !(PAGE_SIZE_4KB - 1))
     }
 }
 
-// =============================================================================
-// Validated Load Segment
-// =============================================================================
-
 /// A fully validated PT_LOAD segment ready for mapping.
-///
-/// This struct is created only after comprehensive validation, including:
-/// - Bounds checking within file
-/// - Address space validation
-/// - Alignment validation
-/// - Size validation
 #[derive(Debug, Clone, Copy, slopos_ostd::Zeroable)]
 #[repr(C)]
 pub struct ValidatedSegment {
@@ -473,20 +346,14 @@ pub struct ValidatedSegment {
     pub vaddr_start: u64,
     /// Page-aligned virtual address end
     pub vaddr_end: u64,
-    /// File offset for segment data
     pub file_offset: u64,
-    /// Size of data in file
     pub file_size: u64,
-    /// Original virtual address (before alignment)
     pub original_vaddr: u64,
-    /// Original memory size
     pub mem_size: u64,
-    /// Segment flags
     pub flags: u32,
 }
 
 impl ValidatedSegment {
-    /// All-zero sentinel suitable for filling uninitialised scratch.
     pub const ZERO: Self = Self {
         vaddr_start: 0,
         vaddr_end: 0,
@@ -497,24 +364,18 @@ impl ValidatedSegment {
         flags: 0,
     };
 
-    /// Calculate the total number of pages this segment requires.
     pub fn page_count(&self) -> u64 {
         (self.vaddr_end - self.vaddr_start) / PAGE_SIZE_4KB
     }
 
-    /// Check if this segment has a true overlap with another.
-    ///
-    /// Adjacent/contiguous segments are allowed (common ELF optimization).
-    /// Only truly overlapping segments (where one contains addresses inside another)
-    /// are considered invalid.
+    /// Whether this segment's interior intersects `other`'s; adjacent segments
+    /// are contiguous, not overlapping.
     pub fn has_conflicting_overlap(&self, other: &ValidatedSegment) -> bool {
         let self_start = self.original_vaddr;
         let self_end = self.original_vaddr.saturating_add(self.mem_size);
         let other_start = other.original_vaddr;
         let other_end = other.original_vaddr.saturating_add(other.mem_size);
 
-        // True overlap: one segment's interior intersects another's interior
-        // Adjacent segments (self_end == other_start) are NOT overlaps
         self_start < other_end
             && self_end > other_start
             && self_start != other_end
@@ -522,27 +383,16 @@ impl ValidatedSegment {
     }
 }
 
-// =============================================================================
-// ELF Validator
-// =============================================================================
-
-/// Comprehensive ELF validator and parser.
-///
-/// This validator performs all security checks on an ELF file before
-/// returning validated structures that are safe to use for loading.
+/// Performs every security check on an ELF file before returning structures
+/// that are safe to use for loading.
 pub struct ElfValidator<'a> {
-    /// Raw ELF file data
     data: &'a [u8],
-    /// Validated ELF header
     header: Elf64Header,
-    /// Base address for loading (for PIE/relocation)
     load_base: u64,
 }
 
 impl<'a> ElfValidator<'a> {
-    /// Create a new ELF validator for the given data.
-    ///
-    /// This immediately validates the ELF header.
+    /// Validates the ELF header immediately.
     pub fn new(data: &'a [u8]) -> ElfResult<Self> {
         let header = Elf64Header::parse(data)?;
         header.validate_phdr_table(data.len())?;
@@ -554,23 +404,19 @@ impl<'a> ElfValidator<'a> {
         })
     }
 
-    /// Set the load base address for PIE binaries.
     pub fn with_load_base(mut self, base: u64) -> Self {
         self.load_base = base;
         self
     }
 
-    /// Get the validated ELF header.
     pub fn header(&self) -> &Elf64Header {
         &self.header
     }
 
-    /// Parse and validate all PT_LOAD segments into a caller-provided slice.
+    /// Writes the validated PT_LOAD segments into `out` and returns the count.
     ///
-    /// Returns the number of segments written. `out` must have length
-    /// at least `MAX_LOAD_SEGMENTS`; the caller owns the backing
-    /// storage (typically a `KVec` on the heap) so a 896 B array
-    /// does not materialise on the caller's stack.
+    /// `out` must hold at least `MAX_LOAD_SEGMENTS`; the caller owns the
+    /// storage so the segment array never lands on the caller's stack.
     pub fn validate_load_segments_into(&self, out: &mut [ValidatedSegment]) -> ElfResult<usize> {
         if out.len() < MAX_LOAD_SEGMENTS {
             return Err(ElfError::TooManyLoadSegments);
@@ -622,12 +468,8 @@ impl<'a> ElfValidator<'a> {
         Ok(count)
     }
 
-    /// Test-only wrapper that returns a heap-allocated segment array.
-    /// Production code must use [`validate_load_segments_into`].
-    ///
-    /// The fixed-size 16-segment array is heap-allocated via
-    /// `KBox::zeroed` so the test caller's stack frame stays under the
-    /// per-function limit.
+    /// Test-only; production code uses [`validate_load_segments_into`]. The
+    /// array is heap-allocated so the caller's stack frame stays bounded.
     #[cfg(feature = "test-hooks")]
     pub fn validate_load_segments(
         &self,
@@ -641,13 +483,10 @@ impl<'a> ElfValidator<'a> {
         Ok((segments, count))
     }
 
-    /// Validate the entry point address.
-    ///
     /// The entry point must fall within one of the loaded segments.
     pub fn validate_entry_point(&self, segments: &[ValidatedSegment]) -> ElfResult<u64> {
         let entry = self.adjusted_entry_point();
 
-        // Entry point must be within a loaded segment
         let valid = segments
             .iter()
             .any(|seg| entry >= seg.vaddr_start && entry < seg.vaddr_end);
@@ -659,7 +498,6 @@ impl<'a> ElfValidator<'a> {
         Ok(entry)
     }
 
-    /// Get the entry point adjusted for load base.
     pub fn adjusted_entry_point(&self) -> u64 {
         if self.header.is_pie() {
             self.load_base.wrapping_add(self.header.e_entry)
@@ -668,7 +506,6 @@ impl<'a> ElfValidator<'a> {
         }
     }
 
-    /// Get a program header by index.
     fn get_program_header(&self, index: usize) -> ElfResult<Elf64Phdr> {
         if index >= self.header.e_phnum as usize {
             return Err(ElfError::InvalidPhdrOffset);
@@ -684,28 +521,22 @@ impl<'a> ElfValidator<'a> {
         Elf64Phdr::parse(&self.data[offset..end])
     }
 
-    /// Validate a single segment comprehensively.
     fn validate_segment(&self, phdr: &Elf64Phdr) -> ElfResult<ValidatedSegment> {
-        // 1. Validate file bounds: p_offset + p_filesz must fit in file
         let file_end = phdr.file_end()?;
         if file_end > self.data.len() as u64 {
             return Err(ElfError::InvalidSegmentOffset);
         }
 
-        // 2. Validate sizes: p_filesz <= p_memsz
         if phdr.p_filesz > phdr.p_memsz {
             return Err(ElfError::FileSizeExceedsMemSize);
         }
 
-        // 3. Validate memory bounds: vaddr + memsz must not overflow
         let vaddr_end = phdr.end_address()?;
 
-        // 4. Validate alignment (if non-zero, must be power of 2)
         if phdr.p_align != 0 && !phdr.p_align.is_power_of_two() {
             return Err(ElfError::InvalidAlignment);
         }
 
-        // 5. Calculate actual addresses (apply load base for PIE)
         let vaddr = if self.header.is_pie() {
             self.load_base.wrapping_add(phdr.p_vaddr)
         } else {
@@ -718,22 +549,17 @@ impl<'a> ElfValidator<'a> {
             vaddr_end
         };
 
-        // 6. Validate address space: must be in user space
-        // Check for kernel address space (high canonical addresses)
         if vaddr >= KERNEL_SPACE_START_VA || mem_end > KERNEL_SPACE_START_VA {
             return Err(ElfError::KernelAddressViolation);
         }
 
-        // Check user space bounds
         if vaddr < USER_SPACE_START_VA || mem_end > USER_SPACE_END_VA {
             return Err(ElfError::AddressOutOfBounds);
         }
 
-        // 7. Calculate page-aligned boundaries
         let aligned_start = vaddr & !(PAGE_SIZE_4KB - 1);
         let aligned_end = (mem_end + PAGE_SIZE_4KB - 1) & !(PAGE_SIZE_4KB - 1);
 
-        // Ensure alignment didn't cause overflow
         if aligned_end < aligned_start {
             return Err(ElfError::SegmentSizeOverflow);
         }
@@ -749,17 +575,14 @@ impl<'a> ElfValidator<'a> {
         })
     }
 
-    /// Get raw access to the file data for a segment.
-    ///
-    /// Returns the slice of file data corresponding to the segment's file content.
-    /// This has already been bounds-checked during validation.
+    /// File bytes backing `segment`; the range was bounds-checked during
+    /// validation.
     pub fn segment_data(&self, segment: &ValidatedSegment) -> &[u8] {
         let start = segment.file_offset as usize;
         let end = start + segment.file_size as usize;
         &self.data[start..end]
     }
 
-    /// Check if the ELF requires a dynamic interpreter (PT_INTERP).
     pub fn has_interpreter(&self) -> ElfResult<bool> {
         for i in 0..self.header.e_phnum as usize {
             let phdr = self.get_program_header(i)?;
@@ -770,9 +593,7 @@ impl<'a> ElfValidator<'a> {
         Ok(false)
     }
 
-    /// Find the optional PT_TLS segment.
-    ///
-    /// Returns `(p_vaddr, p_filesz, p_memsz, p_align)` when present.
+    /// Returns PT_TLS's `(p_vaddr, p_filesz, p_memsz, p_align)` when present.
     pub fn find_tls_segment(&self) -> ElfResult<Option<(u64, u64, u64, u64)>> {
         let Some(phdr) = self.find_tls_program_header()? else {
             return Ok(None);
@@ -801,29 +622,20 @@ impl<'a> ElfValidator<'a> {
     }
 }
 
-// =============================================================================
-// ELF Exec Info (metadata for auxiliary vector)
-// =============================================================================
-
 /// Metadata collected during ELF loading, used to populate the auxiliary vector
 /// on the user stack.
 #[derive(Debug, Clone, Copy)]
 pub struct ElfExecInfo {
-    /// User-space entry point address.
     pub entry: u64,
-    /// User-space address where program headers are mapped (or 0 if not mapped).
+    /// User-space address where program headers are mapped, or 0 if not mapped.
     pub phdr_addr: u64,
-    /// Size of each program header entry.
     pub phent_size: u16,
-    /// Number of program headers.
     pub phnum: u16,
-    /// Size of initialized TLS template (.tdata).
+    /// Size of the initialized TLS template (.tdata).
     pub tls_filesz: u64,
     /// Total static TLS size (.tdata + .tbss).
     pub tls_memsz: u64,
-    /// TLS alignment requirement from PT_TLS.
     pub tls_align: u64,
-    /// TLS template virtual address from PT_TLS.
     pub tls_vaddr: u64,
     /// Thread pointer (TCB address) to load into FS base.
     pub tls_tp: u64,

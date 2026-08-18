@@ -2,7 +2,7 @@ use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
 use slopos_ostd::cpu::x86_64::xsave;
 use slopos_ostd::task::{FpuState, XSTATE_RESERVED_OFFSET};
 use slopos_ostd::test_support::cpu_state;
-use slopos_ostd::{klog_info, KBox};
+use slopos_ostd::{KBox, klog_info};
 
 use crate::TestResult;
 use crate::{fail, pass};
@@ -36,11 +36,8 @@ fn fpu_xmm_roundtrip_b() -> TestResult {
 /// A ring-0 `#GP` from `XRSTOR64` is recovered, not fatal.
 ///
 /// A non-zero byte in the XSTATE header's reserved tail faults in both the
-/// standard and the compacted form, so the fault does not depend on which
-/// XSAVE features the CPU implements — unlike `XCOMP_BV`'s format bit, which a
-/// CPU with XSAVEC accepts as a request for the compacted layout. That makes
-/// this a real test of the fixup even if the validation rules change. The
-/// machine still running afterwards is the assertion.
+/// standard and the compacted form, unlike `XCOMP_BV`'s format bit, so the
+/// fault does not depend on which XSAVE features the CPU implements.
 fn fpu_xrstor_gp_is_recovered() -> TestResult {
     let Ok(mut saved) = KBox::try_init(FpuState::init_zero()) else {
         return fail!("could not allocate the live-state snapshot");

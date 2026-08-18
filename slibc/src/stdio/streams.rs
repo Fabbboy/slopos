@@ -1,19 +1,11 @@
 //! Standard streams — stdin, stdout, stderr.
-//!
-//! Three portals into the Wheel of Fate, each carrying bytes to or from
-//! the kernel's divine judgement.
 
 use super::{BufferMode, FILE, FILE_FLAG_LINKED, FILE_FLAG_READABLE, FILE_FLAG_WRITABLE, registry};
-
-// ---------------------------------------------------------------------------
-// Static FILE objects
-// ---------------------------------------------------------------------------
 
 static mut STDIN_FILE: FILE = FILE::new_const(0, BufferMode::Line, FILE_FLAG_READABLE);
 static mut STDOUT_FILE: FILE = FILE::new_const(1, BufferMode::Line, FILE_FLAG_WRITABLE);
 static mut STDERR_FILE: FILE = FILE::new_const(2, BufferMode::None, FILE_FLAG_WRITABLE);
 
-/// Pointer to the standard input stream.
 #[unsafe(no_mangle)]
 pub static mut stdin: *mut FILE = &raw mut STDIN_FILE;
 
@@ -22,10 +14,6 @@ pub static mut stdout: *mut FILE = &raw mut STDOUT_FILE;
 
 #[unsafe(no_mangle)]
 pub static mut stderr: *mut FILE = &raw mut STDERR_FILE;
-
-// ---------------------------------------------------------------------------
-// Initialization
-// ---------------------------------------------------------------------------
 
 /// Clear a standard stream's buffer state and flags, preserving its place on
 /// the open-stream list. Dropping `FILE_FLAG_LINKED` here would re-link an
@@ -64,23 +52,16 @@ pub fn stdio_init() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Internal stream access helpers
-// ---------------------------------------------------------------------------
-
-/// Get a pointer to the static stdout FILE object.
 #[inline]
 pub fn stdout_file() -> *mut FILE {
     &raw mut STDOUT_FILE
 }
 
-/// Get a pointer to the static stderr FILE object.
 #[inline]
 pub fn stderr_file() -> *mut FILE {
     &raw mut STDERR_FILE
 }
 
-/// Get a pointer to the static stdin FILE object.
 #[inline]
 pub fn stdin_file() -> *mut FILE {
     &raw mut STDIN_FILE

@@ -1,14 +1,7 @@
-//! Modern memory-management / address-space surface.
+//! Address-space surface: typed CR3 primitives, per-CPU ASID pools, the TLB
+//! shootdown backend, lazy unmap flush, PCID errata gating and KPTI.
 //!
-//! Every CR3 write in the kernel funnels through
-//! [`cr3::write_cr3_value`]. The module owns:
-//!
-//!   - typed CR3 primitives (`Cr3Value`, `Pcid`, `MmContextId`)
-//!   - per-CPU ASID pools (Linux-style 16-slot dance) — [`asid`]
-//!   - TLB shootdown backend (`trait ShootdownBackend`) — [`rar`]
-//!   - Lazy Unmap Flush (LUF): the local half of an unmap — [`luf`]
-//!   - CPU errata gating (PCID blacklist) — [`errata`]
-//!   - KPTI dual-PML4 scaffolding — [`kpti`]
+//! Every CR3 write in the kernel funnels through [`cr3::write_cr3_value`].
 
 pub mod asid;
 pub mod cr3;

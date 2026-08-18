@@ -23,8 +23,8 @@ static X2APIC_AVAILABLE: InitFlag = InitFlag::new();
 static APIC_ENABLED: InitFlag = InitFlag::new();
 static APIC_BASE_PHYSICAL: AtomicU64 = AtomicU64::new(0);
 
-/// MMIO region for Local APIC registers.
-/// Initialized once during detect() and used for all register access.
+/// Mapped once during `detect()` and never re-mapped; a runtime APIC-base
+/// change therefore needs a re-initialization.
 static APIC_REGS: OnceLock<MmioRegion> = OnceLock::new();
 
 pub fn detect() -> bool {
@@ -227,9 +227,8 @@ pub fn timer_stop() {
     republish_timer_armed(false);
 }
 
-/// Publish whether this CPU still receives periodic timer interrupts.
-/// `counting` is the caller's knowledge of the initial count; the LVT
-/// supplies the rest.
+/// `counting` is the caller's knowledge of the initial count; the LVT supplies
+/// the rest.
 fn republish_timer_armed(counting: bool) {
     let lvt = read_register(LAPIC_LVT_TIMER);
     let ticking = counting && (lvt & LAPIC_TIMER_PERIODIC) != 0 && (lvt & LAPIC_LVT_MASKED) == 0;
@@ -265,15 +264,9 @@ fn send_ipi_raw(icr_high: u32, icr_low: u32) {
     if !is_available() || !is_enabled() {
         return;
     }
-    // The ICR_HIGH/ICR_LOW write pair must be atomic against IRQ handlers
-    // on this CPU that also send IPIs (scheduler reschedule wakes, other
-    // TLB shootdowns): an interrupting sender between our two writes
-    // overwrites ICR_HIGH, redirecting our IPI to ITS destination — the
-    // intended target never receives it. Observed live as a TLB-shootdown
-    // initiator spinning forever on an ack from a CPU whose IPI had been
-    // redirected (the target's request stayed queued, ack stayed false,
-    // every LAPIC IRR empty). Linux requires IRQs disabled around the
-    // xAPIC ICR sequence for exactly this reason.
+    // The ICR_HIGH/ICR_LOW write pair must be atomic against IRQ handlers on
+    // this CPU that also send IPIs: an interrupting sender between the two
+    // writes overwrites ICR_HIGH, redirecting this IPI to ITS destination.
     let irq_flags = slopos_ostd::cpu::x86_64::interrupts::save_flags_cli();
     wait_icr_idle();
     write_register(LAPIC_ICR_HIGH, icr_high);
@@ -312,8 +305,6 @@ pub fn set_base_address(base: u64) {
     cpu::write_msr(Msr::APIC_BASE, apic_base_msr);
 
     APIC_BASE_PHYSICAL.store(masked_base, Ordering::Relaxed);
-    // Note: APIC_REGS is initialized once during detect() and cannot be updated.
-    // Changing the APIC base address at runtime requires re-initialization.
     klog_info!(
         "APIC: Base address changed to 0x{:x} - restart required for new mapping",
         masked_base
@@ -393,13 +384,10 @@ pub fn send_ipi_to_cpu(target_apic_id: u32, vector: u8) {
     send_ipi_raw(target_apic_id << 24, fixed_ipi_flags(vector as u32));
 }
 
-/// Send a Non-Maskable Interrupt to a specific CPU via the LAPIC ICR.
-///
 /// Used by the NMI watchdog to interrupt a CPU that appears stuck with
 /// interrupts disabled (e.g. deadlocked spinlock).
 pub fn send_nmi_to(target_apic_id: u32) {
-    // ICR format: delivery mode NMI (0b100 << 8), level assert, edge trigger,
-    // physical destination.  No vector is needed for NMI delivery.
+    // NMI delivery carries no vector.
     const ICR_DELIVERY_NMI: u32 = 0b100 << 8;
     let icr_low = ICR_DELIVERY_NMI
         | LAPIC_ICR_DEST_PHYSICAL
@@ -408,14 +396,10 @@ pub fn send_nmi_to(target_apic_id: u32) {
     send_ipi_raw(target_apic_id << 24, icr_low);
 }
 
-/// Broadcast a Non-Maskable Interrupt to all OTHER CPUs in one ICR write.
-///
-/// The Reliable Abort Core's stop-the-world: when a CPU wins the fatal-panic
-/// election it NMIs every peer so they stop touching the console and release
-/// their locks before it prints. NMI (not the maskable halt IPI) is required
-/// because a wedged peer may be spinning with `IF=0` (e.g. inside a TLB
-/// `wait_for_acks`), and only an NMI pierces that. Mirrors Linux
-/// `crash_smp_send_stop` / FreeBSD `stop_cpus_hard`.
+/// The Reliable Abort Core's stop-the-world: the CPU that wins the fatal-panic
+/// election NMIs every peer so they release their locks before it prints. NMI
+/// rather than the maskable halt IPI, because a wedged peer may be spinning with
+/// `IF=0` (e.g. inside a TLB `wait_for_acks`) and only an NMI pierces that.
 pub fn send_nmi_all_excluding_self() {
     const ICR_DELIVERY_NMI: u32 = 0b100 << 8;
     send_ipi_raw(

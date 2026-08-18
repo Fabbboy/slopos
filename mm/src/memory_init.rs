@@ -91,11 +91,9 @@ static FRAMEBUFFER_RESERVATION: SpinLock<Option<FramebufferReservation>> = SpinL
     lock_class!("FRAMEBUFFER_RESERVATION", LOCK_LEVEL_RESOURCE),
 );
 
-/// Plumbing for the pre-typestate / post-typestate boot-step split. The
-/// pre step receives `memmap` and `hhdm_offset` from Limine; the post
-/// step needs them again for `map_acpi_regions`. Stored as a raw
-/// integer so the pointer is `Send + Sync`-clean for static storage —
-/// reconstructed via `as *const _` in the post step.
+/// Carries the pre-typestate step's Limine arguments across to the
+/// post-typestate step. `memmap_ptr` is a `usize` so the static is `Send +
+/// Sync`.
 struct MemoryInitCtx {
     memmap_ptr: usize,
     hhdm_offset: u64,
@@ -108,11 +106,8 @@ fn framebuffer_reservation() -> Option<FramebufferReservation> {
 }
 
 fn configure_region_store(memmap: *const LimineMemmapResponse) {
-    // The reservation store now embeds its 4096-slot array directly inside
-    // a SpinLock; capacity is fixed at the type level. Iterating the
-    // memmap purely to derive a planning estimate would only be a logging
-    // exercise — emit an informational warning if the entry count would
-    // have overflowed the legacy estimate, then reset.
+    // The store's capacity is fixed at the type level, so the entry count only
+    // ever feeds a warning.
     let entry_count = limine_memmap_iter(memmap).count();
     if entry_count > BOOT_REGION_STATIC_CAP {
         klog_info!(
@@ -189,11 +184,9 @@ fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
 
 fn compute_memory_stats(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
     let _ = memmap;
-    // Gather snapshots from the region store (REGION_STORE lock, same
-    // LOCK_LEVEL_RESOURCE as INIT_STATS) BEFORE acquiring INIT_STATS.
-    // Holding INIT_STATS while calling mm_region_* would nest two
-    // same-level locks, which OSTD's lock-tracking walker treats as
-    // an AB-BA deadlock risk.
+    // Snapshot the region store before acquiring INIT_STATS: both locks are
+    // LOCK_LEVEL_RESOURCE, and nesting two same-level locks is an AB-BA risk
+    // the lock walker rejects.
     let memory_regions_count = mm_region_count();
     let available_memory_bytes = mm_region_total_bytes(MmRegionKind::Usable);
     let tracked_page_frames = if available_memory_bytes == 0 {
@@ -275,19 +268,12 @@ fn record_kernel_core_reservations() {
     );
 }
 
-/// Make every ACPI-reclaimable region reachable through the HHDM, so
-/// the table parsers can read them. Limine revision 3 no longer maps
-/// these regions itself.
-///
-/// The pages are firmware memory, not allocator memory: the reservation
-/// store keeps them out of the buddy, and a leaf that owned one would
-/// hand ACPI tables back to the allocator the day something unmapped
-/// it. They go in through the no-ownership entry point for that reason.
-///
-/// A VA that already resolves is left exactly as it is. Re-installing
-/// an identical translation would mean demoting whatever huge leaf
-/// currently covers it, which costs page tables to change nothing, and
-/// the cursor refuses to overwrite a present leaf in any case.
+/// Limine revision 3 no longer maps ACPI-reclaimable regions itself, so the
+/// table parsers need them brought into the HHDM here. They go in through the
+/// no-ownership entry point: an owning leaf would hand firmware memory back to
+/// the buddy the day something unmapped it. A VA that already resolves is left
+/// alone — re-installing an identical translation would demote whatever huge
+/// leaf covers it for nothing.
 fn map_acpi_regions(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
     if memmap.is_null() {
         return;
@@ -543,20 +529,9 @@ fn display_memory_summary() {
     klog_info!("HHDM Offset:           0x{:x}", stats.hhdm_offset);
     klog_info!("=====================================================");
 }
-/// Pre-typestate half of memory init. Runs at memory-phase
-/// priority 2 — before `META_SLOTS` is installed and before the
-/// OSTD `FrameAlloc` shim is registered.
-///
-/// On success: HHDM is live, the memmap is parsed into the region
-/// store, the buddy allocator is up, the kernel-master PML4 is
-/// re-published into `KERNEL_PML4_PHYS`, and PAT is programmed. The
-/// `memmap` and `hhdm_offset` arguments are stashed in
-/// `MEMORY_INIT_CTX` so the post-typestate half can reach them
-/// without re-plumbing through the boot-step API.
-///
-/// After this returns, `META_SLOTS` install and `register_with_ostd`
-/// run (priorities 5 and 6) so the typestate `Frame::<KernelMeta>`
-/// alloc path is live before any caller in the post step touches it.
+/// Runs at memory-phase priority 2, before `META_SLOTS` is installed (5) and
+/// the OSTD `FrameAlloc` shim is registered (6), so nothing here may use the
+/// typestate `Frame<_>` alloc path.
 pub fn init_memory_system_pre_typestate(
     memmap: *const LimineMemmapResponse,
     hhdm_offset: u64,
@@ -572,7 +547,6 @@ pub fn init_memory_system_pre_typestate(
         height: info.height as u64,
     });
 
-    // Initialize the unified HHDM module (single source of truth)
     if hhdm_available {
         crate::hhdm::init(hhdm_offset);
         if hhdm_offset != HHDM_VIRT_BASE {
@@ -608,10 +582,6 @@ pub fn init_memory_system_pre_typestate(
 
     EARLY_PAGING_INIT.mark_set();
 
-    // Drive the buddy allocator's lifecycle:
-    //   Uninit → Sized: install the boot-allocated frame descriptor table.
-    //   Sized  → Seeded: seed the free-lists from the recorded memory map.
-    //   Seeded → Live: enable per-CPU page caches for the order-0 fast path.
     BUDDY_ALLOCATOR.install_descriptor_table(
         allocator_plan.buffer as *mut u8,
         allocator_plan.capacity_frames,
@@ -630,13 +600,9 @@ pub fn init_memory_system_pre_typestate(
     0
 }
 
-/// Post-typestate half of memory init. Runs at memory-phase
-/// priority 10 — after `META_SLOTS` is installed (priority 5) and
-/// the OSTD `FrameAlloc` shim is registered (priority 6).
-///
-/// On entry the buddy allocator and the typestate `Frame<_>` API are
-/// both live, so every page allocation made here goes through
-/// `Frame::<KernelMeta>::alloc` rather than the raw bootstrap path.
+/// Runs at memory-phase priority 10, after `META_SLOTS` (5) and the OSTD
+/// `FrameAlloc` shim (6), so allocations here take the typestate
+/// `Frame::<KernelMeta>::alloc` path rather than the bootstrap one.
 pub fn init_memory_system_post_typestate<'brand>(token: &BspToken<'brand>) -> c_int {
     let ctx = MEMORY_INIT_CTX
         .get()
@@ -644,29 +610,18 @@ pub fn init_memory_system_post_typestate<'brand>(token: &BspToken<'brand>) -> c_
     let memmap = ctx.memmap_ptr as *const LimineMemmapResponse;
     let hhdm_offset = ctx.hhdm_offset;
 
-    // Map ACPI reclaimable regions into HHDM so drivers can parse ACPI tables
-    // This is required for Limine revision 3 which no longer maps these regions
     map_acpi_regions(memmap, hhdm_offset);
 
-    // Bring up the kernel slab: state-machine transition to `Live`,
-    // register the slab as OSTD's `KernelHeapBackend` so every global
-    // allocation routes through `KERNEL_SLAB`, run the soft-reboot
-    // coherency warmup (load-bearing for framebuffer perf after PS/2
-    // soft reset — see the comment block in `mm/src/slab/mod.rs`).
     crate::slab::init_kernel_slab(token);
     crate::global_allocator_use_kernel_slab(token);
     crate::slab::warmup_for_soft_reboot();
 
-    // Kernel-stack and SafeStack data-stack VA allocators — must come after
-    // paging + heap so each region's `SpinLock` is usable and paging
-    // primitives can be called.  Backs all task stacks via the
-    // generic `TaskStack<R>` handle in `core::scheduler::task_stack`.
+    // Must come after paging and the heap: each region's `SpinLock` and the
+    // paging primitives have to be usable.
     crate::stack_va::init::<crate::stack_region::KstackRegion>();
     crate::stack_va::init::<crate::stack_region::UstackRegion>();
-    // Arm the per-CPU magazine fast path. Safe to do here: each
-    // `SlabAllocator<SIZE>` owns its own lock, so magazine re-entry
-    // is bounded to a single size class and `IrqPreemptGuard` pins
-    // the CPU for the duration of every push/pop.
+    // Safe here: each `SlabAllocator<SIZE>` owns its own lock, so magazine
+    // re-entry is bounded to a single size class.
     crate::slab::enable_heap_caches();
 
     if init_process_vm() != 0 {

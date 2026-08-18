@@ -39,10 +39,8 @@ impl core::fmt::Display for Verbosity {
     }
 }
 
-/// Test-harness runtime configuration.
-///
-/// Globs are stored owned (`KVec<u8>`) so the parsing path can synthesise
-/// patterns (e.g. `tests.suite=foo` → `*foo*`) without juggling lifetimes.
+/// Test-harness runtime configuration. Globs are stored owned so the parsing
+/// path can synthesise patterns without juggling lifetimes.
 #[derive(Clone, Debug, Default)]
 pub struct TestConfig {
     pub enabled: bool,
@@ -61,7 +59,6 @@ impl Default for Verbosity {
 }
 
 impl TestConfig {
-    /// True iff `name` should run under the current filter.
     pub fn passes_filter(&self, name: &[u8]) -> bool {
         let run_match = self.run_globs.is_empty()
             || self
@@ -173,9 +170,8 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
     cfg
 }
 
-/// Translate `tests.suite=foo` into the glob `*foo*` so that any test
-/// fully-qualified name containing `foo` is admitted. Kept as a
-/// convenience alias for the more general `tests.run=` form.
+/// Translate `tests.suite=foo` into `*foo*`, a convenience alias for the more
+/// general `tests.run=` form.
 fn push_suite_glob(target: &mut KVec<KVec<u8>>, suite: &str) {
     let mut owned = KVec::<u8>::new();
     if owned.push(b'*').is_err() {

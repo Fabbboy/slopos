@@ -4,17 +4,17 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use slopos_ostd::klog_info;
-use slopos_ostd::sync::StateFlag;
 #[cfg(feature = "tests")]
 use slopos_ostd::KVec;
+use slopos_ostd::klog_info;
+use slopos_ostd::sync::StateFlag;
 
 use crate::config::TestConfig;
 
 #[cfg(feature = "tests")]
 use crate::config::Verbosity;
 #[cfg(feature = "tests")]
-use crate::registry::{registry_sorted, TestDesc, TestKind};
+use crate::registry::{TestDesc, TestKind, registry_sorted};
 #[cfg(feature = "tests")]
 use crate::result::TestResult;
 
@@ -261,11 +261,7 @@ fn run_phase(
         summary.over_time,
     );
 
-    if bailed || summary.failed > 0 {
-        -1
-    } else {
-        0
-    }
+    if bailed || summary.failed > 0 { -1 } else { 0 }
 }
 
 #[cfg(feature = "tests")]
@@ -286,8 +282,6 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
         raw_outcome = (desc.run)();
         let t1 = slopos_arch::tsc::rdtsc();
         time_ms = measure_elapsed_ms(t0, t1);
-        // Userland thunks run in `/sbin/init`'s syscall context on any CPU, so
-        // their klog lands in that CPU's ring rather than CPU 0's.
         log_cpu = crate::capture::current_cpu();
         truncated = crate::capture::truncated_bytes();
     }

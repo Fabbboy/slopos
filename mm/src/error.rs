@@ -1,21 +1,13 @@
-//! Unified error types for the memory management subsystem.
-//!
-//! This module consolidates error types that were previously scattered across
-//! `paging/error.rs`, `cow.rs`, and `demand.rs`. Those modules had significant
-//! variant overlap (AllocationFailed, MappingFailed, InvalidAddress, NoAddressSpace
-//! appeared in 2-3 of them).
-//!
-//! Domain-specific error types (`ElfError`, `UserPtrError`) remain in their own
-//! modules — they have no overlapping variants and are well-contained.
+//! Unified error type for the memory management subsystem. `ElfError` and
+//! `UserPtrError` stay in their own modules; they share no variants with this
+//! one.
 
 use crate::paging::page_table_defs::PageTableLevel;
 use core::fmt;
 
-/// Unified memory management error.
-///
-/// Covers paging, copy-on-write, demand paging, and general VM operations.
-/// Variants are organized by the subsystem that typically produces them,
-/// but any MM operation may return any variant.
+/// Covers paging, copy-on-write, demand paging and general VM operations;
+/// variants are grouped by producing subsystem, but any MM operation may
+/// return any of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MmError {
     NoMemory,
@@ -69,5 +61,4 @@ impl fmt::Display for MmError {
     }
 }
 
-/// Convenience result type for memory management operations.
 pub type MmResult<T = ()> = Result<T, MmError>;

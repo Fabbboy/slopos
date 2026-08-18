@@ -43,7 +43,6 @@ fn hdr(flags: u8, seq: u32, ack: u32) -> TcpHeader {
     }
 }
 
-/// Valid final ACK transitions SynRecv → Data.
 pub fn test_syn_recv_valid_ack_transitions_to_data() -> TestResult {
     let mut pcb = make_pcb();
     let actions =
@@ -64,7 +63,6 @@ pub fn test_syn_recv_valid_ack_transitions_to_data() -> TestResult {
     pass!()
 }
 
-/// ACK below snd_una triggers RST.
 pub fn test_syn_recv_bad_low_ack_triggers_rst() -> TestResult {
     let mut pcb = make_pcb();
     // snd_una starts at iss; any ack_num < iss is out of range.
@@ -77,7 +75,6 @@ pub fn test_syn_recv_bad_low_ack_triggers_rst() -> TestResult {
     pass!()
 }
 
-/// ACK above snd_nxt triggers RST.
 pub fn test_syn_recv_bad_high_ack_triggers_rst() -> TestResult {
     let mut pcb = make_pcb();
     let actions = SynRecvState::on_segment(
@@ -89,10 +86,9 @@ pub fn test_syn_recv_bad_high_ack_triggers_rst() -> TestResult {
     pass!()
 }
 
-/// RST releases the PCB and sets RESET_RECEIVED (RFC 5961: must be in window).
+/// Per RFC 5961 the RST is accepted only in window; `rcv_nxt` is `PEER_IRS + 1`.
 pub fn test_syn_recv_rst_releases_pcb() -> TestResult {
     let mut pcb = make_pcb();
-    // rcv_nxt = PEER_IRS + 1 after handshake; RST must be in-window.
     let actions = SynRecvState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, PEER_IRS + 1, 0), 0);
     assert_test!(actions.release, "release");
     assert_test!(
@@ -102,7 +98,6 @@ pub fn test_syn_recv_rst_releases_pcb() -> TestResult {
     pass!()
 }
 
-/// Non-ACK segment (bare SYN) is dropped silently.
 pub fn test_syn_recv_bare_syn_dropped() -> TestResult {
     let mut pcb = make_pcb();
     let actions = SynRecvState::on_segment(&mut pcb, &hdr(TCP_FLAG_SYN, 0, 0), 0);
@@ -111,7 +106,6 @@ pub fn test_syn_recv_bare_syn_dropped() -> TestResult {
     pass!()
 }
 
-/// Bare FIN is likewise dropped.
 pub fn test_syn_recv_bare_fin_dropped() -> TestResult {
     let mut pcb = make_pcb();
     let actions = SynRecvState::on_segment(&mut pcb, &hdr(TCP_FLAG_FIN, 0, 0), 0);

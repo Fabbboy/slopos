@@ -1,117 +1,64 @@
 //! Page table flags and paging constants.
-//!
-//! This module provides type-safe bitflags for x86_64 page table entries
-//! and related paging constants like page sizes.
 
 use bitflags::bitflags;
 
 bitflags! {
     /// x86_64 page table entry flags.
-    ///
-    /// These flags control page permissions, caching behavior, and
-    /// hardware-maintained access/dirty bits. Combine with `|` operator.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use slopos_mm::paging_defs::PageFlags;
-    ///
-    /// let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER;
-    /// let pte = phys_addr | flags.bits();
-    ///
-    /// if flags.contains(PageFlags::USER) {
-    ///     // User-accessible page
-    /// }
-    /// ```
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct PageFlags: u64 {
-        /// Page is present in memory (bit 0).
         const PRESENT       = 1 << 0;
-        /// Page is writable (otherwise read-only) (bit 1).
         const WRITABLE      = 1 << 1;
-        /// Page is accessible from user mode (ring 3) (bit 2).
+        /// Accessible from ring 3.
         const USER          = 1 << 2;
-        /// Write-through caching (vs write-back) (bit 3).
+        /// Write-through caching rather than write-back.
         const WRITE_THROUGH = 1 << 3;
-        /// Disable caching for this page (bit 4).
         const CACHE_DISABLE = 1 << 4;
-        /// Set by hardware when page is accessed (bit 5).
+        /// Set by hardware on access.
         const ACCESSED      = 1 << 5;
-        /// Set by hardware when page is written (bit 6).
+        /// Set by hardware on write.
         const DIRTY         = 1 << 6;
-        /// Page is 2MB (PDE) or 1GB (PDPTE) huge page (bit 7).
+        /// 2MB in a PDE, 1GB in a PDPTE.
         const HUGE          = 1 << 7;
-        /// Page is global (not flushed on CR3 change) (bit 8).
+        /// Not flushed on a CR3 change.
         const GLOBAL        = 1 << 8;
-        /// Disable instruction fetch from this page (bit 63).
-        /// Requires NX bit enabled in EFER MSR.
+        /// Requires the NX bit enabled in the EFER MSR.
         const NO_EXECUTE    = 1 << 63;
 
-        // =====================================================================
-        // Software-defined flags (bits 9-11 are available for OS use)
-        // =====================================================================
-
-        /// Copy-on-Write marker (bit 9).
-        /// When set with !WRITABLE, a write fault triggers COW resolution.
+        /// Copy-on-Write marker; with `!WRITABLE` a write fault triggers COW
+        /// resolution.
         const COW           = 1 << 9;
 
-        // =====================================================================
-        // Convenience Combinations
-        // =====================================================================
-
-        /// Kernel read-write page (PRESENT | WRITABLE).
         const KERNEL_RW = Self::PRESENT.bits() | Self::WRITABLE.bits();
-        /// Kernel read-only page (PRESENT only).
         const KERNEL_RO = Self::PRESENT.bits();
-        /// User read-write page (PRESENT | WRITABLE | USER).
         const USER_RW = Self::PRESENT.bits() | Self::WRITABLE.bits() | Self::USER.bits();
-        /// User read-only page (PRESENT | USER).
         const USER_RO = Self::PRESENT.bits() | Self::USER.bits();
-        /// Large kernel page (PRESENT | WRITABLE | HUGE).
         const LARGE_KERNEL_RW = Self::PRESENT.bits() | Self::WRITABLE.bits() | Self::HUGE.bits();
         const MMIO = Self::PRESENT.bits() | Self::WRITABLE.bits() | Self::CACHE_DISABLE.bits() | Self::NO_EXECUTE.bits();
     }
 }
 
 impl PageFlags {
-    /// Address mask for extracting physical frame address from PTE.
-    /// Bits 12-51 contain the 4KB-aligned physical address.
+    /// Bits 12-51 hold the 4KB-aligned physical address.
     pub const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-    /// Extract physical address from a page table entry.
     #[inline]
     pub const fn extract_address(pte: u64) -> u64 {
         pte & Self::ADDRESS_MASK
     }
 }
 
-// =============================================================================
-// Page Sizes
-// =============================================================================
-
-/// 4KB page size (standard).
 pub const PAGE_SIZE_4KB: u64 = 0x1000;
 
-/// 4KB page size as usize for array indexing and size calculations.
 pub const PAGE_SIZE_4KB_USIZE: usize = PAGE_SIZE_4KB as usize;
 
-/// 2MB page size (huge page via PDE).
 pub const PAGE_SIZE_2MB: u64 = 0x20_0000;
 
-/// 1GB page size (huge page via PDPTE).
 pub const PAGE_SIZE_1GB: u64 = 0x4000_0000;
 
-// =============================================================================
-// OSTD compatibility razors.
-//
-// Every `PageFlags::*` value here must match
-// `slopos_ostd::mm::page_table::PteFlags::*` exactly: the kernel-half
-// mapping helpers convert one to the other on every call, so a drifted
-// bit would round-trip a mapping into a different set of permissions
-// with nothing to notice. These compile-time asserts fire at build time
-// if the bitfield ever moves.
-// =============================================================================
-
+// Every `PageFlags::*` value must match `slopos_ostd::mm::page_table::PteFlags`
+// exactly: the kernel-half mapping helpers convert one to the other on every
+// call, so a drifted bit would round-trip a mapping into a different set of
+// permissions with nothing to notice.
 const _: () = {
     use slopos_ostd::mm::page_table::PteFlags;
     assert!(PageFlags::PRESENT.bits() == PteFlags::PRESENT.bits());
@@ -125,10 +72,8 @@ const _: () = {
     assert!(PageFlags::GLOBAL.bits() == PteFlags::GLOBAL.bits());
     assert!(PageFlags::NO_EXECUTE.bits() == PteFlags::NO_EXECUTE.bits());
     assert!(PageFlags::ADDRESS_MASK == PteFlags::ADDRESS_MASK);
-    // The slopos-side `COW` software bit lives at PTE bit 9, inside
-    // OSTD's `SOFTWARE_BITS_MASK` (bits 9..=11). Asserting the bit
-    // value pins the contract: slopos-mm uses bit 9 of `software` for
-    // its COW marker (see `mm::cow::SOFTWARE_COW_BIT`).
+    // Pins the contract that slopos-mm's COW marker is bit 9 of OSTD's
+    // software bits (9..=11); see `mm::cow::SOFTWARE_COW_BIT`.
     assert!(PageFlags::COW.bits() == 1 << 9);
     assert!(PageFlags::COW.bits() & PteFlags::SOFTWARE_BITS_MASK == PageFlags::COW.bits());
 };

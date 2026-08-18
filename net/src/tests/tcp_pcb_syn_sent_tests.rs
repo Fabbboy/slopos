@@ -43,8 +43,6 @@ fn hdr(flags: u8, seq: u32, ack: u32) -> TcpHeader {
     }
 }
 
-/// A valid SYN+ACK that acknowledges our SYN transitions to `Data`
-/// (Established) and emits a plain ACK.
 pub fn test_syn_sent_syn_ack_transitions_to_data() -> TestResult {
     let mut pcb = make_pcb();
     let peer_iss = 5_000u32;
@@ -70,8 +68,6 @@ pub fn test_syn_sent_syn_ack_transitions_to_data() -> TestResult {
     pass!()
 }
 
-/// Simultaneous open: SYN without ACK → transition to `SynRecv`,
-/// emit SYN+ACK.
 pub fn test_syn_sent_simultaneous_open() -> TestResult {
     let mut pcb = make_pcb();
     let actions = SynSentState::on_segment(&mut pcb, &hdr(TCP_FLAG_SYN, 3000, 0), &[], 0);
@@ -89,7 +85,6 @@ pub fn test_syn_sent_simultaneous_open() -> TestResult {
     pass!()
 }
 
-/// RST+ACK with a valid ACK releases the PCB and flags RESET_RECEIVED.
 pub fn test_syn_sent_rst_ack_refused() -> TestResult {
     let mut pcb = make_pcb();
     let actions = SynSentState::on_segment(
@@ -107,7 +102,6 @@ pub fn test_syn_sent_rst_ack_refused() -> TestResult {
     pass!()
 }
 
-/// RST alone (no ACK) is silently dropped.
 pub fn test_syn_sent_bare_rst_ignored() -> TestResult {
     let mut pcb = make_pcb();
     let actions = SynSentState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, 0, 0), &[], 0);
@@ -117,8 +111,6 @@ pub fn test_syn_sent_bare_rst_ignored() -> TestResult {
     pass!()
 }
 
-/// An ACK that does not cover our SYN is invalid; we reply with a
-/// bare RST seq = ack_num.
 pub fn test_syn_sent_bad_ack_triggers_rst() -> TestResult {
     let mut pcb = make_pcb();
     let actions = SynSentState::on_segment(&mut pcb, &hdr(TCP_FLAG_ACK, 0, OUR_ISS - 1), &[], 0);
@@ -133,7 +125,6 @@ pub fn test_syn_sent_bad_ack_triggers_rst() -> TestResult {
     pass!()
 }
 
-/// Bare FIN is neither a SYN, ACK, nor RST — should be dropped.
 pub fn test_syn_sent_bare_fin_ignored() -> TestResult {
     let mut pcb = make_pcb();
     let actions = SynSentState::on_segment(&mut pcb, &hdr(TCP_FLAG_FIN, 0, 0), &[], 0);
@@ -141,7 +132,6 @@ pub fn test_syn_sent_bare_fin_ignored() -> TestResult {
     pass!()
 }
 
-/// MSS option in SYN+ACK is reflected into the new `DataState.peer_mss`.
 pub fn test_syn_sent_parses_mss_from_syn_ack() -> TestResult {
     let mut pcb = make_pcb();
     // MSS = 1200
@@ -160,7 +150,6 @@ pub fn test_syn_sent_parses_mss_from_syn_ack() -> TestResult {
     pass!()
 }
 
-/// Window scale option in SYN+ACK is reflected into the new DataState.
 pub fn test_syn_sent_parses_wscale() -> TestResult {
     let mut pcb = make_pcb();
     // Window Scale = 3 (NOP + WScale to align to 4 bytes)

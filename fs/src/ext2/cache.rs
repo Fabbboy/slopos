@@ -8,24 +8,18 @@ use crate::blockdev::BlockDevice;
 
 const CACHE_ENTRIES: usize = 128;
 
-/// Whether a cached block holds file *data* or filesystem *metadata*
-/// (bitmaps, group descriptors, inode tables, directory blocks, indirect
-/// pointer blocks). The distinction drives ordered writeback: in the
-/// crash-consistency model the FS aims for (ext2 `data=ordered`), data blocks
-/// must reach stable storage *before* the metadata that references them, so a
-/// crash can never expose a freshly-allocated inode/dir-entry pointing at
-/// stale or uninitialised disk contents.
+/// Whether a cached block holds file *data* or filesystem *metadata*. The
+/// distinction drives ordered writeback (ext2 `data=ordered`): data blocks must
+/// reach stable storage *before* the metadata that references them, so a crash
+/// cannot expose a fresh inode or dir-entry pointing at stale contents.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum BlockKind {
     Data,
     Metadata,
 }
 
-/// One cache slot. The 4 KiB backing storage lives in
-/// `frame: Frame<PageCacheMeta>` (HHDM-mapped, returned to the buddy
-/// allocator when the slot drops). The dirty bit and the owner-key
-/// backref are stored on the frame's typed metadata. `pinned`, `lru`,
-/// `valid`, and `kind` are host-side bookkeeping.
+/// One cache slot; its 4 KiB of storage is the `frame`, whose typed metadata
+/// also carries the dirty bit and the owner-key backref.
 struct CacheEntry {
     block: BlockNum,
     frame: Frame<PageCacheMeta>,
@@ -52,30 +46,15 @@ impl CacheEntry {
 /// LRU-ordered, fixed-capacity, **write-back** block cache backed by
 /// [`Frame<PageCacheMeta>`] pages from the buddy allocator.
 ///
-/// # Lifecycle (gold-standard, persistent)
+/// One cache lives for the lifetime of the mount, owned by
+/// `ext2_vfs::CachedExt2` and borrowed `&mut` by the per-call
+/// [`super::Ext2Fs`] handle, so dirty blocks accumulate across operations and
+/// are written back lazily — on eviction, on [`Self::flush_all`], or by the
+/// background flusher.
 ///
-/// Unlike a per-operation scratch cache, one `BlockCache` is created at mount
-/// time and **lives for the lifetime of the mounted filesystem**, owned by the
-/// long-lived FS state (`ext2_vfs::CachedExt2`) and borrowed `&mut` by the
-/// thin, per-call [`super::Ext2Fs`] handle. This is what makes it a real
-/// buffer cache:
-///
-///   * dirty blocks accumulate across operations and are written back lazily
-///     (on eviction, on explicit [`Self::flush_all`]/sync, or by the
-///     background flusher) rather than synchronously per call;
-///   * reads hit warm blocks across calls instead of re-reading the device;
-///   * because the cache is never dropped, a forgotten flush can no longer
-///     *lose* data — the bytes remain authoritative in the cache until
-///     persisted. (The original data-loss bug was a *per-call* cache being
-///     dropped unflushed.)
-///
-/// # Durability
-///
-/// `write_at` only guarantees the device *accepted* the bytes; on a write-back
-/// device they may sit in a volatile cache. The FS issues
-/// [`BlockDevice::flush`] barriers around ordered phases (see
-/// `Ext2Fs::sync`). This cache never issues device flushes itself — it only
-/// tracks dirtiness and orders its own writeback passes by [`BlockKind`].
+/// This cache never issues device flushes itself: `write_at` only means the
+/// device accepted the bytes, and the barriers around ordered phases are
+/// `Ext2Fs::sync`'s.
 pub struct BlockCache {
     entries: KVec<CacheEntry>,
     index: KBTreeMap<BlockNum, usize>,
@@ -85,9 +64,8 @@ pub struct BlockCache {
 
 impl BlockCache {
     pub fn new(block_size: u32) -> Result<Self, Ext2Error> {
-        // Belt-and-braces: the slab callers already validate the
-        // block size, but a stray construction with a larger size
-        // would silently truncate sub-block reads.
+        // Callers validate this already, but a larger size would
+        // silently truncate sub-block reads.
         debug_assert!(block_size as usize <= EXT2_MAX_BLOCK_SIZE as usize);
 
         let mut entries = KVec::with_capacity(CACHE_ENTRIES).map_err(|_| Ext2Error::OutOfMemory)?;

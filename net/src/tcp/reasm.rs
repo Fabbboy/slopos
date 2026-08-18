@@ -102,13 +102,9 @@ impl Assembler {
 
     /// Consume contiguous coverage starting at `rcv_nxt`.
     ///
-    /// If the lowest interval starts at (or before) `rcv_nxt`, it is removed
-    /// and its length past `rcv_nxt` is returned.  The loop repeats for any
-    /// chained contiguous intervals (defensive — `insert` merges eagerly so
-    /// at most one interval should match).
-    ///
-    /// The caller is responsible for advancing `head`/`count` on the ring
-    /// buffer and updating `rcv_nxt`.
+    /// Returns the number of bytes past `rcv_nxt` now covered; the caller is
+    /// responsible for advancing `head`/`count` on the ring buffer and
+    /// updating `rcv_nxt`.
     pub fn drain_contiguous(&mut self, rcv_nxt: u32) -> usize {
         let mut total = 0usize;
         loop {
@@ -117,13 +113,10 @@ impl Assembler {
             }
             let (start, end) = self.ranges[0];
             let expected = rcv_nxt.wrapping_add(total as u32);
-            // Allow start <= expected (handles partial overlap / trimming).
             if seq_gt(start, expected) {
                 break;
             }
-            // Bytes contributed: from expected to end.
             if seq_le(end, expected) {
-                // Entirely below rcv_nxt — stale; just remove.
                 self.remove_first();
                 continue;
             }
@@ -148,13 +141,11 @@ impl Assembler {
         self.count = 0;
     }
 
-    /// Remove the first element and shift everything left.
     fn remove_first(&mut self) {
         if self.count == 0 {
             return;
         }
         self.count -= 1;
-        // Shift left to preserve sorted order.
         let mut i = 0;
         while i < self.count {
             self.ranges[i] = self.ranges[i + 1];

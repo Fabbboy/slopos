@@ -1,18 +1,14 @@
 //! KTAP-grammar emitter.
 //!
-//! Each emitted line is prefixed with the literal `KTAP\t` (an ASCII tab),
-//! so a host parser can tolerate kernel klog interleaving by simply
-//! ignoring lines that don't start with the prefix. Diagnostic YAML blocks
-//! are indented `KTAP\t  ` (two spaces after the tab).
+//! Every line carries the literal `KTAP\t` prefix so a host parser can ignore
+//! interleaved klog; diagnostic YAML blocks add two spaces after the tab.
 
 use slopos_ostd::klog_info;
 
 use crate::registry::TestDesc;
 use crate::result::TestResult;
 
-/// Truncate captured-log emission at this many bytes per failing test to
-/// keep serial output bounded; the host can re-run the test in `--raw`
-/// mode if it needs the full transcript.
+/// Per-failing-test cap on captured-log emission, to bound serial output.
 const MAX_LOG_EMIT: usize = 4096;
 
 pub fn emit_header(plan: u32) {
@@ -110,24 +106,14 @@ pub fn emit_bail(reason: &str) {
     klog_info!("KTAP\tBail out! {}", reason);
 }
 
-// =============================================================================
-// Nested subtest emit (Phase 3 utests)
-// =============================================================================
-//
-// Subtests are emitted *during* the parent utest's run, while the parent
-// `ok N - …`/`not ok N - …` line follows after `(desc.run)()` returns.
-// Result on the wire: subtest lines come *before* their parent line. The
-// host wrapper (Phase 4) treats subtests as siblings of the next-emitted
-// parent line. Two-space indent before `ok`/`not ok` keys the parser into
-// nested mode.
+// Subtest lines reach the wire *before* their parent's `ok`/`not ok` line; the
+// two-space indent is what keys the host parser into nested mode.
 
 /// Pass subtest line. `sub_idx` is the 1-based position within the parent.
 pub fn emit_subtest_ok(sub_idx: u32, name: &str) {
     klog_info!("KTAP\t  ok {} - {}", sub_idx, name);
 }
 
-/// Fail subtest line. `msg` is the optional diagnostic; empty strings are
-/// emitted without a `# …` suffix to keep the wire-format clean.
 pub fn emit_subtest_not_ok(sub_idx: u32, name: &str, msg: &str) {
     if msg.is_empty() {
         klog_info!("KTAP\t  not ok {} - {}", sub_idx, name);

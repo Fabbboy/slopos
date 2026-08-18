@@ -1,20 +1,8 @@
 //! `FileKind::Pidfd` file operations.
 //!
-//! A pidfd is an open file whose `handle: usize` *is* the target task id.
-//! It carries no per-open kernel state — it is a thin, pollable view of a
-//! task's exit status:
-//!
-//! - `poll_events` returns `POLLIN` once the target has exited (or is gone,
-//!   i.e. already reaped — which counts as exited).
-//! - `poll_wait` subscribes the calling task to the target's
-//!   `KernelEvent::ChildExit` — the *same* event the kernel publishes from
-//!   the task-exit path (`task_wake_all_waiters`) and that `waitpid` waits
-//!   on. No new kernel event, no new wakeup mechanism.
-//! - `read`/`write` are meaningless (`-EINVAL`); the exit status is reaped
-//!   with the existing `waitpid` syscall once the fd signals.
-//!
-//! Lifetime: lookup upgrades the task registry's weak handle. IDs are
-//! monotonic and never recycled, so an absent task is unambiguously dead.
+//! The open file's `handle: usize` *is* the target task id; a pidfd carries no
+//! per-open kernel state. Task ids are monotonic and never recycled, so an
+//! absent task is unambiguously dead.
 
 use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
@@ -28,9 +16,7 @@ pub struct PidfdFileOps;
 
 pub static PIDFD_FILE_OPS: PidfdFileOps = PidfdFileOps;
 
-/// `true` once the target task (by id) has exited, or is gone entirely.
 fn target_exited(task_id: u32) -> bool {
-    // A failed upgrade means the task was already destroyed — treat as exited.
     task_find_by_id(task_id)
         .map(|task| task.is_exited())
         .unwrap_or(true)
@@ -42,7 +28,7 @@ impl FileOps for PidfdFileOps {
     }
 
     fn read(&self, _handle: usize, _buf: &mut dyn IoBufWrite, _offset: u64, _flags: u32) -> isize {
-        // A pidfd is not readable (Linux semantics); reap with waitpid.
+        // Not readable, per Linux pidfd semantics; reap with waitpid.
         Errno::EINVAL.as_isize()
     }
 
@@ -51,9 +37,6 @@ impl FileOps for PidfdFileOps {
     }
 
     fn poll_wait(&self, handle: usize) -> bool {
-        // Register the calling task on the target's child-exit queue — the
-        // exact register-then-recheck shape poll(2) / OP_POLL_ADD expect
-        // (the default `poll_fused` calls this then `poll_events`).
         BUS.subscribe_current(child_exit_event(handle as u32))
     }
 

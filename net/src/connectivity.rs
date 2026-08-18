@@ -107,9 +107,8 @@ pub struct Connectivity {
     /// that already holds one.
     local_net_be: AtomicU32,
     local_mask_be: AtomicU32,
-    /// Whether this classifier drives its own state. A userland daemon that
-    /// takes over — the only thing that can ever report a captive portal —
-    /// clears this and calls [`Connectivity::force_state`].
+    /// Whether this classifier drives its own state; a userland daemon that
+    /// takes over clears it and calls [`Connectivity::force_state`].
     enabled: AtomicBool,
 }
 
@@ -132,8 +131,7 @@ impl Connectivity {
 
     /// The current state. [`NET_CONN_UNKNOWN`] until the first evaluation —
     /// "nobody has looked yet" is a different answer from "nothing is
-    /// reachable", and a UI that showed the second before the first boot
-    /// evaluation would be reporting an outage that had not happened.
+    /// reachable".
     #[inline]
     pub fn state(&self) -> u8 {
         self.state.load(Ordering::Acquire)
@@ -156,10 +154,9 @@ impl Connectivity {
         self.enabled.store(on, Ordering::Release);
     }
 
-    /// Record a state directly, returning the transition if there was one.
-    ///
-    /// The one path that may report a value the ladder cannot produce, which
-    /// is why it is the path a userland connectivity daemon uses.
+    /// Record a state directly, returning the transition if there was one. The
+    /// one path that may report a value the ladder cannot produce, which is why
+    /// a userland connectivity daemon uses it.
     pub fn force_state(&self, new: u8) -> Option<(u8, u8)> {
         let old = self.state.swap(new, Ordering::AcqRel);
         if old == new {
@@ -180,28 +177,19 @@ impl Connectivity {
         self.force_state(classify(evidence))
     }
 
-    /// [`apply`](Self::apply), announcing any transition to the monitors.
-    ///
-    /// The post happens after the state is committed and with nothing held —
-    /// the same rule every other producer follows, and the reason this is a
-    /// separate method from `apply` rather than a flag on it.
+    /// [`apply`](Self::apply), announcing any transition to the monitors after
+    /// the state is committed and with nothing held.
     pub fn apply_and_announce(&self, evidence: Evidence) -> Option<(u8, u8)> {
         let transition = self.apply(evidence);
         if let Some((old, new)) = transition {
-            // Logged as well as posted: the netmon event reaches a subscriber,
-            // and a connectivity transition is exactly the thing someone reads
-            // a boot log to explain.
             slopos_ostd::klog_info!("connectivity: {} -> {}", state_name(old), state_name(new));
             announce(old, new);
         }
         transition
     }
 
-    /// Note that the current default gateway answered.
-    ///
-    /// Takes the source address so the receive path does not have to know
-    /// which address that is; the comparison is against the cached gateway and
-    /// costs one atomic load.
+    /// Note that the current default gateway answered. Takes the source
+    /// address so the receive path does not have to know which address that is.
     pub fn note_gateway_answer(&self, src: Ipv4Addr) {
         let gateway = self.gateway_be.load(Ordering::Acquire);
         if gateway != 0 && src.to_u32_be() == gateway {
@@ -216,12 +204,9 @@ impl Connectivity {
             .store(crate::clock::now_ms(), Ordering::Release);
     }
 
-    /// Note that `peer` answered, if `peer` is off-link.
-    ///
-    /// A connection to the local segment says nothing about the path beyond
-    /// it, and counting one would report [`NET_CONN_FULL`] for a machine that
-    /// can only reach its own subnet — which is the exact distinction the
-    /// `Local` rung exists to make.
+    /// Note that `peer` answered, if `peer` is off-link. A connection to the
+    /// local segment says nothing about the path beyond it, and counting one
+    /// would report [`NET_CONN_FULL`] for a machine confined to its own subnet.
     pub fn note_wan_peer(&self, peer: Ipv4Addr) {
         if self.is_off_link(peer) {
             self.note_wan_answer();
@@ -230,10 +215,10 @@ impl Connectivity {
 
     /// Whether `addr` is outside the default route interface's own prefix.
     ///
-    /// Answered from the cached prefix rather than the interface table,
-    /// because the callers are receive paths holding their own locks. Before
-    /// the first evaluation the mask is zero and nothing is off-link, which is
-    /// the conservative direction: evidence is dropped, never invented.
+    /// Answered from the cached prefix rather than the interface table, because
+    /// the callers are receive paths holding their own locks. Before the first
+    /// evaluation the mask is zero and nothing is off-link: evidence is dropped,
+    /// never invented.
     pub fn is_off_link(&self, addr: Ipv4Addr) -> bool {
         let mask = self.local_mask_be.load(Ordering::Acquire);
         if mask == 0 {
@@ -284,10 +269,8 @@ impl Default for Connectivity {
     }
 }
 
-/// Announce a transition to the monitors.
-///
-/// Separate from the state change so it is impossible to post while holding
-/// something: every caller commits first and announces after.
+/// Announce a transition to the monitors. Separate from the state change so a
+/// post can never happen while something is held.
 fn announce(old: u8, new: u8) {
     netmon_post(
         NET_EV_CONNECTIVITY,
@@ -296,25 +279,18 @@ fn announce(old: u8, new: u8) {
     );
 }
 
-// =============================================================================
-// Gathering
-// =============================================================================
-
 /// Read the stack's current shape into an [`Evidence`], refreshing the cached
 /// gateway and local prefix as a side effect.
 ///
-/// Each table is read in its own critical section and released before the
-/// next: the interface table, then the route table, then the neighbour cache.
-/// That is the same one-lock-at-a-time rule [`crate::iface_ctl`] documents, and
-/// it is why this cannot run from inside any of them.
+/// Each table is read in its own critical section and released before the next,
+/// so this cannot run from inside any of them.
 pub fn gather_evidence() -> Evidence {
     let enabled = iface::is_enabled();
 
     let mut any_carrier = false;
     let mut has_address = false;
     iface::for_each(|i| {
-        // Loopback is exempt: `127.0.0.1` is always up and says nothing about
-        // whether this machine is on a network.
+        // Loopback is always up and says nothing about being on a network.
         if matches!(i.kind, IfaceKind::Loopback) || !i.is_realised(enabled) || !i.carrier {
             return;
         }
@@ -343,27 +319,23 @@ pub fn gather_evidence() -> Evidence {
         };
     };
 
-    // Cache the prefix of the interface the default route leaves by; that is
-    // the one whose segment counts as "local" for off-link decisions.
+    // The interface the default route leaves by is the one whose segment counts
+    // as "local" for off-link decisions.
     let (net, mask) = iface::get_by_dev(route.dev)
         .and_then(|i| i.primary_addr())
         .map(|a| (a.network(), crate::iface::prefix_to_mask(a.prefix_len)))
         .unwrap_or((Ipv4Addr::UNSPECIFIED, 0));
     CONNECTIVITY.cache_topology(route.gateway, net, mask);
 
-    // A directly connected default route has no first hop to resolve, so
-    // there is nothing that could fail to answer.
+    // A directly connected default route has no first hop to resolve.
     let now_ms = crate::clock::now_ms();
     let gateway_reachable = if route.gateway.is_unspecified() {
         true
     } else {
-        // Either the neighbour is confirmed, or this classifier heard from the
-        // gateway recently. The second half is not redundant: a `Reachable`
-        // entry ages to `Stale` after `REACHABLE_TIME_MS` — every 30 seconds on
-        // a perfectly healthy link — so reading only the cache would flap the
-        // indicator through "no internet" on that cycle. Neighbour aging is a
-        // cache-management policy; whether the first hop answers is what this
-        // asks, and `last_gateway_ms` is the record of that.
+        // The second half is not redundant: a `Reachable` entry ages to `Stale`
+        // after `REACHABLE_TIME_MS` even on a healthy link, so reading only the
+        // cache would flap the indicator. Aging is cache policy;
+        // `last_gateway_ms` records whether the first hop actually answers.
         NEIGHBOR_CACHE.is_reachable(route.dev, route.gateway)
             || CONNECTIVITY.gateway_fresh(now_ms, GATEWAY_STALE_MS)
     };
@@ -377,10 +349,6 @@ pub fn gather_evidence() -> Evidence {
     }
 }
 
-// =============================================================================
-// Kernel-classifier shorthands
-// =============================================================================
-
 /// The system's connectivity state.
 #[inline]
 pub fn state() -> u8 {
@@ -393,10 +361,7 @@ pub fn since_ms() -> u64 {
     CONNECTIVITY.since_ms()
 }
 
-/// Re-evaluate now and announce any transition.
-///
-/// Called from the classifier's timer, from the control plane after a topology
-/// change, and from `NET_IFOP_CONN_RECHECK`. Never call it holding a network
+/// Re-evaluate now and announce any transition. Never call it holding a network
 /// lock: it reads all three tables and posts.
 pub fn recheck() {
     CONNECTIVITY.apply_and_announce(gather_evidence());
@@ -426,20 +391,14 @@ pub fn note_wan_peer(peer: Ipv4Addr) {
     CONNECTIVITY.note_wan_peer(peer);
 }
 
-// =============================================================================
-// The timer
-// =============================================================================
-
 use slopos_ostd::sync::InitFlag;
 
 static TIMER_ARMED: InitFlag = InitFlag::new();
 
 /// Arm the periodic evaluation once, the first time the network timer runs.
 ///
-/// Self-arming rather than a boot step because the classifier has no
-/// initialisation of its own to order against — it needs the timer wheel and
-/// the thread that drains it, and the first tick of that thread is exactly
-/// when both exist.
+/// Self-arming rather than a boot step: the first tick of the timer thread is
+/// exactly when both the wheel and the thread draining it exist.
 pub fn ensure_armed() {
     if TIMER_ARMED.init_once() {
         arm();
@@ -451,49 +410,34 @@ fn arm() {
 }
 
 /// One classifier tick: re-arm, re-evaluate, and probe if that is the only way
-/// to make progress.
-///
-/// Runs from the network timer thread with nothing held, which is what makes
-/// both the evaluation (three table reads and a post) and the probe (a packet
-/// allocation and a send) legal here.
+/// to make progress. Runs from the network timer thread with nothing held,
+/// which is what makes the table reads, the post and the send legal here.
 pub fn on_timer() {
     arm();
 
     let evidence = gather_evidence();
     CONNECTIVITY.apply_and_announce(evidence);
 
-    // Active probes, in the order the ladder doubts things. Both are ICMP and
-    // both are conditional on fresh passive evidence being absent, so a working
-    // machine sends nothing at all.
     if classify(evidence) != NET_CONN_LIMITED {
         return;
     }
     let now = crate::clock::now_ms();
 
-    // Rung one: the first hop. Nothing beyond it is worth asking about until
-    // this answers.
+    // Nothing beyond the first hop is worth asking about until it answers.
     let gateway = CONNECTIVITY.gateway_be.load(Ordering::Acquire);
     if gateway != 0 && !CONNECTIVITY.gateway_fresh(now, GATEWAY_STALE_MS) {
         probe_gateway(Ipv4Addr::from_u32_be(gateway));
         return;
     }
 
-    // Rung two: the path beyond it. Without this the classifier could only
-    // learn about the internet from traffic somebody else generated, so a
-    // freshly booted machine would report "no internet" until its user happened
-    // to run something — the absence of evidence as evidence of absence.
-    //
-    // ICMP to an address we already hold, not a DNS query: a kernel timer
-    // emitting unsolicited queries would widen the open predictable-query-ID
-    // surface, and this needs no name resolved. Off-link only, because a
-    // resolver on the local segment proves nothing about the path past the
-    // gateway.
     if !CONNECTIVITY.wan_fresh(now) {
         probe_wan();
     }
 }
 
-/// Send one ICMP echo to the configured resolver, if it is off-link.
+/// Send one ICMP echo to the configured resolver, if it is off-link — a
+/// resolver on the local segment proves nothing about the path past the
+/// gateway.
 fn probe_wan() {
     let Some(target) = crate::resolver::primary() else {
         return;
@@ -505,11 +449,9 @@ fn probe_wan() {
     let _ = crate::icmp::send_echo_request(target.0, PROBE_IDENT, sequence, &[]);
 }
 
-/// Send one ICMP echo request to `gateway`.
 fn probe_gateway(gateway: Ipv4Addr) {
-    // The sequence is the low bits of the clock rather than a counter: it is
-    // only ever used to tell one probe's reply from the next, and a counter
-    // would be state to keep for no gain.
+    // Sequence is the low bits of the clock, not a counter: it only ever tells
+    // one probe's reply from the next.
     let sequence = (crate::clock::now_ms() / TICK_MS) as u16;
     let _ = crate::icmp::send_echo_request(gateway.0, PROBE_IDENT, sequence, &[]);
 }

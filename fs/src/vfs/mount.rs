@@ -153,20 +153,16 @@ impl MountTable {
             }
             let mp_path = mp.path_bytes();
 
-            // Skip the mount at the parent path itself
             if mp_path.len() == plen && &mp_path[..plen] == parent {
                 continue;
             }
 
-            // Determine where the child component starts
             let child_start = if parent == b"/" {
-                // Root parent: child mounts look like "/X"
                 if mp_path.len() <= 1 || mp_path[0] != b'/' {
                     continue;
                 }
                 1
             } else {
-                // Non-root parent: child mounts look like "<parent>/X"
                 if mp_path.len() <= plen + 1 || &mp_path[..plen] != parent || mp_path[plen] != b'/'
                 {
                     continue;
@@ -176,7 +172,6 @@ impl MountTable {
 
             let child_part = &mp_path[child_start..];
 
-            // Must be a single path component (no further slashes)
             if child_part.is_empty() || child_part.contains(&b'/') {
                 continue;
             }

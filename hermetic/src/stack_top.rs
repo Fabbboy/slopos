@@ -1,12 +1,10 @@
-//! `KernelStackTop<'a>` — kernel-virt stack-top address, replacing `u64` in
-//! the TSS-write APIs (`gdt_set_kernel_rsp0`, `gdt_set_ist`). The only
-//! borrow-bound constructor is `from_slice`, which requires a real `&[u8]`,
-//! so a fabricated address cannot reach those APIs with a lifetime tied to
-//! anything real.
+//! `KernelStackTop<'a>` — kernel-virt stack-top address replacing `u64` in the
+//! TSS-write APIs. `from_slice` is the only borrow-bound constructor, so a
+//! fabricated address cannot reach those APIs with a lifetime tied to anything
+//! real.
 //!
-//! Deliberately untagged by stack kind: one `IstStackRegion` slice serves
-//! every IST slot from a single pool, and which function consumes the value
-//! is what distinguishes the kinds.
+//! Deliberately untagged by stack kind: one `IstStackRegion` slice serves every
+//! IST slot, and which function consumes the value distinguishes the kinds.
 
 use core::marker::PhantomData;
 
@@ -40,14 +38,12 @@ impl<'a> KernelStackTop<'a> {
     }
 
     /// Construct a `'static` stack top from a kernel-virt address the caller
-    /// has established refers to a mapped region outliving the kernel image
-    /// (an IST slot mapped at boot, a per-CPU kthread stack).
+    /// has established refers to a mapped region outliving the kernel image.
     pub fn from_kernel_va(addr: u64) -> KernelStackTop<'static> {
         KernelStackTop::<'static>::from_raw(addr)
     }
 
-    /// Construct from a borrowed kernel-virt slice: the 16-byte-aligned top
-    /// of the slice, borrowing the slice's lifetime.
+    /// The 16-byte-aligned top of a borrowed kernel-virt slice.
     pub fn from_slice(slice: &'a [u8]) -> Self {
         // 16-byte alignment per the x86-64 ABI stack rule.
         let end = slice.as_ptr_range().end as u64;
@@ -58,7 +54,6 @@ impl<'a> KernelStackTop<'a> {
         }
     }
 
-    /// Raw address for handoff to TSS / MSR-write code.
     pub fn as_u64(&self) -> u64 {
         self.addr
     }

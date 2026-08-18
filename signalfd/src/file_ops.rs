@@ -1,21 +1,9 @@
-//! `FileKind::Signalfd` file operations.
+//! `FileKind::Signalfd` file operations: a pollable view of the owner task's
+//! pending signals, filtered to a subscribed mask.
 //!
-//! A signalfd is a pollable view of the owner task's pending signals,
-//! filtered to a subscribed mask. Its `handle: usize` resolves
-//! [`SignalfdState`](crate::registry::SignalfdState) (owner task id + mask).
-//!
-//! - `poll_events` returns `POLLIN` when `(owner.signal_pending & mask) != 0`.
-//! - `poll_wait` subscribes the calling task to the owner's `SignalPending`
-//!   event (published by every signal-raise via `task_signal_raise`), so a
-//!   raised signal wakes the poller as an in-band ring/poll event.
-//! - `read` drains the lowest pending masked signal and emits one
-//!   [`SignalfdSiginfo`]; `write` is meaningless (`-EINVAL`).
-//!
-//! Paired with the caller blocking those signals (`rt_sigprocmask`), this
-//! turns signal delivery from an out-of-band `EINTR` into an in-band
-//! completion — `(pending & !blocked)` excludes the masked signals from the
-//! harvest's `has_pending_signal()` EINTR check, while `poll_events` (which
-//! tests raw `pending`) still reports them.
+//! Paired with the caller blocking those signals (`rt_sigprocmask`), delivery
+//! becomes in-band: `(pending & !blocked)` excludes them from the harvest's
+//! EINTR check, while `poll_events` tests raw `pending` and still reports them.
 
 use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
@@ -34,8 +22,7 @@ pub struct SignalfdFileOps;
 
 pub static SIGNALFD_FILE_OPS: SignalfdFileOps = SignalfdFileOps;
 
-/// Owns one signalfd registry entry. The open-file layer holds it as a
-/// `KArc<dyn FileBacking>`; dropping the last fd alias removes the entry.
+/// Owns one signalfd registry entry; dropping the last fd alias removes it.
 #[derive(slopos_ostd::Charged)]
 pub(crate) struct SignalfdBacking {
     pub(crate) handle: usize,
@@ -52,7 +39,6 @@ impl Drop for SignalfdBacking {
     }
 }
 
-/// Signals in `state.mask` currently pending for the owner task.
 fn pending_masked(state: &SignalfdState) -> u64 {
     task_find_by_id(state.owner_task_id)
         .map(|task| task.signal_pending() & slopos_abi::signal::SIGNAL_MASK & state.mask)
@@ -73,11 +59,10 @@ impl FileOps for SignalfdFileOps {
         }
         let pending = pending_masked(&state);
         if pending == 0 {
-            // Readiness is reported by poll_events; a bare read with nothing
-            // pending is non-blocking EAGAIN (the reactor polls first).
+            // Never blocks: readiness comes from poll_events, so an empty read
+            // is EAGAIN rather than a sleep.
             return Errno::EAGAIN.as_isize();
         }
-        // Drain the lowest pending masked signal.
         let signum = (pending.trailing_zeros() as u8).wrapping_add(1);
         let Some(task) = task_find_by_id(state.owner_task_id) else {
             return Errno::EBADF.as_isize();

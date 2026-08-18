@@ -1,19 +1,13 @@
 //! Cross-phase summary stash for the test harness.
 //!
-//! The kernel-test phase runs from the boot init pipeline (BSP bootstrap
-//! stub context) and produces a `TestRunSummary`. The userland-test phase
-//! runs later from `/sbin/init`'s syscall context (`SYSCALL_RUN_USERLAND_TESTS`)
-//! and needs the kernel-phase totals to roll up the cumulative result and
-//! decide shutdown semantics.
-//!
-//! These two phases live in different crates (`slopos-boot` writes; the
-//! syscall handler in `slopos-core` reads), so the stash lives in the
-//! shared `slopos-testing` crate.
+//! The kernel phase runs from the boot init pipeline and the userland phase
+//! later from `/sbin/init`'s syscall context, in different crates
+//! (`slopos-boot` writes, `slopos-core` reads), so the totals live here.
 
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-use slopos_ostd::sync::spin::SpinLock;
 use slopos_ostd::KVec;
+use slopos_ostd::sync::spin::SpinLock;
 
 use crate::{TestConfig, TestRunSummary, Verbosity};
 
@@ -45,19 +39,14 @@ static KERNEL_CONFIG: SpinLock<TestConfig> = SpinLock::new(
     slopos_ostd::lock_class!("KERNEL_CONFIG", slopos_ostd::sync::LOCK_LEVEL_RESOURCE),
 );
 
-/// Whether `tests.shutdown=on` was set on the boot command line. Read by
-/// the userland-phase syscall handler to decide whether to signal QEMU exit.
+/// Whether `tests.shutdown=on` was set on the boot command line.
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Whether `tests=on` was set on the boot command line. Lets the syscall
-/// handler short-circuit when invoked from a non-test boot.
+/// Whether `tests=on` was set on the boot command line.
 static TESTS_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Stash the kernel-phase summary + run-rc + relevant config bits for the
-/// userland phase to read.
-///
-/// Called once from the boot init pipeline after `tests_run_all` returns.
-/// Subsequent calls overwrite (intended for re-init scenarios in tests).
+/// Called once from the boot init pipeline after `tests_run_all` returns;
+/// later calls overwrite.
 pub fn store_kernel_phase(summary: &TestRunSummary, rc: i32, cfg: &TestConfig) {
     *KERNEL_SUMMARY.lock() = *summary;
     *KERNEL_CONFIG.lock() = cfg.clone();

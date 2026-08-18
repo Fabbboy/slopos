@@ -1,40 +1,10 @@
 //! TCP congestion control — CUBIC (RFC 8312) + Hystart++ (RFC 9406).
-//!
-//! Provides a [`CongestionControl`] trait and a [`Cubic`] implementation
-//! that replaces the former NewReno algorithm.
-//!
-//! ## Algorithm summary
-//!
-//! - **Slow start**: starts at `cwnd = IW` (initial window, 10 MSS per
-//!   RFC 6928) and doubles `cwnd` every RTT.  Hystart++ (RFC 9406)
-//!   monitors per-round min RTT and exits to Conservative Slow Start
-//!   (CSS) when queueing is detected, then to full congestion avoidance
-//!   after [`CSS_ROUNDS`] rounds.
-//! - **Congestion avoidance**: CUBIC growth function `W(t) = C*(t-K)³ +
-//!   W_max` produces concave growth toward `W_max` (the pre-loss window)
-//!   and convex growth beyond it.  TCP-friendliness (RFC 8312 §4.3)
-//!   ensures CUBIC never underperforms Reno.
-//! - **Fast retransmit / recovery**: SACK-based loss detection triggers
-//!   `ssthresh = W_max * β` (β = 0.7), `cwnd = ssthresh`, and the
-//!   connection enters recovery until `snd_una` passes the RECOVER point.
-//!   Fast convergence (§4.6) adjusts `W_max` downward when the network
-//!   is degrading.
-//! - **RTO timeout**: same multiplicative decrease, then `cwnd = MSS`,
-//!   drop to slow start, reset CUBIC epoch.
 
 use crate::tcp::seq::seq_ge;
 
-/// Trait every congestion-control algorithm must implement.
-///
-/// The state machine holds the trait object as an enum variant (see
-/// [`CcAlgo`]) so no heap allocation is needed.
 pub trait CongestionControl {
     /// Advance the algorithm after an ACK that advanced `snd_una` by
-    /// `acked_bytes`.  `rtt_sample_ms` is `Some(r)` when the ACK yields
-    /// an eligible RTT sample.  `snd_una` is the new cumulative ACK
-    /// point — used to detect recovery exit.  `snd_nxt` is the current
-    /// send-next pointer — used for Hystart++ round tracking.  `now_ms`
-    /// is the wall-clock time — used for the CUBIC time function.
+    /// `acked_bytes`.
     fn on_ack(
         &mut self,
         acked_bytes: u32,
@@ -44,12 +14,11 @@ pub trait CongestionControl {
         now_ms: u64,
     );
 
-    /// Called when the retransmission timer fires for the oldest
-    /// unacknowledged segment.  Resets to slow start.
+    /// The retransmission timer fired for the oldest unacknowledged segment;
+    /// resets to slow start.
     fn on_timeout(&mut self, flight_size: u32);
 
-    /// Called when SACK-based loss detection finds the first lost segment.
-    /// Sets `ssthresh = W_max * β`, `cwnd = ssthresh`, enters recovery.
+    /// SACK-based loss detection found the first lost segment; enters recovery.
     fn on_fast_retransmit(&mut self, flight_size: u32, high_water: u32);
 
     /// Current congestion window in bytes.
@@ -58,25 +27,18 @@ pub trait CongestionControl {
     /// Current slow-start threshold in bytes.
     fn ssthresh(&self) -> u32;
 
-    /// Are we currently in the fast-recovery phase?
     fn in_recovery(&self) -> bool;
 }
 
-/// Maximum segment size used for the default Cubic instance.  Matches
-/// [`crate::tcp::DEFAULT_MSS`].
+/// Matches [`crate::tcp::DEFAULT_MSS`].
 const DEFAULT_MSS: u32 = 1460;
 
-/// Initial congestion window in bytes.  RFC 6928 recommends IW = 10 MSS
-/// for modern loss-resilient stacks.
+/// Initial congestion window in bytes: IW = 10 MSS per RFC 6928.
 pub const INITIAL_CWND: u32 = 10 * DEFAULT_MSS;
 
-/// Initial slow-start threshold — start arbitrarily high so the very
-/// first ACK doesn't immediately exit slow start.  RFC 5681 §3.1.
+/// Arbitrarily high so the very first ACK does not exit slow start.
+/// RFC 5681 §3.1.
 pub const INITIAL_SSTHRESH: u32 = u32::MAX;
-
-// ---------------------------------------------------------------------------
-// CUBIC constants (RFC 8312 §4)
-// ---------------------------------------------------------------------------
 
 /// Scaling constant C = 0.4 = C_NUM / C_DEN.
 const C_NUM: u64 = 2;
@@ -86,8 +48,7 @@ const C_DEN: u64 = 5;
 const BETA_NUM: u32 = 7;
 const BETA_DEN: u32 = 10;
 
-/// TCP-friendliness linear growth factor α = 3(1−β)/(1+β).
-/// 3 * 0.3 / 1.7 ≈ 0.5294.  We use 529/1000.
+/// TCP-friendliness linear growth factor α = 3(1−β)/(1+β) ≈ 0.5294.
 const TCP_ALPHA_NUM: u64 = 529;
 const TCP_ALPHA_DEN: u64 = 1000;
 
@@ -95,25 +56,15 @@ const TCP_ALPHA_DEN: u64 = 1000;
 const FAST_CONV_NUM: u32 = 17;
 const FAST_CONV_DEN: u32 = 20;
 
-// ---------------------------------------------------------------------------
-// Hystart++ constants (RFC 9406)
-// ---------------------------------------------------------------------------
-
-/// Number of Conservative Slow Start rounds before entering CA.
+/// Number of Conservative Slow Start rounds before entering congestion
+/// avoidance.
 const CSS_ROUNDS: u8 = 5;
 
-/// Minimum RTT increase threshold for Hystart++ (ms).
 const MIN_RTT_THRESH_MS: u32 = 4;
 
-/// Maximum RTT increase threshold for Hystart++ (ms).
 const MAX_RTT_THRESH_MS: u32 = 16;
 
-/// Divisor for computing RTT threshold from baseline.
 const RTT_DIVISOR: u32 = 8;
-
-// ---------------------------------------------------------------------------
-// Integer cube root
-// ---------------------------------------------------------------------------
 
 /// Integer cube root via Newton's method.  Returns ⌊∛x⌋.
 fn integer_cbrt(x: u64) -> u64 {
@@ -134,7 +85,6 @@ fn integer_cbrt(x: u64) -> u64 {
         r = (2 * r + x / r2) / 3;
     }
 
-    // Final adjustment for off-by-one.
     while r > 1 && r.saturating_mul(r).saturating_mul(r) > x {
         r -= 1;
     }
@@ -144,62 +94,49 @@ fn integer_cbrt(x: u64) -> u64 {
     r
 }
 
-// ---------------------------------------------------------------------------
-// Cubic
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug)]
 pub struct Cubic {
-    // Core window state
     cwnd: u32,
     ssthresh: u32,
     mss: u32,
 
-    /// RFC 6582 recovery point.  When `Some(seq)`, we are in recovery.
-    /// Recovery ends when `snd_una >= recover`.
+    /// RFC 6582 recovery point.  `Some` means in recovery, which ends when
+    /// `snd_una >= recover`.
     recover: Option<u32>,
 
-    // -- CUBIC state (RFC 8312 §4) -----------------------------------------
-    /// Wall-clock time of the current epoch start (ms).  0 = not started.
+    /// Epoch start (ms).  0 = not started.
     epoch_start_ms: u64,
 
-    /// W_max: cwnd at the time of the last loss, possibly adjusted by
-    /// fast convergence.  Used as the origin of the cubic function.
+    /// W_max: cwnd at the last loss, possibly adjusted by fast convergence,
+    /// used as the origin of the cubic function.
     origin_point: u32,
 
-    /// W_max from the loss event *before* the current one.  Compared
-    /// against cwnd at loss time for fast convergence (§4.6).
+    /// W_max from the loss event *before* the current one, compared against
+    /// cwnd at loss time for fast convergence (RFC 8312 §4.6).
     last_max_cwnd: u32,
 
-    /// Precomputed time (ms) from epoch start to reach `origin_point`.
+    /// Time (ms) from epoch start to reach `origin_point`.
     k_ms: u64,
 
-    /// TCP-friendliness comparison window (bytes).  Grows linearly like
-    /// Reno: `tcp_cwnd += α * mss * acked_bytes / cwnd` per ACK.
+    /// TCP-friendliness comparison window (bytes).
     tcp_cwnd: u32,
 
-    // -- Hystart++ state (RFC 9406) ----------------------------------------
-    /// `snd_nxt` value saved at the start of the current measurement
-    /// round.  A round completes when `snd_una >= round_start`.
+    /// `snd_nxt` saved at the start of the current measurement round; the
+    /// round completes when `snd_una >= round_start`.
     round_start: u32,
 
     /// Minimum RTT observed in the last completed round (baseline).
     last_round_min_rtt_ms: u32,
 
-    /// Running minimum RTT in the current round.
     curr_round_min_rtt_ms: u32,
 
-    /// True when we are in Conservative Slow Start (CSS).
     in_css: bool,
 
-    /// Number of CSS rounds completed.
     css_rounds: u8,
 
-    /// RTT baseline recorded when CSS was entered.
     css_baseline_rtt_ms: u32,
 
-    /// Whether we have completed at least one full round (so
-    /// `last_round_min_rtt_ms` is valid).
+    /// At least one full round completed, so `last_round_min_rtt_ms` is valid.
     round_started: bool,
 }
 
@@ -230,17 +167,13 @@ impl Cubic {
         Self::new(DEFAULT_MSS)
     }
 
-    /// Shared loss handling for both fast retransmit and RTO.
-    ///
-    /// Sets `origin_point`, `last_max_cwnd`, `ssthresh`, and resets the
-    /// CUBIC epoch.  Does **not** touch `cwnd` or `recover` — callers do
-    /// that.
+    /// Shared loss handling for both fast retransmit and RTO.  Does **not**
+    /// touch `cwnd` or `recover` — callers do that.
     fn on_loss(&mut self) {
         let cwnd_before = self.cwnd;
 
-        // Fast convergence (RFC 8312 §4.6): if the network is getting
-        // worse (cwnd hasn't recovered to the previous W_max), reduce
-        // W_max further so we converge faster.
+        // Fast convergence (RFC 8312 §4.6): a cwnd that never recovered to the
+        // previous W_max means the network is degrading, so pull W_max down.
         if cwnd_before < self.last_max_cwnd {
             self.last_max_cwnd = cwnd_before;
             self.origin_point =
@@ -250,13 +183,11 @@ impl Cubic {
             self.origin_point = cwnd_before;
         }
 
-        // ssthresh = W_max * β, minimum 2*MSS.
         self.ssthresh = core::cmp::max(
             (self.origin_point as u64 * BETA_NUM as u64 / BETA_DEN as u64) as u32,
             2 * self.mss,
         );
 
-        // Reset CUBIC epoch — will restart on next on_ack in CA.
         self.epoch_start_ms = 0;
         self.tcp_cwnd = 0;
     }

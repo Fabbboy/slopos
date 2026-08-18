@@ -27,13 +27,12 @@ pub mod xsave_tests;
 #[cfg(feature = "tests")]
 pub mod zz_lockdep_tests;
 
-pub use config::{config_from_cmdline, TestConfig, Verbosity};
+pub use config::{TestConfig, Verbosity, config_from_cmdline};
 pub use harness::{
-    cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms, tests_mark_panic,
+    TestRunSummary, cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms, tests_mark_panic,
     tests_request_shutdown, tests_reset_panic_state, tests_run_all, tests_run_userland,
-    TestRunSummary,
 };
-pub use registry::{TestDesc, TestKind, FLAG_EXPECTED_PANIC};
+pub use registry::{FLAG_EXPECTED_PANIC, TestDesc, TestKind};
 pub use result::{TestOutcome, TestResult};
 pub use runner::execute_test;
 pub use slopos_service_core::paste;
@@ -60,11 +59,7 @@ macro_rules! fail {
     }};
 }
 
-/// Register a single test function as a `TestDesc` in `.test_registry`.
-///
-/// The function must have signature `fn() -> TestResult`. The harness
-/// runs each entry under `catch_panic!`, capturing klog output for the
-/// duration of the test.
+/// Register a `fn() -> TestResult` as a `TestDesc` in `.test_registry`.
 ///
 /// ```ignore
 /// fn my_test() -> TestResult { TestResult::Pass }

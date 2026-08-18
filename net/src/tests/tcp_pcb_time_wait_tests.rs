@@ -47,10 +47,9 @@ fn hdr(flags: u8, seq: u32, ack: u32) -> TcpHeader {
     }
 }
 
-/// RST releases the PCB (RFC 5961: must be in window).
+/// Per RFC 5961 the RST is accepted only in window; `last_rcv_nxt` is the edge.
 pub fn test_time_wait_rst_releases() -> TestResult {
     let mut pcb = make_pcb();
-    // last_rcv_nxt = LAST_RCV_NXT; RST must be in-window to be accepted.
     let actions = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_RST, LAST_RCV_NXT, 0), 2000);
     assert_test!(actions.release, "release");
     assert_test!(
@@ -60,7 +59,6 @@ pub fn test_time_wait_rst_releases() -> TestResult {
     pass!()
 }
 
-/// Retransmitted FIN re-ACKs with frozen sequence numbers.
 pub fn test_time_wait_fin_re_acks() -> TestResult {
     let mut pcb = make_pcb();
     let actions =
@@ -70,7 +68,6 @@ pub fn test_time_wait_fin_re_acks() -> TestResult {
     assert_eq_test!(ack.seq_num, LAST_SND_NXT, "frozen snd_nxt");
     assert_eq_test!(ack.ack_num, LAST_RCV_NXT, "frozen rcv_nxt");
     assert_test!((ack.flags & TCP_FLAG_ACK) != 0, "ACK flag set");
-    // entry_ms updated for the new timer baseline
     if let PcbState::TimeWait(s) = &pcb.state {
         assert_eq_test!(s.entry_ms, 5_000, "entry_ms refreshed");
     }
@@ -78,7 +75,6 @@ pub fn test_time_wait_fin_re_acks() -> TestResult {
     pass!()
 }
 
-/// Data segment (PSH+ACK) is dropped.
 pub fn test_time_wait_data_dropped() -> TestResult {
     let mut pcb = make_pcb();
     let actions =
@@ -88,7 +84,6 @@ pub fn test_time_wait_data_dropped() -> TestResult {
     pass!()
 }
 
-/// SYN is dropped.
 pub fn test_time_wait_syn_dropped() -> TestResult {
     let mut pcb = make_pcb();
     let actions = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_SYN, 0, 0), 2000);
@@ -96,7 +91,6 @@ pub fn test_time_wait_syn_dropped() -> TestResult {
     pass!()
 }
 
-/// Empty packet is dropped.
 pub fn test_time_wait_empty_dropped() -> TestResult {
     let mut pcb = make_pcb();
     let actions = TimeWaitState::on_segment(&mut pcb, &hdr(0, 0, 0), 2000);
@@ -104,7 +98,6 @@ pub fn test_time_wait_empty_dropped() -> TestResult {
     pass!()
 }
 
-/// Successive retransmitted FINs each refresh entry_ms.
 pub fn test_time_wait_fin_refreshes_entry_ms_every_call() -> TestResult {
     let mut pcb = make_pcb();
     let _ = TimeWaitState::on_segment(&mut pcb, &hdr(TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0), 500);

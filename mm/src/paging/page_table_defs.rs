@@ -182,15 +182,11 @@ impl core::fmt::Debug for PageTableEntry {
     }
 }
 
-/// Entries in a page-table frame: one per index of a 9-bit level, which
-/// is exactly one 4 KiB page of 8-byte entries.
+/// Entries in a page-table frame: one 4 KiB page of 8-byte entries.
 pub const PAGE_TABLE_ENTRIES: usize = 512;
 
-// The accessors below reach a frame as `*mut u64` and read entries back
-// through `PageTableEntry::from_raw`, so the entry type has to be exactly
-// a `u64` in size and alignment for that pun to hold. A wider
-// `PageTableEntry`, or one that lost `repr(transparent)`, would leave
-// every accessor addressing the wrong bytes.
+// The accessors pun a frame as `*mut u64`, so a `PageTableEntry` must stay
+// exactly a `u64` in size and alignment.
 const _: () = assert!(
     core::mem::size_of::<PageTableEntry>() == core::mem::size_of::<u64>()
         && core::mem::align_of::<PageTableEntry>() == core::mem::align_of::<u64>(),
@@ -201,39 +197,12 @@ const _: () = assert!(
     "a page-table frame is one 4 KiB page of entries"
 );
 
-// ---------------------------------------------------------------------
-// Per-entry access to a page-table frame
-// ---------------------------------------------------------------------
-//
-// Read-only, and only two of them. Every kernel-half page-table write
-// goes through `slopos_ostd::mm::vm_space::CursorMut` under the
-// `KERNEL_VM_SPACE` lock; what is left here is the descent's read side,
-// which the walker in `walker.rs` and the translation helpers in
-// `tables.rs` share.
-//
-// Neither forms a reference into a frame. That is the point: a
-// reference over a frame — even one scoped to a single statement —
-// claims all 4096 bytes in order to touch eight, and two CPUs reading
-// different VAs that share a table would each hold one. The hardware
-// page walker also stamps Accessed and Dirty into any entry it uses, so
-// even a single-CPU shared reference claims a stability the machine does
-// not honour. No type names a page-table frame, so the typed form of
-// that mistake cannot be written at all.
-//
-// Access is therefore per-entry and atomic, which is what a page-table
-// entry actually is — and it is what makes reading an entry the cursor
-// may be writing well-defined rather than a race.
-//
-// `pub(crate)` rather than `pub`: this module is reachable from outside
-// the crate, and the read surface is narrow enough that widening it has
-// to be a deliberate act.
+// Read side of the page-table descent; every kernel-half write goes through
+// `slopos_ostd::mm::vm_space::CursorMut` under the `KERNEL_VM_SPACE` lock.
+// Access is per-entry and atomic, never a reference over the frame: the
+// hardware walker stamps Accessed and Dirty into entries concurrently.
 
 /// The HHDM view of the page-table frame at `phys`, as an entry array.
-///
-/// A frame holds `PAGE_TABLE_ENTRIES` entries starting at its base, so a
-/// `phys` that is not page-aligned would address a window straddling two
-/// frames. The buddy hands out page-aligned frames; the assertion states
-/// the property rather than assuming it.
 #[inline]
 fn table_base_at(phys: PhysAddr) -> NonNull<u64> {
     debug_assert!(!phys.is_null(), "page-table frame address must be non-null");
@@ -245,7 +214,6 @@ fn table_base_at(phys: PhysAddr) -> NonNull<u64> {
         .expect("page-table frame address must be non-null")
 }
 
-/// Read the entry at `index` in the page-table frame at `phys`.
 #[inline]
 pub(crate) fn entry_at(phys: PhysAddr, index: usize) -> PageTableEntry {
     debug_assert!(index < PAGE_TABLE_ENTRIES);

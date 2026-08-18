@@ -1,16 +1,8 @@
-//! The `Pages` axis: an address space's mapped pages, charged exactly.
-//!
-//! What makes this kind different from every other one is that its charge
-//! tracks a quantity that *changes* over the holder's life. A `FdSlot` charge
-//! is minted with the descriptor and refunded with it; a `Pages` charge has to
-//! survive a mapping being split down the middle, two mappings merging into
-//! one, and a whole address space being torn down — each of which is a
-//! different way for the number to drift from the tree it summarises.
-//!
-//! FreeBSD carried the per-region form of this for sixteen years and removed
-//! it in 2026 because "a single counter cannot properly express" a split that
-//! carves a hole. The tests below are the ones that shape has to pass and
-//! could not: a mid-range unmap, and a merge that must not double-charge.
+//! The `Pages` axis: an address space's mapped pages, charged exactly. Unlike
+//! every other kind, this charge tracks a quantity that *changes* over the
+//! holder's life — a mapping split down the middle, two mappings merged into
+//! one, a whole address space torn down — each a different way for the number
+//! to drift from the tree it summarises.
 
 use slopos_abi::quota::{QuotaMode, ResourceKind};
 use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
@@ -30,11 +22,9 @@ use crate::process_vm::{
 const MAP_FLAGS: u64 = MAP_ANONYMOUS | MAP_PRIVATE;
 const PROT_RW: u64 = PROT_READ | PROT_WRITE;
 
-/// A scratch address space plus its account, torn down on drop.
-///
-/// Every test here needs a principal that is not the caller's and a row that
-/// goes dark afterwards: a leftover row carrying a deliberately-tiny ceiling
-/// is indistinguishable, to the headroom gate, from a real workload refused.
+/// A scratch address space plus its account, torn down on drop: a row left
+/// behind carrying a deliberately-tiny ceiling is indistinguishable, to the
+/// headroom gate, from a real workload refused.
 struct Scratch {
     pid: u32,
     restore: QuotaMode,
@@ -109,12 +99,10 @@ pub fn test_quota_pages_mmap_charges_exactly() -> TestResult {
     pass!()
 }
 
-/// A hole punched in the middle of a mapping refunds exactly the hole.
-///
 /// The case a per-region scalar charge cannot express: the region splits into
 /// two remnants, and the charge must fall by the carved pages and no more.
-/// Getting this wrong in either direction is silent — too large a refund hands
-/// out headroom that does not exist, too small pins it forever.
+/// Either error is silent — too large a refund hands out headroom that does not
+/// exist, too small pins it forever.
 pub fn test_quota_pages_split_refunds_only_the_hole() -> TestResult {
     let Some(scratch) = Scratch::new() else {
         return fail!("could not create an address space");
@@ -144,7 +132,6 @@ pub fn test_quota_pages_split_refunds_only_the_hole() -> TestResult {
         want
     );
 
-    // And both remnants are still there to be given back.
     process_vm_munmap(resolve_pid(scratch.pid), addr, PAGES * PAGE_SIZE_4KB);
     assert_test!(
         scratch.used() == before,
@@ -153,11 +140,10 @@ pub fn test_quota_pages_split_refunds_only_the_hole() -> TestResult {
     pass!()
 }
 
-/// Two adjacent compatible mappings merge into one entry and are charged once.
-///
-/// The mirror of the split: `VmaMap::insert` absorbs a neighbour and widens
-/// the new entry by exactly as much, so a charge that re-paid for the absorbed
-/// pages would drift up by one region per merge and never come back down.
+/// The mirror of the split: `VmaMap::insert` absorbs an adjacent compatible
+/// neighbour and widens the new entry by exactly as much, so a charge that
+/// re-paid for the absorbed pages would drift up by one region per merge and
+/// never come back down.
 pub fn test_quota_pages_merge_does_not_double_charge() -> TestResult {
     let Some(scratch) = Scratch::new() else {
         return fail!("could not create an address space");
@@ -189,11 +175,9 @@ pub fn test_quota_pages_merge_does_not_double_charge() -> TestResult {
     pass!()
 }
 
-/// An mmap over the ceiling is refused, and the refusal changes nothing.
-///
 /// The property the whole axis exists for, and the one a check-then-charge
-/// split gets wrong: the refusal has to be the identity on the row, not a
-/// debit that is corrected afterwards.
+/// split gets wrong: a refusal has to be the identity on the row, not a debit
+/// that is corrected afterwards.
 pub fn test_quota_pages_ceiling_refuses_and_leaves_no_debit() -> TestResult {
     let Some(scratch) = Scratch::new() else {
         return fail!("could not create an address space");
@@ -216,8 +200,8 @@ pub fn test_quota_pages_ceiling_refuses_and_leaves_no_debit() -> TestResult {
     let denials = stats(scratch.account(), ResourceKind::Pages).map_or(0, |s| s.denials);
     assert_test!(denials > 0, "a refusal nobody counted is a silent denial");
 
-    // Under the ceiling still works, so the refusal was the limit and not a
-    // wedged address space.
+    // A grant under the ceiling is what separates the limit from a wedged
+    // address space.
     let granted = scratch.mmap(HEADROOM as u64);
     assert_test!(granted != 0, "an mmap within the ceiling was refused");
     process_vm_munmap(
@@ -228,18 +212,9 @@ pub fn test_quota_pages_ceiling_refuses_and_leaves_no_debit() -> TestResult {
     pass!()
 }
 
-/// Tearing an address space down returns every page it held.
-///
 /// The leak this catches is unbounded across a boot: an address space whose
 /// charge outlives it holds its principal's headroom forever, and because the
 /// row is only reissued when the *slot* is reused, nothing else retires it.
-///
-/// Measured on the account rather than on the root, and that is not a
-/// weakening. A kernel-side `create_process_vm` spawns against the root, so
-/// several live address spaces share one row and `account_release` cancels
-/// that row's whole outstanding amount upward when any of them is retired --
-/// the root's number is therefore not a per-address-space quantity and cannot
-/// answer this question. The account's own before/after is the exact one.
 pub fn test_quota_pages_teardown_returns_everything() -> TestResult {
     let restore = quota_mode();
     set_quota_mode(QuotaMode::Enforce);
@@ -248,14 +223,11 @@ pub fn test_quota_pages_teardown_returns_everything() -> TestResult {
         set_quota_mode(restore);
         return fail!("could not create an address space");
     }
-    // Measured through the audit rather than through a row's number.
-    //
-    // Neither row can answer this on its own: the address space's own row is
-    // darkened by the retire teardown performs, and a darkened row reads zero
-    // whether or not the charge was given back; and the root is a shared
-    // ancestor whose total moves with every other live address space in the
-    // suite. What is invariant is the reconciliation — after teardown no map
-    // exists, so no page may remain claimed against it.
+    // Neither row can answer this on its own: teardown darkens the address
+    // space's own row, which then reads zero whether or not the charge came
+    // back, and the root is a shared ancestor moving with every other live
+    // address space in the suite. What is invariant is the reconciliation —
+    // after teardown no map exists, so no page may remain claimed against it.
     let account = resolve_pid(pid).account();
 
     let addr = process_vm_mmap(
@@ -292,14 +264,11 @@ pub fn test_quota_pages_teardown_returns_everything() -> TestResult {
     pass!()
 }
 
-/// The audit sees a page charge that stopped matching its address space.
-///
-/// Not vacuous: the fault is planted by charging the account behind the map's
-/// back, which is exactly the shape a mutation that forgot to adjust its
-/// charge would produce. An audit that could not see this would be a number
-/// with no reader — and `Pages` is the one kind the other three checks cannot
-/// cover, because they compare rows against each other and a charge that
-/// drifted from its *map* is consistent with every ancestor.
+/// The drift is planted by charging the account behind the map's back — the
+/// shape a mutation that forgot to adjust its charge would produce. `Pages` is
+/// the one kind the other three checks cannot cover: they compare rows against
+/// each other, and a charge that drifted from its *map* is consistent with
+/// every ancestor.
 pub fn test_quota_pages_audit_catches_a_drifted_charge() -> TestResult {
     let Some(scratch) = Scratch::new() else {
         return fail!("could not create an address space");
@@ -315,7 +284,6 @@ pub fn test_quota_pages_audit_catches_a_drifted_charge() -> TestResult {
     });
     assert_test!(found == 0, "a settled address space audited as mismatched");
 
-    // Plant the drift: a debit the map knows nothing about.
     let planted =
         try_charge::<slopos_abi::quota::PagesAxis>(scratch.account(), 5).expect("planting a drift");
 
@@ -382,18 +350,10 @@ slopos_testing::stest!(
     suite = quota_pages
 );
 
-// ---------------------------------------------------------------------------
-// Keepalive DMA frames: the second, independent pin charge
-// ---------------------------------------------------------------------------
-
-/// A keepalive's pin charge is independent of the buffer it was taken from.
-///
-/// The property that makes it safe for a keepalive to outlive its
-/// `PinnedUserBuffer`, which is its entire purpose: a NIC TX DMA survives a
-/// ring-fd close or a process exit, and these refs are what stop the pages
-/// being recycled mid-DMA. A shared charge would be refunded at ring teardown
-/// while the driver still held them -- a memory-lock bypass at exactly the DMA
-/// boundary, and the reason the pin ceiling exists at all.
+/// A keepalive's pin charge is independent of the buffer it was taken from,
+/// which is what lets it outlive its `PinnedUserBuffer` while a NIC TX DMA is
+/// still in flight. A shared charge would be refunded at ring teardown while
+/// the driver still held the pages — a memory-lock bypass at the DMA boundary.
 #[cfg(feature = "test-hooks")]
 pub fn test_quota_keepalive_charge_outlives_its_pin() -> TestResult {
     use crate::pinned_user_buffer::PinnedUserBuffer;
@@ -415,7 +375,6 @@ pub fn test_quota_keepalive_charge_outlives_its_pin() -> TestResult {
         with_both - before
     );
 
-    // The buffer goes away; the keepalive and its charge must not.
     drop(pin);
     let after_pin = pinned();
     assert_test!(
@@ -436,8 +395,6 @@ pub fn test_quota_keepalive_charge_outlives_its_pin() -> TestResult {
     pass!()
 }
 
-/// A retransmit's keepalive is a second pin and is charged as one.
-///
 /// Two in-flight DMAs of the same pages hold them down twice over, so counting
 /// them once would let a retransmit storm pin arbitrarily many pages against a
 /// single charge. `redup` also re-uses the original's account rather than the

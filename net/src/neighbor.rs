@@ -605,7 +605,7 @@ impl NeighborCache {
                 }
             }
             NeighborState::Stale { .. } => {
-                // TODO(tech-debt): a stale re-probe that draws no reply never returns to Incomplete — it should re-enter resolution instead of waiting for ArpExpire.
+                // TODO(tech-debt): a stale re-probe drawing no reply never falls back to Incomplete — it should restart resolution.
                 let dev = entry.dev;
                 let ip = entry.ip;
 
@@ -682,10 +682,8 @@ fn current_tick_approx() -> u64 {
     slopos_kernel_services::platform::timer_ticks()
 }
 
-/// Convert a tick span to milliseconds, saturating at `u32::MAX`.
-///
-/// Answers 0 when the timer frequency is not known yet rather than dividing by
-/// zero; an entry cannot be older than the timer that would have aged it.
+/// Convert a tick span to milliseconds, saturating at `u32::MAX`; answers 0
+/// while the timer frequency is not yet known.
 fn ticks_to_ms(ticks: u64) -> u32 {
     let freq = slopos_kernel_services::platform::timer_frequency() as u64;
     if freq == 0 {

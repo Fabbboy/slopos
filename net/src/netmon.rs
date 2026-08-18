@@ -1,53 +1,14 @@
 //! Network-state monitors: the rings behind a `net_monitor` fd.
 //!
-//! A monitor is a subscription to the stack's configuration changes. The
-//! producer side is [`netmon_post`], which every mutation calls after it has
-//! committed; the consumer side is a pollable fd whose `read` drains whole
-//! [`NetEvent`] records (see [`crate::netmon_file_ops`]). That is what lets a
-//! status indicator *react* to a lease or a carrier transition instead of
-//! polling for one.
+//! [`netmon_post`] publishes a configuration change; the consumer side is a
+//! pollable fd whose `read` drains whole [`NetEvent`] records (see
+//! [`crate::netmon_file_ops`]). Each monitor owns a fixed
+//! [`NETMON_RING_CAP`]-entry ring in `.bss`; nothing here allocates.
 //!
-//! # One ring per subscriber
-//!
-//! Each monitor owns its own fixed [`NETMON_RING_CAP`]-entry ring, so the whole
-//! subsystem is [`MAX_NETMON`] × [`NETMON_RING_CAP`] × 32 B of `.bss` and
-//! nothing here allocates. A single shared ring with per-reader cursors would
-//! force the kernel to choose between tracking the slowest reader and letting a
-//! slow reader stall a fast one; netlink and Fuchsia's interface watcher both
-//! give each subscriber its own buffer for exactly that reason.
-//!
-//! # Overflow is a record, not an errno
-//!
-//! A full ring drops the **newest** record and counts it. The next `read`
-//! emits one [`NET_EV_OVERFLOW`] carrying that count, ahead of the records the
-//! ring retained, and the count it reported is the count it clears — an
-//! episode that grows while the marker is in flight stays open for the
-//! remainder rather than losing it. In-band keeps the
-//! reader's position in the stream: netlink reports the same condition
-//! out-of-band as `ENOBUFS` on `recvmsg`, which is famously easy to mishandle.
-//! The marker carries the sequence of the *first* record that was dropped, so a
-//! reader learns exactly where its view went stale and can re-snapshot from
-//! there. Because the ring drops newest, that sequence is above every record
-//! delivered behind it — the marker is a boundary, not another point in the
-//! stream.
-//!
-//! # The sequence
-//!
-//! Records are stamped from [`crate::netseq`], the one counter the whole
-//! network-management surface shares, and it advances whether or not anybody is
-//! subscribed. A client opens its fd, issues a `net_query` whose header carries
-//! [`netseq::net_seq`](crate::netseq::net_seq), and then discards drained
-//! records with `seq <= hdr.seq`: the snapshot and the stream join with no gap
-//! and no replay. Numbering an event nobody receives is what keeps that handoff
-//! sound — a hole in the numbering would be indistinguishable from a lost
-//! record.
-//!
-//! # Posting holds nothing
-//!
-//! [`NetMonTable::post`] collects the monitors it woke into a stack array,
-//! drops the table lock, and only then publishes. The table is a leaf with no
-//! outgoing lock edges, which is both what makes it safe to post from a hard
-//! IRQ and what keeps a wake site out from under a cli-spinlock.
+//! Records are stamped from [`crate::netseq`], which advances whether or not
+//! anybody is subscribed: a client joins the stream by discarding drained
+//! records with `seq <= hdr.seq` from its `net_query` snapshot, and a hole in
+//! the numbering would be indistinguishable from a lost record.
 
 use slopos_abi::Errno;
 use slopos_abi::event::{KernelEvent, MAX_NETMON, NetMonSlot};
@@ -66,21 +27,14 @@ use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 use crate::netseq::next_seq;
 
-/// Records one monitor buffers before it starts dropping.
-///
-/// Sized for the burst a single DHCP transaction produces (address, routes,
-/// resolver, connectivity, plus the interface transitions around them) with
-/// room to spare, so a reader woken by the first record has drained long
-/// before the last arrives.
+/// Records one monitor buffers before it starts dropping. Sized for the burst
+/// a single DHCP transaction produces, with room to spare.
 pub const NETMON_RING_CAP: usize = 64;
 
-/// Monitors one process may hold open at once.
-///
-/// A fixed [`MAX_NETMON`]-slot registry with no per-process quota is an
-/// exhaustion denial of service from any unprivileged process: eight opens and
-/// nothing else on the system can watch the network again. Two is enough for
-/// the shapes that exist — an indicator and a configuration tool — and a third
-/// is a bug in the caller far more often than a legitimate need.
+/// Monitors one process may hold open at once. Without a per-process quota the
+/// fixed [`MAX_NETMON`]-slot registry is an exhaustion denial of service from
+/// any unprivileged process; two covers the shapes that exist — an indicator
+/// and a configuration tool.
 pub const NETMON_MAX_PER_PROCESS: usize = 2;
 
 /// Slot-index bit width in the packed fd handle; the rest holds the generation.
@@ -91,8 +45,8 @@ const _: () = assert!(MAX_NETMON <= (1usize << SLOT_BITS));
 /// Which subscription bit selects `kind`.
 ///
 /// [`NET_EV_OVERFLOW`] deliberately maps to no bit: it is synthesised by the
-/// ring that dropped a record, never posted, and it reaches its subscriber
-/// whatever that subscriber asked for.
+/// ring that dropped a record and reaches its subscriber whatever that
+/// subscriber asked for.
 #[inline]
 pub const fn mask_bit_for_kind(kind: u16) -> u32 {
     match kind {
@@ -110,29 +64,24 @@ pub const fn mask_bit_for_kind(kind: u16) -> u32 {
 
 /// One subscriber's ring plus the state that describes it.
 ///
-/// A dead monitor keeps its slot and its generation; `live` is what
-/// distinguishes the two, and the generation is what makes a handle minted
-/// before the slot was recycled resolve to a typed miss.
-///
-/// Deliberately neither `Copy` nor `Clone`: it is two kilobytes, and the
-/// build's stack-frame gate is the reason an accidental by-value copy must not
-/// even be spellable.
+/// A dead monitor keeps its slot and its generation; `live` distinguishes the
+/// two, and the generation makes a handle minted before the slot was recycled
+/// resolve to a typed miss. Deliberately neither `Copy` nor `Clone`: at two
+/// kilobytes, an accidental by-value copy must not be spellable under the
+/// stack-frame gate.
 struct Monitor {
     live: bool,
     generation: u64,
-    /// The table this monitor belongs to, and the key the per-process cap
-    /// counts against. An [`FdTable`] rather than a raw pid because the cap
-    /// must not be inherited: a recycled id would hand the next process its
-    /// predecessor's outstanding monitors and refuse it at `NETMON_MAX_PER_PROCESS`
-    /// it never reached.
+    /// The key the per-process cap counts against. An [`FdTable`] rather than
+    /// a raw pid because the cap must not be inherited: a recycled id would
+    /// charge the next process with its predecessor's outstanding monitors.
     owner: Option<FdTable>,
     mask: u32,
     ring: [NetEvent; NETMON_RING_CAP],
     head: usize,
     len: usize,
     /// Records dropped and not yet reported. Non-zero **is** the open overflow
-    /// episode — there is no separate latch, so "reported" and "cleared" cannot
-    /// disagree.
+    /// episode; there is no separate latch.
     dropped: u32,
     /// Sequence of the first record dropped in the open episode.
     overflow_seq: u64,
@@ -162,11 +111,9 @@ impl Monitor {
     /// Append `ev`, dropping it and opening (or extending) an overflow episode
     /// when the ring is full.
     ///
-    /// Drop-newest rather than overwrite-oldest: the records already queued are
-    /// the ones whose loss a reader cannot reconstruct, because the reader has
-    /// not yet seen them and the state they described has since moved on. The
-    /// newest record's information is still recoverable — it is in the live
-    /// state a re-snapshot reads.
+    /// Drop-newest rather than overwrite-oldest: a queued record's loss is
+    /// unrecoverable to a reader that has not yet seen it, while the newest
+    /// record's information is still in the live state a re-snapshot reads.
     fn push(&mut self, ev: &NetEvent) {
         if self.len == NETMON_RING_CAP {
             if self.dropped == 0 {
@@ -181,9 +128,9 @@ impl Monitor {
 
     /// The record a `read` would deliver next, without consuming it.
     ///
-    /// The overflow marker is synthesised here rather than stored, which is why
-    /// it can be reported ahead of records the ring queued before the drop
-    /// without occupying an entry of its own.
+    /// The overflow marker is synthesised here rather than stored, so it can be
+    /// reported ahead of records the ring queued before the drop without
+    /// occupying an entry of its own.
     fn front(&self) -> Option<NetEvent> {
         if self.dropped != 0 {
             return Some(NetEvent::new(
@@ -202,12 +149,11 @@ impl Monitor {
     /// Consume what [`front`](Self::front) handed out, once it has been
     /// delivered.
     ///
-    /// Splitting delivery into peek-copy-commit is what lets a `read` copy to a
-    /// user buffer without holding the table lock, and the identity checks here
-    /// are what make that safe to interleave. A record retires only if it is
-    /// still at the head, and the marker retires only the number of drops it
-    /// actually reported — so a drop landing between the peek and the retire
-    /// leaves a smaller episode open rather than vanishing from the count.
+    /// Peek-copy-commit is what lets a `read` copy to a user buffer without
+    /// holding the table lock. A record retires only if it is still at the
+    /// head, and the marker retires only the drops it actually reported, so a
+    /// drop landing between the peek and the retire leaves a smaller episode
+    /// open rather than vanishing from the count.
     fn commit(&mut self, ev: &NetEvent) {
         if ev.kind == NET_EV_OVERFLOW {
             if self.dropped != 0 && self.overflow_seq == ev.seq {
@@ -307,8 +253,8 @@ impl NetMonTable {
     }
 
     /// Release a monitor. Called from the owning fd's backing `Drop`, so the
-    /// last fd close **is** the teardown. A stale handle is a no-op, which is
-    /// what makes a double release unrepresentable rather than merely unlikely.
+    /// last fd close **is** the teardown. A stale handle is a no-op, which
+    /// makes a double release unrepresentable.
     pub fn close(&self, raw_handle: usize) {
         let handle = Handle::<Monitor>::unpack(raw_handle, SLOT_BITS);
         let mut table = self.inner.lock();
@@ -328,7 +274,6 @@ impl NetMonTable {
         monitor.dropped = 0;
     }
 
-    /// Run `f` against the live monitor `raw_handle` names.
     fn with_monitor<R>(
         &self,
         raw_handle: usize,
@@ -349,10 +294,9 @@ impl NetMonTable {
     /// Publish a state change to every monitor subscribed to its kind,
     /// returning the sequence it was given.
     ///
-    /// The sequence advances whether or not anybody is listening. Waking
-    /// happens after the table lock is released: the woken slots are collected
-    /// into a stack array first, so this function has no outgoing lock edge and
-    /// stays callable from a hard IRQ and from under a caller's cli-spinlock.
+    /// Woken slots are collected into a stack array and published after the
+    /// table lock is released, so this has no outgoing lock edge and stays
+    /// callable from a hard IRQ and from under a caller's cli-spinlock.
     pub fn post(&self, kind: u16, ifindex: u32, payload: [u8; 16]) -> u64 {
         let bit = mask_bit_for_kind(kind);
         let seq = next_seq();
@@ -382,18 +326,16 @@ impl NetMonTable {
         seq
     }
 
-    /// The record a `read` would deliver next, without consuming it.
     pub fn peek(&self, raw_handle: usize) -> Result<Option<NetEvent>, Errno> {
         self.with_monitor(raw_handle, |m| m.front())
     }
 
-    /// Consume the record [`peek`](Self::peek) returned, once it has been
-    /// delivered. Ignored if the monitor has moved on.
+    /// Consume the record [`peek`](Self::peek) returned. Ignored if the
+    /// monitor has moved on.
     pub fn commit(&self, raw_handle: usize, event: &NetEvent) -> Result<(), Errno> {
         self.with_monitor(raw_handle, |m| m.commit(event))
     }
 
-    /// Drain up to `out.len()` records, returning how many were written.
     pub fn drain(&self, raw_handle: usize, out: &mut [NetEvent]) -> Result<usize, Errno> {
         let mut written = 0usize;
         while written < out.len() {
@@ -407,7 +349,6 @@ impl NetMonTable {
         Ok(written)
     }
 
-    /// Whether a `read` on this monitor would return a record.
     pub fn is_readable(&self, raw_handle: usize) -> bool {
         self.with_monitor(raw_handle, |m| m.readable())
             .unwrap_or(false)
@@ -421,17 +362,14 @@ impl NetMonTable {
             .ok()
     }
 
-    /// Live monitors in this registry.
     pub fn count(&self) -> usize {
         let table = self.inner.lock();
         table.slots.iter().filter(|m| m.live).count()
     }
 
     /// A summary of what the registry is holding, for the diagnostic console.
-    ///
-    /// `dropped` is the interesting number: a non-zero count names a
-    /// subscriber that is not keeping up, which is invisible from anywhere
-    /// else and is exactly what someone debugging a stuck indicator wants.
+    /// A non-zero `dropped` names a subscriber that is not keeping up, which is
+    /// invisible from anywhere else.
     pub fn stats(&self) -> NetMonStats {
         let table = self.inner.lock();
         let mut stats = NetMonStats::default();
@@ -443,11 +381,9 @@ impl NetMonTable {
         stats
     }
 
-    /// Release every monitor.
-    ///
-    /// Test-only. Production tears a monitor down through its fd, and closing
-    /// one out from under its owner would leave that owner polling an fd that
-    /// can never be ready again.
+    /// Release every monitor. Test-only: production tears a monitor down
+    /// through its fd, and closing one out from under its owner would leave
+    /// that owner polling an fd that can never be ready again.
     #[cfg(feature = "test-hooks")]
     pub fn clear(&self) {
         let mut table = self.inner.lock();
@@ -466,15 +402,10 @@ impl NetMonTable {
     }
 }
 
-// =============================================================================
-// Kernel-registry shorthands
-// =============================================================================
-
 /// Publish a state change to the kernel's monitors. See [`NetMonTable::post`].
 ///
-/// Build `payload` with the [`NetEvent`] encoder for the kind being posted
-/// (`NetEvent::iface_payload`, `addr_payload`, …) so kernel and userland share
-/// one decoder.
+/// Build `payload` with the [`NetEvent`] encoder for the kind being posted so
+/// kernel and userland share one decoder.
 #[inline]
 pub fn netmon_post(kind: u16, ifindex: u32, payload: [u8; 16]) -> u64 {
     NETMON_TABLE.post(kind, ifindex, payload)

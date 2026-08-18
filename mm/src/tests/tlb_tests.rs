@@ -1,11 +1,4 @@
-//! TLB Shootdown Tests - Finding Real Bugs in SMP TLB Invalidation
-//!
-//! These tests target dangerous edge cases in TLB management:
-//! - flush_page/flush_range/flush_all with invalid addresses
-//! - TlbFlushBatch overflow behavior
-//! - SMP state consistency (active_cpu_count, notify_cpu_online edge cases)
-//! - handle_shootdown_ipi with invalid cpu_idx
-//! - Race conditions in broadcast_flush_request
+//! TLB shootdown and SMP TLB-invalidation tests.
 
 use super::tests::resolve_pid;
 use slopos_abi::addr::VirtAddr;
@@ -23,15 +16,11 @@ use crate::tlb::{
 };
 use slopos_abi::task::INVALID_PROCESS_ID;
 
-/// Two CPU indices past anything this machine will bring online, so a test
-/// can drive the per-process shootdown mask without disturbing a live
-/// CPU's address-space bookkeeping or provoking a real IPI.
+/// Two CPU indices past anything this machine brings online, so a test can
+/// drive the per-process shootdown mask without disturbing a live CPU's
+/// address-space bookkeeping or provoking a real IPI.
 const OFFLINE_CPU_A: usize = MAX_CPUS - 1;
 const OFFLINE_CPU_B: usize = MAX_CPUS - 2;
-
-// =============================================================================
-// BASIC FLUSH OPERATION TESTS
-// =============================================================================
 
 pub fn test_flush_page_null_address() -> TestResult {
     flush_page(VirtAddr::NULL);
@@ -51,7 +40,6 @@ pub fn test_flush_page_user_max_address() -> TestResult {
 }
 
 pub fn test_flush_page_high_kernel_address() -> TestResult {
-    // High canonical kernel address (valid but unusual)
     let high_kernel = VirtAddr::new(0xFFFF_FFFF_FFFF_0000);
     flush_page(high_kernel);
     TestResult::Pass
@@ -59,13 +47,11 @@ pub fn test_flush_page_high_kernel_address() -> TestResult {
 
 pub fn test_flush_range_empty() -> TestResult {
     let addr = VirtAddr::new(0xFFFF_FFFF_8000_0000);
-    // Start == end means empty range
     flush_range(addr, addr);
     TestResult::Pass
 }
 
 pub fn test_flush_range_inverted() -> TestResult {
-    // End < start - should be handled gracefully (probably no-op)
     let start = VirtAddr::new(0xFFFF_FFFF_8001_0000);
     let end = VirtAddr::new(0xFFFF_FFFF_8000_0000);
     flush_range(start, end);
@@ -80,7 +66,6 @@ pub fn test_flush_range_single_page() -> TestResult {
 }
 
 pub fn test_flush_range_large() -> TestResult {
-    // Large range should trigger full TLB flush internally (>32 pages)
     let start = VirtAddr::new(0xFFFF_FFFF_8000_0000);
     let end = VirtAddr::new(0xFFFF_FFFF_8010_0000); // 1MB = 256 pages
     flush_range(start, end);
@@ -88,9 +73,8 @@ pub fn test_flush_range_large() -> TestResult {
 }
 
 pub fn test_flush_range_threshold_boundary() -> TestResult {
-    // Exactly at INVLPG_THRESHOLD (32 pages)
     let start = VirtAddr::new(0xFFFF_FFFF_8000_0000);
-    let end = VirtAddr::new(0xFFFF_FFFF_8002_0000); // 32 * 4KB = 128KB
+    let end = VirtAddr::new(0xFFFF_FFFF_8002_0000); // INVLPG_THRESHOLD: 32 * 4KB
     flush_range(start, end);
     TestResult::Pass
 }
@@ -101,7 +85,6 @@ pub fn test_flush_all_basic() -> TestResult {
 }
 
 pub fn test_flush_asid_kernel_cr3() -> TestResult {
-    // Flush with a fake CR3 value representing kernel address space
     let fake_asid = 0xFFFF_FFFF_0000_0000u64;
     flush_asid(fake_asid);
     TestResult::Pass
@@ -111,10 +94,6 @@ pub fn test_flush_asid_zero() -> TestResult {
     flush_asid(0);
     TestResult::Pass
 }
-
-// =============================================================================
-// TLB FLUSH BATCH TESTS
-// =============================================================================
 
 pub fn test_batch_empty_finish() -> TestResult {
     let mut batch = TlbFlushBatch::new();
@@ -139,7 +118,7 @@ pub fn test_batch_multiple_pages() -> TestResult {
 }
 
 pub fn test_batch_at_threshold() -> TestResult {
-    // Add exactly INVLPG_THRESHOLD pages (32)
+    // Exactly INVLPG_THRESHOLD pages (32).
     let mut batch = TlbFlushBatch::new();
     for i in 0..32u64 {
         batch.add(VirtAddr::new(0xFFFF_FFFF_8000_0000 + i * 0x1000));
@@ -149,7 +128,7 @@ pub fn test_batch_at_threshold() -> TestResult {
 }
 
 pub fn test_batch_overflow() -> TestResult {
-    // Add more than INVLPG_THRESHOLD pages - should trigger full flush
+    // Past INVLPG_THRESHOLD (32 pages).
     let mut batch = TlbFlushBatch::new();
     for i in 0..64u64 {
         batch.add(VirtAddr::new(0xFFFF_FFFF_8000_0000 + i * 0x1000));
@@ -159,7 +138,6 @@ pub fn test_batch_overflow() -> TestResult {
 }
 
 pub fn test_batch_scattered_addresses() -> TestResult {
-    // Non-contiguous addresses should still work
     let mut batch = TlbFlushBatch::new();
     batch.add(VirtAddr::new(0xFFFF_FFFF_8000_0000));
     batch.add(VirtAddr::new(0xFFFF_FFFF_A000_0000));
@@ -169,11 +147,10 @@ pub fn test_batch_scattered_addresses() -> TestResult {
 }
 
 pub fn test_batch_drop_flushes() -> TestResult {
-    // Batch should flush on drop if not finished
     {
         let mut batch = TlbFlushBatch::new();
         batch.add(VirtAddr::new(0xFFFF_FFFF_8000_0000));
-        // Intentionally not calling finish - drop should handle it
+        // Intentionally no finish(): drop must flush.
     }
     TestResult::Pass
 }
@@ -186,13 +163,8 @@ pub fn test_batch_double_finish() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// SMP STATE TESTS
-// =============================================================================
-
 pub fn test_is_smp_active_initial() -> TestResult {
-    // Initially only BSP is active, so SMP should be inactive
-    // But since tests run after kernel init, this may vary
+    // Tests run after kernel init, so SMP state is not deterministic here.
     let _is_smp = is_smp_active();
     TestResult::Pass
 }
@@ -226,10 +198,6 @@ pub fn test_bsp_apic_id_from_pcr() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// HANDLE_SHOOTDOWN_IPI TESTS
-// =============================================================================
-
 pub fn test_handle_shootdown_ipi_cpu_zero() -> TestResult {
     handle_shootdown_ipi(0);
     TestResult::Pass
@@ -241,19 +209,13 @@ pub fn test_handle_shootdown_ipi_cpu_max_minus_one() -> TestResult {
 }
 
 pub fn test_handle_shootdown_ipi_cpu_overflow() -> TestResult {
-    // CPU index >= MAX_CPUS should be handled gracefully
     handle_shootdown_ipi(MAX_CPUS);
     handle_shootdown_ipi(MAX_CPUS + 100);
     handle_shootdown_ipi(usize::MAX);
     TestResult::Pass
 }
 
-// =============================================================================
-// CPU FEATURE DETECTION TESTS
-// =============================================================================
-
 pub fn test_has_invpcid_consistent() -> TestResult {
-    // Call twice - should return same result (cached)
     let first = has_invpcid();
     let second = has_invpcid();
 
@@ -277,12 +239,7 @@ pub fn test_has_pcid_consistent() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// CONSTANTS VALIDATION TESTS
-// =============================================================================
-
 pub fn test_tlb_shootdown_vector_valid() -> TestResult {
-    // Vector should be in valid IPI range (0x20-0xFE)
     if TLB_SHOOTDOWN_VECTOR < 0x20 {
         klog_info!(
             "TLB_TEST: BUG - TLB_SHOOTDOWN_VECTOR 0x{:x} conflicts with exceptions",
@@ -318,10 +275,6 @@ pub fn test_max_cpus_reasonable() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// FLUSH TYPE CONVERSION TESTS
-// =============================================================================
-
 pub fn test_flush_type_from_valid() -> TestResult {
     if FlushType::from(0) != FlushType::None {
         klog_info!("TLB_TEST: FlushType::from(0) != None");
@@ -344,7 +297,6 @@ pub fn test_flush_type_from_valid() -> TestResult {
 }
 
 pub fn test_flush_type_from_invalid() -> TestResult {
-    // Invalid values should map to None
     if FlushType::from(4) != FlushType::None {
         klog_info!("TLB_TEST: FlushType::from(4) != None");
         return TestResult::Fail;
@@ -458,12 +410,7 @@ pub fn test_should_flush_tlb_lazy_skips() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// STRESS TESTS
-// =============================================================================
-
 pub fn test_rapid_flush_pages() -> TestResult {
-    // Rapidly flush many pages - potential race condition finder
     for i in 0..100u64 {
         flush_page(VirtAddr::new(0xFFFF_FFFF_8000_0000 + i * 0x1000));
     }
@@ -471,7 +418,6 @@ pub fn test_rapid_flush_pages() -> TestResult {
 }
 
 pub fn test_rapid_flush_all() -> TestResult {
-    // Multiple full flushes in quick succession
     for _ in 0..10 {
         flush_all();
     }
@@ -479,7 +425,6 @@ pub fn test_rapid_flush_all() -> TestResult {
 }
 
 pub fn test_interleaved_flush_operations() -> TestResult {
-    // Mix different flush operations
     flush_page(VirtAddr::new(0xFFFF_FFFF_8000_0000));
     flush_all();
     flush_range(
@@ -491,16 +436,9 @@ pub fn test_interleaved_flush_operations() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// PER-PROCESS SHOOTDOWN MASK TESTS
-// =============================================================================
-
-/// Destroying a process leaves no CPU in its shootdown mask.
-///
-/// Process ids are recycled, so a mask that outlives its process is
-/// inherited by the id's next holder: it would shoot down CPUs that never
-/// mapped the new address space, and — because the mask is the complete
-/// target list — say nothing about the CPUs that did.
+/// Process ids recycle, so a mask that outlives its process is inherited by the
+/// id's next holder: it would shoot down CPUs that never mapped the new address
+/// space and, being the complete target list, omit the CPUs that did.
 pub fn test_destroy_clears_the_process_shootdown_mask() -> TestResult {
     let pid = create_process_vm();
     if pid == INVALID_PROCESS_ID {
@@ -542,12 +480,9 @@ pub fn test_destroy_clears_the_process_shootdown_mask() -> TestResult {
     TestResult::Pass
 }
 
-/// A targeted flush reaches every CPU the mask names.
-///
-/// `targeted_flush_request` skips offline CPUs, so an offline-only mask
-/// must still complete rather than hang waiting for an ack that cannot
-/// come — and the mask must survive the flush, because a live process
-/// keeps running on those CPUs afterwards.
+/// `targeted_flush_request` skips offline CPUs, so an offline-only mask must
+/// complete rather than hang on an ack that cannot come; the mask must survive
+/// the flush because a live process keeps running on those CPUs.
 pub fn test_targeted_flush_covers_every_masked_cpu() -> TestResult {
     let pid = create_process_vm();
     if pid == INVALID_PROCESS_ID {
@@ -581,8 +516,8 @@ pub fn test_targeted_flush_covers_every_masked_cpu() -> TestResult {
     crate::tlb::flush_all_for_process(key);
 
     let after = process_tlb_cpumask_count(key);
-    // Switch this CPU back off the address space, the way a real context
-    // switch would, before the process goes away.
+    // Switch this CPU off the address space, as a real context switch would,
+    // before the process goes away.
     notify_mm_switch(None, INVALID_PROCESS_ID, live_cpu);
     destroy_process_vm(resolve_pid(pid));
     if after != 3 {

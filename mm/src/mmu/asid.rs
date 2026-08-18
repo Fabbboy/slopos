@@ -1,22 +1,10 @@
 //! Per-CPU ASID pool and context-switch fast path.
 //!
-//! Mirrors Linux's `arch/x86/mm/tlb.c` design:
-//!   - Each CPU owns [`DYN_ASIDS_PER_CPU`] PCID slots (16 here; Linux uses 6).
-//!     The hardware PCID loaded into `CR3[11:0]` is `slot_index + 1`.
-//!     PCID `0` is reserved for kernel-only address-space loads.
-//!   - A slot remembers which `MmContextId` last occupied it and what
-//!     `tlb_gen` was current at the time. On switch-in, if the requested
-//!     `(ctx_id, tlb_gen)` still matches, the CPU writes CR3 with the
-//!     `NOFLUSH` bit so its TLB entries survive.
-//!   - A stale generation reuses the same slot but issues `INVPCID` type 1
-//!     (single-context flush) to drop the old translations.
-//!   - A miss rotates `next_asid` forward, evicts whatever was in that slot
-//!     (flushing it), binds the new context, and writes a `NOFLUSH=0` CR3.
-//!
-//! CPUs that do not support `CR4.PCIDE` (or where the errata layer in
-//! `mmu::errata` has force-disabled it) fall through to the legacy path:
-//! every call returns `Cr3Value::kernel(phys)` and the hardware flushes
-//! the whole TLB on each CR3 reload — still correct, just slower.
+//! Each CPU owns [`DYN_ASIDS_PER_CPU`] PCID slots; the hardware PCID loaded
+//! into `CR3[11:0]` is `slot_index + 1`, and PCID `0` is reserved for
+//! kernel-only address-space loads. Without `CR4.PCIDE` (unsupported, or
+//! force-disabled by `mmu::errata`) every call returns `Cr3Value::kernel(phys)`
+//! and the hardware flushes the whole TLB on each CR3 reload.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -39,12 +27,9 @@ const INVPCID_ALL_CONTEXT_NO_GLOBALS: u64 = 3;
 
 /// Number of dynamic per-CPU PCID slots.
 ///
-/// Linux uses `TLB_NR_DYN_ASIDS = 6`; we have enough headroom and cheap
-/// cache to justify 16. Slot index 0 is unused (it maps to PCID 1 —
-/// kernel PCID 0 is reserved). With 16 slots, PCIDs in use on any one
-/// CPU are `0` (kernel) plus `1..=16` (user). That fits comfortably in
-/// the 12-bit PCID space and leaves room for the KPTI bit-11 user/kernel
-/// pair (see `mmu::kpti`).
+/// PCIDs in use on any one CPU are `0` (kernel) plus `1..=16` (user), which fits
+/// the 12-bit PCID space and leaves room for the KPTI bit-11 user/kernel pair
+/// (see `mmu::kpti`).
 pub const DYN_ASIDS_PER_CPU: usize = 16;
 
 #[derive(Clone, Copy)]
@@ -60,26 +45,17 @@ impl AsidSlot {
     };
 }
 
-/// Per-CPU ASID state. Mutated only by its owning CPU, with interrupts
-/// disabled (callers are the context switcher and shootdown IPI handler).
-/// Counters are `AtomicU64` so they can be read non-authoritatively from
-/// other CPUs (debug / diagnostics).
+/// Mutated only by its owning CPU with interrupts disabled. Counters are
+/// `AtomicU64` only so other CPUs can read them non-authoritatively.
 #[repr(C, align(64))]
 struct PerCpuAsids {
     slots: [AsidSlot; DYN_ASIDS_PER_CPU],
-    /// Which slot was bound by the most recent `switch_to`.
     last_loaded_slot: u8,
-    /// Round-robin cursor for slot allocation on miss.
     next_asid: u8,
-    /// Whether the last switch wrote CR3 at all. Purely diagnostic.
     _padding: [u8; 6],
-    /// Fast path: context + generation match → CR3 with NOFLUSH.
     pub hot_hits: AtomicU64,
-    /// Slot hit, generation stale → INVPCID single-context + reuse.
     pub gen_refresh: AtomicU64,
-    /// No slot held this context → rotated into a fresh slot.
     pub misses: AtomicU64,
-    /// Legacy non-PCID path taken (CR4.PCIDE disabled at boot).
     pub legacy: AtomicU64,
 }
 
@@ -98,22 +74,19 @@ impl PerCpuAsids {
     }
 }
 
-/// The slot table is written only by its owning CPU with interrupts off, but
 /// `forget_context_local` takes a caller-supplied index, so nothing about the
-/// signature confines a caller to its own slot. `PerCpuSlot` checks the
+/// signature confines a caller to its own slot; `PerCpuSlot` checks the
 /// exclusivity the discipline assumes.
 static PER_CPU: [PerCpuSlot<PerCpuAsids>; MAX_CPUS] = {
     const INIT: PerCpuSlot<PerCpuAsids> = PerCpuSlot::new(PerCpuAsids::new());
     [INIT; MAX_CPUS]
 };
 
-/// Global switch: set once at BSP boot after CPUID + errata check. Mirrors
-/// the hardware's `CR4.PCIDE` but in software so the context-switch hot
-/// path never reads `CR4`.
+/// Software mirror of `CR4.PCIDE`, set once at BSP boot, so the
+/// context-switch hot path never reads `CR4`.
 static PCID_ENABLED: AtomicBool = AtomicBool::new(false);
 static INVPCID_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
-/// Is the PCID fast path active on this machine?
 #[inline]
 pub fn pcid_enabled() -> bool {
     PCID_ENABLED.load(Ordering::Relaxed)
@@ -138,14 +111,10 @@ fn cpu_has_invpcid() -> bool {
     (ebx & CPUID_SEXT_EBX_INVPCID) != 0
 }
 
-/// BSP bring-up: probe PCID, probe INVPCID, enable `CR4.PCIDE` on the
-/// current CPU, and flip the global feature switch.
+/// BSP bring-up for the PCID fast path.
 ///
-/// Must run with CR3's PCID bits already zero (they are, because all
-/// prior writes went through `Cr3Value::kernel`). Safe to call again on
-/// APs via [`init_ap`].
-///
-/// Returns `true` if PCID is live system-wide after this call.
+/// Must run with CR3's PCID bits already zero. Returns `true` if PCID is
+/// live system-wide after this call.
 pub fn init_bsp() -> bool {
     let pcid = cpu_has_pcid();
     let invpcid = cpu_has_invpcid();
@@ -179,17 +148,15 @@ pub fn init_bsp() -> bool {
     true
 }
 
-/// AP bring-up counterpart to [`init_bsp`]. Must run after the AP has
-/// inherited the kernel page tables but before its first user-address
-/// CR3 load.
+/// AP counterpart to [`init_bsp`]. Must run after the AP has inherited the
+/// kernel page tables but before its first user-address CR3 load.
 pub fn init_ap() {
     if pcid_enabled() {
         set_cr4_pcide_local();
     }
 }
 
-/// Raw per-CPU CR4.PCIDE enable. Assumes PCID is supported and the
-/// current CR3 has PCID == 0.
+/// Assumes PCID is supported and the current CR3 has PCID == 0.
 fn set_cr4_pcide_local() {
     let cr4 = read_cr4() | Cr4Flags::PCIDE.bits();
     write_cr4(cr4);
@@ -197,16 +164,10 @@ fn set_cr4_pcide_local() {
 }
 
 /// Flush all entries belonging to a specific PCID (INVPCID type 1).
-///
-/// Used when reassigning a PCID slot to a different context, or when a
-/// stale generation forces us to drop the slot's prior TLB caches.
 pub fn flush_pcid(pcid: u16) {
     if !invpcid_available() {
-        // No INVPCID: widen to every context rather than reloading CR3.
-        // A CR3 reload drops only the tag it loads, so with `CR4.PCIDE`
-        // set it would leave `pcid` itself untouched whenever `pcid` is
-        // not the one currently in CR3 — which is exactly the eviction
-        // case this function exists to serve.
+        // A CR3 reload drops only the tag it loads, so with `CR4.PCIDE` set it
+        // would leave `pcid` untouched whenever `pcid` is not the tag in CR3.
         flush_local_all_contexts();
         return;
     }
@@ -215,24 +176,15 @@ pub fn flush_pcid(pcid: u16) {
 
 /// Invalidate every non-global TLB entry on this CPU, across **all** PCIDs.
 ///
-/// `mov cr3` is not this operation. With `CR4.PCIDE` set it invalidates only
-/// the entries tagged with the PCID in the value being loaded, so every other
-/// address space this CPU has cached survives — and [`select_cr3`] hands back
-/// `NOFLUSH` CR3 values, so those survivors go live again the next time this
-/// CPU switches to one of those contexts. A frame handed to a new owner while
-/// such an entry exists is readable and writable through the old mapping.
+/// `mov cr3` is not this operation: with `CR4.PCIDE` set it invalidates only
+/// the tag in the value being loaded, and [`select_cr3`] hands back `NOFLUSH`
+/// values, so a frame handed to a new owner stays readable and writable
+/// through a surviving stale entry.
 ///
-/// Three implementations, in preference order:
-///
-///   1. `INVPCID` type 3 — all-context, excluding globals. Exactly right: the
-///      kernel's global mappings are preserved and every user tag is dropped.
-///   2. Toggling `CR4.PGE` — a `MOV to CR4` that *changes* PGE invalidates the
-///      whole TLB including global entries, so flipping it and flipping it back
-///      works whichever way round it started. Coarser (it takes the kernel's
-///      global entries with it) and it costs two flushes, but it needs no
-///      instruction the CPU might not have.
-///   3. A CR3 reload — correct only because PCID is off, which makes CR3's tag
-///      space a single context.
+/// The `CR4.PGE` fallback works because a `MOV to CR4` that *changes* PGE
+/// invalidates the whole TLB including globals, whichever way round it
+/// started; the CR3 reload is correct only because PCID is off there, making
+/// CR3's tag space a single context.
 pub fn flush_local_all_contexts() {
     if !pcid_enabled() {
         slopos_arch::cpu::flush_tlb_all();
@@ -249,22 +201,8 @@ pub fn flush_local_all_contexts() {
 
 /// Choose a CR3 value for the next address space to load on this CPU.
 ///
-/// This is the **hot path** of every context switch. Three outcomes:
-///
-///   1. *Hot hit* — same `(ctx_id, tlb_gen)` as last time → write CR3
-///      with `NOFLUSH`, TLB retained.
-///   2. *Gen refresh* — a slot already held this `ctx_id` but its
-///      `tlb_gen` is stale (an unmap happened on another CPU and bumped
-///      the generation). Issue `INVPCID` type 1 on the PCID and reuse
-///      the slot with NOFLUSH.
-///   3. *Miss* — no slot had this `ctx_id`. Advance `next_asid`, evict
-///      whatever was there (full PCID flush), install the new binding,
-///      and write CR3 without NOFLUSH.
-///
-/// When PCID is globally disabled, always returns
-/// `Cr3Value::kernel(phys)` which corresponds to PCID 0 + NOFLUSH=0.
-///
-/// Callers: `scheduler::prepare_switch_to`. Interrupts must be off.
+/// Interrupts must be off. When PCID is globally disabled, always returns
+/// `Cr3Value::kernel(phys)`, which corresponds to PCID 0 + NOFLUSH=0.
 pub fn select_cr3(
     cpu_id: usize,
     ctx_id: MmContextId,
@@ -282,13 +220,11 @@ pub fn select_cr3(
         return Cr3Value::kernel(pml4_phys);
     }
 
-    // Kernel-only switches (ctx_id invalid) use PCID 0 unconditionally.
     if !ctx_id.is_valid() {
         return Cr3Value::new(pml4_phys, Pcid::KERNEL, true);
     }
 
     with_asid_state(cpu_id, |state| {
-        // Fast path: slot currently loaded still valid.
         if (state.last_loaded_slot as usize) < DYN_ASIDS_PER_CPU {
             let slot = &state.slots[state.last_loaded_slot as usize];
             if slot.ctx_id == ctx_id.raw() && slot.tlb_gen == ctx_tlb_gen {
@@ -298,7 +234,6 @@ pub fn select_cr3(
             }
         }
 
-        // Linear scan for a pre-existing slot for this ctx_id.
         for (i, slot) in state.slots.iter_mut().enumerate() {
             if slot.ctx_id == ctx_id.raw() {
                 let pcid_raw = i as u16 + 1;
@@ -314,13 +249,10 @@ pub fn select_cr3(
             }
         }
 
-        // Miss: rotate into the next slot, evict prior contents.
         let slot_idx = state.next_asid as usize;
         state.next_asid = ((state.next_asid as usize + 1) % DYN_ASIDS_PER_CPU) as u8;
         let pcid_raw = slot_idx as u16 + 1;
 
-        // Flush whatever the prior tenant left behind. Cheap on INVPCID-
-        // capable hardware; a full CR3 reload otherwise.
         if state.slots[slot_idx].ctx_id != 0 {
             flush_pcid(pcid_raw);
         }
@@ -331,21 +263,14 @@ pub fn select_cr3(
         state.last_loaded_slot = slot_idx as u8;
         state.misses.fetch_add(1, Ordering::Relaxed);
 
-        // NOFLUSH=false because we must have the processor flush any stale
-        // non-global entries cached with this PCID value since we set the
-        // slot above. In practice INVPCID already did that, but pairing
-        // NOFLUSH=false with the allocation keeps correctness simple.
+        // NOFLUSH=false so the processor drops any stale non-global entries
+        // still cached under this PCID.
         Cr3Value::new(pml4_phys, Pcid::new_unchecked(pcid_raw), false)
     })
 }
 
-/// Run `f` over CPU `cpu_id`'s ASID state.
-///
-/// Panics rather than returning on a declined borrow. Every caller reaches
-/// this either on the context-switch path or from a context-teardown, both of
-/// which run with interrupts off on the slot's own CPU — so a decline means
-/// two writers reached one slot, which is the bug the borrow word exists to
-/// surface rather than something to paper over with a skipped update.
+/// Panics on a declined borrow: every caller runs with interrupts off on the
+/// slot's own CPU, so a decline means two writers reached one slot.
 #[inline]
 fn with_asid_state<R>(cpu_id: usize, f: impl FnOnce(&mut PerCpuAsids) -> R) -> R {
     IrqDisabled::with(|irq| {
@@ -355,12 +280,8 @@ fn with_asid_state<R>(cpu_id: usize, f: impl FnOnce(&mut PerCpuAsids) -> R) -> R
     })
 }
 
-/// Invalidate all per-CPU slot bindings for a particular context.
-///
-/// Called when an `MmContextId` is being destroyed so its TLB entries
-/// cannot linger under their previously-assigned PCIDs on any CPU this
-/// function is invoked on. Each CPU must call this for its own state.
-/// Cross-CPU invalidation rides on the shootdown path.
+/// Drop this CPU's slot bindings for a destroyed `MmContextId`. Each CPU must
+/// call it for its own state; cross-CPU invalidation rides the shootdown path.
 pub fn forget_context_local(cpu_id: usize, ctx_id: MmContextId) {
     if cpu_id >= MAX_CPUS || !pcid_enabled() {
         return;

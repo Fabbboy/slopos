@@ -9,9 +9,8 @@ use crate::tests::tcp_common::reset_all as reset;
 use crate::timer::{NET_TIMER_WHEEL, TimerKind};
 use crate::with_data_state;
 
-// Keepalive periods (mirrors the private production constants in tcp/mod.rs).
-// Advancing the unified mock clock by just past a period crosses the next
-// keepalive deadline so the timer wheel fires it in a single `process_due()`.
+// Mirrors the private production constants in tcp/mod.rs. The `+ 1` lands just
+// past a period so the timer wheel fires that deadline in one `process_due()`.
 const KEEPALIVE_IDLE_MS: u64 = 7_200 * 1_000;
 const KEEPALIVE_INTERVAL_MS: u64 = 75 * 1_000;
 const IDLE_ADVANCE_MS: u64 = KEEPALIVE_IDLE_MS + 1;
@@ -19,11 +18,6 @@ const INTERVAL_ADVANCE_MS: u64 = KEEPALIVE_INTERVAL_MS + 1;
 
 /// Start each keepalive test on the mock clock so every keepalive deadline is
 /// expressed in mock time and a later `MockClock::advance` can cross it.
-///
-/// Returns the [`MockClockGuard`](crate::clock::MockClockGuard) that restores
-/// real time on drop; callers bind it for the whole test body
-/// (`let _clock = keepalive_setup();`) so the pinned clock cannot leak into a
-/// later test or the userland phase.
 #[must_use = "bind the returned MockClockGuard for the test body, else the clock is restored immediately"]
 fn keepalive_setup() -> crate::clock::MockClockGuard {
     reset();

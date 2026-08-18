@@ -1,13 +1,6 @@
-//! Glob-matching for test names.
-//!
-//! Supports two metacharacters:
-//!   - `*` — matches any sequence (including empty)
-//!   - `?` — matches exactly one byte
-//!
-//! Matching is byte-oriented; test names are ASCII fully-qualified module
-//! paths so this is sufficient.
+//! Glob-matching for test names: `*` matches any sequence including empty, `?`
+//! exactly one byte. Byte-oriented — test names are ASCII module paths.
 
-/// Recursive backtracking glob matcher.
 pub fn glob_match(pat: &[u8], name: &[u8]) -> bool {
     let mut pi = 0usize;
     let mut ni = 0usize;
@@ -38,7 +31,6 @@ pub fn glob_match(pat: &[u8], name: &[u8]) -> bool {
     pi == pat.len()
 }
 
-/// True iff any pattern in `pats` matches `name`.
 pub fn matches_any(pats: &[&[u8]], name: &[u8]) -> bool {
     pats.iter().any(|p| glob_match(p, name))
 }

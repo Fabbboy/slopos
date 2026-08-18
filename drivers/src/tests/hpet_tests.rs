@@ -5,11 +5,6 @@ use slopos_testing::measure_elapsed_ms;
 
 use crate::hpet;
 
-// ---------------------------------------------------------------------------
-// Nanosecond conversion math
-// ---------------------------------------------------------------------------
-
-/// Verify `nanoseconds(0)` returns 0.
 pub fn test_hpet_nanoseconds_zero() -> TestResult {
     let ns = hpet::nanoseconds(0);
     if ns != 0 {
@@ -19,9 +14,6 @@ pub fn test_hpet_nanoseconds_zero() -> TestResult {
     TestResult::Pass
 }
 
-/// Verify `nanoseconds(1)` equals the tick period converted to nanoseconds.
-/// For a 10 MHz HPET (period = 100_000_000 fs), one tick = 100 ns.
-/// For a 100 MHz HPET (period = 10_000_000 fs), one tick = 10 ns.
 pub fn test_hpet_nanoseconds_one_tick() -> TestResult {
     let period_fs = hpet::period_femtoseconds();
     if period_fs == 0 {
@@ -44,7 +36,6 @@ pub fn test_hpet_nanoseconds_one_tick() -> TestResult {
     TestResult::Pass
 }
 
-/// Verify nanosecond conversion is linear: `nanoseconds(N) == N * nanoseconds(1)`.
 pub fn test_hpet_nanoseconds_linearity() -> TestResult {
     let period_fs = hpet::period_femtoseconds();
     if period_fs == 0 {
@@ -69,8 +60,6 @@ pub fn test_hpet_nanoseconds_linearity() -> TestResult {
     TestResult::Pass
 }
 
-/// Verify u128 math does not overflow with large tick values.
-/// At 100 MHz (10_000_000 fs), u64::MAX ticks ≈ 1.8×10^14 seconds.
 /// The u128 intermediate must not wrap.
 pub fn test_hpet_nanoseconds_large_ticks() -> TestResult {
     let period_fs = hpet::period_femtoseconds();
@@ -79,18 +68,15 @@ pub fn test_hpet_nanoseconds_large_ticks() -> TestResult {
         return TestResult::Skipped;
     }
 
-    // Verify with u64::MAX — the u128 path should handle this.
     let ns = hpet::nanoseconds(u64::MAX);
     if ns == 0 {
         klog_info!("HPET_TEST: BUG - nanoseconds(u64::MAX) returned 0 (overflow?)");
         return TestResult::Fail;
     }
 
-    // Verify with a value that would overflow u64 multiply:
-    // 10^12 ticks × 10^7 fs = 10^19 > u64::MAX ≈ 1.8×10^19
+    // 10^12 ticks × 10^7 fs = 10^19, which overflows a u64 multiply.
     let big_ticks: u64 = 1_000_000_000_000;
     let ns_big = hpet::nanoseconds(big_ticks);
-    // Expected: big_ticks × period_fs / 1_000_000
     let expected = ((big_ticks as u128 * period_fs as u128) / 1_000_000) as u64;
     if ns_big != expected {
         klog_info!(
@@ -104,11 +90,6 @@ pub fn test_hpet_nanoseconds_large_ticks() -> TestResult {
     TestResult::Pass
 }
 
-// ---------------------------------------------------------------------------
-// Counter liveness
-// ---------------------------------------------------------------------------
-
-/// Verify the counter is advancing (two reads with a spin gap).
 pub fn test_hpet_counter_advancing() -> TestResult {
     if !hpet::is_available() {
         klog_info!("HPET_TEST: SKIP - HPET not initialized");
@@ -132,7 +113,6 @@ pub fn test_hpet_counter_advancing() -> TestResult {
     TestResult::Pass
 }
 
-/// Verify monotonicity: 100 consecutive reads must be non-decreasing.
 pub fn test_hpet_counter_monotonic() -> TestResult {
     if !hpet::is_available() {
         klog_info!("HPET_TEST: SKIP - HPET not initialized");
@@ -156,11 +136,6 @@ pub fn test_hpet_counter_monotonic() -> TestResult {
     TestResult::Pass
 }
 
-// ---------------------------------------------------------------------------
-// Delay accuracy
-// ---------------------------------------------------------------------------
-
-/// Verify `delay_ms(10)` actually waits approximately 10 ms (within 5-50 ms).
 pub fn test_hpet_delay_accuracy() -> TestResult {
     if !hpet::is_available() {
         klog_info!("HPET_TEST: SKIP - HPET not initialized");
@@ -194,7 +169,6 @@ pub fn test_hpet_delay_accuracy() -> TestResult {
     TestResult::Pass
 }
 
-/// Verify `delay_ms(0)` returns instantly (≤ 2 ms).
 pub fn test_hpet_delay_zero() -> TestResult {
     if !hpet::is_available() {
         klog_info!("HPET_TEST: SKIP - HPET not initialized");
@@ -216,11 +190,6 @@ pub fn test_hpet_delay_zero() -> TestResult {
     TestResult::Pass
 }
 
-// ---------------------------------------------------------------------------
-// Availability API
-// ---------------------------------------------------------------------------
-
-/// Verify `is_available()` returns true when called after init.
 pub fn test_hpet_is_available() -> TestResult {
     if !hpet::is_available() {
         klog_info!("HPET_TEST: BUG - is_available() returned false after init");
@@ -229,7 +198,6 @@ pub fn test_hpet_is_available() -> TestResult {
     TestResult::Pass
 }
 
-/// Verify `period_femtoseconds()` returns a valid value within HPET spec range.
 pub fn test_hpet_period_valid() -> TestResult {
     let period = hpet::period_femtoseconds();
     if period == 0 {

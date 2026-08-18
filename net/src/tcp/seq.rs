@@ -1,20 +1,10 @@
 //! TCP sequence number arithmetic (RFC 793 §3.3).
 //!
-//! Provides wrapping comparison helpers that treat 32-bit sequence numbers as
-//! points on a circular number line, plus a strongly-typed [`SeqNum`] newtype
-//! for call sites that want the extra safety.  The free-function `seq_lt`
-//! family is retained for source compatibility with the existing state
-//! machine — rewriting every use site is a P3-era concern, not the purpose
-//! of this module.
-//!
-//! ## Wrapping comparison (RFC 793 §3.3)
-//!
-//! TCP sequence space is a 32-bit unsigned counter that wraps.  Two sequence
-//! numbers are compared as if they lay on a circle: the "distance" between
-//! them is computed via wrapping subtraction and reinterpreted as `i32`, so
-//! a value "close to wrap" compares less-than a value just past zero.  This
-//! is **not** the same as `<` on `u32`; tests frequently catch bugs where a
-//! helper accidentally uses the latter.
+//! Sequence numbers are points on a circular 32-bit line: comparison is
+//! wrapping subtraction reinterpreted as `i32`, so a value close to wrap
+//! compares less-than one just past zero. This is **not** `<` on `u32`. The
+//! [`SeqNum`] newtype routes the operators through it; the `seq_lt` family is
+//! the same comparison as free functions.
 //!
 //! ```ignore
 //! use slopos_net::tcp::seq::SeqNum;
@@ -24,41 +14,28 @@
 use core::cmp::Ordering;
 use core::ops::{Add, AddAssign, Sub};
 
-// -----------------------------------------------------------------------------
-// Free-function form (legacy callers)
-// -----------------------------------------------------------------------------
-
-/// `a` is before `b` in sequence space (wrapping comparison).
 #[inline]
 pub fn seq_lt(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) < 0
 }
 
-/// `a` is before or equal to `b` in sequence space.
 #[inline]
 pub fn seq_le(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) <= 0
 }
 
-/// `a` is after `b` in sequence space.
 #[inline]
 pub fn seq_gt(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) > 0
 }
 
-/// `a` is after or equal to `b` in sequence space.
 #[inline]
 pub fn seq_ge(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) >= 0
 }
 
-// -----------------------------------------------------------------------------
-// Newtype form
-// -----------------------------------------------------------------------------
-
-/// A TCP sequence number.  Wraps a `u32` so that `<`/`>`/`PartialOrd` route
-/// through the RFC 793 wrapping comparison instead of naive integer
-/// comparison.
+/// A TCP sequence number; `<`/`>`/`PartialOrd` route through the RFC 793
+/// wrapping comparison rather than naive integer comparison.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, slopos_ostd::Zeroable)]
 #[repr(transparent)]
 pub struct SeqNum(pub u32);
@@ -77,22 +54,18 @@ impl SeqNum {
         self.0
     }
 
-    /// Wrapping addition — returns `self + n` in 32-bit sequence space.
     #[inline]
     pub const fn wrapping_add(self, n: u32) -> Self {
         Self(self.0.wrapping_add(n))
     }
 
-    /// Wrapping subtraction — returns `self - n` in 32-bit sequence space.
     #[inline]
     pub const fn wrapping_sub(self, n: u32) -> Self {
         Self(self.0.wrapping_sub(n))
     }
 
-    /// Unsigned distance from `self` to `other` in sequence space, treating
-    /// the result as a positive increment.  Equivalent to
-    /// `other.0.wrapping_sub(self.0)` — callers that need a signed delta
-    /// should use [`SeqDelta`].
+    /// Unsigned forward distance from `self` to `other`; use [`SeqDelta`] for a
+    /// signed one.
     #[inline]
     pub const fn distance_to(self, other: SeqNum) -> u32 {
         other.0.wrapping_sub(self.0)
@@ -107,12 +80,8 @@ impl PartialOrd for SeqNum {
 }
 
 impl Ord for SeqNum {
-    /// Total-ordering sequence number comparison **within a half-window**.
-    ///
-    /// RFC 793 only defines the ordering when `|a - b| < 2^31`.  Outside
-    /// that range the result is undefined (and any implementation choice
-    /// is acceptable).  We adopt "shortest-arc" semantics: reinterpret the
-    /// wrapping delta as `i32` and compare to zero.
+    /// RFC 793 defines the ordering only when `|a - b| < 2^31`; outside that
+    /// range this picks the shortest arc.
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         let delta = self.0.wrapping_sub(other.0) as i32;
@@ -137,9 +106,7 @@ impl AddAssign<u32> for SeqNum {
 
 impl Sub<SeqNum> for SeqNum {
     type Output = u32;
-    /// `a - b` yields the **unsigned** wrapping distance from `b` to `a`.
-    /// Callers that need a signed delta should compute it themselves via
-    /// `(a.0.wrapping_sub(b.0)) as i32`.
+    /// Yields the **unsigned** wrapping distance from `rhs` to `self`.
     #[inline]
     fn sub(self, rhs: SeqNum) -> u32 {
         self.0.wrapping_sub(rhs.0)
@@ -160,15 +127,8 @@ impl From<SeqNum> for u32 {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Signed delta helper
-// -----------------------------------------------------------------------------
-
-/// Signed difference between two [`SeqNum`]s, in the range `[-2^31, 2^31)`.
-///
-/// Only defined when the two values are within a half-window of each other;
-/// outside that range the result wraps and becomes meaningless (same caveat
-/// as RFC 793's own ordering).
+/// Signed difference between two [`SeqNum`]s, meaningful only when they are
+/// within a half-window of each other (same caveat as RFC 793's own ordering).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct SeqDelta(pub i32);

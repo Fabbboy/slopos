@@ -1,10 +1,4 @@
 //! Outcome of running a single test entry.
-//!
-//! `TestOutcome` is the canonical name. `TestResult` is kept as a public
-//! alias so the 70+ assertion macros that already write
-//! `return $crate::TestResult::Fail` keep compiling unchanged. Phase 2's
-//! site migration will rename the references at the source level; this
-//! file's alias goes away then.
 
 use core::ffi::c_int;
 
@@ -18,9 +12,8 @@ pub enum TestOutcome {
     OverTime = 4,
 }
 
-/// Backward-compatible alias for `TestOutcome`. Existing assertion
-/// macros and call sites use `TestResult::Fail` — the alias makes that
-/// resolve to `TestOutcome::Fail` without source-level churn.
+// TODO(tech-debt): transitional alias for `TestOutcome` — migrate the call
+// sites and delete it.
 pub type TestResult = TestOutcome;
 
 impl TestOutcome {
@@ -59,13 +52,8 @@ impl TestOutcome {
         self as u8
     }
 
-    /// KTAP status word: "ok" for pass-equivalent, "not ok" for failures.
     #[inline]
     pub fn ktap_word(self) -> &'static str {
-        if self.is_pass() {
-            "ok"
-        } else {
-            "not ok"
-        }
+        if self.is_pass() { "ok" } else { "not ok" }
     }
 }

@@ -1,10 +1,9 @@
 //! Type-safe assertion macros returning TestResult on failure.
 //!
-//! Failure arms live in `#[cold] #[inline(never)]` helpers. At opt-level 0
-//! each `klog_info!` puts its `Arguments` and argument array in the *caller's*
-//! frame, unmerged, whether or not the assertion fires — a dozen assertions
-//! cost a kilobyte of a test's 2 KiB frame budget. `&dyn Debug` rather than
-//! generics keeps it to one helper each instead of one per formatted type.
+//! Failure arms live in `#[cold] #[inline(never)]` helpers because at
+//! opt-level 0 each `klog_info!` costs the *caller's* frame an unmerged
+//! `Arguments` array whether or not it fires. `&dyn Debug` rather than generics
+//! keeps that to one helper each instead of one per formatted type.
 
 use core::fmt::Debug;
 
@@ -112,10 +111,9 @@ macro_rules! assert_not_null {
     }};
 }
 
-/// Unwrap an `Option`, failing the test when it is `None`.
-///
-/// The registry lookups return an owning guard, so the binding this yields
-/// must outlive every use of the task it names.
+/// Unwrap an `Option`, failing the test when it is `None`. Registry lookups
+/// return an owning guard, so the binding must outlive every use of what it
+/// names.
 #[macro_export]
 macro_rules! assert_some {
     ($opt:expr) => {{
@@ -148,9 +146,8 @@ macro_rules! assert_test {
             return $crate::assertions::assert_failed("ASSERT", Some($msg));
         }
     }};
-    // The variadic arm keeps its `format_args!` at the call site: the values
-    // being formatted live there, and there is no way to name their types
-    // through a non-generic helper.
+    // This arm keeps `format_args!` at the call site: a non-generic helper
+    // cannot name the types of the values being formatted.
     ($cond:expr, $fmt:expr, $($arg:tt)*) => {{
         if !$cond {
             slopos_ostd::klog_info!(concat!("ASSERT: ", $fmt), $($arg)*);

@@ -98,7 +98,6 @@ pub fn test_socket_option_roundtrips() -> TestResult {
     );
     assert_eq_test!(i32::from_ne_bytes(i32buf), 1);
 
-    // SO_RCVTIMEO/SO_SNDTIMEO use Timeval (16 bytes, type-safe)
     let mut tvbuf = [0u8; 16];
     assert_eq_test!(
         socket_getsockopt(sock_idx, SOL_SOCKET, SO_RCVTIMEO, &mut tvbuf),

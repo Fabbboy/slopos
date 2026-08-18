@@ -1,17 +1,7 @@
-//! Demux + Epoch reclaim regression tests for the lock-free TCP
-//! dispatch path.
+//! Demux + Epoch reclaim regression tests for the lock-free TCP dispatch path.
 //!
-//! These tests are single-threaded by construction (SlopOS's `stest!`
-//! harness runs each test on one CPU). The lock-free property of
-//! `tcp::find` is therefore exercised mechanically — every call must
-//! complete without acquiring a `SpinLock` — but observable
-//! consistency under install/release races is validated through
-//! deterministic interleavings: install then find, release then find,
-//! repeated install/release pairs.
-//!
-//! The Epoch reclaim test instruments a `Drop` counter on a payload
-//! deferred via `NET_EPOCH.defer_kbox` and asserts the counter only
-//! advances after `NET_EPOCH.wait()` completes a grace period.
+//! `stest!` runs each test on one CPU, so install/release races are covered
+//! only through deterministic interleavings, not real concurrency.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -44,10 +34,6 @@ fn shard_tuple(seed: u8) -> TcpTuple {
         remote_port: 60000 + seed as u16,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Demux read path correctness
-// ---------------------------------------------------------------------------
 
 pub fn test_demux_find_after_install_returns_some() -> TestResult {
     reset();
@@ -101,8 +87,7 @@ pub fn test_demux_listener_fallback() -> TestResult {
     };
     assert_test!(listener_id.is_listener(), "id is listener");
 
-    // Lookup of an incoming connection that matches the listener port
-    // but has a non-wildcard remote — the demux must fall back to the
+    // Matching local port with a non-wildcard remote must fall back to the
     // listener table.
     let incoming = TcpTuple {
         local_ip: [10, 0, 0, 1],
@@ -118,8 +103,6 @@ pub fn test_demux_listener_fallback() -> TestResult {
 pub fn test_demux_install_release_cycle_consistency() -> TestResult {
     reset();
     let tuple = shard_tuple(5);
-    // Hammer install/release/find pairs; every step's observable index
-    // must agree with the per-slot state.
     for _ in 0..32 {
         let id = match table::install_established(tuple, syn_sent_state(), |_| {}) {
             Ok(id) => id,
@@ -180,10 +163,6 @@ pub fn test_demux_port_in_use_lock_free() -> TestResult {
     pass!()
 }
 
-// ---------------------------------------------------------------------------
-// Epoch reclaim contract
-// ---------------------------------------------------------------------------
-
 struct DropProbe;
 
 static DROP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -206,16 +185,12 @@ pub fn test_epoch_defer_runs_after_grace_period() -> TestResult {
         Err(_) => return fail!("KBox alloc failed"),
     };
 
-    // Hand the box to NET_EPOCH for deferred drop. The drop must not
-    // run synchronously — `rcu_call_typed` enqueues the callback.
     NET_EPOCH.defer_kbox::<DropProbe>(boxed);
 
     NET_EPOCH.wait();
 
-    // Drive the drain, but poll for the effect rather than assuming this call
-    // performed it: an idle CPU drains concurrently, and one that has already
-    // detached the chain leaves nothing for a manual call to find while the
-    // invocation is still in flight.
+    // Poll for the effect rather than assume this call drained: an idle CPU
+    // drains concurrently and may already have detached the chain.
     let mut waited = 0;
     while DROP_COUNTER.load(Ordering::Acquire) == 0 && waited < DRAIN_DEADLINE_MS {
         slopos_ostd::sync::rcu::rcu_raise_softirq();
@@ -239,17 +214,12 @@ pub fn test_epoch_enter_allows_rcucell_load() -> TestResult {
         Ok(id) => id,
         Err(_) => return fail!("install failed"),
     };
-    // `find` already uses NET_EPOCH internally; verify it operates
-    // without panicking and returns the expected id.
+    // `find` already uses NET_EPOCH internally.
     let found = table::find(&tuple);
     assert_eq_test!(found, Some(id), "find under NET_EPOCH");
     table::release(id);
     pass!()
 }
-
-// ---------------------------------------------------------------------------
-// stest! registration
-// ---------------------------------------------------------------------------
 
 slopos_testing::stest!(
     name = test_demux_find_after_install_returns_some,

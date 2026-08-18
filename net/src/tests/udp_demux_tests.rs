@@ -141,9 +141,7 @@ pub fn test_udp_demux_clear() -> TestResult {
 pub fn test_udp_demux_overflow() -> TestResult {
     reset();
 
-    // Fill a single hash bucket by registering entries on the same port
-    // with different IP addresses (all hash to the same bucket).
-    // Each bucket holds 8 entries; the 9th should overflow.
+    // A shared port hashes every registration into one bucket, which holds 8 entries.
     let mut demux = UDP_DEMUX.lock();
     for idx in 0..8u32 {
         let ip = Ipv4Addr([10, 0, idx as u8, 1]);
