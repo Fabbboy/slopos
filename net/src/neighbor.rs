@@ -1,9 +1,5 @@
 //! ARP neighbor cache with state machine and timer-driven aging.
 //!
-//! Keyed by `(DevIndex, Ipv4Addr)`, fixed capacity of 256 entries with LRU
-//! eviction; state transitions are driven by the
-//! [`NetTimerWheel`](super::timer::NetTimerWheel).
-//!
 //! Public methods collect pending I/O as [`NeighborAction`]s under the lock and
 //! return them for the caller to execute unlocked, so `DeviceHandle::tx_lock`
 //! never nests under the cache lock.
@@ -135,7 +131,6 @@ struct NeighborCacheInner {
     next_entry_id: u32,
 }
 
-/// Per-interface ARP neighbor cache with state machine and timer integration.
 pub struct NeighborCache {
     inner: SpinLock<NeighborCacheInner>,
 }
@@ -155,9 +150,8 @@ impl NeighborCache {
         }
     }
 
-    /// Clear all entries and reset the ID generator.
-    ///
-    /// Used by test harnesses so neighbor state cannot leak between tests.
+    /// Clear all entries and reset the ID generator, so neighbor state cannot
+    /// leak between tests.
     pub fn reset(&self) {
         let mut inner = self.inner.lock();
         for entry in inner.entries.iter_mut() {
@@ -634,7 +628,7 @@ impl NeighborCache {
 
         for (i, entry) in inner.entries.iter().enumerate() {
             let (priority, age) = match &entry.state {
-                NeighborState::Failed => (4, u64::MAX), // always evict Failed first
+                NeighborState::Failed => (4, u64::MAX),
                 NeighborState::Stale { last_used_tick, .. } => (3, *last_used_tick),
                 NeighborState::Reachable { confirmed_tick, .. } => (2, *confirmed_tick),
                 NeighborState::Incomplete { .. } => (1, 0),

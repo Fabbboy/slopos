@@ -81,7 +81,6 @@ pub fn test_tiocpkt_off_normal_read() -> TestResult {
         return TestResult::Fail;
     };
 
-    // Packet mode is OFF by default.
     let _ = tty::write(slave, b"AB", false);
     let mut buf = [0u8; 16];
     match tty::read(master, &mut buf, true) {

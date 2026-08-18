@@ -25,8 +25,6 @@ use super::cr3::{Cr3Value, MmContextId, Pcid};
 /// SDM Vol 2A §3.2.
 const INVPCID_ALL_CONTEXT_NO_GLOBALS: u64 = 3;
 
-/// Number of dynamic per-CPU PCID slots.
-///
 /// PCIDs in use on any one CPU are `0` (kernel) plus `1..=16` (user), which fits
 /// the 12-bit PCID space and leaves room for the KPTI bit-11 user/kernel pair
 /// (see `mmu::kpti`).
@@ -201,8 +199,7 @@ pub fn flush_local_all_contexts() {
 
 /// Choose a CR3 value for the next address space to load on this CPU.
 ///
-/// Interrupts must be off. When PCID is globally disabled, always returns
-/// `Cr3Value::kernel(phys)`, which corresponds to PCID 0 + NOFLUSH=0.
+/// Interrupts must be off.
 pub fn select_cr3(
     cpu_id: usize,
     ctx_id: MmContextId,

@@ -43,7 +43,6 @@ pub struct UnixSocketInner {
     pub unix_idx: u32,
 }
 
-/// Socket status and mode flags.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SocketFlags(u32);
 
@@ -76,9 +75,7 @@ impl SocketFlags {
 
 pub struct SocketOptions {
     pub reuse_addr: bool,
-    /// Receive buffer size in bytes.
     pub recv_buf_size: usize,
-    /// Send buffer size in bytes.
     pub send_buf_size: usize,
     /// Receive timeout in milliseconds (`None` means infinite).
     pub recv_timeout: Option<u64>,
@@ -86,7 +83,6 @@ pub struct SocketOptions {
     pub send_timeout: Option<u64>,
     /// TCP only.
     pub keepalive: bool,
-    /// Disable Nagle algorithm (TCP only).
     pub tcp_nodelay: bool,
 }
 
@@ -131,7 +127,6 @@ impl Default for SocketOptions {
     }
 }
 
-/// Fixed-capacity queue with ring-buffer semantics.
 /// Push never overwrites; it returns `false` when full.
 pub struct BoundedQueue<T> {
     slots: KVec<Option<T>>,
@@ -240,8 +235,7 @@ impl<T> fmt::Debug for BoundedQueue<T> {
 /// `process` decides disclosure, and is an [`FdTable`] rather than a pid because
 /// a recycled id would let the next holder of that number read the previous
 /// one's socket ownership. `task_id` is what gets reported, because it is the
-/// number the rest of the userland ABI speaks; an address-space id names
-/// nothing another syscall would take.
+/// number the userland ABI speaks.
 #[derive(Clone, Copy)]
 pub struct SocketOwner {
     pub process: Option<FdTable>,
@@ -361,9 +355,8 @@ impl SlabSocketTable {
     /// Allocate a new socket slot owned by `owner`.
     ///
     /// The owner is taken here because this is the only place a socket comes
-    /// into existence; one assigned afterwards is one `accept` could forget.
-    /// [`SocketOwner`] is what `net_query` redacts against, so a wrong value
-    /// here is a wrong disclosure.
+    /// into existence, and [`SocketOwner`] is what `net_query` redacts against,
+    /// so a wrong value here is a wrong disclosure.
     pub fn alloc(&mut self, inner: SocketInner, owner: SocketOwner) -> Option<usize> {
         self.init_if_needed();
         if self.freelist.is_empty() {
@@ -470,10 +463,9 @@ impl EphemeralPortAllocator {
         self.allocated_count = 0;
     }
 
-    /// In-place [`Init`] recipe equivalent to [`Self::new`], so a runtime
-    /// caller avoids materialising the 2 KiB bitmap on its stack. The
-    /// `AllocError` carrier satisfies `KBox::try_init`'s `E: From<AllocError>`
-    /// bound; the closure itself never errors.
+    /// In-place [`Init`] recipe equivalent to [`Self::new`]. The `AllocError`
+    /// carrier satisfies `KBox::try_init`'s `E: From<AllocError>` bound; the
+    /// closure itself never errors.
     pub fn init_default() -> impl Init<Self, slopos_ostd::mm::AllocError> {
         use slopos_ostd::mm::AllocError;
         init_struct_with(
@@ -486,7 +478,6 @@ impl EphemeralPortAllocator {
         )
     }
 
-    /// Allocate one ephemeral port using round-robin selection.
     pub fn alloc(&mut self) -> Option<Port> {
         if self.allocated_count >= Self::EPHEMERAL_PORT_COUNT {
             return None;
@@ -557,7 +548,6 @@ impl SocketAllocBitmap {
         }
     }
 
-    /// Called when the socket table grows.
     pub fn set_capacity(&mut self, cap: usize) {
         self.initialized_capacity = cap;
     }
@@ -876,7 +866,6 @@ fn socket_send_tcp_segment_zerocopy(
     socket_send_tcp_segment(seg, &scratch[..len])
 }
 
-/// Outcome of a signal-interruptible socket wait.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SockWait {
     Ready,
@@ -887,8 +876,6 @@ enum SockWait {
 
 /// Block until `pred()` returns true, returning early on a pending signal so
 /// the syscall surfaces `EINTR` instead of stalling out the full timeout.
-/// The predicate carries a `has_pending_signal()` probe, and both arms re-check
-/// it after wake to tell "signal woke us" from "data woke us"/"timeout expired".
 fn wait_socket_event<F: FnMut() -> bool>(
     ev: KernelEvent,
     mut pred: F,
@@ -1000,8 +987,7 @@ pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
         // The child PCB inherits the listener's socket_id at install time.
         if actions.notify.contains(tcp::SocketNotify::NEW_ESTABLISHED) {
             if let Some(tuple) = tcp::with_pcb(conn_id, |pcb| pcb.tuple) {
-                // Free evidence the path beyond the gateway works. Atomics
-                // only, so it is safe despite the locks this path takes.
+                // Atomics only, so it is safe despite the locks this path takes.
                 crate::connectivity::note_tcp_established(crate::types::Ipv4Addr(tuple.remote_ip));
                 let listener_sock_idx =
                     tcp::with_pcb(conn_id, |pcb| pcb.socket_id.map(|s| s.0)).flatten();
@@ -1627,7 +1613,6 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
     }
 }
 
-/// How a socket family handles `connect`.
 enum ConnectFamily {
     Tcp,
     /// UDP/ICMP: `connect` just records the peer and completes inline.
@@ -1835,8 +1820,7 @@ pub fn socket_connect_nonblock(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
 }
 
 /// The resolved transport target of a send, after validation + UDP/ICMP
-/// auto-bind. Shared by [`socket_send`] and [`socket_send_pinned`] so the
-/// auto-bind / port-rollback / state-check logic exists once.
+/// auto-bind.
 enum SendTarget {
     Udp {
         local: SockAddr,
@@ -2009,7 +1993,7 @@ fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, 
 
 /// Drain all currently-transmittable segments for `tcp_idx` to the wire.
 /// Returns `0` on success, or a negative errno (`i64`) on a segment-send or
-/// scratch-alloc failure. Shared by the slice and pinned TCP send paths.
+/// scratch-alloc failure.
 fn tcp_drain_segments(tcp_idx: tcp::ConnId) -> i64 {
     // Heap-allocate the per-segment scratch so the 1460 B buffer
     // doesn't pad this function's frame above the stack-sizes gate.
@@ -2025,8 +2009,6 @@ fn tcp_drain_segments(tcp_idx: tcp::ConnId) -> i64 {
         };
         let rc = match zc {
             None => socket_send_tcp_segment(&seg, &tx_payload[..n]),
-            // Zero-copy segment: DMA straight from the pinned pages (re-DMA on
-            // retransmit), copy-falling-back from them on a cold neighbor.
             Some(z) => socket_send_tcp_segment_zerocopy(&seg, z, &mut tx_payload[..]),
         };
         if rc != 0 {
@@ -2180,10 +2162,6 @@ fn socket_send_tcp_pinned(
 }
 
 /// Send `payload` on a connected socket.
-///
-/// `payload` is a kernel staging buffer — every caller stages user bytes
-/// through one before calling, so no user address reaches this function and
-/// the bytes cannot change under it.
 pub fn socket_send(sock_idx: u32, payload: &[u8]) -> i64 {
     let target = match socket_send_resolve(sock_idx, payload.len()) {
         Ok(t) => t,
@@ -2221,9 +2199,7 @@ pub fn socket_send(sock_idx: u32, payload: &[u8]) -> i64 {
 
 /// Single-direct-copy `socket_send` (SlopRing registered/provided buffers): the
 /// payload is volatile-copied **once**, straight from the pinned user pages
-/// (via `reader`) into the socket buffer — no kernel staging scratch. Shares
-/// [`socket_send_resolve`] with the slice path so auto-bind / state handling is
-/// identical.
+/// (via `reader`) into the socket buffer — no kernel staging scratch.
 pub fn socket_send_pinned(sock_idx: u32, reader: &mut VmReader<'_>) -> i64 {
     let target = match socket_send_resolve(sock_idx, reader.remain()) {
         Ok(t) => t,
@@ -2273,15 +2249,14 @@ pub enum ZcSendOutcome {
     WouldBlock,
 }
 
-/// True NIC-DMA zero-copy `socket_send` (SlopRing `OP_SEND_ZC`). Shares
-/// [`socket_send_resolve`] with the slice / single-copy paths (identical
-/// auto-bind + connected-state handling), then routes connected **UDP** and
-/// **ICMP echo** through the NIC-DMA leaves; every other case (TCP, unix, any
-/// resolve error) is [`ZcSendOutcome::NotEligible`] so the caller uses the
-/// single-copy leaf. `runs` are the coalesced pinned `(paddr, len)` physical
-/// runs (summing to `total_len`); `reader` is the same pinned range as a
-/// volatile cursor (used only by ICMP for its CPU-side checksum);
-/// `keepalive`/`token` are handed to the driver to hold across the DMA.
+/// True NIC-DMA zero-copy `socket_send` (SlopRing `OP_SEND_ZC`). Routes
+/// connected **UDP** and **ICMP echo** through the NIC-DMA leaves; every other
+/// case (TCP, unix, any resolve error) is [`ZcSendOutcome::NotEligible`] so the
+/// caller uses the single-copy leaf. `runs` are the coalesced pinned
+/// `(paddr, len)` physical runs (summing to `total_len`); `reader` is the same
+/// pinned range as a volatile cursor (used only by ICMP for its CPU-side
+/// checksum); `keepalive`/`token` are handed to the driver to hold across the
+/// DMA.
 pub fn socket_send_zerocopy(
     sock_idx: u32,
     runs: &[(u64, u32)],
@@ -2317,14 +2292,14 @@ pub fn socket_send_zerocopy(
 }
 
 /// TCP `MSG_ZEROCOPY` send (SlopRing `OP_SEND_ZC` on a connected TCP socket).
-/// Unlike the UDP/ICMP one-shot NIC-DMA leaf, this enqueues a zero-copy chunk
-/// onto the send queue (holding the pinned pages `keepalive` — data at the pin's
-/// `base_off` — and the refcounted `token`), then kicks the send pump. The bytes
-/// DMA straight from the pinned pages as the congestion window allows, re-DMA on
-/// retransmit, and the deferred `F_NOTIF` fires once they are cumulatively ACKed
-/// and every in-flight DMA is reclaimed. Returns `Submitted` once queued, or
-/// `NotEligible` (not a connected TCP socket / does not fit SO_SNDBUF) so the
-/// caller uses the single-direct-copy leaf.
+/// Enqueues a zero-copy chunk onto the send queue (holding the pinned pages
+/// `keepalive` — data at the pin's `base_off` — and the refcounted `token`),
+/// then kicks the send pump. The bytes DMA straight from the pinned pages as
+/// the congestion window allows, re-DMA on retransmit, and the deferred
+/// `F_NOTIF` fires once they are cumulatively ACKed and every in-flight DMA is
+/// reclaimed. Returns `Submitted` once queued, or `NotEligible` (not a
+/// connected TCP socket / does not fit SO_SNDBUF) so the caller uses the
+/// single-direct-copy leaf.
 pub fn socket_send_zerocopy_tcp(
     sock_idx: u32,
     keepalive: KeepaliveFrames,
@@ -2350,9 +2325,7 @@ pub fn socket_send_zerocopy_tcp(
     }
 }
 
-/// The resolved transport kind of a recv, after validation. Shared by the
-/// slice path ([`socket_recv`]) and the single-direct-copy pinned path
-/// ([`socket_recv_pinned`]).
+/// The resolved transport kind of a recv, after validation.
 enum RecvKind {
     /// `SHUT_RD` — return EOF (0) for both families.
     Eof,
@@ -2507,7 +2480,7 @@ fn udp_recv_loop(
 /// TCP stream recv loop. `recv_once` performs one drain attempt from the recv
 /// ring into the caller's sink (`tcp::recv` for a kernel slice, or
 /// `tcp::recv_into` straight into pinned user pages); the loop owns the
-/// EOF / nonblock / wait / napi-kick policy, identical for both sinks.
+/// EOF / nonblock / wait / napi-kick policy.
 fn tcp_recv_loop(
     sock_idx: u32,
     tcp_idx: tcp::ConnId,
@@ -2522,10 +2495,9 @@ fn tcp_recv_loop(
                     return n as i64;
                 }
 
-                // EOF: recv buffer empty AND peer has closed their side.
-                // FIN_WAIT_1/2 mean WE sent FIN (write-shutdown) but can
-                // still receive — only return EOF when the peer also closed
-                // (Closing, TimeWait, Closed, LastAck) or tcp reports peer FIN.
+                // EOF only when the recv buffer is empty AND the peer closed:
+                // FIN_WAIT_1/2 mean we sent FIN (write-shutdown) but can still
+                // receive.
                 if !matches!(
                     tcp::get_state(tcp_idx),
                     Some(
@@ -2564,11 +2536,9 @@ fn tcp_recv_loop(
                     SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
                     SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
                 }
-                // Sync-drain on the recv task's CPU so the post-wait
-                // ring read observes the most recent committed
-                // used-ring state. Resolves an IRQ-delivery edge in
-                // the current driver where the kthread's drain can
-                // lag the woken user task.
+                // Sync-drain on the recv task's CPU so the post-wait ring read
+                // observes the most recent committed used-ring state; the
+                // driver kthread's drain can lag the woken user task.
                 crate::napi::kick();
             }
             Err(e) => return map_tcp_err_i64(e),
@@ -2576,8 +2546,6 @@ fn tcp_recv_loop(
     }
 }
 
-/// Receive into `out`, which is a kernel staging buffer — every caller copies
-/// to user memory itself, so no user address reaches this function.
 pub fn socket_recv(sock_idx: u32, out: &mut [u8]) -> i64 {
     match socket_recv_resolve(sock_idx) {
         Err(e) => e,
@@ -2604,7 +2572,6 @@ pub fn socket_recv(sock_idx: u32, out: &mut [u8]) -> i64 {
 /// Single-direct-copy `socket_recv` (SlopRing registered/provided buffers): the
 /// received bytes are volatile-copied **once**, straight from the socket buffer
 /// into the pinned user pages (via `writer`) — no kernel staging scratch.
-/// Shares [`socket_recv_resolve`] and the recv loops with the slice path.
 pub fn socket_recv_pinned(sock_idx: u32, writer: &mut VmWriter<'_>) -> i64 {
     match socket_recv_resolve(sock_idx) {
         Err(e) => e,
@@ -2651,8 +2618,8 @@ pub fn socket_close(sock_idx: u32) -> i32 {
         let was_listener = sock.state == SocketState::Listening;
         sock.recv_queue.clear();
 
-        // Drop the accept queue. The SYN queue lives in the listener PCB and
-        // goes with it when `tcp::close` releases the slot.
+        // The SYN queue lives in the listener PCB and goes with it when
+        // `tcp::close` releases the slot.
         if let SocketInner::Tcp(ref mut tcp_inner) = sock.inner {
             if let Some(ref mut listen_state) = tcp_inner.listen {
                 listen_state.clear();
@@ -2665,9 +2632,8 @@ pub fn socket_close(sock_idx: u32) -> i32 {
     };
 
     // A listener's established children hold shard slots and name it as their
-    // socket. Nothing else reclaims them once it is gone — they would sit
-    // until a RST, a FIN or TIME_WAIT expiry — so release them here and reset
-    // the peers that were still talking to them.
+    // socket; nothing else reclaims them once it is gone, so release them here
+    // and reset the peers that were still talking to them.
     if was_listener {
         for (tuple, seq) in tcp::release_children_of(tcp::SocketId(sock_idx)) {
             let rst = tcp::SegmentBuilder::bare_rst(tuple, seq);
@@ -2675,8 +2641,6 @@ pub fn socket_close(sock_idx: u32) -> i32 {
         }
     }
 
-    // Release the TCP connection (if any).  The sharded table handles
-    // cleanup internally via release(); no separate demux unregister needed.
     if let Some(tcp_idx) = tcp_idx {
         tcp::set_socket_idx(tcp_idx, None);
     }
@@ -2711,10 +2675,8 @@ pub fn socket_close(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_poll_readable(sock_idx: u32) -> u32 {
-    // Sync-drain so the readiness probe observes the most recent
-    // committed used-ring state. Required for the userland poll
-    // path (`select`/`poll`) whose semantics demand a fresh-edge
-    // readiness sample on every call.
+    // Sync-drain so the readiness probe observes the most recent committed
+    // used-ring state: `select`/`poll` demand a fresh-edge sample every call.
     crate::napi::kick();
 
     let (state, is_datagram, tcp_idx, has_dgram_data) = {
@@ -2732,7 +2694,6 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
     };
 
     if state == SocketState::Listening {
-        // Check accept queue in TcpListenState.
         let table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get(sock_idx as usize) else {
             return 0;
@@ -2922,7 +2883,6 @@ pub fn socket_reset_all() {
         BUS.publish(sock_send_ev(idx as u32));
     }
 
-    // Reset the allocation bitmap to match the cleared table.
     {
         let table = NEW_SOCKET_TABLE.lock();
         let mut alloc = SOCKET_ALLOC.lock();
@@ -2947,8 +2907,6 @@ pub struct SocketSnapshot {
     pub nonblocking: bool,
 }
 
-/// How many slots the socket table currently has.
-///
 /// The bound a caller must size a [`collect_sockets`] buffer to. Not
 /// `MAX_SOCKETS`: that is the ABI's idea of a reasonable number, while the slab
 /// grows from 64 to 1024 as sockets are opened, and the two diverge on exactly
@@ -2984,19 +2942,14 @@ pub struct SocketRow {
 /// resolving a connection's state from inside the table lock would nest one
 /// under the other for no reason. Phase one copies what the socket table
 /// itself knows and remembers the `ConnId`; phase two resolves those with the
-/// table lock released. Same shape as `poll_carrier`'s read-then-announce
-/// split.
+/// table lock released.
 ///
 /// `out` must be pre-allocated by the caller — nothing here allocates, because
-/// phase one runs under a lock and the allocator is where every subsystem
-/// meets. Rows beyond its capacity are dropped; the caller sizes it from
-/// [`socket_table_capacity`].
+/// phase one runs under a lock. Rows beyond its capacity are dropped; the
+/// caller sizes it from [`socket_table_capacity`].
 pub fn collect_sockets(out: &mut KVec<SocketRow>) {
     {
         let table = NEW_SOCKET_TABLE.lock();
-        // The table's *current* capacity, not `MAX_SOCKETS`: a constant bound
-        // silently stops enumerating exactly when a busy system has the most to
-        // report, and a missing row reads as "no such socket".
         let capacity = table.capacity();
         for idx in 0..capacity {
             let Some(sock) = table.get(idx) else {
@@ -3049,10 +3002,9 @@ pub fn collect_sockets(out: &mut KVec<SocketRow>) {
         }
     }
 
-    // Phase two: the socket table lock is released. A `ConnId` may have gone
-    // stale in between — `with_pcb` returns `None` for a slot whose occupant
-    // changed, which leaves the row at the state phase one recorded rather
-    // than reporting another connection's.
+    // A `ConnId` may have gone stale since phase one; `with_pcb` returns `None`
+    // for a slot whose occupant changed, which leaves the row at the recorded
+    // state rather than reporting another connection's.
     for row in out.iter_mut() {
         let Some(conn) = row.conn else {
             continue;
@@ -3074,7 +3026,6 @@ pub fn collect_sockets(out: &mut KVec<SocketRow>) {
     }
 }
 
-/// Map a TCP state to its `NET_SOCK_*` value.
 const fn tcp_state_to_abi(state: tcp::TcpState) -> u8 {
     match state {
         tcp::TcpState::Listen => NET_SOCK_LISTEN,
@@ -3117,7 +3068,6 @@ pub fn socket_lookup_tcp_idx(sock_idx: u32) -> Option<tcp::ConnId> {
 }
 
 pub fn socket_count_active() -> usize {
-    // Fast path: use the allocation bitmap instead of scanning the full table.
     SOCKET_ALLOC.lock().count_active()
 }
 
@@ -3341,7 +3291,6 @@ pub fn socket_shutdown(sock_idx: u32, how: i32) -> i32 {
         tcp_idx
     };
 
-    // For TCP sockets, perform protocol-level shutdown actions.
     if let Some(tcp_idx) = tcp_idx {
         let shut_wr = how == SHUT_WR || how == SHUT_RDWR;
         let shut_rd = how == SHUT_RD || how == SHUT_RDWR;
@@ -3354,7 +3303,6 @@ pub fn socket_shutdown(sock_idx: u32, how: i32) -> i32 {
 
         if shut_rd {
             tcp::recv_discard(tcp_idx);
-            // Wake recv waiters so they see EOF.
             BUS.publish(sock_recv_ev(sock_idx));
         }
     }
@@ -3390,15 +3338,13 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_process_timers() {
-    // Retransmit timers now fire exclusively via NET_TIMER_WHEEL → tcp::on_retransmit;
-    // the polling path used to shadow this and was a known race hazard.
+    // Retransmit timers fire exclusively via NET_TIMER_WHEEL → tcp::on_retransmit.
     let now_ms = slopos_kernel_services::clock::uptime_ms();
     if let Some((_idx, seg)) = tcp::delayed_ack_check(now_ms) {
         let _ = socket_send_tcp_segment(&seg, &[]);
     }
 }
 
-/// Public wrapper for socket_from_tcp_idx (used by timer dispatch).
 pub fn socket_from_tcp_idx_pub(tcp_idx: tcp::ConnId) -> Option<u32> {
     socket_from_tcp_idx(tcp_idx)
 }
@@ -3456,14 +3402,12 @@ pub fn socket_max_send_probe(sock_idx: u32, max_len: usize) -> i32 {
     cmp::min(space, max_len) as i32
 }
 
-/// Return the peer (remote) address for socket `sock_idx`, if connected.
 pub fn socket_get_peer_addr(sock_idx: u32) -> Option<SockAddr> {
     let table = NEW_SOCKET_TABLE.lock();
     let sock = table.get(sock_idx as usize)?;
     sock.remote_addr
 }
 
-/// Return the local (bound) address for socket `sock_idx`, if bound.
 pub fn socket_get_local_addr(sock_idx: u32) -> Option<SockAddr> {
     let table = NEW_SOCKET_TABLE.lock();
     let sock = table.get(sock_idx as usize)?;

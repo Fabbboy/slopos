@@ -5,25 +5,6 @@
 //! `ESTABLISHED`, `FIN_WAIT_1`, `FIN_WAIT_2`, `CLOSE_WAIT`, `CLOSING`,
 //! and `LAST_ACK`.  Which of those six labels currently applies is
 //! captured by the [`ClosePhase`] sub-enum on [`DataState`].
-//!
-//! # Handler structure
-//!
-//! [`DataState::on_segment`] is the single input entry point.  It
-//! routes the work to five sub-methods, each responsible for one
-//! phase of the RFC 793 §3.4 arrival procedure:
-//!
-//! 1. [`on_rst`] — handle RST fast-path (release or mark reset).
-//! 2. [`on_unexpected_syn`] — handle SYN-in-established (RST + release).
-//! 3. [`process_ack`] — update `snd_una`/`snd_wnd`, drive
-//!    [`SendMap::on_cumulative_ack`], [`RttEstimator::sample`], and
-//!    [`CongestionControl::on_ack`].  Applies SACK blocks for loss
-//!    detection (RFC 6675).  Reschedules the RTO timer.
-//! 4. [`process_payload`] — accept in-order bytes into the recv
-//!    buffer, buffer OOO segments, drain contiguous ones back out.
-//! 5. [`process_fin_and_close_phase`] — advance [`ClosePhase`] in
-//!    response to the peer's FIN flag; signal a `ToTimeWait`
-//!    transition to the caller when the closing chain ends.
-//! 6. [`emit_ack_if_needed`] — delayed-ACK decision.
 
 use core::mem;
 
@@ -55,10 +36,9 @@ pub enum ClosePhase {
     LastAck,
 }
 
-/// Internal transition hint — the sub-methods signal to the top
-/// dispatcher when a change of variant (DataState → TimeWait) or a
-/// slot release is required.  Allows each sub-method to keep
-/// operating on `&mut DataState` without owning the enum swap.
+/// How a sub-method signals a variant change or slot release back to the top
+/// dispatcher, so it can keep operating on `&mut DataState` without owning the
+/// enum swap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NextTransition {
     StayInData,
@@ -69,7 +49,6 @@ enum NextTransition {
 /// State-specific payload for the Data variant.
 #[derive(Debug, slopos_ostd::SlotFields)]
 pub struct DataState {
-    // -------- Sequence variables (RFC 793 §3.2) --------
     pub iss: SeqNum,
     pub irs: SeqNum,
     pub snd_una: SeqNum,
@@ -78,7 +57,6 @@ pub struct DataState {
     pub rcv_nxt: SeqNum,
     pub rcv_wnd: u16,
 
-    // -------- Options --------
     pub peer_mss: u16,
     pub rcv_wscale: u8,
     pub snd_wscale: u8,
@@ -86,45 +64,35 @@ pub struct DataState {
     pub sack_permitted: bool,
     pub nagle_enabled: bool,
 
-    // -------- Close phase --------
     pub close_phase: ClosePhase,
 
-    // -------- RTT + congestion control --------
     pub rtt: RttEstimator,
     pub cc: CcAlgo,
 
-    // -------- Retransmission (SACK-driven, RFC 6675) --------
     pub sendmap: SendMap,
     pub retransmit_token: Option<TimerToken>,
 
-    // -------- Keepalive --------
     pub keepalive_token: Option<TimerToken>,
     pub keepalive_probes_sent: u8,
     pub last_activity_tick: u64,
 
-    // -------- FIN_WAIT_2 timeout --------
     pub fin_wait2_token: Option<TimerToken>,
 
-    // -------- TCP Timestamps (RFC 7323) --------
     pub ts_enabled: bool,
     pub ts_recent: u32,
     pub last_ack_sent: u32,
 
-    // -------- Misc --------
     pub reset_received: bool,
     pub peer_closed: bool,
 }
 
 impl DataState {
     /// Heap-direct initialiser for a freshly-established `DataState`.
-    /// Returns an [`Init`] recipe rather than a `Self` rvalue so the
-    /// 3 KiB struct never materialises on the caller's stack — the
-    /// closure writes each field directly into the heap slot supplied
-    /// by [`slopos_ostd::KBox::try_init`] / [`slopos_ostd::PinBox::try_init`].
     ///
-    /// Hand-written `init_from_closure` (rather than a macro that
-    /// expands into a field-capturing closure) keeps the closure's
-    /// stack frame small — the stack-safety gate verifies this.
+    /// Returns an [`Init`] recipe rather than a `Self` rvalue so the 3 KiB
+    /// struct never materialises on the caller's stack, and is hand-written
+    /// rather than macro-expanded so the closure's own frame stays inside the
+    /// stack-safety gate.
     #[allow(clippy::too_many_arguments)]
     pub fn init_new(
         iss: SeqNum,
@@ -141,9 +109,6 @@ impl DataState {
         ts_enabled: bool,
     ) -> impl Init<Self, AllocError> {
         let cc_mss = peer_mss.max(DEFAULT_MSS) as u32;
-        // Writes every field of `Self` exactly once via the safe
-        // `write_field!` / `zero_field!` wrappers. No intermediate
-        // `Self` rvalue is built.
         init_struct_with(
             move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
                 write_field!(slot, iss, iss);
@@ -179,11 +144,8 @@ impl DataState {
         )
     }
 
-    /// Heap-direct initialiser for the `SYN_RECV → ESTABLISHED`
-    /// transition path. Mirrors the field-overrides the previous
-    /// `from_syn_recv` constructor applied (sack/ts_recent fixups), but
-    /// builds in place so the 3 KiB struct never lands on a caller's
-    /// stack.
+    /// Heap-direct initialiser for the `SYN_RECV → ESTABLISHED` transition;
+    /// builds in place so the 3 KiB struct never lands on a caller's stack.
     pub fn init_from_syn_recv(
         s: &super::syn_recv::SynRecvState,
     ) -> impl Init<Self, AllocError> + '_ {
@@ -202,8 +164,6 @@ impl DataState {
         let wscale_enabled = s.wscale_enabled;
         let sack_permitted = s.sack_permitted;
         let ts_enabled = s.ts_enabled;
-        // Same field-by-field idiom as `init_new` — see there for the
-        // overall invariant.
         init_struct_with(
             move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
                 write_field!(slot, iss, iss);
@@ -222,7 +182,6 @@ impl DataState {
                 write_field!(slot, close_phase, ClosePhase::Established);
                 write_field!(slot, rtt, RttEstimator::new());
                 write_field!(slot, cc, CcAlgo::cubic(cc_mss));
-                // `SendMap` is all-zero-valid.
                 zero_field!(slot, sendmap);
                 write_field!(slot, retransmit_token, None);
                 write_field!(slot, keepalive_token, None);
@@ -239,10 +198,9 @@ impl DataState {
         )
     }
 
-    /// Test-and-test-hooks-only by-value constructor. Materialises a `Self`
-    /// rvalue on the caller's stack — only safe when the caller is a
-    /// `Box<DataState>` consumer that immediately heap-moves the
-    /// result. Production code must use [`init_new`] / [`init_from_syn_recv`].
+    /// Test-only by-value constructor. Materialises the `Self` rvalue on the
+    /// caller's stack, so only a consumer that immediately heap-moves it may
+    /// call it; production code uses [`init_new`] / [`init_from_syn_recv`].
     #[cfg(any(test, feature = "test-hooks"))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -290,8 +248,7 @@ impl DataState {
         }
     }
 
-    /// Build TSopt value for outgoing segments, or `None` if timestamps
-    /// are not negotiated on this connection.
+    /// Timestamp option for outgoing segments, `None` if not negotiated.
     #[inline]
     pub fn ts_option(&self, now_ms: u64) -> Option<(u32, u32)> {
         if self.ts_enabled {
@@ -301,8 +258,7 @@ impl DataState {
         }
     }
 
-    /// Apply an incoming segment to a Data PCB.  See module doc for
-    /// the sub-method breakdown.
+    /// Apply an incoming segment to a Data PCB.
     pub fn on_segment(
         pcb: &mut Pcb,
         bufs: &mut TcpBufferPair,
@@ -311,9 +267,6 @@ impl DataState {
         payload: &[u8],
         now_ms: u64,
     ) -> Actions {
-        // Early RST fast-path — isolated to its own frame so the
-        // classify_rst + SegmentBuilder::ack scratch doesn't land
-        // on this dispatcher's stack.
         if hdr.is_rst() {
             return handle_data_rst(pcb, hdr, now_ms);
         }
@@ -325,19 +278,15 @@ impl DataState {
             return Self::on_unexpected_syn(pcb, hdr, actions);
         }
 
-        // PAWS check — compute dropped-old-duplicate ACK out-of-line.
         if data_paws_should_drop(pcb, options) {
             return paws_drop_ack(pcb, now_ms);
         }
 
-        // Everything past this point requires an ACK flag.
         if !hdr.is_ack() {
             return actions;
         }
 
-        // Update ts_recent from the incoming segment (RFC 7323 §4.3):
-        // only when SEG.SEQ <= Last.ACK.sent (segment is in the window
-        // we've already acknowledged).
+        // RFC 7323 §4.3: update ts_recent only when SEG.SEQ <= Last.ACK.sent.
         {
             let PcbState::Data(data) = &mut pcb.state else {
                 unreachable!()
@@ -352,9 +301,6 @@ impl DataState {
             }
         }
 
-        // Process in the canonical RFC 793 order.  The sub-methods
-        // signal transitions via the returned `NextTransition`.
-        // Process ACK and free acknowledged bytes from the send buffer.
         let acked = {
             let PcbState::Data(data) = &mut pcb.state else {
                 unreachable!()
@@ -365,27 +311,19 @@ impl DataState {
             bufs.send.process_ack(acked as usize);
         }
 
-        // `process_payload` + `process_fin_and_close_phase` need
-        // combined access to bufs and pcb.state; do them
-        // with a helper that takes both.
         let transition =
             Self::process_payload_fin_and_ack(pcb, bufs, hdr, payload, now_ms, &mut actions);
 
-        // Apply any variant transition signalled by the sub-methods.
         match transition {
             NextTransition::StayInData => {}
             NextTransition::ToTimeWait => {
-                // Move the final rcv_nxt / snd_nxt / rcv_wnd out of
-                // the Data payload into a new TimeWaitState.
                 let PcbState::Data(data) = &pcb.state else {
                     unreachable!()
                 };
                 let tw = TimeWaitState::new(data.rcv_nxt, data.snd_nxt, data.rcv_wnd, now_ms);
-                // Schedule the 2×MSL timer via Actions so the glue
-                // layer can install it after the lock is released.
-                // The slot index is filled by the glue layer; we use
-                // a sentinel (0) and the glue substitutes the real
-                // value.  See `tcp::input` in the C.1 cutover.
+                // Deferred through `Actions` so the glue layer installs the
+                // 2×MSL timer after the lock drops; `key: 0` is a sentinel it
+                // replaces with the real slot index.
                 actions.push_timer(TimerOp::Schedule {
                     kind: TimerKind::TcpTimeWait,
                     key: 0,
@@ -401,12 +339,6 @@ impl DataState {
         actions
     }
 
-    // -------------------------------------------------------------------------
-    // Sub-methods
-    // -------------------------------------------------------------------------
-
-    /// Handle an incoming RST.  The connection is dead; flag the
-    /// reset to the socket layer and release the slot.
     fn on_rst(pcb: &mut Pcb, mut actions: Actions) -> Actions {
         let PcbState::Data(data) = &mut pcb.state else {
             unreachable!()
@@ -423,8 +355,6 @@ impl DataState {
         actions
     }
 
-    /// Handle an unexpected SYN in an established+ state: send RST,
-    /// release the slot, flag the reset.
     fn on_unexpected_syn(pcb: &mut Pcb, _hdr: &TcpHeader, mut actions: Actions) -> Actions {
         let tuple = pcb.tuple;
         let PcbState::Data(data) = &pcb.state else {
@@ -436,10 +366,8 @@ impl DataState {
         actions
     }
 
-    /// Advance `snd_una`/`snd_wnd`, pop newly-acked entries from the
-    /// send map, drive RTT / congestion-control callbacks, and
-    /// reschedule the retransmission timer.  Returns the number of
-    /// bytes newly acknowledged (0 if the ACK did not advance).
+    /// Returns the number of bytes newly acknowledged, 0 if the ACK did not
+    /// advance `snd_una`.
     fn process_ack(
         &mut self,
         _tuple: super::super::tuple::TcpTuple,
@@ -451,14 +379,12 @@ impl DataState {
         let old_snd_una = self.snd_una;
         let ack = hdr.ack_num;
 
-        // Parse options once — used for both SACK blocks and TSecr.
         let parsed = if (!options.is_empty() && self.sack_permitted) || self.ts_enabled {
             Some(super::super::header::parse_tcp_options(options))
         } else {
             None
         };
 
-        // Extract SACK blocks for use after the forward/dup ACK branch.
         let (sack_blocks, sack_count) = if self.sack_permitted {
             if let Some(ref p) = parsed {
                 (p.sack_blocks, p.sack_block_count)
@@ -469,8 +395,7 @@ impl DataState {
             ([(0, 0); 4], 0)
         };
 
-        // Only advance if the ACK is strictly greater than snd_una
-        // and no greater than snd_nxt (RFC 793 §3.4).
+        // RFC 793 §3.4: an ACK is acceptable only in (snd_una, snd_nxt].
         let acked = if seq_gt(ack, old_snd_una.raw()) && seq_le(ack, self.snd_nxt.raw()) {
             self.snd_una = SeqNum::new(ack);
             self.snd_wnd = if self.wscale_enabled {
@@ -501,8 +426,6 @@ impl DataState {
             if let Some(rtt_ms) = rtt_sample {
                 self.rtt.sample(rtt_ms);
             }
-            // Feed CC with the freshly-acked bytes, RTT sample, sequence
-            // state, and wall-clock time for CUBIC + Hystart++.
             self.cc.on_ack(
                 outcome.bytes_freed,
                 rtt_sample,
@@ -510,7 +433,6 @@ impl DataState {
                 self.snd_nxt.raw(),
                 now_ms,
             );
-            // Reschedule the retransmit timer.
             if let Some(token) = self.retransmit_token.take() {
                 actions.push_timer(TimerOp::Cancel { token });
             }
@@ -528,8 +450,7 @@ impl DataState {
             0
         };
 
-        // Apply SACK blocks on both forward and duplicate ACKs.
-        // This feeds the SendMap for loss detection (RFC 6675).
+        // SACK blocks feed RFC 6675 loss detection on duplicate ACKs too.
         if sack_count > 0 {
             let new_losses = self
                 .sendmap
@@ -543,14 +464,9 @@ impl DataState {
         acked
     }
 
-    // -------------------------------------------------------------------------
-    // Combined payload + FIN + delayed ACK handling
-    // -------------------------------------------------------------------------
-
-    /// Process payload, FIN, and any post-ACK state transitions in one
-    /// place — they share mutable access to both `bufs` and
-    /// `pcb.state`, so splitting further would require juggling
-    /// mutable borrows.
+    /// Payload, FIN and post-ACK transitions share mutable access to both
+    /// `bufs` and `pcb.state`, so splitting them further would mean juggling
+    /// borrows.
     fn process_payload_fin_and_ack(
         pcb: &mut Pcb,
         bufs: &mut TcpBufferPair,
@@ -561,7 +477,6 @@ impl DataState {
     ) -> NextTransition {
         let tuple = pcb.tuple;
 
-        // -------- Payload accept + OOO drain --------
         let mut accepted_len: usize = 0;
         let PcbState::Data(d) = &pcb.state else {
             unreachable!()
@@ -580,8 +495,8 @@ impl DataState {
             };
             let expected_seq = d.rcv_nxt;
             if hdr.seq_num != expected_seq.raw() {
-                // Out-of-order — buffer ahead of rcv_nxt and emit
-                // a duplicate ACK so the peer retransmits the gap.
+                // Buffer ahead of rcv_nxt and duplicate-ACK so the peer
+                // retransmits the gap.
                 if seq_gt(hdr.seq_num, expected_seq.raw()) {
                     let offset = hdr.seq_num.wrapping_sub(expected_seq.raw()) as usize;
                     let wrote_ooo = bufs.recv.buf.write_at_offset(offset, payload);
@@ -596,10 +511,8 @@ impl DataState {
                     let (ooo_blocks, ooo_count) = bufs.ooo.sack_blocks();
                     let seg_end = hdr.seq_num.wrapping_add(payload.len() as u32);
 
-                    // DSACK (RFC 2883): if the segment is a duplicate
-                    // (seq < rcv_nxt), report the duplicate range as
-                    // the first SACK block so the peer can detect
-                    // spurious retransmits.
+                    // DSACK (RFC 2883): a duplicate range goes in the first
+                    // SACK block so the peer can detect spurious retransmits.
                     if super::super::seq::seq_lt(hdr.seq_num, expected_seq.raw()) {
                         let dsack_right = if seq_gt(seg_end, expected_seq.raw()) {
                             expected_seq.raw()
@@ -617,7 +530,6 @@ impl DataState {
                         }
                         ack_seg.sack_block_count = total;
                     } else {
-                        // Normal OOO SACK blocks.
                         ack_seg.sack_blocks = ooo_blocks;
                         ack_seg.sack_block_count = ooo_count;
                     }
@@ -661,7 +573,6 @@ impl DataState {
             if accepted_len > 0 {
                 actions.notify |= SocketNotify::RECV_WAKE;
             }
-            // Emit an immediate ACK if delayed-ACK heuristic says so.
             if bufs.recv.should_ack_now(now_ms) {
                 let PcbState::Data(data) = &mut pcb.state else {
                     unreachable!()
@@ -684,9 +595,6 @@ impl DataState {
             }
         }
 
-        // -------- State-specific pure-ACK transitions --------
-        // These occur when an ACK moves FinWait1 → FinWait2,
-        // Closing → TimeWait, or LastAck → released.
         let ack = hdr.ack_num;
         {
             let PcbState::Data(data) = &mut pcb.state else {
@@ -699,8 +607,8 @@ impl DataState {
                             // Simultaneous close: handled below.
                         } else {
                             data.close_phase = ClosePhase::FinWait2;
-                            // Schedule FIN_WAIT_2 timeout to release
-                            // stale half-closed connections.
+                            // The FIN_WAIT_2 timeout releases stale
+                            // half-closed connections.
                             actions.push_timer(TimerOp::Schedule {
                                 kind: TimerKind::TcpFinWait2,
                                 key: 0,
@@ -723,7 +631,6 @@ impl DataState {
             }
         }
 
-        // -------- FIN handling --------
         if hdr.is_fin() {
             let tuple = pcb.tuple;
             let PcbState::Data(data) = &mut pcb.state else {
@@ -788,13 +695,8 @@ impl DataState {
         NextTransition::StayInData
     }
 
-    // -------------------------------------------------------------------------
-    // Keepalive / delayed-ACK / zero-window (D.5 extracted methods)
-    // -------------------------------------------------------------------------
-
-    /// If keepalive is enabled and no timer is active, return the idle
-    /// delay in milliseconds to schedule.  Caller is responsible for calling
-    /// `NET_TIMER_WHEEL.schedule()` with this value.
+    /// The idle delay in milliseconds the caller should schedule, or `None` if
+    /// keepalive is disabled or a timer is already active.
     pub fn schedule_initial_keepalive(&mut self, keepalive_enabled: bool) -> Option<u64> {
         if keepalive_enabled && self.keepalive_token.is_none() {
             Some(super::super::TCP_KEEPALIVE_IDLE_MS)
@@ -803,9 +705,8 @@ impl DataState {
         }
     }
 
-    /// Reset the keepalive timer on data activity.  Returns the old
-    /// token to cancel and the idle delay in milliseconds to reschedule, or
-    /// `None` if keepalive was not active.
+    /// The old token to cancel and the idle delay in milliseconds to
+    /// reschedule, or `None` if keepalive was not active.
     pub fn reset_keepalive_on_activity(&mut self) -> Option<(TimerToken, u64)> {
         if let Some(token) = self.keepalive_token.take() {
             self.keepalive_probes_sent = 0;
@@ -815,8 +716,8 @@ impl DataState {
         }
     }
 
-    /// Check if a delayed ACK should fire.  Returns the ACK segment
-    /// if so, and marks the ACK as sent on the receive buffer.
+    /// The ACK segment if a delayed ACK is now due, marking it sent on the
+    /// receive buffer.
     pub fn check_delayed_ack(
         &self,
         tuple: super::super::tuple::TcpTuple,
@@ -856,10 +757,6 @@ impl DataState {
         Some(seg)
     }
 
-    // -------------------------------------------------------------------------
-    // Invariants
-    // -------------------------------------------------------------------------
-
     #[cfg(debug_assertions)]
     pub(super) fn debug_assert_invariants(&self, _pcb: &Pcb) {
         debug_assert!(
@@ -880,8 +777,8 @@ impl DataState {
                 debug_assert!(self.peer_closed, "Closing/LastAck implies peer_closed");
             }
         }
-        // FIN consumes 1 sequence byte but is not tracked in the
-        // send map (which only covers data segments).
+        // FIN consumes one sequence byte but the send map covers data
+        // segments only.
         let fin_offset = match self.close_phase {
             ClosePhase::FinWait1 | ClosePhase::LastAck | ClosePhase::Closing => 1u32,
             _ => 0,
@@ -900,17 +797,11 @@ impl DataState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Inline-never helpers extracted from `DataState::on_segment` so their
-// SegmentBuilder / challenge-ack scratch doesn't inflate the dispatcher's
-// stack frame — the kernel-wide stack-safety gate forbids it.
-// ---------------------------------------------------------------------------
-
 /// Handle an incoming RST on a Data PCB (RFC 5961 classification).
-/// Returns the completed [`Actions`] the caller should propagate.
-/// `#[inline(never)]` so the 400 B `Actions` return slot plus the
-/// `SegmentBuilder::ack` challenge-ACK scratch stay in this helper's
-/// frame, not the dispatcher's.
+///
+/// `#[inline(never)]` here and on the PAWS helpers below keeps their
+/// `SegmentBuilder` scratch and 400 B `Actions` slots out of the `on_segment`
+/// dispatcher's frame, which the stack-safety gate bounds.
 #[inline(never)]
 fn handle_data_rst(pcb: &mut Pcb, hdr: &TcpHeader, now_ms: u64) -> Actions {
     let tuple = pcb.tuple;
@@ -941,10 +832,7 @@ fn handle_data_rst(pcb: &mut Pcb, hdr: &TcpHeader, now_ms: u64) -> Actions {
     }
 }
 
-/// Pure-check helper: does the incoming segment's timestamp option
-/// trip PAWS? Takes no `Actions` and produces no segments; the
-/// dispatcher delegates the drop-ACK build to [`paws_drop_ack`] only
-/// when this returns `true`.
+/// Does the incoming segment's timestamp option trip PAWS?
 #[inline(never)]
 fn data_paws_should_drop(pcb: &Pcb, options: &[u8]) -> bool {
     let PcbState::Data(data) = &pcb.state else {
@@ -960,9 +848,7 @@ fn data_paws_should_drop(pcb: &Pcb, options: &[u8]) -> bool {
     super::super::header::ts_less_than(tsval, data.ts_recent)
 }
 
-/// Build the drop-ACK [`Actions`] for a PAWS-rejected segment. Separate
-/// frame so the `SegmentBuilder::ack` scratch doesn't inflate the
-/// dispatcher.
+/// Build the drop-ACK [`Actions`] for a PAWS-rejected segment.
 #[inline(never)]
 fn paws_drop_ack(pcb: &Pcb, now_ms: u64) -> Actions {
     let mut actions = Actions::new();

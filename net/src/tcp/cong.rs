@@ -56,8 +56,7 @@ const TCP_ALPHA_DEN: u64 = 1000;
 const FAST_CONV_NUM: u32 = 17;
 const FAST_CONV_DEN: u32 = 20;
 
-/// Number of Conservative Slow Start rounds before entering congestion
-/// avoidance.
+/// Conservative Slow Start rounds before entering congestion avoidance.
 const CSS_ROUNDS: u8 = 5;
 
 const MIN_RTT_THRESH_MS: u32 = 4;
@@ -66,7 +65,7 @@ const MAX_RTT_THRESH_MS: u32 = 16;
 
 const RTT_DIVISOR: u32 = 8;
 
-/// Integer cube root via Newton's method.  Returns ⌊∛x⌋.
+/// Returns ⌊∛x⌋.
 fn integer_cbrt(x: u64) -> u64 {
     if x == 0 {
         return 0;
@@ -107,12 +106,11 @@ pub struct Cubic {
     /// Epoch start (ms).  0 = not started.
     epoch_start_ms: u64,
 
-    /// W_max: cwnd at the last loss, possibly adjusted by fast convergence,
-    /// used as the origin of the cubic function.
+    /// W_max: cwnd at the last loss, possibly adjusted by fast convergence.
     origin_point: u32,
 
-    /// W_max from the loss event *before* the current one, compared against
-    /// cwnd at loss time for fast convergence (RFC 8312 §4.6).
+    /// W_max from the loss event *before* the current one; drives fast
+    /// convergence (RFC 8312 §4.6).
     last_max_cwnd: u32,
 
     /// Time (ms) from epoch start to reach `origin_point`.
@@ -125,7 +123,6 @@ pub struct Cubic {
     /// round completes when `snd_una >= round_start`.
     round_start: u32,
 
-    /// Minimum RTT observed in the last completed round (baseline).
     last_round_min_rtt_ms: u32,
 
     curr_round_min_rtt_ms: u32,
@@ -167,8 +164,8 @@ impl Cubic {
         Self::new(DEFAULT_MSS)
     }
 
-    /// Shared loss handling for both fast retransmit and RTO.  Does **not**
-    /// touch `cwnd` or `recover` — callers do that.
+    /// Shared loss handling for fast retransmit and RTO. Does **not** touch
+    /// `cwnd` or `recover` — callers do that.
     fn on_loss(&mut self) {
         let cwnd_before = self.cwnd;
 
@@ -300,7 +297,6 @@ impl CongestionControl for Cubic {
                     }
                 }
 
-                // Advance to new round.
                 self.last_round_min_rtt_ms = self.curr_round_min_rtt_ms;
                 self.curr_round_min_rtt_ms = u32::MAX;
                 self.round_start = snd_nxt;
@@ -311,20 +307,15 @@ impl CongestionControl for Cubic {
                 let increment = self.mss.saturating_mul(self.mss) / self.cwnd.max(1);
                 self.cwnd = self.cwnd.saturating_add(increment);
             } else {
-                // Standard slow start: cwnd += min(acked, MSS).
                 let growth = core::cmp::min(acked_bytes, self.mss);
                 self.cwnd = self.cwnd.saturating_add(growth);
             }
             return;
         }
 
-        // -- Congestion avoidance (cwnd >= ssthresh) — CUBIC ----------------
-
-        // Reset Hystart state on CA entry.
         self.in_css = false;
         self.css_rounds = 0;
 
-        // Start a new CUBIC epoch if needed.
         if self.epoch_start_ms == 0 {
             self.epoch_start_ms = now_ms;
             self.k_ms = self.compute_k(self.cwnd);
@@ -334,8 +325,7 @@ impl CongestionControl for Cubic {
         let t_ms = now_ms.saturating_sub(self.epoch_start_ms);
         let w_cubic = self.w_cubic(t_ms);
 
-        // TCP friendliness (RFC 8312 §4.3): linear Reno-equivalent growth.
-        // tcp_cwnd += α * mss * acked_bytes / cwnd
+        // TCP friendliness (RFC 8312 §4.3): tcp_cwnd += α * mss * acked / cwnd.
         let tcp_inc = TCP_ALPHA_NUM * self.mss as u64 * acked_bytes as u64
             / (TCP_ALPHA_DEN * self.cwnd.max(1) as u64);
         self.tcp_cwnd = self.tcp_cwnd.saturating_add(tcp_inc as u32);
@@ -343,7 +333,6 @@ impl CongestionControl for Cubic {
         let target = core::cmp::max(w_cubic, self.tcp_cwnd);
 
         if target > self.cwnd {
-            // Per-ACK fractional increase toward target.
             let diff = target - self.cwnd;
             let inc = (diff as u64 * self.mss as u64 / self.cwnd.max(1) as u64) as u32;
             self.cwnd = self.cwnd.saturating_add(inc.max(1));
@@ -354,7 +343,6 @@ impl CongestionControl for Cubic {
         self.on_loss();
         self.cwnd = self.mss;
         self.recover = None;
-        // Reset Hystart state — start fresh after RTO.
         self.in_css = false;
         self.css_rounds = 0;
         self.round_started = false;
@@ -383,12 +371,7 @@ impl CongestionControl for Cubic {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pluggable algorithm enum (no Box<dyn>, no_std-friendly)
-// ---------------------------------------------------------------------------
-
-/// Zero-allocation dispatch over the supported CC algorithms.  Wires into
-/// the data path as a single field on the connection state block.
+/// Zero-allocation dispatch over the supported CC algorithms.
 #[derive(Clone, Copy, Debug)]
 pub enum CcAlgo {
     Cubic(Cubic),

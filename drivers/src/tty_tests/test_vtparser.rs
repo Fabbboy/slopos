@@ -28,7 +28,6 @@ pub fn test_parser_execute_control() -> TestResult {
     TestResult::Pass
 }
 
-/// ESC [ 2 J → EraseDisplay(All).
 pub fn test_clear_screen() -> TestResult {
     let mut parser = VtParser::new();
     let _ = parser.advance(0x1B);
@@ -45,7 +44,7 @@ pub fn test_clear_screen() -> TestResult {
     TestResult::Pass
 }
 
-/// ESC [ 10 ; 20 H → SetCursorPos { row: 9, col: 19 } (0-based).
+/// CSI H parameters are 1-based: 10;20 is row 9, col 19.
 pub fn test_cursor_position() -> TestResult {
     let mut parser = VtParser::new();
     for &b in b"\x1b[10;20H" {
@@ -147,8 +146,8 @@ pub fn test_sgr_multi_param() -> TestResult {
         klog_info!("TTY_TEST: BUG - expected Bold, got {:?}", first);
         return TestResult::Fail;
     }
-    // A queued second SGR action drains on the next advance, which returns it
-    // before processing the byte just fed.
+    // A queued second SGR action drains on the next advance, ahead of the byte
+    // just fed.
     let second = parser.advance(b'A');
     if second != VtAction::SetAttribute(SgrAttr::ForegroundColor(1)) {
         klog_info!(
@@ -191,7 +190,6 @@ pub fn test_vconsole_clear_screen() -> TestResult {
     TestResult::Pass
 }
 
-/// CSI H parameters are 1-based, so 10;20 lands on row 9, col 19.
 pub fn test_vconsole_cursor_pos() -> TestResult {
     let mut state = boxed_vconsole_state();
     for &b in b"\x1b[10;20H" {
@@ -258,7 +256,6 @@ pub fn test_vconsole_sgr_reset() -> TestResult {
 /// ESC 7 saves the cursor, ESC 8 restores it.
 pub fn test_vconsole_save_restore_cursor() -> TestResult {
     let mut state = boxed_vconsole_state();
-    // 1-based CSI H: lands on row 5, col 10.
     for &b in b"\x1b[6;11H" {
         state.process_byte(b);
     }
@@ -301,7 +298,6 @@ pub fn test_vconsole_erase_line() -> TestResult {
     for &b in b"ABCDE" {
         state.process_byte(b);
     }
-    // 1-based CSI H: lands on row 0, col 2.
     for &b in b"\x1b[1;3H" {
         state.process_byte(b);
     }
@@ -352,7 +348,6 @@ pub fn test_cursor_movement_clamping() -> TestResult {
 
 pub fn test_vconsole_scroll_up() -> TestResult {
     let mut state = boxed_vconsole_state();
-    // 1-based CSI H: 'A' lands on row 0, 'B' on row 1.
     state.process_byte(b'A');
     for &b in b"\x1b[2;1H" {
         state.process_byte(b);

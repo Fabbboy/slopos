@@ -1,13 +1,12 @@
 //! TTY driver abstraction — backend hardware operations for each terminal.
 //!
-//! `DriverId` is the lock-free dispatch handle: the TTY core clones the
-//! driver identifier while holding the per-TTY lock, drops the lock, and hands
-//! the id to `super::output`, the only module that emits.  Neither
-//! `TtyDriverKind` nor the `TtyDriver` trait exposes a write, so a frame
-//! holding a slot guard cannot reach a driver.
+//! `DriverId` is the lock-free dispatch handle: the TTY core clones it under
+//! the per-TTY lock, drops the lock, then hands it to `super::output`, the only
+//! module that emits. Neither `TtyDriverKind` nor the `TtyDriver` trait exposes
+//! a write, so a frame holding a slot guard cannot reach a driver.
 //!
-//! PTY peer references are `KWeak<TtyBacking>` links: the write site upgrades
-//! one to pin the peer's slot, and a failed upgrade discards the write.
+//! PTY peer references are `KWeak<TtyBacking>`: the write site upgrades one to
+//! pin the peer's slot, and a failed upgrade discards the write.
 
 use slopos_abi::syscall::UserTermios;
 use slopos_ostd::KWeak;
@@ -55,17 +54,15 @@ pub trait TtyDriver {
     fn set_termios(&self, _termios: &UserTermios) {}
 
     /// Whether the driver holds output accepted but not yet transmitted.
-    /// Synchronous (polling) drivers return `false` — their emission blocks
-    /// until the byte is on the wire; interrupt-driven ones return `true`
-    /// while the TX FIFO is non-empty.
+    /// Synchronous (polling) drivers return `false`: their emission blocks
+    /// until the byte is on the wire.
     fn output_pending(&self) -> bool {
         false
     }
 
-    /// Bytes accepted by the driver but not yet transmitted.  Defaults to
-    /// `0`/`1` from [`output_pending`](TtyDriver::output_pending); a driver
-    /// with FIFO-depth visibility overrides it so `TIOCOUTQ` reports the real
-    /// count.
+    /// Bytes accepted but not yet transmitted. Defaults to `0`/`1` from
+    /// [`output_pending`](TtyDriver::output_pending); a driver with FIFO-depth
+    /// visibility overrides it so `TIOCOUTQ` reports the real count.
     fn output_pending_bytes(&self) -> usize {
         if self.output_pending() { 1 } else { 0 }
     }
@@ -147,7 +144,7 @@ pub enum DriverId {
     PtySlave { peer: KWeak<TtyBacking> },
 }
 
-/// Driver backend for COM1 serial console (TTY 0).
+/// COM1 serial console, TTY 0.
 pub struct SerialConsoleDriver;
 
 impl TtyDriver for SerialConsoleDriver {
@@ -169,15 +166,13 @@ impl TtyDriver for SerialConsoleDriver {
     }
 }
 
-/// Driver backend for a virtual console (PS/2 keyboard + framebuffer).
 /// Input arrives via interrupt (`tty::push_input`), so `drain_input` returns
 /// nothing beyond what a test has injected.
 pub struct VConsoleDriver;
 
 /// Bytes a test has queued as if the vconsole's hardware had produced them:
-/// the polled drain — the path that stages echo under the slot lock — has no
-/// other in-harness driver behind it, and the vconsole's serial mirror can be
-/// turned off so the echo never reaches the wire the harness parses.
+/// the polled drain is the only in-harness path that stages echo under the
+/// slot lock.
 #[cfg(feature = "test-hooks")]
 static VCONSOLE_INJECT: slopos_ostd::sync::SpinLock<slopos_ostd::ring_buffer::RingBuffer<u8, 64>> =
     slopos_ostd::sync::SpinLock::new(
@@ -196,8 +191,6 @@ pub fn inject_vconsole_input(bytes: &[u8]) {
 
 impl TtyDriver for VConsoleDriver {
     fn drain_input(&self, _out: &mut [u8]) -> usize {
-        // PS/2 keyboard input comes via interrupt → tty::push_input.
-        // No polling needed.
         #[cfg(feature = "test-hooks")]
         {
             let mut buf = VCONSOLE_INJECT.lock();

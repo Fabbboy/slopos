@@ -21,13 +21,8 @@ use slopos_ostd::process::quota::FileBacking;
 #[allow(non_camel_case_types)]
 type ssize_t = isize;
 
-/// Install an FD entry in `process_id`'s table.
-///
-/// Consumes the owning `backing` for `handle`, binding it into the single
-/// owning [`KArc<OpenFile>`]; on every error path it is dropped here, so
-/// callers must not tear the subsystem object down on their own error arm.
-/// `fd_flags` is the new descriptor's inheritance policy — callers carrying
-/// POSIX open flags spell close-on-exec as `O_CLOEXEC` inside `flags`.
+/// Consumes `backing`, dropping it on every error path, so callers must not
+/// tear the subsystem object down on their own error arm.
 fn install_fd_entry(
     table: FdTable,
     ops: &'static dyn FileOps,
@@ -203,8 +198,7 @@ pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c
     )
 }
 
-/// Map a TTY open failure to the errno the open syscall reports; a locked
-/// PTY slave reports `EIO`, following Linux devpts behaviour.
+/// A locked PTY slave reports `EIO`, following Linux devpts behaviour.
 fn tty_open_errno(e: TtyError) -> Errno {
     match e {
         TtyError::DeviceBusy => Errno::EBUSY,
@@ -227,10 +221,8 @@ pub fn file_read_fd(table: FdTable, fd: c_int, buf: &mut dyn IoBufWrite) -> ssiz
     read_open_file(&open_file, buf, false)
 }
 
-/// The read core over an owned open-file description — shared by the
-/// fd-addressed path and the [`FileRef`]-addressed ring path. The held
-/// `KArc<OpenFile>` is the object the fd points at, so advancing its shared
-/// offset stays correct if a concurrent close drops the fd alias mid-read.
+/// Holding the `KArc<OpenFile>` keeps the shared-offset update correct if a
+/// concurrent close drops the fd alias mid-read.
 fn read_open_file(
     open_file: &KArc<OpenFile>,
     buf: &mut dyn IoBufWrite,
@@ -262,8 +254,8 @@ fn read_open_file(
     rc
 }
 
-/// SlopRing non-blocking read against a held [`FileRef`]; the ring's own
-/// reference keeps the description addressable after userland closed the fd.
+/// The ring's own reference keeps the description addressable after userland
+/// closed the fd.
 pub fn file_read_ref_nonblock(file: &FileRef, buf: &mut dyn IoBufWrite) -> ssize_t {
     read_open_file(&file.open_file, buf, true)
 }
@@ -281,8 +273,6 @@ pub fn file_write_fd(table: FdTable, fd: c_int, buf: &dyn IoBufRead) -> ssize_t 
     write_open_file(&open_file, buf, false)
 }
 
-/// The write core over an owned open-file description — shared by the
-/// fd-addressed path and the [`FileRef`]-addressed ring path.
 fn write_open_file(
     open_file: &KArc<OpenFile>,
     buf: &dyn IoBufRead,
@@ -314,16 +304,12 @@ fn write_open_file(
     rc
 }
 
-/// SlopRing non-blocking write against a held [`FileRef`] — see
-/// [`file_read_ref_nonblock`].
 pub fn file_write_ref_nonblock(file: &FileRef, buf: &dyn IoBufRead) -> ssize_t {
     write_open_file(&file.open_file, buf, true)
 }
 
-/// RAII guard forcing a socket fd's *stored* nonblocking flag on for the
-/// duration of a SlopRing probe, then restoring it. A no-op for non-socket
-/// fds, which honour the per-call `O_NONBLOCK` directly. (SLOPRING § 12
-/// reality 1.)
+/// Forces a socket fd's *stored* nonblocking flag on for a ring probe, then
+/// restores it; a no-op for other fds, which honour the per-call `O_NONBLOCK`.
 struct ForcedNonblockGuard {
     ops: &'static dyn FileOps,
     handle: usize,
@@ -501,8 +487,8 @@ pub fn file_get_tty_index(table: FdTable, fd: c_int) -> Option<TtyIndex> {
     }
 }
 
-/// Open a file descriptor for a TTY device. Consumes the caller's owning
-/// TTY backing, so a failed open is undone by that backing's drop.
+/// Consumes the caller's owning TTY backing, so a failed open is undone by
+/// that backing's drop.
 pub fn file_open_tty_fd(
     table: FdTable,
     tty_idx: TtyIndex,
@@ -594,8 +580,6 @@ pub fn file_pipe_create(
         return Errno::ESRCH.raw() as _;
     };
 
-    // Failures carry the still-owned `OpenFile`s out of the closure so their
-    // teardown runs after the lock drops.
     let result: Result<(c_int, c_int), Errno> = (|| {
         let read_res = try_charge::<FdSlot>(account, 1).map_err(|_| Errno::EMFILE)?;
         let write_res = try_charge::<FdSlot>(account, 1).map_err(|_| Errno::EMFILE)?;
@@ -657,9 +641,8 @@ fn file_dup_fd_min(table: FdTable, old_fd: c_int, min_fd: usize) -> c_int {
         let Some(mut alias) = src.try_alias(account) else {
             return Errno::EMFILE.raw() as _;
         };
-        // A dup never copies `cloexec`, a user-settable preference on the fd
-        // number; `close_on_fork` does carry over, since it is not settable and
-        // names the description's affinity to the process that opened it.
+        // `cloexec` is a preference on the fd number, so a dup starts it clear;
+        // `close_on_fork` names the description and carries over.
         alias.cloexec = false;
 
         let Some(new_idx) = find_free_slot_from(inner, min_fd) else {
@@ -689,10 +672,8 @@ pub fn file_dup3_fd(table: FdTable, old_fd: c_int, new_fd: c_int, flags: u32) ->
     )
 }
 
-/// Shared implementation of `dup2`/`dup3` into an explicit target fd.
 /// dup2 with `old_fd == new_fd` is a validity check (no-op success); dup3
-/// forbids it (handled by the caller). Any pre-existing entry at `new_fd`
-/// is detached under the lock and dropped *after* the lock is released.
+/// forbids it (handled by the caller).
 fn dup_into(table: FdTable, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup3: bool) -> c_int {
     if new_fd < 0 || new_fd as usize >= FILEIO_MAX_OPEN_FILES {
         return Errno::EBADF.raw() as _;
@@ -713,8 +694,7 @@ fn dup_into(table: FdTable, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup3
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Err(Errno::EBADF);
         };
-        // dup2 onto a live descriptor frees one number as it takes one, so only
-        // a *free* target needs a fresh charge; an occupied one reuses the
+        // Only a *free* target needs a fresh charge; an occupied one reuses the
         // displaced entry's, keeping exactly one charge per number at all times.
         let occupied = inner.descriptors[new_fd as usize].is_some();
         let alias = if occupied {
@@ -862,7 +842,6 @@ pub fn fileio_open_socket_fd(
     )
 }
 
-/// Open an FD using caller-supplied FileOps, handle, and owning backing.
 /// `fd_flags` is mandatory: an fd minted from kernel-side ops carries no
 /// POSIX open flags, so its inheritance policy has no other source.
 pub fn fileio_open_fd_with_ops(
@@ -891,8 +870,8 @@ pub fn fileio_get_open_file_handle(table: FdTable, fd: i32) -> Option<(FileKind,
     Some((snap.ops().kind(), snap.handle()))
 }
 
-/// Resolve an open fd to its subsystem handle and ops vtable. Confers no
-/// ownership: the caller's own fd keeps the file alive for the operation.
+/// Confers no ownership: the caller's own fd keeps the file alive for the
+/// operation.
 pub fn fileio_get_handle_and_ops(table: FdTable, fd: i32) -> Option<(usize, &'static dyn FileOps)> {
     let snap = {
         let inner = lock_table_slot(table)?;
@@ -901,15 +880,12 @@ pub fn fileio_get_handle_and_ops(table: FdTable, fd: i32) -> Option<(usize, &'st
     Some((snap.handle(), snap.ops()))
 }
 
-/// Resolve a held [`FileRef`] to its subsystem handle and ops vtable — the
-/// reference analog of [`fileio_get_handle_and_ops`], without an fd lookup.
 pub fn fileio_handle_and_ops_from_ref(file: &FileRef) -> (usize, &'static dyn FileOps) {
     (file.open_file.handle, file.open_file.ops)
 }
 
 /// Mint a [`FileRef`] alias of an open fd — the SCM_RIGHTS send side. The
-/// returned reference shares the open-file description and keeps it alive
-/// until dropped or installed.
+/// alias keeps the description alive until dropped or installed.
 pub fn fileio_clone_file_ref(table: FdTable, fd: i32) -> Option<FileRef> {
     let snap = {
         let inner = lock_table_slot(table)?;
@@ -920,9 +896,8 @@ pub fn fileio_clone_file_ref(table: FdTable, fd: i32) -> Option<FileRef> {
     })
 }
 
-/// Install a received [`FileRef`] into `process_id`'s fd table — the
-/// SCM_RIGHTS receive side. The alias transfers into the table entry with
-/// cloexec clear; on failure it drops here, closing that alias.
+/// Install a received [`FileRef`] — the SCM_RIGHTS receive side. On failure
+/// the alias drops here, closing it.
 pub fn fileio_install_file_ref(table: FdTable, file: FileRef) -> c_int {
     // The receiver pays for the number; the sender's in-flight custody charge
     // is released by the queue that held it.
@@ -942,9 +917,8 @@ pub fn fileio_install_file_ref(table: FdTable, file: FileRef) -> c_int {
     idx as c_int
 }
 
-/// Install a [`FileRef`] at exactly `target_fd`, displacing any occupant.
-/// Generalises [`fileio_install_file_ref`] for the spawn fd-action
-/// allow-list. On failure the alias drops here, closing it.
+/// Install a [`FileRef`] at exactly `target_fd`, displacing any occupant. On
+/// failure the alias drops here, closing it.
 pub fn fileio_install_file_ref_at(
     table: FdTable,
     target_fd: c_int,
@@ -961,8 +935,7 @@ pub fn fileio_install_file_ref_at(
             drop(file);
             return Errno::ESRCH.raw() as _;
         };
-        // Displace first: installing onto a live descriptor frees one number as
-        // it takes one, so the charge below is only for a genuinely new number.
+        // Displace first: the charge below is then only for a new number.
         let displaced = inner.descriptors[target_fd as usize].take();
         let Ok(reservation) = try_charge::<FdSlot>(account, 1) else {
             inner.descriptors[target_fd as usize] = displaced;
@@ -984,8 +957,7 @@ pub fn fileio_install_file_ref_at(
     target_fd
 }
 
-/// Detach the description at `fd` and return it as a [`FileRef`] — the spawn
-/// `TransferFd` move. `None` if `fd` is absent or the table is missing.
+/// Detach the description at `fd` — the spawn `TransferFd` move.
 pub fn fileio_take_file_ref(table: FdTable, fd: c_int) -> Option<FileRef> {
     let entry = with_table_slot(table, |inner| {
         if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
@@ -998,9 +970,8 @@ pub fn fileio_take_file_ref(table: FdTable, fd: c_int) -> Option<FileRef> {
     })
 }
 
-/// Detach the description at `fd` only while the slot still holds
-/// `expected`'s description; a slot the owner concurrently closed or
-/// repopulated is left untouched.
+/// Detaches only while the slot still holds `expected`'s description; a slot
+/// the owner concurrently closed or repopulated is left untouched.
 pub fn fileio_take_file_ref_matching(
     table: FdTable,
     fd: c_int,
@@ -1021,9 +992,8 @@ pub fn fileio_take_file_ref_matching(
     })
 }
 
-/// Open `path` and install its description at exactly `target_fd`, displacing
-/// any occupant — the spawn `Open` action. The inherited fd is never
-/// close-on-exec.
+/// Open `path` at exactly `target_fd`, displacing any occupant — the spawn
+/// `Open` action. The inherited fd is never close-on-exec.
 pub fn fileio_open_at_fd(table: FdTable, target_fd: c_int, path: &[u8], posix_flags: u32) -> c_int {
     if target_fd < 0 || target_fd as usize >= FILEIO_MAX_OPEN_FILES {
         return Errno::EBADF.raw() as _;

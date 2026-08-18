@@ -1,17 +1,11 @@
 //! Per-frame metadata tag for untyped kernel pages and the boot-time
 //! installer for OSTD's `META_SLOTS` array.
 //!
-//! `KernelMeta` is the default `AnyFrameMeta` for any kernel-owned
-//! page that doesn't need a richer type (page tables, anonymous
-//! frames, DMA buffers all carry their own meta types). It lives in
-//! `slopos-ostd` already; this module re-exports it so kernel code can
-//! reach it under the `slopos_mm::kernel_meta::KernelMeta` path that
+//! `KernelMeta` is the default `AnyFrameMeta` for any kernel-owned page that
+//! doesn't need a richer type. It is defined in `slopos-ostd` and re-exported
+//! here so kernel code can reach it under the
+//! `slopos_mm::kernel_meta::KernelMeta` path that
 //! `slopos_mm::page_alloc::KernelFrame` references.
-//!
-//! [`install_meta_slots`] sizes the array to one slot per usable
-//! physical frame, allocates the backing pages from the buddy
-//! allocator, and registers the slice with OSTD via
-//! [`slopos_ostd::mm::frame::init_meta_slots`].
 
 use core::mem::size_of;
 
@@ -40,19 +34,12 @@ const _: () = assert!(
 /// are live (Memory phase priority ≥ 10) and before any `Frame<M>` is
 /// constructed.
 ///
-/// The `&BspToken<'brand>` witness binds the call to the BSP-init
-/// scope opened by `slopos_ostd::sync::run_bsp_init` and is forwarded
-/// to OSTD's [`init_meta_slots`] (which enforces one-shot
-/// registration).
-///
 /// Returns the number of slots installed, or `0` if there is nothing
-/// to install (no RAM or the buddy returned NULL).
+/// to install.
 pub fn install_meta_slots<'brand>(token: &BspToken<'brand>) -> usize {
-    // One `MetaSlot` per RAM frame. `Usable` is too narrow: the master PML4
-    // and other bootloader-allocated frames live in reclaimable /
-    // firmware-reserved RAM yet are wrapped as `Frame<PageTableMeta>`, so
-    // their slots must exist. Device MMIO is excluded — those paddrs are
-    // never wrapped and resolve to an out-of-range error.
+    // `Usable` is too narrow: the master PML4 and other bootloader-allocated
+    // frames live in reclaimable / firmware-reserved RAM yet are wrapped as
+    // `Frame<PageTableMeta>`, so their slots must exist.
     let highest_frame = mm_region_highest_ram_frame();
     if highest_frame == 0 {
         return 0;
@@ -69,12 +56,9 @@ pub fn install_meta_slots<'brand>(token: &BspToken<'brand>) -> usize {
         _ => return 0,
     };
 
-    // Bootstrap escape: `install_meta_slots` *is* the function that
-    // installs META_SLOTS, so the typestate `Frame::<KernelMeta>::alloc`
-    // path physically cannot work yet (`from_unused` walks META_SLOTS
-    // and returns `NotInitialised`). This is the sole legitimate
-    // zero-flag caller of `__alloc_page_frames_raw` in tree — every
-    // other kernel page allocation goes through the typestate.
+    // Bootstrap escape: `Frame::<KernelMeta>::alloc` cannot work until
+    // META_SLOTS exists, and installing it is what this function does. No
+    // other kernel page allocation may bypass the typestate this way.
     let phys = __alloc_page_frames_raw(count, 0);
     if phys.is_null() {
         panic!(
@@ -86,15 +70,9 @@ pub fn install_meta_slots<'brand>(token: &BspToken<'brand>) -> usize {
     let virt = PhysAddr::new(phys.as_u64()).to_virt();
     let slots = virt.as_u64() as *mut MetaSlot;
 
-    // `__alloc_page_frames_raw(.., ZERO)` returned `pages * 4 KiB` of
-    // zero-initialised, page-aligned, exclusively-owned physical memory;
-    // `to_virt` translated through the kernel HHDM into a kernel-mode
-    // virtual address that is unique to us, so the `MetaSlot` slice
-    // covering `[slots, slots + n_slots)` is valid for the kernel's
-    // lifetime and does not alias. The OSTD `init_meta_slots` entry
-    // point is safe (it merely stores the base/len under the BspToken
-    // witness); the raw-pointer soundness obligation it documents is
-    // satisfied by the allocation above.
+    // The allocation above is zeroed, page-aligned and exclusively owned, so
+    // `[slots, slots + n_slots)` is valid for the kernel's lifetime and does
+    // not alias.
     init_meta_slots(token, slots, n_slots);
     n_slots
 }

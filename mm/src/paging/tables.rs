@@ -2,16 +2,9 @@
 //!
 //! Read-only. Every kernel-half page-table *write* goes through
 //! `slopos_mm::kernel_mappings`, which drives OSTD's `CursorMut` under
-//! the `KERNEL_VM_SPACE` lock; this module answers the question the
-//! hardware page walker answers, over the same physical PML4, and
-//! answers it the same way — one relaxed atomic load per level, no
-//! lock, no allocation, no reference into a page-table frame.
-//!
-//! That is why translation does not route through
-//! `kernel_mappings::kernel_virt_to_phys`: taking an IRQ-disabling
-//! spinlock behind what is conceptually an address translation would
-//! make every `virt_to_phys` a synchronisation event, and reads never
-//! had a synchronisation problem to begin with.
+//! the `KERNEL_VM_SPACE` lock. Translation here is one relaxed atomic
+//! load per level — no lock, no allocation, no reference into a
+//! page-table frame — so a read never becomes a synchronisation event.
 
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -23,14 +16,11 @@ use super::walker::walk_phys;
 use crate::hhdm::{self, PhysAddrHhdm};
 use crate::memory_layout_defs::KERNEL_VIRTUAL_BASE;
 
-/// The PML4 frame CR3 holds — the root of the kernel-half tree the
-/// walks in this module descend. `0` until [`init_paging`] records
-/// it. Written once on the BSP before any AP exists; the `Release`
-/// store pairs with the `Acquire` load in [`kernel_pml4_phys`] so the
-/// frame is visible before any descent rooted on it.
+/// The PML4 frame CR3 holds; `0` until [`init_paging`] records it. Written
+/// once on the BSP before any AP exists; the `Release` store pairs with the
+/// `Acquire` load in [`kernel_pml4_phys`].
 static KERNEL_PML4_PHYS: AtomicU64 = AtomicU64::new(0);
 
-/// The PML4 frame backing the kernel-half tree.
 /// `PhysAddr::NULL` before [`init_paging`] records it.
 #[inline]
 pub fn kernel_pml4_phys() -> PhysAddr {
@@ -42,11 +32,6 @@ fn get_cr3() -> PhysAddr {
     crate::mmu::read_cr3_value().pml4_phys()
 }
 
-/// Walk the kernel half (PML4 indices 256..512) via the OSTD cursor
-/// and stamp `GLOBAL` onto every present leaf — handles 4 KiB / 2 MiB /
-/// 1 GiB leaves uniformly via the cursor's `protect::<S>` API.
-/// Idempotent. Used by the early boot init step that wraps the live
-/// kernel-master PML4.
 pub fn paging_mark_kernel_global() {
     crate::kernel_mappings::mark_kernel_global();
 }

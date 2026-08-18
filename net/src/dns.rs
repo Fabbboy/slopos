@@ -505,7 +505,7 @@ impl DnsCache {
 fn fnv1a_hash(data: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c_9dc5;
     for &byte in data {
-        // DNS names are case-insensitive; fold ASCII upper to lower.
+        // DNS names are case-insensitive.
         let b = if byte >= b'A' && byte <= b'Z' {
             byte | 0x20
         } else {
@@ -539,7 +539,7 @@ pub fn dns_cache_flush() {
 /// A driver pumps it: each [`step`](DnsResolver::step) reports the outcome of
 /// the previous action ([`DnsOutcome`]) and gets back the next ([`DnsStep`]),
 /// so retry counting, error precedence and parsing are testable from canned
-/// reply bytes with no transport, scheduler or clock involved.
+/// reply bytes.
 pub struct DnsResolver {
     /// Query rounds still allowed (including the one currently outstanding).
     attempts_remaining: usize,
@@ -746,8 +746,6 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
                     resp_len,
                     &resp_buf[..resp_len.min(32)]
                 );
-                // The borrow of `resp_buf` ends when the next `step` consumes
-                // `outcome`, before the buffer is reused.
                 outcome = DnsOutcome::Reply(&resp_buf[..resp_len]);
             }
         }

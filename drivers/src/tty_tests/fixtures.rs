@@ -58,11 +58,9 @@ impl EchoScratch {
     }
 }
 
-/// Returns a TTY to service when it goes out of scope. A hangup is terminal for
-/// the slot, and TTY 0 carries the serial console every later test writes
-/// through; a guard restores it on the failure paths too. Termios goes back
-/// alongside the flag because a `B0` baud rate would hang the line up again on
-/// the next `tcsetattr`.
+/// A hangup is terminal for the slot, and TTY 0 carries the serial console every
+/// later test writes through. Termios goes back alongside the flag because a
+/// `B0` baud rate would hang the line up again on the next `tcsetattr`.
 pub(super) struct HangupScope {
     idx: TtyIndex,
     saved: Option<slopos_abi::syscall::UserTermios>,
@@ -207,8 +205,6 @@ pub(super) fn open_pty_pair() -> PtyPair {
     }
 }
 
-/// The peer link from a PTY end's driver, for direct `master_write` /
-/// `slave_write` calls.
 pub(super) fn peer_link_of(idx: TtyIndex) -> KWeak<TtyBacking> {
     let guard = TTY_SLOTS[idx.0 as usize].lock();
     match guard.as_ref().map(|tty| &tty.driver) {
@@ -219,7 +215,6 @@ pub(super) fn peer_link_of(idx: TtyIndex) -> KWeak<TtyBacking> {
     }
 }
 
-/// Holds both ends of a packet-mode PTY pair open; dropping it frees the pair.
 pub(super) struct PtyGuard {
     _master_backing: KArc<TtyBacking>,
     _slave_backing: KArc<dyn FileBacking>,

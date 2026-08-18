@@ -1,7 +1,5 @@
-//! TCP (Transmission Control Protocol) implementation — RFC 793 + RFC 7413.
-//!
-//! Protocol logic only: header parsing, checksum, state machine, connection
-//! table and teardown. Packet I/O belongs to the caller.
+//! TCP — RFC 793 + RFC 7413. Protocol logic only; packet I/O belongs to the
+//! caller.
 
 pub mod actions;
 pub mod buffer;
@@ -53,17 +51,17 @@ use slopos_ostd::klog_debug;
 use slopos_ostd::mm::uframe::KeepaliveFrames;
 use slopos_ostd::{KVec, ZcNotifToken};
 
-/// Initial retransmission timeout in milliseconds (RFC 6298 recommends 1s).
+/// RFC 6298 recommends 1 s.
 pub const INITIAL_RTO_MS: u32 = 1000;
 
 pub const MAX_RTO_MS: u32 = 60_000;
 
-/// TIME_WAIT duration in milliseconds (2 × MSL, MSL = 30s).
+/// 2 × MSL, MSL = 30 s.
 pub const TIME_WAIT_MS: u64 = 60_000;
 
 pub const MAX_RETRANSMITS: u8 = 8;
 
-/// FIN_WAIT_2 timeout in milliseconds (60 s, matches Linux `tcp_fin_timeout`).
+/// 60 s, matching Linux's `tcp_fin_timeout` default.
 pub const FIN_WAIT2_TIMEOUT_MS: u64 = 60_000;
 
 /// Keepalive idle period before the first probe (RFC 1122 default 2 h).
@@ -73,8 +71,7 @@ const TCP_KEEPALIVE_PROBES_MAX: u8 = 9;
 
 pub(crate) use isn::generate_isn;
 
-/// Process an incoming TCP segment. Returns the `Actions` the caller drains:
-/// segments to send, socket-layer wake-ups, and the accepted child, if any.
+/// Process an incoming TCP segment into the `Actions` the caller drains.
 pub fn input(
     src_ip: [u8; 4],
     dst_ip: [u8; 4],
@@ -101,8 +98,8 @@ pub fn input(
     if id.is_listener() {
         let (mut actions, parent_sock) =
             input_process_listener(id, &incoming_tuple, hdr, options, now_ms);
-        // Installing the child runs outside the listener's per-slot lock
-        // (already dropped) so it can take the matching shard's write lock.
+        // Installing the child runs outside the listener's per-slot lock so it
+        // can take the matching shard's write lock.
         if actions.accepted.is_some()
             && let Some(child_id) =
                 install_accepted_child(&incoming_tuple, &actions, hdr, parent_sock)
@@ -115,8 +112,8 @@ pub fn input(
             return child_actions;
         }
         if actions.accepted.is_some() {
-            // The table had no room, and the peer believes the handshake
-            // completed, so it has to be told otherwise.
+            // The table had no room, but the peer believes the handshake
+            // completed.
             actions.accepted = None;
             actions.notify = SocketNotify::empty();
             actions.push_segment(SegmentBuilder::rst_for(hdr, dst_ip, src_ip));
@@ -209,9 +206,8 @@ pub fn on_syn_ack_retransmit(key: u32) -> Option<TcpOutSegment> {
 
 /// Release every established child a closing listener still owns.
 ///
-/// A child carries its parent's `socket_id` and holds a shard slot that
-/// nothing else reclaims once the listener is gone; the returned tuples let
-/// the caller reset the peers it was still speaking to.
+/// A child holds a shard slot nothing else reclaims once the listener is gone;
+/// the returned tuples let the caller reset the peers it was still speaking to.
 pub fn release_children_of(socket_id: pcb::SocketId) -> KVec<(TcpTuple, u32)> {
     let mut ids = [None; table::TOTAL_PCB_SLOTS];
     let count = table::snapshot_shard_conn_ids(&mut ids);
@@ -231,15 +227,13 @@ pub fn release_children_of(socket_id: pcb::SocketId) -> KVec<(TcpTuple, u32)> {
     orphans
 }
 
-/// Give `id` the send/receive rings its next transition assumes, if it does not
-/// already have them.
+/// Give `id` the send/receive rings its next transition assumes.
 ///
 /// The 2 x 32 KiB pair is allocated outside the PCB lock: a slab refill under
-/// the `TCP_PCB_SLOTS` cli-spinlock — a lock an unauthenticated remote peer
-/// drives — deadlocks. A PCB is installed in `SynRecv` and never re-enters it,
-/// so a stale "will not need rings" peek is only possible in the direction
-/// that wastes an allocation. `#[inline(never)]` keeps the `TcpBufferPair`
-/// rvalue off the state closures' frames, which the 2 KiB stack gate rejects.
+/// the `TCP_PCB_SLOTS` cli-spinlock — a lock a remote peer drives — deadlocks.
+/// A PCB never re-enters `SynRecv`, so a stale peek can only waste an
+/// allocation. `#[inline(never)]` keeps the `TcpBufferPair` rvalue off the
+/// state closures' frames, which the 2 KiB stack gate rejects.
 #[inline(never)]
 fn ensure_connection_buffer(id: ConnId) -> Result<(), TcpError> {
     let wanted = table::with_pcb_and_bufs(id, |pcb, buf| {
@@ -367,9 +361,8 @@ fn input_process_established(
         actions
     });
 
-    // Read outside the PCB lock: the keepalive option lives in the socket
-    // table, and the socket layer takes that table before calling down into a
-    // PCB, so reading it here would invert the socket -> tcp lock order.
+    // The socket layer takes the socket table before calling down into a PCB,
+    // so reading the keepalive option under the PCB lock inverts that order.
     if actions
         .as_ref()
         .is_some_and(|a| a.notify.contains(SocketNotify::NEW_ESTABLISHED))
@@ -458,9 +451,8 @@ pub fn listen(local_ip: [u8; 4], local_port: u16) -> Result<ConnId, TcpError> {
         remote_ip: [0; 4],
         remote_port: 0,
     };
-    // Built before the listener slot lock is taken: growing it inside
-    // `on_syn` would run the allocator beneath a cli-spinlock an
-    // unauthenticated peer drives.
+    // Built before the listener slot lock is taken: growing it inside `on_syn`
+    // would run the allocator beneath a cli-spinlock a remote peer drives.
     let local = SockAddr::new(Ipv4Addr(local_ip), Port(local_port));
     let syn_queue = listener::SynQueue::with_capacity(local)?;
     let id = table::install_listener(
@@ -765,7 +757,6 @@ pub fn set_socket_idx(id: ConnId, socket_id: Option<SocketId>) {
     });
 }
 
-/// Check whether the peer has closed their write half (sent FIN).
 pub fn is_peer_closed(id: ConnId) -> bool {
     table::with_pcb(id, |pcb| match &pcb.state {
         PcbState::Data(d) => d.peer_closed,
@@ -834,7 +825,6 @@ pub fn set_nodelay(id: ConnId, nodelay: bool) {
     });
 }
 
-/// Write data into a connection's send buffer.
 pub fn send(id: ConnId, data: &[u8]) -> Result<usize, TcpError> {
     if id.is_listener() {
         return Err(TcpError::InvalidState);
@@ -888,7 +878,6 @@ pub fn send_from(
     }
 }
 
-/// Read data from a connection's receive buffer.
 pub fn recv(id: ConnId, out: &mut [u8]) -> Result<usize, TcpError> {
     if id.is_listener() {
         return Err(TcpError::InvalidState);
@@ -955,9 +944,8 @@ pub fn recv_into(
 /// bytes straight from the pinned pages `keepalive` (data at the pin's
 /// `base_off`), held across retransmits until they are cumulatively ACKed.
 /// `token` owns the chunk's notification reference; the ring posts `F_NOTIF`
-/// when it reaches zero. `None` — not a sendable Data state, the chunk does
-/// not fit SO_SNDBUF, or the chunk store cannot grow — drops `keepalive` and
-/// `token` here and leaves the caller the single-direct-copy leaf.
+/// when it reaches zero. `None` drops `keepalive` and `token` here and leaves
+/// the caller the single-direct-copy leaf.
 pub fn enqueue_zerocopy(
     id: ConnId,
     keepalive: KeepaliveFrames,
@@ -1361,7 +1349,6 @@ pub fn delayed_ack_check(now_ms: u64) -> Option<(ConnId, TcpOutSegment)> {
     None
 }
 
-/// Generate a zero-window probe for a connection with snd_wnd == 0.
 pub fn zero_window_probe(id: ConnId, _now_ms: u64) -> Option<TcpOutSegment> {
     if id.is_listener() {
         return None;

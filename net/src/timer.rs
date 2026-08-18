@@ -1,38 +1,10 @@
-//! Data-driven timer wheel for the SlopOS networking stack.
+//! Timer wheel for the networking stack: entries carry a [`TimerKind`] and a
+//! `key` naming the resource, not a callback.
 //!
-//! All network timers (ARP aging, TCP retransmit, TCP delayed ACK, TCP keepalive,
-//! TCP TIME_WAIT, reassembly timeout) use this timer wheel with typed dispatch.
-//! No bare `fn()` callbacks — timers carry a [`TimerKind`] discriminant and a
-//! `key` that identifies the specific resource (ARP entry ID, TCP connection ID,
-//! reassembly group ID, etc.).
-//!
-//! # Time model
-//!
-//! Deadlines are absolute **milliseconds** read from the unified
-//! [`crate::clock`] source — the same clock the TCP state machine uses, so
-//! there is a single notion of "now" across the whole net stack.  A timer
-//! scheduled with `schedule(delay_ms, …)` records `deadline_ms = now_ms() +
-//! delay_ms`.  [`process_due`](NetTimerWheel::process_due) fires every
-//! non-cancelled entry with `deadline_ms <= now_ms()` — in deadline order —
-//! regardless of how far the clock has advanced since the last call.  There is
-//! no per-tick stepping and no catch-up cap: jumping the clock forward by an
-//! hour fires an hour's worth of due timers in one pass, which is what lets
-//! tests fast-forward instantly via [`MockClock::advance`](crate::clock).
-//!
-//! # Concurrency
-//!
-//! The wheel's pending list is protected by an [`SpinLock`].  Expired entries
-//! are collected under the lock, then dispatched **outside** the lock.  This
-//! prevents deadlock when dispatch handlers schedule new timers.
-//!
-//! The token generator ([`AtomicU64`]) is lock-free — scheduling and cancelling
-//! timers from interrupt context is safe.
-//!
-//! # Integration
-//!
-//! [`net_timer_process`] is the integration point.  Call it from the NAPI poll
-//! loop and the idle wakeup callback to ensure timers fire both during active
-//! networking and during idle periods.
+//! Deadlines are absolute milliseconds from [`crate::clock`]. There is no
+//! per-tick stepping and no catch-up cap, so jumping the clock forward by an
+//! hour fires an hour's worth of due timers in one pass — which is what lets
+//! tests fast-forward instantly.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -43,42 +15,25 @@ use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{write_field, write_init_field};
 
-/// Maximum number of timer entries dispatched in a single `process_due()` call.
-///
-/// If more than this many entries are due, the earliest by deadline fire first
-/// and the remainder are left for the next `process_due()` call (their
-/// `deadline_ms <= now` still holds).  This bounds per-call work to prevent
-/// interrupt-context stalls.
+/// Excess due entries wait for the next `process_due()` call; the bound keeps
+/// per-call work from stalling interrupt context.
 pub const MAX_TIMERS_PER_PROCESS: usize = 32;
 
-// =============================================================================
-// TimerKind — discriminant for typed dispatch
-// =============================================================================
-
 /// Discriminant identifying which subsystem a timer belongs to.
-///
-/// The `match` on `TimerKind` in the dispatch loop is exhaustive — adding a
-/// new variant forces the caller to handle it.  This is the data-driven
-/// alternative to bare `fn()` callbacks, which cannot carry state in Rust
-/// without heap allocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimerKind {
     /// ARP neighbor entry has aged past `REACHABLE_TIME`; transition to `Stale`.
     ArpExpire,
     /// ARP request retry for an `Incomplete` neighbor entry.
     ArpRetransmit,
-    /// TCP retransmission timer fired.
     TcpRetransmit,
     /// SYN-ACK retransmission for a half-open connection in a listener's SYN
     /// queue. Distinct from [`TimerKind::TcpRetransmit`] because its keys come
-    /// from the SYN queue's own counter and would otherwise be indistinguishable
-    /// from the `ConnId`s established connections use.
+    /// from the SYN queue's own counter, not from the `ConnId` space.
     TcpSynAck,
-    /// TCP delayed ACK timer fired.
     TcpDelayedAck,
     /// TCP TIME_WAIT 2×MSL has elapsed.
     TcpTimeWait,
-    /// TCP keepalive probe.
     TcpKeepalive,
     /// TCP FIN_WAIT_2 timeout — releases stale half-closed connections.
     TcpFinWait2,
@@ -86,28 +41,16 @@ pub enum TimerKind {
     ReassemblyTimeout,
     /// Connectivity re-evaluation, and the one active gateway probe.
     ConnProbe,
-    /// A DHCP message went unanswered; send it again.
     DhcpRetransmit,
     /// T1 — time to renew with the server that granted the lease.
     DhcpT1,
     /// T2 — the granting server has stopped answering; ask anybody.
     DhcpT2,
-    /// The lease ran out.
     DhcpExpire,
 }
 
-// =============================================================================
-// TimerToken — opaque cancellation handle
-// =============================================================================
-
-/// Opaque, monotonically increasing token for timer cancellation.
-///
-/// Each scheduled timer receives a unique `TimerToken`.  Passing it to
-/// [`NetTimerWheel::cancel`] marks the corresponding entry as cancelled
-/// so it will be skipped when the pending list is drained.
-///
-/// Tokens are never reused — the generator is a 64-bit counter that will
-/// not wrap in any realistic scenario.
+/// Opaque token for timer cancellation. Never reused — the generator is a
+/// 64-bit counter that will not wrap.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TimerToken(u64);
 

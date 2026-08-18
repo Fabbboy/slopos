@@ -2,10 +2,6 @@
 //!
 //! Each class is its own type parameterised over `const SIZE: usize`;
 //! the aggregator [`super::KernelSlab`] owns one instance of each.
-//! Each instance holds:
-//! - its own `SpinLock<SlabClassState>` over the partial-slab list,
-//! - per-CPU magazines for a lock-free fast path,
-//! - per-class counters.
 //!
 //! Slab pages are allocated lazily from the buddy via
 //! [`super::page::alloc_slab_page`] and tracked intrusively through
@@ -13,17 +9,11 @@
 //! heap allocation, which is required because the slab IS the heap and
 //! cannot recurse into itself during init.
 //!
-//! ## Verification (Inv. 9)
-//!
-//! Once [`SlabAllocator::build_slab_page`] claims a page from the buddy the
-//! caller links it on the class's partial list and never returns it — there is no
-//! `free_kernel_page` on the steady-state alloc/dealloc path, so a cell
-//! handed out by [`SlabAllocator::alloc_one`] can never outlive its page.
-//! `verification/proofs/slab_lifetime.rs` machine-checks the stronger
-//! general rule (a page may only be reclaimed with zero outstanding cells)
-//! and proves the broken "reclaim with live cells" violates Inv. 9 — so the
-//! never-free discipline here is the conservative instance of a verified
-//! guard. See `verification/STATUS.md`.
+//! Inv. 9: once [`SlabAllocator::build_slab_page`] claims a page from the buddy
+//! the caller links it on the class's partial list and never returns it, so a
+//! cell handed out by [`SlabAllocator::alloc_one`] can never outlive its page.
+//! `verification/proofs/slab_lifetime.rs` machine-checks the stronger general
+//! rule that a page may only be reclaimed with zero outstanding cells.
 
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -77,8 +67,6 @@ impl SlabClassStats {
     }
 }
 
-/// Per-size-class slab allocator.
-///
 /// `SIZE` is a const generic so each class is a distinct type, giving
 /// `impl Slab` a fixed `Slot = NonNull<u8>` per class.
 pub struct SlabAllocator<const SIZE: usize> {
@@ -112,11 +100,9 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
         }
     }
 
-    /// Allocate one object. Magazine fast path first, then slab page
-    /// list, then grow a fresh page from the buddy.
     pub(crate) fn alloc_one(&self) -> Option<NonNull<u8>> {
-        // Magazine fast path: only when armed AND when the class lock
-        // is not held by us (defends against any pathological re-entry).
+        // Skip the magazine while the class lock is held: defends against any
+        // pathological re-entry.
         if super::HEAP_CACHES_ENABLED.load(Ordering::Acquire) && !self.inner.is_locked() {
             let _pin = IrqPreemptGuard::new();
             let cpu = get_current_cpu();
@@ -126,7 +112,6 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
                 self.stats.free_objects.fetch_sub(1, Ordering::Relaxed);
                 return Some(ptr);
             }
-            // Magazine empty — refill from the global pool.
             self.refill_magazine(mag);
             if let Some(ptr) = mag.pop() {
                 self.stats.alloc_count.fetch_add(1, Ordering::Relaxed);
@@ -135,19 +120,11 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
             }
         }
 
-        // Slow path: pop directly from an existing slab page's free-list
-        // under the class lock.
         if let Some(ptr) = self.with_class_locked(|state| self.pop_from_existing_slabs(state)) {
             self.stats.alloc_count.fetch_add(1, Ordering::Relaxed);
             self.stats.free_objects.fetch_sub(1, Ordering::Relaxed);
             return Some(ptr);
         }
-        // Every existing slab is full. Build a fresh page WITHOUT holding
-        // the class lock: `build_slab_page` -> buddy alloc may perform a
-        // cross-CPU LUF/TLB drain that waits for peer IPI acks, and holding
-        // the IRQ-off `SpinLock<SlabClassState>` across it deadlocks (a peer
-        // spinning on this same lock can't service the ack IPI). Then link
-        // it and pop from it under the lock.
         let new_slab = self.build_slab_page()?;
         let obj = self.with_class_locked(|state| {
             self.link_slab_at_head(state, new_slab);
@@ -162,7 +139,6 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
         Some(obj)
     }
 
-    /// Return an object. Magazine first, then slab page free-list.
     /// Double-frees are swallowed: if `ptr` is already cached in
     /// either the per-CPU magazine or the slab page's free chain, the
     /// dealloc is a no-op.
@@ -171,9 +147,8 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
             let _pin = IrqPreemptGuard::new();
             let cpu = get_current_cpu();
             let mag = self.magazines.get_pinned_mut(cpu);
-            // Defend against double-free: rejecting a duplicate now
-            // prevents the magazine from later handing the same
-            // pointer to two callers (silent use-after-free).
+            // A duplicate here would let the magazine hand one pointer to two
+            // callers.
             if mag.contains(ptr) {
                 return;
             }
@@ -182,8 +157,6 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
                 self.stats.free_objects.fetch_add(1, Ordering::Relaxed);
                 return;
             }
-            // Magazine full — drain half into the global pool, then
-            // retry the push.
             self.drain_magazine_half(mag);
             if mag.push(ptr) {
                 self.stats.free_count.fetch_add(1, Ordering::Relaxed);
@@ -191,11 +164,6 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
                 return;
             }
         }
-        // Fallback path: directly insert into the owning slab page's
-        // free-list under the class lock. `push_to_slab` walks the
-        // chain and rejects duplicates, so double-frees that bypass
-        // the magazine (caches disabled, or magazine fast path skipped
-        // for any other reason) are still swallowed here.
         if self.with_class_locked(|state| self.push_to_slab(state, ptr)) {
             self.stats.free_count.fetch_add(1, Ordering::Relaxed);
             self.stats.free_objects.fetch_add(1, Ordering::Relaxed);
@@ -203,8 +171,7 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
     }
 
     /// Drain every per-CPU magazine for this class — push every
-    /// cached object back into the global slab pool. Called from
-    /// [`super::drain_all_heap_caches`].
+    /// cached object back into the global slab pool.
     pub(crate) fn drain_magazines(&self) {
         self.magazines.for_each_mut_at_shutdown(|_cpu, mag| {
             while let Some(ptr) = mag.pop() {
@@ -213,15 +180,10 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
         });
     }
 
-    // ---- internals --------------------------------------------------
-
-    /// Run `f` under the class lock with an unwind-abort guard armed.
-    /// Every class-lock section splices intrusive free lists; an unwind
-    /// mid-splice would release the lock around a torn chain, so it aborts
-    /// instead. The guard is armed after the lock (the abort fires before
-    /// the lock guard's release) and disarmed on the normal path, so a
-    /// completed section never aborts even while a panic is unwinding
-    /// elsewhere in the task.
+    /// Run `f` under the class lock with an unwind-abort guard armed: every
+    /// class-lock section splices intrusive free lists, and an unwind
+    /// mid-splice would release the lock around a torn chain. The guard is
+    /// armed after the lock so the abort fires before the lock guard's release.
     fn with_class_locked<R>(&self, f: impl FnOnce(&SlabClassState) -> R) -> R {
         let state = self.inner.lock();
         let abort_guard = AbortOnUnwind::new();
@@ -232,9 +194,7 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
 
     fn refill_magazine(&self, mag: &mut Magazine) {
         let batch = MAGAZINE_CAPACITY / 2;
-        // Best-effort: drain existing partial slabs only. If none are
-        // available the magazine stays partial and the caller falls to the
-        // slow path, which grows a fresh page outside this lock.
+        // Best-effort: drain existing partial slabs only.
         self.with_class_locked(|state| {
             for _ in 0..batch {
                 let Some(ptr) = self.pop_from_existing_slabs(state) else {

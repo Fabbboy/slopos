@@ -1,9 +1,7 @@
 //! Tests for the DHCP transport: the glue between the state machine and a real
 //! interface.
 //!
-//! Each test registers its own mock device and drives only that one, and every
-//! ACK injected here carries no DNS option, so the system resolver the DNS
-//! tests depend on is never overwritten.
+//! Each test registers its own mock device and drives only that one.
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -26,7 +24,6 @@ const SERVER: [u8; 4] = [10, 77, 0, 1];
 const CLIENT_IP: [u8; 4] = [10, 77, 0, 55];
 const MASK: [u8; 4] = [255, 255, 255, 0];
 
-/// What a mock device saw, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MockEvent {
     /// Carries the frame's DHCP message type, or 0 for a non-DHCP frame.
@@ -42,7 +39,6 @@ struct EventLog {
     len: usize,
 }
 
-/// A device that records what the stack did to it.
 struct RecordingMock {
     mac: MacAddr,
     log: SpinLock<EventLog>,
@@ -126,8 +122,6 @@ impl NetDevice for RecordingMock {
     }
 }
 
-/// The DHCP message type inside a transmitted Ethernet frame, if it is one.
-///
 /// Ethernet(14) + IPv4(20) + UDP(8) is the only shape this client emits, so the
 /// offsets are fixed rather than parsed.
 fn dhcp_msg_type(frame: &[u8]) -> Option<u8> {
@@ -138,7 +132,7 @@ fn dhcp_msg_type(frame: &[u8]) -> Option<u8> {
     if frame.len() < PAYLOAD + BOOTP_HEADER_LEN {
         return None;
     }
-    // EtherType IPv4, protocol UDP, destination port 67.
+    // EtherType IPv4, protocol UDP.
     if frame[12..14] != [0x08, 0x00] || frame[L2 + 9] != 17 {
         return None;
     }
@@ -172,7 +166,6 @@ fn option_53(bootp: &[u8]) -> Option<u8> {
     None
 }
 
-/// A registered mock plus its interface and a running DHCP client.
 struct Fixture {
     dev: DevIndex,
     ifindex: u32,
@@ -189,7 +182,6 @@ impl Fixture {
         Some(Self { dev, ifindex, mock })
     }
 
-    /// Start the client and drive it to `Bound`.
     fn bind(&self, lease_secs: u32) -> bool {
         if !crate::dhcp::start(self.dev) {
             return false;
@@ -222,8 +214,8 @@ fn current_xid(dev: DevIndex) -> Option<u32> {
     crate::dhcp::transport::xid_of(dev)
 }
 
-/// Build a server reply. `lease` present adds options 51/58/59; **no DNS
-/// option is ever written**, so `bind()` leaves the resolver alone.
+/// Build a server reply. **No DNS option is ever written**, so `bind()` leaves
+/// the system resolver the DNS tests depend on untouched.
 fn reply(
     buf: &mut [u8; DHCP_FRAME_LEN],
     xid: u32,

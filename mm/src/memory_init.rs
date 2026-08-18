@@ -185,8 +185,7 @@ fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
 fn compute_memory_stats(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
     let _ = memmap;
     // Snapshot the region store before acquiring INIT_STATS: both locks are
-    // LOCK_LEVEL_RESOURCE, and nesting two same-level locks is an AB-BA risk
-    // the lock walker rejects.
+    // LOCK_LEVEL_RESOURCE, and the lock walker rejects nesting two of those.
     let memory_regions_count = mm_region_count();
     let available_memory_bytes = mm_region_total_bytes(MmRegionKind::Usable);
     let tracked_page_frames = if available_memory_bytes == 0 {

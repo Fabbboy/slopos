@@ -56,7 +56,7 @@ impl TtySession {
     pub fn detach(&mut self) {
         self.session = KWeak::new();
         self.fg_pgrp = KWeak::new();
-        // focused_task_id is deliberately not cleared — compositor focus is independent.
+        // focused_task_id is deliberately not cleared.
     }
 
     /// The controlling session's id, or `0` when none is attached / alive.
@@ -69,7 +69,6 @@ impl TtySession {
         self.fg_pgrp.upgrade().map_or(0, |pg| pg.id())
     }
 
-    /// Pin the foreground group across a signal delivery.
     pub fn fg_pgrp_handle(&self) -> Option<KArc<ProcessGroup>> {
         self.fg_pgrp.upgrade()
     }
@@ -174,7 +173,6 @@ pub fn test_install_session(
     }
 }
 
-/// Called when a session ends.
 pub fn detach_session_by_id(session_id: u32) {
     if session_id == 0 {
         return;

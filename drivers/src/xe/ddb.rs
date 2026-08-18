@@ -55,8 +55,8 @@ pub fn program_cursor_ddb(
     program.flip(mmio, surf_ggtt);
     pipe::wait_for_vblank(mmio, pipe);
 
-    // Only watermark level 0 is enabled; with the higher levels and the
-    // transition watermark disabled the display falls back to level 0.
+    // Higher levels and the transition watermark stay zero; the display then
+    // falls back to level 0.
     mmio.write::<u32>(regs::cur_buf_cfg(pipe), ddb::encode_buf_cfg(split.cursor));
     mmio.write::<u32>(regs::cur_wm(pipe, 0), ddb::cursor_wm0());
     for level in 1..regs::PLANE_WM_LEVELS {

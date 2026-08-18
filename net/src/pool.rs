@@ -1,21 +1,9 @@
 //! Pre-allocated packet buffer pool.
 //!
-//! Provides O(1) alloc/release of fixed-size packet buffers. Each slot
-//! is backed by a typed [`Frame<PacketMeta>`] page from the kernel
-//! frame allocator; a buffer's bytes are reached through the frame's
-//! `as_bytes`/`as_bytes_mut` HHDM views, so byte access is
-//! borrow-checker-enforced rather than relying on raw-pointer aliasing.
-//!
-//! # Design rationale
-//!
-//! Linux uses `kmem_cache` (slab) for `sk_buff` allocation because
-//! per-packet `kmalloc` is too slow and fragments the heap under load.
-//! A fixed pool gives O(1) alloc/free and predictable memory use. The
-//! frames are allocated once at [`init`](PacketPool::init) and recycled
-//! for the kernel's lifetime; the free-list lives behind a leaf
-//! `SpinLock` (the lock disables IRQs while held and acquires no other
-//! lock, so it is safe to take from any context and can never head a
-//! lock-ordering cycle).
+//! Each slot is backed by a typed [`Frame<PacketMeta>`] page, allocated once at
+//! [`init`](PacketPool::init) and recycled for the kernel's lifetime. The
+//! free-list sits behind a leaf `SpinLock` that acquires no other lock, so it
+//! can be taken from any context.
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use slopos_ostd::lock_class;
@@ -24,57 +12,36 @@ use slopos_ostd::KVec;
 use slopos_ostd::mm::frame::{Frame, PacketMeta};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
-/// Usable size of each packet buffer in bytes.
-///
-/// Covers the maximum Ethernet frame (1518) plus headroom (128) with
-/// room to spare. The backing frame is a full 4 KiB page; only the
-/// first `BUF_SIZE` bytes are exposed to the network stack.
+/// Usable prefix of each 4 KiB backing frame: max Ethernet frame (1518) plus
+/// headroom.
 pub const BUF_SIZE: usize = 2048;
 
-/// Number of pre-allocated buffer slots.
-///
-/// Each slot is backed by one 4 KiB frame, so the pool reserves
-/// `POOL_SIZE * 4 KiB` of physical memory. Tunable: lower it for a
-/// smaller footprint, raise it for more in-flight buffers.
+/// Number of pre-allocated slots; each reserves one 4 KiB frame.
 pub const POOL_SIZE: usize = 256;
 
-// =============================================================================
-// Pool state
-// =============================================================================
-
-/// Mutable pool state, guarded by [`PacketPool::inner`].
 struct PoolInner {
-    /// Per-slot frame storage. `slots[i]` is `Some` while the frame for
-    /// slot `i` is resident in the pool, and `None` while that frame is
-    /// lent to a live [`PacketBuf`](super::packetbuf::PacketBuf). The
-    /// length is however many frames [`init`](PacketPool::init) managed
-    /// to allocate (`<= POOL_SIZE`).
+    /// `slots[i]` is `None` while that frame is lent to a live
+    /// [`PacketBuf`](super::packetbuf::PacketBuf); length is however many
+    /// frames [`init`](PacketPool::init) obtained (`<= POOL_SIZE`).
     slots: KVec<Option<Frame<PacketMeta>>>,
-    /// Free-list of slot indices: `i` is present iff `slots[i]` is
-    /// resident and not currently lent out.
+    /// `i` is present iff `slots[i]` is resident and not lent out.
     free: KVec<u16>,
 }
 
 /// Pre-allocated packet buffer pool.
 ///
-/// `alloc`/`release` operate on bare `u16` slot handles; `acquire`/
-/// `restore` additionally move the backing [`Frame<PacketMeta>`] in and
-/// out, so a [`PacketBuf`](super::packetbuf::PacketBuf) can own its
-/// frame by value and mutate the bytes under a genuine `&mut`.
+/// `alloc`/`release` hand out bare `u16` slot handles; `acquire`/`restore`
+/// additionally move the backing [`Frame<PacketMeta>`] out and back, so a
+/// [`PacketBuf`](super::packetbuf::PacketBuf) can own its frame by value.
 pub struct PacketPool {
     /// `None` until [`init`](Self::init) populates it.
     inner: SpinLock<Option<PoolInner>>,
-    /// Whether [`init`](Self::init) has run.
     initialized: AtomicBool,
-    /// Number of free slots — equals `inner.free.len()` while
-    /// initialized. Held as a standalone atomic so [`available`] is a
-    /// lock-free read.
+    /// Mirrors `inner.free.len()` so `available` is a lock-free read.
     count: AtomicUsize,
 }
 
-/// The global packet pool singleton.
-///
-/// Call [`PacketPool::init`] once before any networking code runs.
+/// Global packet pool; [`PacketPool::init`] must run before any networking code.
 pub static PACKET_POOL: PacketPool = PacketPool {
     inner: SpinLock::new(None, lock_class!("PACKET_POOL", LOCK_LEVEL_RESOURCE)),
     initialized: AtomicBool::new(false),
@@ -82,12 +49,10 @@ pub static PACKET_POOL: PacketPool = PacketPool {
 };
 
 impl PacketPool {
-    /// Allocate the pool's backing frames and build the free-list.
+    /// Allocate the backing frames and build the free-list.
     ///
-    /// Idempotent — subsequent calls are no-ops. Allocates up to
-    /// [`POOL_SIZE`] frames from the kernel frame allocator; if the
-    /// allocator is short, the pool is built with however many frames
-    /// were available rather than panicking.
+    /// Idempotent. Builds with however many of the [`POOL_SIZE`] frames the
+    /// allocator supplies rather than panicking when it is short.
     pub fn init(&self) {
         if self.initialized.swap(true, Ordering::AcqRel) {
             return;
@@ -104,7 +69,6 @@ impl PacketPool {
                     slots.push(Some(frame)).expect("packet pool: push slot");
                     free.push(i as u16).expect("packet pool: push free index");
                 }
-                // Allocator exhausted — keep the slots already built.
                 None => break,
             }
         }
@@ -114,10 +78,8 @@ impl PacketPool {
         self.count.store(available, Ordering::Release);
     }
 
-    /// Reserve a free slot, returning its index. The backing frame stays
-    /// resident in the pool (use [`acquire`](Self::acquire) to take
-    /// ownership of the frame too). Returns `None` if the pool is
-    /// exhausted or not yet initialized.
+    /// Reserve a free slot, leaving its frame resident (see
+    /// [`acquire`](Self::acquire)). `None` if exhausted or uninitialized.
     pub fn alloc(&self) -> Option<u16> {
         let mut guard = self.inner.lock();
         let inner = guard.as_mut()?;
@@ -126,8 +88,8 @@ impl PacketPool {
         Some(slot)
     }
 
-    /// Return a slot index reserved by [`alloc`](Self::alloc) to the
-    /// free-list. The slot's frame must still be resident.
+    /// Return an [`alloc`](Self::alloc)ed slot to the free-list; its frame must
+    /// still be resident.
     pub fn release(&self, slot: u16) {
         let mut guard = self.inner.lock();
         if let Some(inner) = guard.as_mut() {
@@ -136,11 +98,9 @@ impl PacketPool {
         }
     }
 
-    /// Reserve a free slot *and* take ownership of its backing frame.
-    ///
-    /// Returns the slot index plus the moved-out [`Frame<PacketMeta>`],
-    /// or `None` if the pool is exhausted / not yet initialized. The
-    /// frame is returned to the pool by [`restore`](Self::restore).
+    /// Reserve a free slot *and* move out its backing frame, which
+    /// [`restore`](Self::restore) returns. `None` if exhausted or
+    /// uninitialized.
     pub(crate) fn acquire(&self) -> Option<(u16, Frame<PacketMeta>)> {
         let mut guard = self.inner.lock();
         let inner = guard.as_mut()?;
@@ -150,8 +110,7 @@ impl PacketPool {
         Some((slot, frame))
     }
 
-    /// Return a frame taken via [`acquire`](Self::acquire) to its slot
-    /// and mark the slot free again.
+    /// Return an [`acquire`](Self::acquire)d frame to its slot and free the slot.
     pub(crate) fn restore(&self, slot: u16, frame: Frame<PacketMeta>) {
         let mut guard = self.inner.lock();
         if let Some(inner) = guard.as_mut() {
@@ -161,14 +120,12 @@ impl PacketPool {
         }
     }
 
-    /// Number of free buffer slots (diagnostic; racy under concurrent
-    /// access).
+    /// Free-slot count; racy under concurrent access.
     #[inline]
     pub fn available(&self) -> usize {
         self.count.load(Ordering::Relaxed)
     }
 
-    /// Whether [`init`](Self::init) has been called.
     #[inline]
     pub fn is_initialized(&self) -> bool {
         self.initialized.load(Ordering::Acquire)

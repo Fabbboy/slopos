@@ -143,7 +143,6 @@ impl fmt::Display for Port {
     }
 }
 
-/// Ethernet MAC address (6 bytes).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MacAddr(pub [u8; 6]);
 
@@ -161,7 +160,6 @@ impl MacAddr {
             && self.0[5] == 0xff
     }
 
-    /// `true` if the least-significant bit of the first octet is set (multicast).
     #[inline]
     pub const fn is_multicast(&self) -> bool {
         self.0[0] & 0x01 != 0
@@ -240,7 +238,6 @@ pub enum NetError {
     NoBufferSpace,
     ProtocolNotSupported,
     AddressFamilyNotSupported,
-    /// `bind()` was not called.
     SocketNotBound,
     InProgress,
     OperationNotSupported,
@@ -350,7 +347,6 @@ impl fmt::Display for SockAddr {
     }
 }
 
-/// Ethernet frame type field values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum EtherType {
@@ -388,7 +384,6 @@ impl fmt::Display for EtherType {
     }
 }
 
-/// IP protocol number field values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum IpProtocol {

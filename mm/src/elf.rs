@@ -57,7 +57,6 @@ pub const MAX_TOTAL_MAPPED_SIZE: u64 = 256 * 1024 * 1024;
 
 pub const MIN_ELF_SIZE: usize = 64;
 
-/// Errors that can occur during ELF validation and loading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {
     BufferTooSmall,

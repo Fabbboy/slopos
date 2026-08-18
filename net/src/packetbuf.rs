@@ -1,28 +1,18 @@
 //! Pool-backed packet buffer with zero-copy header push/pull and layer tracking.
 //!
 //! `PacketBuf` is the single currency exchanged between the driver layer and the
-//! protocol stack.  It carries both the raw frame data and metadata (layer offsets,
-//! head/tail pointers) that let each protocol layer access its headers without
-//! reparsing from scratch.
-//!
-//! # Ownership
-//!
-//! `PacketBuf` is **move-only** — it deliberately does not implement `Clone`.
-//! Dropping a pooled buffer automatically returns its slot to the global
-//! [`PacketPool`](super::pool::PacketPool) via the `Drop` impl.
-//!
-//! # Layout
+//! protocol stack. It is **move-only**; dropping a pooled buffer returns its
+//! slot to the global [`PacketPool`](super::pool::PacketPool).
 //!
 //! ```text
 //! |<-- headroom -->|<-- payload (head..tail) -->|<-- tailroom -->|
 //! 0            head                          tail           capacity
 //! ```
 //!
-//! * TX path: `alloc()` starts with `head = tail = HEADROOM`.  Headers are
-//!   prepended via [`push_header`](PacketBuf::push_header); payload is appended
-//!   via [`append`](PacketBuf::append).
-//! * RX path: `from_raw_copy()` starts with `head = 0`, `tail = data.len()`.
-//!   Headers are consumed via [`pull_header`](PacketBuf::pull_header).
+//! * TX path: `alloc()` starts with `head = tail = HEADROOM`; headers are
+//!   prepended via [`push_header`](PacketBuf::push_header).
+//! * RX path: `from_raw_copy()` starts with `head = 0`, `tail = data.len()`;
+//!   headers are consumed via [`pull_header`](PacketBuf::pull_header).
 
 use core::fmt;
 use slopos_ostd::KVec;
@@ -31,23 +21,13 @@ use slopos_ostd::mm::frame::{Frame, PacketMeta};
 use super::pool::{BUF_SIZE, PACKET_POOL};
 use super::types::{Ipv4Addr, NetError};
 
-/// Reserved headroom in each pooled buffer (bytes).
-///
-/// 128 bytes covers: Ethernet (14) + IP (20) + TCP max (60) + 34 spare.
-/// Headers are prepended by decrementing `head`.
+/// Reserved headroom in each pooled buffer (bytes): Ethernet (14) + IP (20) +
+/// TCP max (60) + 34 spare.
 pub const HEADROOM: u16 = 128;
 
-// =============================================================================
-// PacketBufInner
-// =============================================================================
-
-/// Internal storage backing for a [`PacketBuf`].
 enum PacketBufInner {
-    /// Backed by the global [`PacketPool`](super::pool::PacketPool) —
-    /// the fast-path allocation. Owns its frame by value; `Drop`
-    /// returns the frame to the pool. `frame` is `Option` only so it
-    /// can be moved out in `Drop`; it is `Some` for the whole of a live
-    /// buffer's lifetime.
+    /// Pool-backed fast path. `frame` is `Option` only so `Drop` can move it
+    /// out; it is `Some` for the whole of a live buffer's lifetime.
     Pooled {
         slot: u16,
         frame: Option<Frame<PacketMeta>>,
@@ -56,29 +36,18 @@ enum PacketBufInner {
     Oversized { data: KVec<u8> },
 }
 
-// =============================================================================
-// PacketBuf
-// =============================================================================
-
 /// A network packet buffer with zero-copy header push/pull and layer offset
-/// tracking.
-///
-/// See [module documentation](self) for layout and ownership semantics.
+/// tracking. See the [module documentation](self) for layout and ownership.
 pub struct PacketBuf {
     inner: PacketBufInner,
     /// Start of the active data region within the backing buffer.
     head: u16,
     /// End of the active data region (exclusive).
     tail: u16,
-    /// Byte offset of the L2 (Ethernet) header within the backing buffer.
     l2_offset: u16,
-    /// Byte offset of the L3 (IPv4) header within the backing buffer.
     l3_offset: u16,
-    /// Byte offset of the L4 (TCP/UDP) header within the backing buffer.
     l4_offset: u16,
 }
-
-// -- Drop: return pooled buffers automatically --------------------------------
 
 impl Drop for PacketBuf {
     fn drop(&mut self) {
@@ -87,12 +56,10 @@ impl Drop for PacketBuf {
                 PACKET_POOL.restore(*slot, f);
             }
         }
-        // Oversized: the KVec<u8> is dropped implicitly.
     }
 }
 
-// -- Debug: metadata only, never dump raw buffer contents ---------------------
-
+// Metadata only: never dump raw buffer contents.
 impl fmt::Debug for PacketBuf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.inner {
@@ -116,16 +83,8 @@ impl fmt::Debug for PacketBuf {
     }
 }
 
-// =============================================================================
-// 1B.3 — Constructors
-// =============================================================================
-
 impl PacketBuf {
     /// Allocate an empty buffer from the global pool with [`HEADROOM`] reserved.
-    ///
-    /// Used by the **TX path** to build outgoing packets.  Push headers backward
-    /// via [`push_header`](Self::push_header), append payload via
-    /// [`append`](Self::append).
     ///
     /// Returns `None` if the pool is exhausted.
     pub fn alloc() -> Option<Self> {
@@ -145,9 +104,8 @@ impl PacketBuf {
 
     /// Allocate a buffer and copy raw frame data into it.
     ///
-    /// Used by the **RX path** when copying from a DMA ring buffer.  The data
-    /// starts at offset 0 (no headroom) so that layer offsets match raw wire
-    /// positions.
+    /// The data starts at offset 0 (no headroom) so that layer offsets match
+    /// raw wire positions.
     ///
     /// Returns `None` if the pool is exhausted or `data.len() > BUF_SIZE`.
     pub fn from_raw_copy(data: &[u8]) -> Option<Self> {
@@ -155,7 +113,6 @@ impl PacketBuf {
             return None;
         }
         let (slot, mut frame) = PACKET_POOL.acquire()?;
-        // We own this frame exclusively after acquire().
         frame.as_bytes_mut()[..data.len()].copy_from_slice(data);
         Some(Self {
             inner: PacketBufInner::Pooled {
@@ -170,10 +127,9 @@ impl PacketBuf {
         })
     }
 
-    /// Allocate an oversized buffer from the heap.
-    ///
-    /// Used **only** for IP reassembly buffers that exceed the pool's
-    /// `BUF_SIZE`.  Normal packet allocation should always use [`alloc`](Self::alloc).
+    /// Allocate an oversized buffer from the heap — **only** for IP reassembly
+    /// buffers that exceed the pool's `BUF_SIZE`; everything else uses
+    /// [`alloc`](Self::alloc).
     pub fn oversized(capacity: usize) -> Self {
         Self {
             inner: PacketBufInner::Oversized {
@@ -188,12 +144,7 @@ impl PacketBuf {
     }
 }
 
-// =============================================================================
-// Internal buffer access
-// =============================================================================
-
 impl PacketBuf {
-    /// Total capacity of the backing buffer.
     #[inline]
     pub fn capacity(&self) -> usize {
         match &self.inner {
@@ -202,27 +153,21 @@ impl PacketBuf {
         }
     }
 
-    /// Shared reference to the usable region of the backing buffer.
     #[inline]
     fn data(&self) -> &[u8] {
         match &self.inner {
             PacketBufInner::Pooled { frame, .. } => {
-                // The pool lends each frame to exactly one PacketBuf, so
-                // this handle is the only view of the bytes. The frame
-                // is a full 4 KiB page; expose only the usable region.
+                // The frame is a full 4 KiB page; expose only the usable region.
                 &frame.as_ref().expect("pooled frame present").as_bytes()[..BUF_SIZE]
             }
             PacketBufInner::Oversized { data } => data.as_slice(),
         }
     }
 
-    /// Mutable reference to the usable region of the backing buffer.
     #[inline]
     fn data_mut(&mut self) -> &mut [u8] {
         match &mut self.inner {
             PacketBufInner::Pooled { frame, .. } => {
-                // `&mut self` plus the one-handle-per-slot pool invariant
-                // make this the only mutable view of the page bytes.
                 &mut frame.as_mut().expect("pooled frame present").as_bytes_mut()[..BUF_SIZE]
             }
             PacketBufInner::Oversized { data } => data.as_mut_slice(),
@@ -230,18 +175,13 @@ impl PacketBuf {
     }
 }
 
-// =============================================================================
-// 1B.4 — Header push/pull and payload access
-// =============================================================================
-
 impl PacketBuf {
-    /// Number of active payload bytes (`tail - head`).
+    /// Number of active payload bytes.
     #[inline]
     pub fn len(&self) -> usize {
         (self.tail - self.head) as usize
     }
 
-    /// `true` if the active region is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.head == self.tail
@@ -253,7 +193,6 @@ impl PacketBuf {
         &self.data()[self.head as usize..self.tail as usize]
     }
 
-    /// Mutable active data region `data[head..tail]`.
     #[inline]
     pub fn payload_mut(&mut self) -> &mut [u8] {
         let h = self.head as usize;
@@ -262,11 +201,9 @@ impl PacketBuf {
     }
 
     /// Prepend `len` bytes of header space by extending `head` backward into
-    /// the headroom.
-    ///
-    /// Returns a mutable slice over the newly exposed bytes (caller fills in
-    /// the header).  Fails with [`NoBufferSpace`](NetError::NoBufferSpace) if
-    /// the headroom is insufficient.
+    /// the headroom, returning the newly exposed bytes. Fails with
+    /// [`NoBufferSpace`](NetError::NoBufferSpace) if the headroom is
+    /// insufficient.
     pub fn push_header(&mut self, len: usize) -> Result<&mut [u8], NetError> {
         let len16 = len as u16;
         if self.head < len16 {
@@ -277,11 +214,9 @@ impl PacketBuf {
         Ok(&mut self.data_mut()[h..h + len])
     }
 
-    /// Consume `len` bytes from the front of the active region.
-    ///
-    /// Returns a shared slice over the consumed bytes (the header that was
-    /// removed).  Fails with [`InvalidArgument`](NetError::InvalidArgument) if
-    /// `len > self.len()`.
+    /// Consume `len` bytes from the front of the active region, returning the
+    /// header that was removed. Fails with
+    /// [`InvalidArgument`](NetError::InvalidArgument) if `len > self.len()`.
     pub fn pull_header(&mut self, len: usize) -> Result<&[u8], NetError> {
         if len > self.len() {
             return Err(NetError::InvalidArgument);
@@ -299,10 +234,9 @@ impl PacketBuf {
         }
     }
 
-    /// Append `src` bytes at the tail end of the active region.
-    ///
-    /// Fails with [`NoBufferSpace`](NetError::NoBufferSpace) if the remaining
-    /// tailroom cannot hold `src`.
+    /// Append `src` bytes at the tail end of the active region. Fails with
+    /// [`NoBufferSpace`](NetError::NoBufferSpace) if the remaining tailroom
+    /// cannot hold `src`.
     pub fn append(&mut self, src: &[u8]) -> Result<(), NetError> {
         let new_tail = self.tail as usize + src.len();
         if new_tail > self.capacity() {
@@ -315,11 +249,9 @@ impl PacketBuf {
     }
 
     /// Append up to `len` bytes pulled directly from a volatile
-    /// [`VmReader`](slopos_ostd::mm::VmReader) over pinned user pages (the
-    /// SlopRing single-direct-copy path) at the tail end of the active region.
-    /// The bytes are volatile-copied straight into the packet buffer with no
-    /// intermediate kernel scratch. Returns the number of bytes appended (which
-    /// may be short only if the reader runs dry). Fails with
+    /// [`VmReader`](slopos_ostd::mm::VmReader) over pinned user pages, with no
+    /// intermediate kernel scratch. Returns the number of bytes appended, short
+    /// only if the reader runs dry. Fails with
     /// [`NoBufferSpace`](NetError::NoBufferSpace) if the tailroom cannot hold
     /// `len`.
     pub fn append_from(
@@ -338,51 +270,39 @@ impl PacketBuf {
     }
 }
 
-// =============================================================================
-// 1B.5 — Layer offset helpers
-// =============================================================================
-
 impl PacketBuf {
-    /// Record the byte offset of the L2 (Ethernet) header.
     #[inline]
     pub fn set_l2(&mut self, offset: u16) {
         self.l2_offset = offset;
     }
 
-    /// Record the byte offset of the L3 (IPv4) header.
     #[inline]
     pub fn set_l3(&mut self, offset: u16) {
         self.l3_offset = offset;
     }
 
-    /// Record the byte offset of the L4 (TCP/UDP) header.
     #[inline]
     pub fn set_l4(&mut self, offset: u16) {
         self.l4_offset = offset;
     }
 
-    /// Raw L2 offset value.
     #[inline]
     pub fn l2_offset(&self) -> u16 {
         self.l2_offset
     }
 
-    /// Raw L3 offset value.
     #[inline]
     pub fn l3_offset(&self) -> u16 {
         self.l3_offset
     }
 
-    /// Raw L4 offset value.
     #[inline]
     pub fn l4_offset(&self) -> u16 {
         self.l4_offset
     }
 
-    /// L2 (Ethernet) header bytes: `data[l2_offset..l3_offset]`.
-    ///
-    /// Returns `&[]` if `l3_offset` has not been set (i.e., the L2 end is
-    /// not yet known).
+    /// L2 (Ethernet) header bytes: `data[l2_offset..l3_offset]`, or `&[]` if
+    /// `l3_offset` has not been set.
     pub fn l2_header(&self) -> &[u8] {
         let start = self.l2_offset as usize;
         let end = self.l3_offset as usize;
@@ -394,9 +314,8 @@ impl PacketBuf {
         &buf[start..end]
     }
 
-    /// L3 (IPv4) header bytes: `data[l3_offset..l4_offset]`.
-    ///
-    /// Returns `&[]` if either `l3_offset` or `l4_offset` has not been set.
+    /// L3 (IPv4) header bytes: `data[l3_offset..l4_offset]`, or `&[]` if either
+    /// offset has not been set.
     pub fn l3_header(&self) -> &[u8] {
         let start = self.l3_offset as usize;
         let end = self.l4_offset as usize;
@@ -408,9 +327,8 @@ impl PacketBuf {
         &buf[start..end]
     }
 
-    /// L4 (TCP/UDP) header + payload bytes: `data[l4_offset..tail]`.
-    ///
-    /// Returns `&[]` if `l4_offset` has not been set.
+    /// L4 (TCP/UDP) header + payload bytes: `data[l4_offset..tail]`, or `&[]`
+    /// if `l4_offset` has not been set.
     pub fn l4_header(&self) -> &[u8] {
         let start = self.l4_offset as usize;
         let end = self.tail as usize;
@@ -422,13 +340,11 @@ impl PacketBuf {
         &buf[start..end]
     }
 
-    /// Raw `head` value (useful for setting layer offsets during parsing).
     #[inline]
     pub fn head(&self) -> u16 {
         self.head
     }
 
-    /// Raw `tail` value.
     #[inline]
     pub fn tail(&self) -> u16 {
         self.tail

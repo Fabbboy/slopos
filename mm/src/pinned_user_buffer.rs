@@ -3,7 +3,7 @@
 //!
 //! [`PinnedUserBuffer::pin`] takes an owning `AnonymousMeta` ref on each backing
 //! frame, so while the handle lives the frames cannot be freed or recycled —
-//! even if the owner `munmap`s the range. `Drop` releases every ref.
+//! even if the owner `munmap`s the range.
 //!
 //! Access is **volatile byte-copy only**: the pinned memory stays user-mapped
 //! and the owner may write it concurrently, so a `&[u8]`/`&mut [u8]` over the
@@ -130,7 +130,6 @@ impl PinnedUserBuffer {
         })
     }
 
-    /// Pinned byte length.
     pub fn len(&self) -> usize {
         self.len
     }
@@ -142,8 +141,7 @@ impl PinnedUserBuffer {
     }
 
     /// Volatile read of `self[off .. off + dst.len()]` into `dst`, transparently
-    /// crossing page boundaries. The volatile read makes a concurrent user write
-    /// well-defined; the caller acts only on the returned snapshot.
+    /// crossing page boundaries.
     pub fn copy_out(&self, off: usize, dst: &mut [u8]) -> Result<(), UFrameError> {
         if off.checked_add(dst.len()).is_none_or(|end| end > self.len) {
             return Err(UFrameError::OutOfBounds);
@@ -162,8 +160,7 @@ impl PinnedUserBuffer {
     }
 
     /// Volatile write of `src` into `self[off .. off + src.len()]`, crossing
-    /// page boundaries. The volatile write makes a concurrent user read
-    /// well-defined.
+    /// page boundaries.
     pub fn copy_in(&self, off: usize, src: &[u8]) -> Result<(), UFrameError> {
         if off.checked_add(src.len()).is_none_or(|end| end > self.len) {
             return Err(UFrameError::OutOfBounds);
@@ -182,9 +179,7 @@ impl PinnedUserBuffer {
     }
 
     /// A volatile [`VmReader`] over `self[off .. off + len]` — the
-    /// single-direct-copy send path. The net leaf pulls bytes straight from the
-    /// pinned pages into the socket buffer with no kernel scratch hop. `None` if
-    /// the range is out of bounds.
+    /// single-direct-copy send path. `None` if the range is out of bounds.
     pub fn reader(&self, off: usize, len: usize) -> Option<VmReader<'_>> {
         if off.checked_add(len)? > self.len {
             return None;
@@ -193,9 +188,7 @@ impl PinnedUserBuffer {
     }
 
     /// A volatile [`VmWriter`] over `self[off .. off + len]` — the
-    /// single-direct-copy recv path. The net leaf pushes bytes straight from the
-    /// socket buffer into the pinned pages with no kernel scratch hop. `None` if
-    /// the range is out of bounds.
+    /// single-direct-copy recv path. `None` if the range is out of bounds.
     pub fn writer(&self, off: usize, len: usize) -> Option<VmWriter<'_>> {
         if off.checked_add(len)? > self.len {
             return None;
@@ -205,8 +198,7 @@ impl PinnedUserBuffer {
 
     /// Test-only: fabricate a pin over freshly-allocated kernel frames (no
     /// process VM required), so the buffer-registry logic can run in a kernel
-    /// stest. The volatile `copy_in`/`copy_out` work on any `UFrame`, so the
-    /// fabricated pin behaves like a real one for the registry's purposes.
+    /// stest.
     #[cfg(feature = "test-hooks")]
     pub fn alloc_for_test(len: usize) -> Option<Self> {
         let n_pages = len.div_ceil(PAGE_SIZE).max(1);
@@ -236,10 +228,9 @@ impl PinnedUserBuffer {
     }
 
     /// In-page byte offset of the pinned range within its first backing page.
-    /// The TCP `MSG_ZEROCOPY` send queue keeps its own keepalive frame refs
-    /// ([`keepalive_frames`](Self::keepalive_frames)) plus this `base_off`, so it
-    /// can re-derive a segment's DMA runs at an arbitrary offset on every
-    /// (re)transmit via [`slopos_ostd::mm::uframe::coalesce_io_runs`].
+    /// The TCP `MSG_ZEROCOPY` send queue pairs it with
+    /// [`keepalive_frames`](Self::keepalive_frames) to re-derive a segment's DMA
+    /// runs at an arbitrary offset on every (re)transmit.
     pub fn base_off(&self) -> usize {
         self.base_off
     }
@@ -294,9 +285,8 @@ impl PinnedUserBuffer {
     /// Coalesced `(paddr, len)` DMA runs for the sub-range `[off, off + len)` of
     /// the pinned buffer — the offset-aware form the TCP `MSG_ZEROCOPY` send queue
     /// needs to DMA a segment from the **middle** of a zero-copy send (MSS
-    /// segmentation + selective retransmit at arbitrary offsets). Delegates to the
-    /// canonical [`coalesce_io_runs`](slopos_ostd::mm::uframe::coalesce_io_runs)
-    /// over the pinned frames; returns empty if the range runs past the pin.
+    /// segmentation + selective retransmit at arbitrary offsets). Returns empty
+    /// if the range runs past the pin.
     pub fn io_runs_at(&self, off: usize, len: usize) -> KVec<(u64, u32)> {
         if off.checked_add(len).is_none_or(|end| end > self.len) {
             return KVec::new();
@@ -310,9 +300,8 @@ impl PinnedUserBuffer {
     /// outlives the ring on a process exit / ring-fd close; the driver holds
     /// this keepalive in its TX slot and drops it only after the device
     /// reclaims the descriptor, closing the use-after-free where the pages
-    /// would be recycled mid-DMA. Re-wrapping a live paddr bumps the frame
-    /// slot's ref count (`from_in_use`); the last wrapper to drop frees it.
-    /// `None` if the per-page list cannot be allocated.
+    /// would be recycled mid-DMA. `None` if the per-page list cannot be
+    /// allocated.
     ///
     /// # Accounting
     ///
@@ -321,9 +310,7 @@ impl PinnedUserBuffer {
     /// whole purpose — so a shared charge would be refunded when the ring went
     /// away while the driver still held the pages, which is a memory-lock
     /// bypass at exactly the DMA boundary. [`KeepaliveFrames`] carries its own
-    /// independent charge instead, refunded wherever the frames are actually
-    /// released — the driver's TX reclaim, a rejected submit, a torn-down send
-    /// queue.
+    /// independent charge instead.
     pub fn keepalive_frames(&self, account: AccountId) -> Option<KeepaliveFrames> {
         KeepaliveFrames::take(self.frames.as_slice(), account)
     }

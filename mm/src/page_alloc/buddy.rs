@@ -1,25 +1,11 @@
 //! Buddy allocator core for the kernel's physical page frames.
 //!
-//! [`BuddyAllocator`] is the safe-Rust [`FrameAlloc`] implementation
-//! that OSTD's [`crate::page_alloc::frame_alloc_handle`] registers via
-//! [`slopos_ostd::mm::frame_alloc::register_frame_allocator`]. The
-//! single static instance lives in [`super`]; this module exposes the
-//! type and the orchestration logic.
+//! [`BuddyAllocator`] is the safe-Rust [`FrameAlloc`] implementation OSTD
+//! registers; the single static instance lives in [`super`].
 //!
-//! The allocator owns three pieces of state:
-//!
-//! 1. [`BuddyInner`] — the per-order free-lists and frame counters,
-//!    guarded by a [`SpinLock`] at [`LOCK_LEVEL_ALLOCATOR`].
-//! 2. [`RawTable<PageFrame>`] — the page-descriptor table, a flat
-//!    array indexed by frame number. Access is gated either by the
-//!    lock above (when mutating free-list links) or by exclusive PCP
-//!    ownership (when a frame is parked in a per-CPU cache and the
-//!    holder pins itself with a [`PreemptGuard`]).
-//! 3. `state: AtomicU8` — explicit boot lifecycle:
-//!    `Uninit → Sized → Seeded → Live`. Replaces today's loose
-//!    `PCP_INIT` flag with a named enum so transitions are visible at
-//!    the call sites and `debug_assert!`-checked at the
-//!    method boundary.
+//! Access to the [`RawTable<PageFrame>`] descriptor table is gated either by
+//! the [`SpinLock`] over [`BuddyInner`] (when mutating free-list links) or by
+//! exclusive PCP ownership under a [`PreemptGuard`].
 
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
@@ -41,20 +27,11 @@ use crate::paging_defs::PAGE_SIZE_4KB;
 
 use super::pcp;
 
-// ---------------------------------------------------------------------------
-// Legacy public constants (preserved verbatim — external callers still set
-// these directly through `__alloc_page_frame_raw`).
-// ---------------------------------------------------------------------------
-
 pub const ALLOC_FLAG_DMA: u32 = 0x02;
 pub const ALLOC_FLAG_KERNEL: u32 = 0x04;
 pub const ALLOC_FLAG_ORDER_SHIFT: u32 = 8;
 pub const ALLOC_FLAG_ORDER_MASK: u32 = 0x1F << ALLOC_FLAG_ORDER_SHIFT;
 pub const ALLOC_FLAG_NO_PCP: u32 = 0x80;
-
-// ---------------------------------------------------------------------------
-// Descriptor state codes.
-// ---------------------------------------------------------------------------
 
 pub(super) const PAGE_FRAME_FREE: u8 = 0x00;
 pub(super) const PAGE_FRAME_ALLOCATED: u8 = 0x01;
@@ -70,7 +47,6 @@ pub(super) const INVALID_PAGE_FRAME: u32 = 0xFFFF_FFFF;
 pub(super) const MAX_ORDER: u32 = 24;
 
 /// One-shot guard for the frame-descriptor table's `&'static mut` handover.
-/// See `install_descriptor_table`.
 static FRAME_TABLE_CLAIMED: InitFlag = InitFlag::new();
 
 const INVALID_REGION_ID: u16 = 0xFFFF;
@@ -90,10 +66,6 @@ const QUARANTINE_RELEASE_PER_FREE: u32 = 2;
 /// Written under the buddy lock, read from the timer tick — which must not take
 /// the allocator's lock 100 times a second to ask a yes/no question.
 pub(super) static QUARANTINE_FRAMES: AtomicU32 = AtomicU32::new(0);
-
-// ---------------------------------------------------------------------------
-// Lifecycle.
-// ---------------------------------------------------------------------------
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,10 +88,6 @@ impl Lifecycle {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Descriptor type (one entry per physical frame).
-// ---------------------------------------------------------------------------
-
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub(super) struct PageFrame {
@@ -130,10 +98,6 @@ pub(super) struct PageFrame {
     pub(super) next_free: u32,
 }
 
-// ---------------------------------------------------------------------------
-// Lock-protected buddy state.
-// ---------------------------------------------------------------------------
-
 #[derive(Default)]
 pub(super) struct BuddyInner {
     pub(super) total_frames: u32,
@@ -143,9 +107,8 @@ pub(super) struct BuddyInner {
     pub(super) free_lists: [u32; (MAX_ORDER as usize) + 1],
     pub(super) max_order: u32,
 
-    /// Blocks freed during the open epoch. Chained through `next_free`, same
-    /// as a free list — a quarantined block is one that has been unlinked from
-    /// its owner but is not yet eligible to be handed out.
+    /// Blocks freed during the open epoch, chained through `next_free`:
+    /// unlinked from their owner but not yet eligible to be handed out.
     pub(super) quarantine_incoming: u32,
     pub(super) quarantine_incoming_tail: u32,
     /// Blocks freed during the previous epoch. These become eligible the
@@ -154,10 +117,7 @@ pub(super) struct BuddyInner {
     pub(super) quarantine_draining: u32,
     pub(super) quarantine_draining_tail: u32,
     /// Blocks the epoch has already proven safe, waiting to be spliced back
-    /// into the free lists. Separated from `draining` so closing an epoch is
-    /// three pointer writes: the splice itself is O(blocks × free-list length)
-    /// and must never run to completion inside the timer interrupt that
-    /// happens to close the epoch.
+    /// into the free lists.
     pub(super) quarantine_releasable: u32,
     pub(super) quarantine_releasable_tail: u32,
     /// Frames held across all three lists.
@@ -336,9 +296,8 @@ impl BuddyInner {
         INVALID_PAGE_FRAME
     }
 
-    /// Park a just-freed block. Deliberately does not coalesce: merging with a
-    /// free buddy would splice a not-yet-reusable frame into a handout-eligible
-    /// block. Coalescing happens on release.
+    /// Park a just-freed block without coalescing: merging with a free buddy
+    /// would splice a not-yet-reusable frame into a handout-eligible block.
     fn quarantine_push(&mut self, table: &RawTable<PageFrame>, frame_num: u32, order: u32) {
         let head = self.quarantine_incoming;
         if let Some(frame) = self.frame_desc_mut(table, frame_num) {
@@ -380,11 +339,8 @@ impl BuddyInner {
     /// Close one epoch: `draining` joins the releasable backlog, `incoming`
     /// takes its place.
     ///
-    /// Splices nothing. This runs from whichever CPU's timer interrupt observes
-    /// the last ack, and a splice is O(blocks × free-list length); thousands of
-    /// those under the allocator's cli-lock inside an interrupt handler stall
-    /// every allocating CPU and stop this one ticking — a silent machine-wide
-    /// wedge with no watchdog report, since no CPU is left to file one.
+    /// Splices nothing — a splice is O(blocks × free-list length), and this
+    /// runs from whichever CPU's timer interrupt observes the last ack.
     fn quarantine_rotate(&mut self, table: &RawTable<PageFrame>) {
         let releasable = Self::quarantine_concat(
             table,
@@ -401,7 +357,7 @@ impl BuddyInner {
     }
 
     /// Splice at most `limit` blocks from the releasable backlog into the free
-    /// lists. Returns the number of frames released.
+    /// lists.
     fn quarantine_release_some(&mut self, table: &RawTable<PageFrame>, limit: u32) -> u32 {
         let mut released = 0u32;
         let mut done = 0u32;
@@ -466,10 +422,7 @@ impl BuddyInner {
             }
 
             // The buddy's pages are already in `free_frames`; the single push
-            // below re-adds them as part of the merged block, so drop the old
-            // count here. Without this every coalesce inflates `free_frames`
-            // by the buddy's size, and the counter drifts upward for the life
-            // of the boot.
+            // below re-adds them as part of the merged block.
             self.free_frames = self
                 .free_frames
                 .saturating_sub(Self::order_block_pages(curr_order));
@@ -659,10 +612,6 @@ impl BuddyInner {
     }
 }
 
-// ---------------------------------------------------------------------------
-// BuddyAllocator: the static `FrameAlloc` implementation.
-// ---------------------------------------------------------------------------
-
 pub struct BuddyAllocator {
     inner: SpinLock<BuddyInner>,
     frame_table: RawTable<PageFrame>,
@@ -671,9 +620,8 @@ pub struct BuddyAllocator {
 
 impl BuddyAllocator {
     /// Const constructor for the BSS-resident singleton in
-    /// [`super::BUDDY_ALLOCATOR`]. Caller must drive the
-    /// `Uninit → Sized → Seeded → Live` lifecycle before the OSTD
-    /// frame-allocator registration site reads from it.
+    /// [`super::BUDDY_ALLOCATOR`]. Caller must drive
+    /// `Uninit → Sized → Seeded → Live` before OSTD reads from it.
     pub const fn new_uninit() -> Self {
         Self {
             inner: SpinLock::new(
@@ -701,13 +649,10 @@ impl BuddyAllocator {
         }
     }
 
-    /// `Uninit → Sized`. Installs the boot-allocated frame descriptor
-    /// table and zeroes the buddy's free-list counters.
+    /// `Uninit → Sized`. Installs the boot-allocated frame descriptor table.
     ///
     /// `frames_ptr` must point to `max_frames` properly aligned
-    /// [`PageFrame`] slots with `'static` lifetime — the boot-time
-    /// memory-init code allocates and HHDM-maps this region just
-    /// before calling.
+    /// [`PageFrame`] slots with `'static` lifetime.
     pub(crate) fn install_descriptor_table(&self, frames_ptr: *mut u8, max_frames: u32) {
         let Some(typed_ptr) =
             NonNull::new(frames_ptr.cast::<PageFrame>()).filter(|_| max_frames > 0)
@@ -716,11 +661,9 @@ impl BuddyAllocator {
         };
         debug_assert_eq!(self.lifecycle(), Lifecycle::Uninit);
 
-        // The frame table is installed once, from a boot-reserved region that
-        // lives as long as the machine — which is what `'static` says, and
-        // what `FRAME_TABLE_CLAIMED` makes checked rather than asserted. A
-        // second install would otherwise hand out a second `&'static mut` to
-        // the same descriptors.
+        // `'static` holds because the region is boot-reserved for the life of
+        // the machine; the claim makes a second install fail rather than mint
+        // a second `&'static mut` to the same descriptors.
         let claim = OneShotBuf::claim(&FRAME_TABLE_CLAIMED, typed_ptr, max_frames as usize)
             .expect("BuddyAllocator::install_descriptor_table called twice");
         self.frame_table.install(claim.into_static_mut());
@@ -753,9 +696,8 @@ impl BuddyAllocator {
         self.advance(Lifecycle::Uninit, Lifecycle::Sized);
     }
 
-    /// `Sized → Seeded`. Iterates the `mm_region_*` store and seeds
-    /// the buddy free-lists from every usable region (respecting
-    /// reservation flags).
+    /// `Sized → Seeded`. Seeds the free lists from every usable `mm_region_*`
+    /// entry, respecting reservation flags.
     pub(crate) fn seed_from_memory_map(&self) {
         debug_assert_eq!(self.lifecycle(), Lifecycle::Sized);
 
@@ -777,8 +719,7 @@ impl BuddyAllocator {
         klog_info!("Page allocator ready: {} pages available", free);
     }
 
-    /// `Seeded → Live`. Activates the per-CPU page caches; subsequent
-    /// order-0 allocations consult the PCP fast path.
+    /// `Seeded → Live`. Activates the per-CPU page caches.
     pub(crate) fn enable_pcp(&self) {
         debug_assert_eq!(self.lifecycle(), Lifecycle::Seeded);
         pcp::mark_live();
@@ -786,10 +727,9 @@ impl BuddyAllocator {
         klog_info!("Per-CPU page cache enabled");
     }
 
-    /// Lock-free descriptor reborrow for PCP fast-path use. Caller
-    /// must hold a [`PreemptGuard`] **and** logical exclusivity over
-    /// `frame_num` (e.g. the frame is in this CPU's PCP stack and
-    /// the caller is about to pop it).
+    /// Lock-free descriptor reborrow. Caller must hold a [`PreemptGuard`]
+    /// **and** logical exclusivity over `frame_num` (e.g. the frame is in this
+    /// CPU's PCP stack and the caller is about to pop it).
     #[inline]
     pub(super) fn frame_desc_lockfree<R>(
         &self,
@@ -799,16 +739,11 @@ impl BuddyAllocator {
         self.frame_table.with_mut(frame_num as usize, f)
     }
 
-    /// Acquire the buddy lock and run `f` with both the locked inner
-    /// state and the (unlocked-but-exclusive-by-virtue-of-the-lock)
-    /// frame descriptor table.
+    /// Run `f` under the buddy lock, with the frame descriptor table held
+    /// exclusive by virtue of that lock.
     ///
-    /// Locked sections split and merge free-list blocks as multi-step
-    /// mutations; an unwind mid-mutation would release the lock around a
-    /// torn free list, so it aborts instead. The guard is armed after the
-    /// lock (the abort fires before the lock guard's release) and disarmed
-    /// on the normal path, so a completed section never aborts even while
-    /// a panic is unwinding elsewhere in the task.
+    /// Free-list mutation is multi-step, so an unwind mid-mutation would
+    /// release the lock around a torn free list; it aborts instead.
     #[inline]
     fn with_locked<R>(&self, f: impl FnOnce(&mut BuddyInner, &RawTable<PageFrame>) -> R) -> R {
         let mut inner = self.inner.lock();
@@ -818,9 +753,9 @@ impl BuddyAllocator {
         result
     }
 
-    /// Snapshot `(total, free, allocated)`. `free` folds in the PCP
-    /// cached frames; `allocated` subtracts them so the two values
-    /// continue to sum to a stable total.
+    /// Snapshot `(total, free, allocated)`. `free` folds in the PCP cached
+    /// frames and `allocated` subtracts them, so the two still sum to a
+    /// stable total.
     pub fn stats(&self) -> (u32, u32, u32) {
         let pcp_cached = pcp::total_cached();
         let inner = self.inner.lock();
@@ -845,8 +780,7 @@ impl BuddyAllocator {
         inner.is_valid_frame(frame_num)
     }
 
-    /// Paint every tracked frame's contents with `value`. Used by
-    /// soft-reboot scrub paths to wipe physical memory.
+    /// Paint every tracked frame's contents with `value`.
     pub fn paint_all(&self, value: u8) {
         let inner = self.inner.lock();
         if !self.frame_table.is_installed() {
@@ -889,8 +823,8 @@ impl BuddyAllocator {
         });
     }
 
-    /// Raw multi-page buddy allocator entry point — bootstrap escape
-    /// and policy-flag opt-out. The result is always zero-scrubbed.
+    /// Raw multi-page entry point — bootstrap escape and policy-flag opt-out.
+    /// The result is always zero-scrubbed.
     pub fn alloc_raw(&self, count: u32, flags: u32) -> PhysAddr {
         if count == 0 {
             return PhysAddr::NULL;
@@ -940,14 +874,11 @@ impl BuddyAllocator {
             };
 
             if frame_num == INVALID_PAGE_FRAME {
-                // Memory may just be parked awaiting a quiesce — and a
-                // quarantined block is an uncoalesced one, so a backlog
-                // fragments the free lists and fails a multi-page request long
-                // before a single-page one. Drain the whole backlog (coalescing
-                // is what a higher-order request needs), then ack, which closes
-                // the epoch outright if the peers already have. Never waits on a
-                // peer: failing and letting the caller retry is the price of
-                // keeping cross-CPU waits off this path.
+                // Memory may just be parked awaiting a quiesce, and a
+                // quarantined block is uncoalesced, so a backlog fails a
+                // multi-page request long before a single-page one. Drain the
+                // backlog, then ack — which closes the epoch outright if the
+                // peers already have. Never waits on a peer.
                 if !quiesce_recovered && crate::mmu::quiesce::is_active() {
                     quiesce_recovered = true;
                     let mut released = self.quarantine_drain_backlog();
@@ -992,15 +923,12 @@ impl BuddyAllocator {
         }
     }
 
-    /// Free a single allocation back to the buddy. The buddy recovers
-    /// the order from the descriptor; `size_pages` from
-    /// [`FrameAlloc::dealloc`] is therefore ignored.
+    /// Free a single allocation back to the buddy. The order is recovered from
+    /// the descriptor, so [`FrameAlloc::dealloc`]'s `size_pages` is ignored.
     pub fn free_phys(&self, phys_addr: PhysAddr) -> i32 {
         let _no_migrate = PreemptGuard::new();
         let cpu = slopos_arch::pcr::get_current_cpu();
 
-        // Free/coalesce is a multi-step free-list mutation; `with_locked`
-        // arms an unwind-abort guard around the whole section.
         self.with_locked(|inner, table| {
             let frame_num = inner.phys_to_frame(phys_addr);
             if !inner.is_valid_frame(frame_num) {
@@ -1020,15 +948,14 @@ impl BuddyAllocator {
             let order = frame.order as u32;
 
             // Ahead of the PCP magazine as well as the free lists: the magazine
-            // is a reuse path too, and a frame freed and re-handed-out from it
-            // never touches the buddy at all.
+            // is a reuse path too, and a frame re-handed-out from it never
+            // touches the buddy at all.
             if crate::mmu::quiesce::quarantine_required() {
                 let pages = BuddyInner::order_block_pages(order);
                 inner.allocated_frames = inner.allocated_frames.saturating_sub(pages);
                 inner.quarantine_push(table, frame_num, order);
-                // Pay down the release debt on every free so the backlog drains
-                // as fast as it fills; otherwise a workload that never idles
-                // parks memory until allocations start failing.
+                // Pay down the release debt on every free; otherwise a workload
+                // that never idles parks memory until allocations fail.
                 inner.quarantine_release_some(table, QUARANTINE_RELEASE_PER_FREE);
                 if inner.quarantine_frames >= QUARANTINE_ADVANCE_FRAMES {
                     crate::mmu::quiesce::request_advance();
@@ -1096,8 +1023,7 @@ impl BuddyAllocator {
         self.with_locked(|inner, table| inner.quarantine_release_some(table, limit))
     }
 
-    /// Drain the whole backlog in bounded steps. For the allocator's recovery
-    /// path, where leaving memory parked means failing a satisfiable request.
+    /// Drain the whole backlog in bounded steps.
     pub fn quarantine_drain_backlog(&self) -> u32 {
         let mut total = 0u32;
         loop {
@@ -1109,12 +1035,10 @@ impl BuddyAllocator {
         }
     }
 
-    /// Is there proven-safe memory waiting to be spliced back?
     pub fn quarantine_has_releasable(&self) -> bool {
         self.with_locked(|inner, _table| inner.quarantine_releasable != INVALID_PAGE_FRAME)
     }
 
-    /// Reads the lock-free mirror; called from the timer tick.
     pub fn quarantine_is_occupied(&self) -> bool {
         QUARANTINE_FRAMES.load(Ordering::Relaxed) > 0
     }
@@ -1212,16 +1136,9 @@ impl BuddyAllocator {
         filled
     }
 
-    // -----------------------------------------------------------------------
-    // PCP fast-path helpers. Live on `BuddyAllocator` (not `pcp`) so they
-    // can use both the lock-free descriptor table and the locked refill
-    // path through a single object.
-    // -----------------------------------------------------------------------
-
-    // The PCP mutation spans below are straight-line bounds-checked field
-    // writes with no fallible calls, so no unwind-abort guard is needed:
-    // a panic there requires already-corrupt state, and the worst torn
-    // outcome is a leaked frame, never a torn list.
+    // No unwind-abort guard on the PCP spans below: they are straight-line
+    // field writes with no fallible calls, and the worst torn outcome is a
+    // leaked frame, never a torn list.
     fn pcp_try_alloc(&self, cpu: usize) -> u32 {
         debug_assert!(PreemptGuard::is_active());
         let Some(cache) = pcp::cache_mut(cpu) else {
@@ -1286,9 +1203,8 @@ impl FrameAlloc for BuddyAllocator {
             opts.align_pages, 1,
             "BuddyAllocator only supports align_pages == 1"
         );
-        // The buddy unconditionally scrubs; `opts.zeroing` is a
-        // type-level audit signal handled by the OSTD typestate, not
-        // a runtime perf escape.
+        // The buddy unconditionally scrubs; `opts.zeroing` is a type-level
+        // audit signal, not a runtime perf escape.
         let count = u32::try_from(opts.size_pages.max(1)).ok()?;
         let mut flags = 0u32;
         if opts.no_pcp {
@@ -1297,11 +1213,10 @@ impl FrameAlloc for BuddyAllocator {
         if opts.dma {
             flags |= ALLOC_FLAG_DMA;
         }
-        // No cross-CPU work here, by construction: a frame reaches a free list
-        // only after `mmu::quiesce` proved every CPU invalidated since it was
-        // unmapped. `alloc` is reachable from page-fault handlers and from under
-        // interrupt-disabling locks, so a rendezvous here deadlocks against its
-        // own callers.
+        // No cross-CPU work here: `alloc` is reachable from page-fault handlers
+        // and from under interrupt-disabling locks, so a rendezvous deadlocks
+        // against its own callers. A frame reaches a free list only after
+        // `mmu::quiesce` proved every CPU invalidated since it was unmapped.
         let phys = self.alloc_raw(count, flags);
         if phys.is_null() { None } else { Some(phys) }
     }
@@ -1310,10 +1225,6 @@ impl FrameAlloc for BuddyAllocator {
         let _ = self.free_phys(paddr);
     }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers.
-// ---------------------------------------------------------------------------
 
 #[inline]
 fn paint_page_at_virt(ptr: *mut u8, value: u8) {

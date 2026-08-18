@@ -1,11 +1,7 @@
 //! ARP protocol handler — request/reply processing and frame construction.
 //!
-//! Implements RFC 826 ARP for Ethernet/IPv4.  Incoming ARP frames are parsed,
-//! validated, and dispatched to the [`NeighborCache`](super::neighbor::NEIGHBOR_CACHE):
-//!
-//! - **Reply** (`oper=2`): updates the cache and flushes pending packets.
-//! - **Request** (`oper=1`) for our IP: sends a unicast ARP reply.
-//! - **Any ARP**: opportunistically updates the cache if the sender is known.
+//! RFC 826 ARP for Ethernet/IPv4, feeding the
+//! [`NeighborCache`](super::neighbor::NEIGHBOR_CACHE).
 
 use slopos_ostd::klog_debug;
 
@@ -23,14 +19,8 @@ const ARP_OPER_REQUEST: u16 = 1;
 const ARP_OPER_REPLY: u16 = 2;
 const ARP_HEADER_LEN: usize = 28;
 
-// =============================================================================
-// 2C.1 — handle_rx
-// =============================================================================
-
-/// Handle an incoming ARP frame.
-///
-/// The packet's `head` points at the first byte of the ARP header (Ethernet
-/// header has been consumed by the ingress pipeline).
+/// Handle an incoming ARP frame; `pkt`'s head is at the ARP header, the
+/// Ethernet header having been consumed by the ingress pipeline.
 pub fn handle_rx(handle: &DeviceHandle, pkt: PacketBuf) {
     let data = pkt.payload();
 
@@ -81,7 +71,7 @@ pub fn handle_rx(handle: &DeviceHandle, pkt: PacketBuf) {
                 sender_mac,
                 dev
             );
-            // insert_or_update above already handled the cache update + pending flush.
+            // Cache update and pending flush already done above.
         }
         ARP_OPER_REQUEST => {
             if target_ip == our_ip && !our_ip.is_unspecified() {
@@ -100,14 +90,7 @@ pub fn handle_rx(handle: &DeviceHandle, pkt: PacketBuf) {
     }
 }
 
-// =============================================================================
-// 2C.2 — send_request
-// =============================================================================
-
 /// Send an ARP request for `target_ip` via `handle`.
-///
-/// Constructs a broadcast Ethernet frame containing an ARP REQUEST and
-/// transmits it through the device.
 pub fn send_request(handle: &DeviceHandle, target_ip: Ipv4Addr) {
     let our_mac = handle.mac();
     let our_ip = get_our_ip();
@@ -119,7 +102,6 @@ pub fn send_request(handle: &DeviceHandle, target_ip: Ipv4Addr) {
         return;
     };
 
-    // Build Ethernet header (push backward into headroom).
     let eth = match pkt.push_header(ETH_HEADER_LEN) {
         Ok(h) => h,
         Err(_) => {
@@ -131,7 +113,6 @@ pub fn send_request(handle: &DeviceHandle, target_ip: Ipv4Addr) {
     eth[ETH_ADDR_LEN..ETH_ADDR_LEN * 2].copy_from_slice(&our_mac.0);
     eth[ETH_ADDR_LEN * 2..ETH_HEADER_LEN].copy_from_slice(&EtherType::Arp.to_be_bytes());
 
-    // Build ARP payload (append at tail).
     let mut arp_data = [0u8; ARP_HEADER_LEN];
     arp_data[0..2].copy_from_slice(&ARP_HTYPE_ETHERNET.to_be_bytes());
     arp_data[2..4].copy_from_slice(&ARP_PTYPE_IPV4.to_be_bytes());
@@ -148,7 +129,7 @@ pub fn send_request(handle: &DeviceHandle, target_ip: Ipv4Addr) {
         return;
     }
 
-    let _ = frame_len; // frame_len used for documentation only
+    let _ = frame_len;
 
     klog_debug!(
         "arp: sending request for {} on dev {}",
@@ -159,10 +140,6 @@ pub fn send_request(handle: &DeviceHandle, target_ip: Ipv4Addr) {
         klog_debug!("arp: send_request tx failed: {}", e);
     }
 }
-
-// =============================================================================
-// ARP reply
-// =============================================================================
 
 fn send_reply(handle: &DeviceHandle, target_ip: Ipv4Addr, target_mac: MacAddr) {
     let our_mac = handle.mac();
@@ -207,14 +184,7 @@ fn send_reply(handle: &DeviceHandle, target_ip: Ipv4Addr, target_mac: MacAddr) {
     }
 }
 
-// =============================================================================
-// Action execution helper
-// =============================================================================
-
-/// Execute a [`NeighborAction`] returned by the neighbor cache.
-///
-/// This function performs the I/O that the cache method deferred to avoid
-/// holding the cache lock during TX.
+/// Perform the I/O the neighbor cache deferred so TX never runs under its lock.
 pub fn execute_neighbor_action(handle: &DeviceHandle, action: NeighborAction) {
     match action {
         NeighborAction::SendArpRequest { target_ip, .. } => {
@@ -239,56 +209,28 @@ pub fn execute_neighbor_action(handle: &DeviceHandle, action: NeighborAction) {
     }
 }
 
-/// Set the destination MAC in a packet's Ethernet header.
-///
-/// Assumes the packet was built by the egress path with `l2_offset` pointing
-/// at the start of the Ethernet header.
+/// Set the destination MAC, assuming the egress path left `l2_offset` at the
+/// start of the Ethernet header.
 pub fn set_dst_mac_in_eth_header(pkt: &mut PacketBuf, mac: MacAddr) {
     let l2 = pkt.l2_offset() as usize;
     let payload = pkt.payload_mut();
     if payload.len() >= l2 + ETH_ADDR_LEN {
-        // The payload starts at `head`, and l2_offset is absolute in the buffer.
-        // For queued packets, l2_offset is set by the egress path before queueing.
-        // We need to write relative to the buffer start, not payload start.
-        // Since payload = data[head..tail] and l2_offset is absolute,
-        // the relative offset is l2 - head.
+        // TODO(tech-debt): dead branch; the write below assumes l2_offset == head.
     }
-    // For packets queued in the Incomplete state, the Ethernet header
-    // has already been written but the destination MAC is placeholder.
-    // Access the raw buffer to overwrite bytes [l2..l2+6].
-    // Since we can only access payload_mut (head..tail) and l2 may be
-    // before head, we need to access via the full data buffer.
-    // For now, the egress path sets l2 at head, so l2 == head.
-    // Write at the start of the payload.
     let data = pkt.payload_mut();
     if data.len() >= ETH_ADDR_LEN {
         data[..ETH_ADDR_LEN].copy_from_slice(&mac.0);
     }
 }
 
-// =============================================================================
-// Helpers
-// =============================================================================
-
-/// Our IPv4 address, for deciding which ARP requests to answer and what to
-/// put in the sender field of the ones we send.
-///
-/// `UNSPECIFIED` when no interface is configured yet, which is the correct
-/// answer during early boot: an ARP reply claiming `0.0.0.0` is never sent,
-/// because every caller checks first.
+/// Our IPv4 address, or `UNSPECIFIED` when no interface is configured yet;
+/// callers check before claiming it in a reply.
 fn get_our_ip() -> Ipv4Addr {
     super::iface::first_ipv4().unwrap_or(Ipv4Addr::UNSPECIFIED)
 }
 
-// =============================================================================
-// Registry-based ARP send (no DeviceHandle needed)
-// =============================================================================
-
-/// Send an ARP request via the device registry (index-based TX).
-///
-/// Equivalent to [`send_request`] but uses [`DEVICE_REGISTRY`] to transmit,
-/// so no [`DeviceHandle`] is required.  Used by the route-aware egress path
-/// where the device is identified by [`DevIndex`] from the routing table.
+/// Send an ARP request by device index, for the route-aware egress path that
+/// holds no [`DeviceHandle`].
 pub fn send_request_via_registry(dev: super::types::DevIndex, target_ip: Ipv4Addr) {
     use super::netdev::DEVICE_REGISTRY;
 
@@ -306,7 +248,6 @@ pub fn send_request_via_registry(dev: super::types::DevIndex, target_ip: Ipv4Add
         return;
     };
 
-    // Build Ethernet header.
     let eth = match pkt.push_header(ETH_HEADER_LEN) {
         Ok(h) => h,
         Err(_) => {
@@ -318,7 +259,6 @@ pub fn send_request_via_registry(dev: super::types::DevIndex, target_ip: Ipv4Add
     eth[ETH_ADDR_LEN..ETH_ADDR_LEN * 2].copy_from_slice(&our_mac.0);
     eth[ETH_ADDR_LEN * 2..ETH_HEADER_LEN].copy_from_slice(&EtherType::Arp.to_be_bytes());
 
-    // Build ARP payload.
     let mut arp_data = [0u8; ARP_HEADER_LEN];
     arp_data[0..2].copy_from_slice(&ARP_HTYPE_ETHERNET.to_be_bytes());
     arp_data[2..4].copy_from_slice(&ARP_PTYPE_IPV4.to_be_bytes());

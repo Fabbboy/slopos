@@ -164,7 +164,6 @@ pub fn test_hpet_delay_accuracy() -> TestResult {
             delay,
             elapsed
         );
-        // Don't fail — QEMU under load can be slow.
     }
     TestResult::Pass
 }

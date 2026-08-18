@@ -1,10 +1,10 @@
 //! Tests that the real mutators announce themselves to the monitors, run
 //! against a monitor opened on the kernel's own registry.
 //!
-//! The rest of the suite is using the live NIC, so each test registers its own
-//! device and filters every assertion by that device's `ifindex`. The master
-//! switch (`NET_EV_GLOBAL_ENABLE`) stays unasserted: it acts on every
-//! registered device, so exercising it would down the live NIC.
+//! Each test registers its own device and filters every assertion by that
+//! device's `ifindex`, because the live NIC is in use. `NET_EV_GLOBAL_ENABLE`
+//! stays unasserted: it acts on every registered device, so exercising it
+//! would down the live NIC.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_fs::fileio::FdTable;
@@ -35,11 +35,9 @@ use crate::pool::PacketPool;
 use crate::route;
 use crate::types::{DevIndex, Ipv4Addr, MacAddr, NetError};
 
-/// The owner these tests register monitors under: the kernel's own table,
-/// rather than a synthetic pid no process could hold.
+/// The kernel's own table, rather than a synthetic pid no process could hold.
 const TEST_OWNER: FdTable = FdTable::Kernel;
 
-/// A device whose link state a test can move.
 struct CarrierMock {
     mac: MacAddr,
     link_up: AtomicBool,
@@ -77,7 +75,6 @@ impl NetDevice for CarrierMock {
     }
 }
 
-/// A registered mock plus its interface row.
 struct Fixture {
     dev: DevIndex,
     ifindex: u32,
@@ -114,8 +111,7 @@ impl Fixture {
     }
 }
 
-/// A monitor on the kernel registry, released on drop so a failing assertion
-/// cannot leak a slot.
+/// Released on drop, so a failing assertion cannot leak a monitor slot.
 struct Monitor {
     handle: usize,
 }
@@ -128,8 +124,6 @@ impl Monitor {
             .map(|handle| Self { handle })
     }
 
-    /// Drain everything queued, keeping only the records naming `ifindex`.
-    ///
     /// Chunked through a small stack array to stay under the 2 KiB frame gate.
     fn drain_for(&self, ifindex: u32, out: &mut [NetEvent]) -> usize {
         let mut chunk = [NetEvent::default(); 8];

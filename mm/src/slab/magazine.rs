@@ -1,23 +1,17 @@
 //! Per-CPU object magazine.
 //!
-//! Each [`super::allocator::SlabAllocator<SIZE>`] holds one [`Magazine`]
-//! per CPU through a `CpuLocal<Magazine>`. The fast path (`pop` /
-//! `push`) is lock-free; the only synchronisation cost is the
+//! Each [`super::allocator::SlabAllocator<SIZE>`] holds one [`Magazine`] per
+//! CPU through a `CpuLocal<Magazine>`; `pop`/`push` are lock-free under the
 //! `IrqPreemptGuard` the caller already takes for per-CPU access.
 //!
-//! Slots are stored as `usize` (raw pointer bits) so the magazine is
-//! naturally `Send + Sync` without an `unsafe impl` (`mm` is
-//! `#![forbid(unsafe_code)]`). The `NonNull<u8>` shape is recovered
-//! only at the API boundary.
+//! Slots are stored as `usize` (raw pointer bits) so the magazine is naturally
+//! `Send + Sync` without an `unsafe impl` (`mm` is `#![forbid(unsafe_code)]`).
 
 use core::ptr::NonNull;
 
 /// Object-cache capacity per CPU per size class.
 pub(crate) const MAGAZINE_CAPACITY: usize = 32;
 
-/// One slot. `repr(transparent)` over `usize` so the layout is
-/// identical to a raw pointer slot, but `usize` is naturally `Send +
-/// Sync`, sparing the magazine its own marker.
 #[repr(transparent)]
 #[derive(Copy, Clone)]
 struct Slot(usize);
@@ -36,9 +30,6 @@ impl Slot {
     }
 }
 
-/// A fixed-size stack of cached object pointers. `pop` / `push` are
-/// single-threaded (per-CPU) operations gated by an
-/// [`slopos_ostd::sync::IrqPreemptGuard`] at the call site.
 #[repr(C)]
 pub(crate) struct Magazine {
     slots: [Slot; MAGAZINE_CAPACITY],
@@ -58,7 +49,6 @@ impl Magazine {
         self.len as usize
     }
 
-    /// Pop the top object pointer, if any.
     #[inline]
     pub(crate) fn pop(&mut self) -> Option<NonNull<u8>> {
         if self.len == 0 {
@@ -70,8 +60,7 @@ impl Magazine {
         slot.as_ptr()
     }
 
-    /// Push an object pointer. Returns `false` if the magazine is
-    /// full (caller drains and retries).
+    /// Returns `false` if the magazine is full; the caller drains and retries.
     #[inline]
     pub(crate) fn push(&mut self, ptr: NonNull<u8>) -> bool {
         if (self.len as usize) >= MAGAZINE_CAPACITY {
@@ -82,17 +71,12 @@ impl Magazine {
         true
     }
 
-    /// Is `ptr` already cached in this magazine? Used by the dealloc
-    /// path to swallow double-frees that would otherwise install the
-    /// same pointer twice (so a subsequent alloc would return the
-    /// same object to two callers — silent use-after-free).
+    /// The dealloc path uses this to swallow double-frees, which would
+    /// otherwise cache one pointer twice and hand one object to two callers.
     #[inline]
     pub(crate) fn contains(&self, ptr: NonNull<u8>) -> bool {
         let needle = Slot::from_ptr(ptr).0;
         let len = self.len as usize;
-        // Use a u32-counted index to keep the bounds check tight; the
-        // magazine size is a fixed compile-time constant well within
-        // u32 range.
         for i in 0..len {
             if self.slots[i].0 == needle {
                 return true;
