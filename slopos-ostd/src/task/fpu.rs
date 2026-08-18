@@ -1,35 +1,30 @@
 //! FPU/SIMD state save/restore via XSAVE64 / XRSTOR64.
 //!
-//! [`FpuState`] is the 64-byte-aligned XSAVE area used by every kernel
-//! task. Its size is the compile-time maximum across current x86-64
-//! XSAVE features (FXSAVE = 512 B, AVX = 832 B, AVX-512 = 2,688 B) so a
-//! single layout serves every CPU; runtime negotiation via
-//! `crate::cpu::x86_64::xsave::active_xcr0()` controls which components
-//! the hardware actually touches.
+//! [`FpuState`] is the 64-byte-aligned XSAVE area used by every kernel task.
+//! A single compile-time-maximum layout serves every CPU; runtime negotiation
+//! via `crate::cpu::x86_64::xsave::active_xcr0()` controls which components the
+//! hardware actually touches.
 
 use core::arch::asm;
 
 use crate::mm::AllocError;
 use crate::mm::init::{Init, Zeroable, init_from_closure};
 
-/// Size of the per-task FPU state save area.
-///
-/// Sized to the AVX-512 worst case (2,688 bytes). FXSAVE-only CPUs use
-/// the first 512 bytes; the remaining bytes are unused but reserved.
+/// Sized to the AVX-512 worst case; FXSAVE-only CPUs use the first 512 bytes
+/// and the rest stays reserved.
 pub const FPU_STATE_SIZE: usize = 2688;
 
-/// Legacy FXSAVE area size (512 B). Used as the fallback when XSAVE is
-/// not available.
+/// Legacy FXSAVE area size, the fallback when XSAVE is not available.
 pub const FXSAVE_AREA_SIZE: usize = 512;
 
 /// Default MXCSR value: all SSE exceptions masked.
 pub const MXCSR_DEFAULT: u32 = 0x1F80;
 
-/// x87 FPU Control Word offset within both the FXSAVE image and the XSAVE
+/// x87 FPU Control Word offset, shared by the FXSAVE image and the XSAVE
 /// legacy region.
 pub(crate) const LEGACY_FCW_OFFSET: usize = 0;
 
-/// MXCSR offset within both the FXSAVE image and the XSAVE legacy region.
+/// MXCSR offset, shared by the FXSAVE image and the XSAVE legacy region.
 pub(crate) const LEGACY_MXCSR_OFFSET: usize = 24;
 
 /// Offset of the XSTATE header, which follows the 512-byte legacy region.
@@ -48,60 +43,50 @@ pub const XSTATE_RESERVED_OFFSET: usize = XSTATE_HEADER_OFFSET + 16;
 /// Length of that reserved tail — the header is 64 bytes in total.
 const XSTATE_RESERVED_LEN: usize = 48;
 
-/// FPU/SIMD state save area.
-///
-/// Sized to [`FPU_STATE_SIZE`] and 64-byte aligned per the XSAVE/XRSTOR
-/// hardware requirement.
+/// FPU/SIMD state save area, 64-byte aligned per the XSAVE/XRSTOR hardware
+/// requirement.
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
 pub struct FpuState {
     pub data: [u8; FPU_STATE_SIZE],
 }
 
-// FPU_STATE_SIZE is a multiple of the 64-byte alignment, so the shell
-// adds no tail padding and the struct size equals the constant that
-// stack/heap layouts are budgeted against.
+// No tail padding: FPU_STATE_SIZE is a multiple of the 64-byte alignment, so
+// the struct size equals the constant layouts are budgeted against.
 const _: () = assert!(core::mem::size_of::<FpuState>() == FPU_STATE_SIZE);
 
-// SAFETY: `FpuState` is `[u8; FPU_STATE_SIZE]` wrapped in a 64-byte
-// alignment shell. The all-zero pattern matches `FpuState::zero()` —
-// XRSTOR with that buffer treats every component header (XSTATE_BV,
-// XCOMP_BV) as zero and uses processor-reset defaults. The legacy x87
-// FCW / MXCSR are zero too, which is technically a non-default
-// (FCW=0x037F, MXCSR=0x1F80 are the kernel defaults), but the zero
-// pattern is still a representationally valid `FpuState` — anyone
-// requiring the kernel-default mask should call `init_default()`.
+// SAFETY: `FpuState` is `[u8; FPU_STATE_SIZE]` wrapped in a 64-byte alignment
+// shell, so the all-zero pattern is a representationally valid value. XRSTOR
+// with that buffer reads XSTATE_BV and XCOMP_BV as zero and uses
+// processor-reset defaults; the legacy FCW/MXCSR are zero rather than the
+// kernel defaults, so callers needing those must use `init_default()`.
 unsafe impl Zeroable for FpuState {}
 
 impl FpuState {
-    /// All-zeroes save area.
     pub const fn zero() -> Self {
         Self {
             data: [0u8; FPU_STATE_SIZE],
         }
     }
 
-    /// Default FPU state with x87/SSE exceptions masked and XSAVE header
-    /// zeroed (XSTATE_BV = 0, XCOMP_BV = 0 — hardware uses processor-reset
-    /// defaults for every component on the next XRSTOR).
+    /// Default FPU state: x87/SSE exceptions masked, XSAVE header zeroed so
+    /// the next XRSTOR uses processor-reset defaults for every component.
     pub const fn new() -> Self {
         let mut state = Self::zero();
-        // FCW = 0x037F (all x87 exceptions masked).
+        // FCW = 0x037F.
         state.data[LEGACY_FCW_OFFSET] = 0x7F;
         state.data[LEGACY_FCW_OFFSET + 1] = 0x03;
-        // MXCSR = 0x1F80 (all SSE exceptions masked).
+        // MXCSR = 0x1F80.
         state.data[LEGACY_MXCSR_OFFSET] = 0x80;
         state.data[LEGACY_MXCSR_OFFSET + 1] = 0x1F;
         state
     }
 
-    /// In-place [`Init`] recipe equivalent to [`Self::new`]. Used by
-    /// `KBox::try_init(FpuState::init_default())` so runtime callers
-    /// don't materialise a 2.6 KiB rvalue on their own stack frame.
+    /// In-place [`Init`] recipe equivalent to [`Self::new`], so callers don't
+    /// materialise a 2.6 KiB rvalue on their own stack frame.
     ///
-    /// The `E = AllocError` parameter is purely an absorption shim so
-    /// the recipe slots into `KBox::try_init`'s `E: From<AllocError>`
-    /// bound — the closure itself never errors.
+    /// `E = AllocError` is an absorption shim for `KBox::try_init`'s
+    /// `E: From<AllocError>` bound; the closure itself never errors.
     pub fn init_default() -> impl Init<Self, AllocError> {
         // SAFETY: zeroes the slot, then writes the legacy FCW (0x037F)
         // and MXCSR (0x1F80) so the result is byte-for-byte identical
@@ -121,10 +106,9 @@ impl FpuState {
         }
     }
 
-    /// In-place [`Init`] recipe equivalent to [`Self::zero`]. Trivial
-    /// counterpart to [`Self::init_default`] when the caller needs an
-    /// XSTATE-untouched buffer with no FCW/MXCSR seed bits. See
-    /// [`Self::init_default`] for the `AllocError` rationale.
+    /// In-place [`Init`] recipe equivalent to [`Self::zero`], for a caller
+    /// wanting no FCW/MXCSR seed bits. See [`Self::init_default`] for the
+    /// `AllocError` rationale.
     pub fn init_zero() -> impl Init<Self, AllocError> {
         // SAFETY: writes `size_of::<Self>()` zero bytes into `slot`,
         // matching `Self::zero()` byte for byte. `FpuState: Zeroable`
@@ -143,10 +127,6 @@ impl Default for FpuState {
         Self::new()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Image validation
-// ---------------------------------------------------------------------------
 
 /// Why an XSAVE image would fault if handed to `XRSTOR64`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,8 +153,7 @@ fn read_u64(bytes: &[u8; FPU_STATE_SIZE], offset: usize) -> u64 {
 /// The kernel produces and consumes only the standard, non-compacted format,
 /// which is what makes these four conditions exhaustive for a buffer of this
 /// fixed size. `xcr0` and `mxcsr_mask` are parameters rather than global reads
-/// so the rules stand on their own and can be exercised against a CPU other
-/// than the one running.
+/// so the rules can be exercised against a CPU other than the one running.
 pub fn validate_xsave_image(
     bytes: &[u8; FPU_STATE_SIZE],
     xcr0: u64,
@@ -184,9 +163,7 @@ pub fn validate_xsave_image(
         return Err(XsaveImageError::XstateBvOutsideXcr0);
     }
 
-    // Bit 63 selects the compacted format and the low bits enumerate its
-    // components; neither is something this kernel ever writes, and XRSTOR64
-    // faults on either.
+    // XRSTOR64 faults on any non-zero XCOMP_BV, and the kernel never writes one.
     if read_u64(bytes, XCOMP_BV_OFFSET) != 0 {
         return Err(XsaveImageError::Compacted);
     }
@@ -196,9 +173,8 @@ pub fn validate_xsave_image(
         return Err(XsaveImageError::ReservedHeader);
     }
 
-    // The one that is easy to miss: MXCSR is restored from the legacy region
-    // whether or not XSTATE_BV claims the SSE component, and a reserved bit
-    // there is a #GP just the same.
+    // MXCSR is restored from the legacy region whether or not XSTATE_BV claims
+    // the SSE component, and a reserved bit there is a #GP just the same.
     let mxcsr = u32::from_le_bytes([
         bytes[LEGACY_MXCSR_OFFSET],
         bytes[LEGACY_MXCSR_OFFSET + 1],
@@ -237,24 +213,11 @@ pub unsafe fn fpu_xsave(state: *mut FpuState, xcr0_mask: u64) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fault-recoverable XRSTOR64.
-//
-// `XRSTOR64` faults on an image the hardware objects to, and the only image
-// the kernel does not author itself is the one `rt_sigreturn` accepts from the
-// user stack. Validation rejects the conditions the SDM documents, but a ring-0
-// #GP has no unwind path — the dispatcher bumps interrupt nesting before any
-// handler runs, and the panic handler refuses to unwind from there — so an
-// un-modelled condition, or a new XCR0 component, would halt the machine
-// rather than fail a syscall.
-//
-// Routing the instruction through a known RIP range makes that survivable: the
-// #GP handler recognises a kernel-mode fault inside
-// `__ostd_fpu_xrstor_start..end` and redirects RIP to the failure tail. Both
-// production XRSTOR sites — sigreturn and the context switch — go through this
-// band, so neither can be the one that stops the CPU.
-// ---------------------------------------------------------------------------
-
+// `XRSTOR64` faults on an image the hardware objects to — the one image the
+// kernel does not author is what `rt_sigreturn` accepts from the user stack —
+// and a ring-0 #GP has no unwind path. Both XRSTOR sites therefore route
+// through a known RIP range: the #GP handler recognises a kernel-mode fault
+// inside `__ostd_fpu_xrstor_start..end` and redirects RIP to the failure tail.
 core::arch::global_asm!(
     ".global __ostd_fpu_xrstor",
     ".global __ostd_fpu_xrstor_start",
@@ -318,13 +281,9 @@ pub unsafe fn fpu_xrstor(state: *const FpuState, xcr0_mask: u64) -> bool {
 }
 
 impl FpuState {
-    /// Safe wrapper around [`fpu_xsave`].
-    ///
-    /// `&mut self` discharges the exclusive-write half of the contract.
-    /// The remaining "interrupts disabled / scheduler serialisation"
-    /// requirement is the standard context-switch invariant the
-    /// scheduler upholds at every call site — kept implicit because
-    /// every consumer of this API operates inside that window.
+    /// Safe wrapper around [`fpu_xsave`]. `&mut self` discharges the
+    /// exclusive-write half of the contract; the IRQs-disabled half is the
+    /// context-switch invariant every caller already runs inside.
     #[inline]
     pub fn save_current(&mut self, xcr0_mask: u64) {
         // SAFETY: `&mut self` guarantees exclusive access + 64-byte
@@ -334,11 +293,8 @@ impl FpuState {
     }
 
     /// Safe wrapper around [`fpu_xrstor`], with its `false`-on-rejection
-    /// return.
-    ///
-    /// `&self` plus the scheduler's IRQs-off + on-this-CPU invariant
-    /// discharge the safety contract. `&self` is sound here because
-    /// `XRSTOR64` only reads the buffer.
+    /// return. `&self` suffices because `XRSTOR64` only reads the buffer; the
+    /// IRQs-off half is the caller's context-switch invariant.
     #[must_use]
     #[inline]
     pub fn restore_to_cpu(&self, xcr0_mask: u64) -> bool {
@@ -356,9 +312,6 @@ mod tests {
     fn fpu_state_is_64_byte_aligned() {
         assert_eq!(core::mem::align_of::<FpuState>(), 64);
     }
-
-    // `size_of::<FpuState>() == FPU_STATE_SIZE` is a `const _` assert
-    // beside the struct definition; no runtime duplicate here.
 
     #[test]
     fn fpu_state_new_sets_fcw_and_mxcsr() {
@@ -412,8 +365,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_xcomp_bv_without_the_format_bit() {
-        // A component bit with bit 63 clear is not a compacted image, but it is
-        // not something XRSTOR64 accepts either.
+        // Bit 63 clear is not a compacted image, but XRSTOR64 rejects it anyway.
         let mut state = FpuState::new();
         write_u64(&mut state, XCOMP_BV_OFFSET, 1);
         assert_eq!(validate(&state), Err(XsaveImageError::Compacted));
@@ -443,8 +395,8 @@ mod tests {
 
     #[test]
     fn validate_accepts_daz_when_the_mask_allows_it() {
-        // The regression guard for hardcoding the mask to 0xFFBF, which clears
-        // bit 6 and would reject a legitimate denormals-are-zero setting.
+        // Bit 6 is DAZ; a mask hardcoded to 0xFFBF clears it and would reject a
+        // legitimate denormals-are-zero setting.
         let mut state = FpuState::new();
         let mxcsr = MXCSR_DEFAULT | (1 << 6);
         state.data[LEGACY_MXCSR_OFFSET..LEGACY_MXCSR_OFFSET + 4]
@@ -459,7 +411,7 @@ mod tests {
     #[test]
     fn validate_ignores_the_legacy_region_beyond_mxcsr() {
         // The XMM/x87 payload is data, not metadata: XRSTOR64 loads whatever is
-        // there. Rejecting it would break every real signal return.
+        // there.
         let mut state = FpuState::new();
         for byte in state.data[32..XSTATE_HEADER_OFFSET].iter_mut() {
             *byte = 0xFF;
@@ -468,11 +420,8 @@ mod tests {
     }
 
     // The next three depend on the real binary layout of the `global_asm!`
-    // block (`__ostd_fpu_xrstor_start` immediately precedes the `xrstor64`
-    // byte, `__ostd_fpu_xrstor_end` follows it, and the fault tail sits past
-    // the `ret`). Miri assigns external-fn pointer values that do not preserve
-    // that layout, so the start..end range collapses and the checks become
-    // meaningless. Skip under Miri.
+    // block; Miri assigns external-fn pointer values that collapse the
+    // start..end range.
     #[cfg_attr(miri, ignore)]
     #[test]
     fn xrstor_fault_ip_is_outside_the_recoverable_range() {

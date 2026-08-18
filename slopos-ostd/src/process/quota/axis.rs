@@ -1,13 +1,11 @@
 //! The axis trait: a resource kind as a type.
 //!
-//! Each marker type in [`slopos_abi::quota`] gets an impl here carrying what
-//! the arena needs to know at the call site without being told — the row
-//! index, the unit, the refund policy, and the cost of one item. Cost is a
-//! property of the axis rather than of the caller precisely so two call sites
-//! charging the same resource cannot disagree about what one costs.
-//!
-//! The trait is sealed. An axis is a claim that the arena has a row for this
-//! kind, and only this crate can make that claim true.
+//! Each marker type in [`slopos_abi::quota`] gets an impl carrying the row
+//! index, the unit, the refund policy and the cost of one item. Cost belongs
+//! to the axis rather than the caller so two call sites charging the same
+//! resource cannot disagree about what one costs. The trait is sealed: an
+//! axis claims the arena has a row for this kind, and only this crate can
+//! make that claim true.
 
 use slopos_abi::quota::{
     CustodyAxis, FdSlot, KernelMetaAxis, ObjectRow, PagesAxis, PinnedBytesAxis, ProcCount, Refund,
@@ -18,15 +16,11 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// A countable resource, named by a type.
 pub trait ResourceAxis: sealed::Sealed + Copy + 'static {
-    /// The arena row this axis debits.
     const KIND: ResourceKind;
-    /// Self-describing, so a dump needs no side table to label a column.
     const NAME: &'static str;
     const UNIT: Unit;
     const REFUND: Refund;
-    /// What one item costs. A property of the axis, never of the call site.
     const COST: u32;
 }
 
@@ -34,9 +28,8 @@ pub trait ResourceAxis: sealed::Sealed + Copy + 'static {
 ///
 /// A separate marker rather than a method on [`ResourceAxis`]: only a
 /// `Refundable` axis can parameterise a [`Charge`](super::Charge), so an axis
-/// added later for a *consumed* resource — one whose acquisition is
-/// irreversible — cannot accidentally acquire a refunding destructor by
-/// implementing one trait.
+/// for a *consumed* resource cannot accidentally acquire a refunding
+/// destructor by implementing one trait.
 pub trait Refundable: ResourceAxis {}
 
 macro_rules! impl_axis {
@@ -71,9 +64,8 @@ impl_axis! {
 mod tests {
     use super::*;
 
-    /// Every axis names the kind whose row it debits. A copy-paste in the
-    /// macro above would be invisible otherwise: the code would compile and
-    /// charge the wrong row forever.
+    /// A copy-paste slip in the macro above compiles and charges the wrong
+    /// row forever.
     #[test]
     fn each_axis_names_its_own_kind() {
         fn check<A: ResourceAxis>(want: ResourceKind) {

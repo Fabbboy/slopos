@@ -1,26 +1,12 @@
 //! Interrupt machinery: vector allocation, callback dispatch, IDT
 //! construction, and IRET-corruption recovery.
 //!
-//! # No bottom halves in the trusted core
-//!
-//! SlopOS ships no softirq / tasklet / work-queue family: no priority
-//! lines, no queue, no worker pool, and above all no execution context
-//! of its own. There is exactly one scheduling primitive. A driver that
-//! needs to defer work *and block* spawns an ordinary `Task` and signals
-//! it from the handler, so that deferral is uniform with the rest of the
-//! task model.
-//!
-//! What the trusted core does own is a *point*: [`crate::sync::bh`]
-//! marks where deferred, non-blocking work is legal on a CPU under load,
-//! and hands a witness to whatever runs there. It decides nothing about
-//! what that is. The split is the framekernel argument applied to
-//! deferral — the context invariant is the part that has to be trusted,
-//! and the policy is the part that does not.
-//!
-//! Work reached through that point must not block. There is no worker to
-//! yield to, and the witness carries a preemption guard, so a bottom half
-//! that tries to deschedule trips the scheduler's preempt-count assertion
-//! at the one chokepoint every blocking primitive funnels through.
+//! There is no softirq / tasklet / work-queue family: a driver that must
+//! defer work *and block* spawns an ordinary `Task` and signals it from the
+//! handler. [`crate::sync::bh`] marks only the *point* at which deferred,
+//! non-blocking work is legal; its witness carries a preemption guard, so a
+//! bottom half that tries to deschedule trips the scheduler's preempt-count
+//! assertion.
 
 pub mod idt;
 pub mod interrupt_frame;

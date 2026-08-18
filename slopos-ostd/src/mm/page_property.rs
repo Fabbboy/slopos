@@ -1,18 +1,15 @@
 //! Typed page-protection properties.
 //!
-//! `PageProperty` is the safe-Rust description a [`CursorMut`] consumer
-//! passes to `map` / `protect`. Conversion to/from the on-disk PTE bit
-//! pattern lives in [`crate::mm::page_table::PteFlags`]; this module
-//! only carries the typed fields and the [`CachePolicy`] enum.
+//! `PageProperty` is what a [`CursorMut`] consumer passes to `map` / `protect`.
+//! Conversion to and from the PTE bit pattern lives in
+//! [`crate::mm::page_table::PteFlags`].
 //!
 //! [`CursorMut`]: crate::mm::vm_space::CursorMut
 
 use crate::mm::page_table::PteFlags;
 
-/// Cache attribute for a leaf mapping.
-///
-/// Maps onto the PWT/PCD/PAT bit triple in the PTE. The PAT MSR layout
-/// SlopOS uses (`mm/src/pat.rs` today) is the firmware default, so:
+/// Cache attribute for a leaf mapping, mapped onto the PWT/PCD/PAT bit triple
+/// in the PTE under SlopOS's firmware-default PAT MSR layout:
 ///
 /// | variant            | PWT | PCD | PAT |
 /// |--------------------|-----|-----|-----|
@@ -34,16 +31,12 @@ impl Default for CachePolicy {
 
 /// Typed access/cache properties of a single leaf mapping.
 ///
-/// `read` is always `true` on x86_64 — a present PTE is implicitly
-/// readable — but the field is carried for forward-compat with ARM64,
-/// which has a separate read bit.
+/// `read` is always `true` on x86_64 — a present PTE is implicitly readable —
+/// and is carried only for ARM64, which has a separate read bit.
 ///
-/// `software` carries the three "available to OS" PTE bits (9..=11)
-/// through cursor `query` / `map` / `protect` round-trips so consumers
-/// can encode kernel-policy state (e.g. copy-on-write markers) in the
-/// page table itself rather than in parallel bookkeeping. Only the
+/// `software` carries the three "available to OS" PTE bits (9..=11) through
+/// cursor round-trips as opaque storage OSTD assigns no meaning to. Only the
 /// low 3 bits are valid; higher bits are masked off in `to_leaf_flags`.
-/// OSTD assigns no semantics to the field — it is opaque storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageProperty {
     pub read: bool,
@@ -56,14 +49,13 @@ pub struct PageProperty {
 }
 
 impl PageProperty {
-    /// `software` bit meaning "this leaf owns no `MetaSlot` reference".
-    /// Set by [`CursorMut::map_io`] over physical memory that has no
-    /// slot at all — device apertures, firmware runtime regions — and
-    /// read back by [`CursorMut::unmap`], which then clears the entry
-    /// without attempting to reclaim a reference that was never taken.
+    /// `software` bit meaning "this leaf owns no `MetaSlot` reference", set by
+    /// [`CursorMut::map_io`] over physical memory with no slot at all (device
+    /// apertures, firmware runtime regions) so [`CursorMut::unmap`] clears the
+    /// entry without reclaiming a reference that was never taken.
     ///
-    /// PTE bit 10. Bit 9 (`software & 1`) is the consumer's
-    /// copy-on-write marker and must stay free.
+    /// PTE bit 10. Bit 9 (`software & 1`) is the consumer's copy-on-write
+    /// marker and must stay free.
     ///
     /// [`CursorMut::map_io`]: crate::mm::vm_space::CursorMut::map_io
     /// [`CursorMut::unmap`]: crate::mm::vm_space::CursorMut::unmap
@@ -119,9 +111,9 @@ impl PageProperty {
         software: 0,
     };
 
-    /// Encode as a leaf [`PteFlags`] bit pattern (does **not** include
-    /// the physical address). The HUGE bit is **not** set here — the
-    /// caller's `CursorMut::map::<S>` ORs it in based on `S::HUGE_BIT`.
+    /// Encode as a leaf [`PteFlags`] bit pattern, without the physical address.
+    /// The HUGE bit is not set here — `CursorMut::map::<S>` ORs it in from
+    /// `S::HUGE_BIT`.
     pub fn to_leaf_flags(self) -> PteFlags {
         let mut f = PteFlags::PRESENT;
         if self.write {
@@ -141,17 +133,14 @@ impl PageProperty {
             CachePolicy::WriteCombining => f |= PteFlags::WRITE_THROUGH,
             CachePolicy::Uncacheable => f |= PteFlags::CACHE_DISABLE,
         }
-        // Mask `software` to its low 3 bits so a stray higher bit
-        // cannot collide with the HUGE flag (bit 7) or the address
-        // mask (bits 12..=51).
+        // Masked to 3 bits so a stray higher bit cannot collide with the HUGE
+        // flag (bit 7) or the address mask (bits 12..=51).
         let sw_bits = ((self.software as u64) & 0x7) << PteFlags::SOFTWARE_BITS_SHIFT;
         PteFlags::from_bits_truncate(f.bits() | sw_bits)
     }
 
-    /// Decode from the leaf PTE bit pattern. Reads the access/cache
-    /// bits and the AVL software bits (9..=11); the address and the
-    /// HUGE bit are intentionally not surfaced (caller knows the leaf
-    /// size from the cursor's level).
+    /// Decode from the leaf PTE bit pattern. The address and the HUGE bit are
+    /// not surfaced: the caller knows the leaf size from the cursor's level.
     pub fn from_leaf_flags(flags: PteFlags) -> Self {
         let cache_policy = if flags.contains(PteFlags::CACHE_DISABLE) {
             CachePolicy::Uncacheable
@@ -288,17 +277,13 @@ mod tests {
             ..PageProperty::USER_RW
         };
         let f = p.to_leaf_flags();
-        // Only bits 9..=11 of the PTE may be set by the software field.
         assert_eq!(
             f.bits() & PteFlags::SOFTWARE_BITS_MASK,
             PteFlags::SOFTWARE_BITS_MASK,
             "software=0xFF should set all three AVL bits"
         );
-        // Adjacent bits must remain untouched.
-        assert!(!f.contains(PteFlags::HUGE)); // bit 7
-        // No address bits set.
+        assert!(!f.contains(PteFlags::HUGE));
         assert_eq!(f.bits() & PteFlags::ADDRESS_MASK, 0);
-        // Round-trip preserves the masked value.
         assert_eq!(PageProperty::from_leaf_flags(f).software, 0x7);
     }
 

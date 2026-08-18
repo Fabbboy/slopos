@@ -1,14 +1,8 @@
 //! Boot-installed, caller-mutex-protected flat array.
 //!
-//! `RawTable<T>` wraps a `(*mut T, len)` pair behind safe accessors. It is
-//! purpose-built for the kernel's physical-page descriptor table (one
-//! `PageFrame` per physical frame) and similar one-shot tables that are:
-//!
-//! 1. Sized at boot, after which `len` never changes.
-//! 2. Backed by storage allocated outside the heap (e.g. a buddy-allocator
-//!    metadata window).
-//! 3. Concurrently accessed from multiple call paths (the global allocator
-//!    lock + a per-CPU cache), each guarded by its own discipline.
+//! `RawTable<T>` wraps a `(*mut T, len)` pair behind safe accessors, for
+//! one-shot tables sized at boot and backed by storage outside the heap — the
+//! kernel's physical-page descriptor table and its like.
 //!
 //! **Caller's contract** (identical to [`RawLink::with_mut`]): every
 //! `get_mut(idx)` reborrow must occur under exclusive access to slot `idx`
@@ -39,8 +33,7 @@ impl<T: 'static> RawTable<T> {
         }
     }
 
-    /// Install `slice` as the table's backing store. May be called at most
-    /// once; subsequent calls panic.
+    /// May be called at most once; subsequent calls panic.
     pub fn install(&self, slice: &'static mut [T]) {
         let base = slice.as_mut_ptr();
         let len = slice.len();
@@ -51,13 +44,12 @@ impl<T: 'static> RawTable<T> {
         self.len.store(len, Ordering::Release);
     }
 
-    /// `true` once `install` has been called.
     #[inline]
     pub fn is_installed(&self) -> bool {
         !self.base.load(Ordering::Acquire).is_null()
     }
 
-    /// Number of slots after `install`. Returns 0 before installation.
+    /// Returns 0 before `install`.
     #[inline]
     pub fn len(&self) -> usize {
         self.len.load(Ordering::Acquire)
@@ -68,11 +60,10 @@ impl<T: 'static> RawTable<T> {
         self.len() == 0
     }
 
-    /// Borrow slot `idx` immutably. Returns `None` if uninstalled or out
-    /// of range.
+    /// Returns `None` if uninstalled or out of range.
     ///
     /// **Caller's contract:** no concurrent `get_mut` for slot `idx` may
-    /// be active. Typically established by the surrounding lock.
+    /// be active.
     #[inline]
     pub fn get(&self, idx: usize) -> Option<&T> {
         let base = self.base.load(Ordering::Acquire);
@@ -87,13 +78,10 @@ impl<T: 'static> RawTable<T> {
         Some(unsafe { &*base.add(idx) })
     }
 
-    /// Borrow slot `idx` mutably. Returns `None` if uninstalled or out of
-    /// range.
+    /// Returns `None` if uninstalled or out of range.
     ///
     /// **Caller's contract:** holds exclusive access to slot `idx` for the
-    /// returned reference's lifetime — typically by holding the containing
-    /// allocator's `SpinLock`, or by being the per-CPU cache pinned by a
-    /// `PreemptGuard` for an `idx` known to live in this CPU's cache.
+    /// returned reference's lifetime.
     #[inline]
     pub fn get_mut(&self, idx: usize) -> Option<&mut T> {
         let base = self.base.load(Ordering::Acquire);
@@ -108,8 +96,6 @@ impl<T: 'static> RawTable<T> {
         Some(unsafe { &mut *base.add(idx) })
     }
 
-    /// Run `f` over slot `idx`'s `&mut T`. Convenience for callers that
-    /// don't want to hold a `&mut` borrow across statements.
     #[inline]
     pub fn with_mut<R>(&self, idx: usize, f: impl FnOnce(&mut T) -> R) -> Option<R> {
         self.get_mut(idx).map(f)

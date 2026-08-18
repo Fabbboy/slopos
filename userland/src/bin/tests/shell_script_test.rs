@@ -2,34 +2,23 @@
 
 //! Non-interactive shell regression tests.
 //!
-//! `yes "curl http://google.com" | shell` used to reprint the prompt for every
-//! command and then run truncated fragments of the line: the shell had no
-//! non-interactive mode, so a raw-mode line editor ran on a pipe, decoded a
-//! fixed 256-byte read into a queue, and dropped whatever was left of that
-//! queue when the line ended.  With a 23-byte command line and `256 % 23 == 3`
-//! the stream advanced three bytes per command, which is exactly the sequence
-//! of fragments the report showed.
-//!
-//! Each case here feeds `/bin/shell` a script down a pipe and asserts on the
-//! exact bytes it produces.  Two properties do the work: the output must be the
+//! Each case feeds `/bin/shell` a script down a pipe and asserts on the exact
+//! bytes it produces.  Two properties do the work: the output must be the
 //! script's output and nothing else — no banner, no prompt, no SGR — and every
 //! line must run exactly once, which a reader that over-reads cannot manage.
 
-// Pull in the `slopos-userland` lib crate so its `_start` ELF entry point is
-// linked into the binary (same requirement as the sibling test bins; without
-// it the linker emits entry 0x0 and `do_exec` rejects the ELF).
+// Links the lib crate's `_start` ELF entry point into the binary; without it
+// the linker emits entry 0x0 and `do_exec` rejects the ELF.
 use slopos_userland as _;
 
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_userland::apps::shell::script::SCRIPT_LINE_MAX;
 use slopos_userland::syscall::{SyscallError, core as sys_core, fs, process};
 
-/// Bounded wait so a regressed shell FAILS the case rather than hanging the
+/// Bounded wait so a regressed shell fails the case rather than hanging the
 /// whole harness.
 const REAP_SPINS: usize = 5000;
 
-/// Run `script` through `/bin/shell` and collect its stdout and exit status.
-///
 /// Feeding and draining are interleaved on non-blocking descriptors: a script
 /// larger than one pipe buffer would otherwise block the parent in `write`
 /// while the child blocks in `write` on an output pipe nobody is reading.
@@ -57,8 +46,8 @@ fn run_script(script: &[u8]) -> Option<(Vec<u8>, i32)> {
         0,
     );
 
-    // The child holds the only copy of each end it reads from or writes to, so
-    // it sees EOF on its script and the parent sees EOF on its output.
+    // After these closes the child holds the only copy of each end it reads
+    // from or writes to, so both sides see EOF.
     let _ = fs::close_fd_raw(script_r);
     let _ = fs::close_fd_raw(out_w);
 
@@ -161,8 +150,6 @@ fn expect_status(name: &str, script: &[u8], want: i32) -> bool {
     true
 }
 
-/// The headline property: a script's stdout is the script's output and nothing
-/// else.  Any banner, prompt, SGR run or bracketed-paste toggle fails this.
 fn script_output_is_exact() -> bool {
     expect_output(
         "script_output_is_exact",
@@ -172,8 +159,7 @@ fn script_output_is_exact() -> bool {
 }
 
 /// Forty short lines span several 256-byte reads, so a reader that keeps a
-/// fixed chunk and discards the rest loses most of them.  Every line must
-/// appear exactly once and in order.
+/// fixed chunk and discards the rest loses most of them.
 fn every_line_runs_once_in_order() -> bool {
     let mut script = Vec::new();
     let mut want = Vec::new();
@@ -190,8 +176,7 @@ fn every_line_runs_once_in_order() -> bool {
     expect_output("every_line_runs_once_in_order", &script, &want)
 }
 
-/// The regression test for the reported bug, stated as the property it broke:
-/// the shell shares its script descriptor with the commands it runs, so it must
+/// The shell shares its script descriptor with the commands it runs, so it must
 /// consume exactly the line it is about to execute.  `cat` here reads the
 /// remainder of the script — which is only there if the shell left it.
 fn no_overread_leaves_stdin_for_the_child() -> bool {
@@ -202,14 +187,11 @@ fn no_overread_leaves_stdin_for_the_child() -> bool {
     )
 }
 
-/// A script exits with the status of its last command.
 fn exit_status_is_last_command() -> bool {
     expect_status("exit_status_is_last_command/false", b"true\nfalse\n", 1)
         && expect_status("exit_status_is_last_command/true", b"false\ntrue\n", 0)
 }
 
-/// Diagnostics belong on stderr; stdout stays the program's data.  `sh: NAME:
-/// not found` used to be written to stdout, so it landed in the pipeline.
 fn diagnostics_go_to_stderr() -> bool {
     expect_output(
         "diagnostics_go_to_stderr",
@@ -218,16 +200,15 @@ fn diagnostics_go_to_stderr() -> bool {
     ) && expect_status("diagnostics_go_to_stderr/status", b"nosuchcmd\n", 127)
 }
 
-/// An over-long line is refused, not truncated: running a shortened command
-/// means running a different command from the one that was written.
+/// Refused, not truncated: a shortened command is a different command from the
+/// one that was written.
 fn over_long_line_is_diagnosed_not_truncated() -> bool {
     let mut script = Vec::new();
     script.extend_from_slice(b"echo ");
     script.resize(script.len() + SCRIPT_LINE_MAX + 64, b'x');
     script.push(b'\n');
     script.extend_from_slice(b"echo after\n");
-    // The over-long line produces nothing, and — the part that matters — the
-    // line after it is a whole line rather than the tail of the one refused.
+    // The line after the refused one must be whole, not its tail.
     expect_output(
         "over_long_line_is_diagnosed_not_truncated",
         &script,
@@ -255,7 +236,6 @@ fn blank_lines_are_skipped() -> bool {
     expect_output("blank_lines_are_skipped", b"\n\n   \necho ok\n", b"ok\n")
 }
 
-/// `exit` did not exist at all; the shell could not be ended from a script.
 fn exit_builtin_terminates_with_status() -> bool {
     expect_output(
         "exit_builtin_terminates_with_status",
@@ -268,8 +248,6 @@ fn exit_builtin_terminates_with_status() -> bool {
     )
 }
 
-/// `echo hi; echo bye` used to print the literal string `hi; echo bye` and
-/// report success — a wrong result with no error.
 fn sequence_and_shortcircuit() -> bool {
     expect_output(
         "sequence_and_shortcircuit",
@@ -278,7 +256,6 @@ fn sequence_and_shortcircuit() -> bool {
     )
 }
 
-/// `cmd 2>&1` used to run `cmd 2 1` with stdout truncated into a file named `&`.
 fn stderr_redirection() -> bool {
     expect_output(
         "stderr_redirection",
@@ -297,15 +274,13 @@ fn assignments_scope_correctly() -> bool {
     )
 }
 
-/// `sh -c` did not exist: `main()` ignored argv entirely.
 fn dash_c_runs_the_string() -> bool {
     let actions = [
         process::clone_fd(0, 0),
         process::clone_fd(1, 1),
         process::clone_fd(2, 2),
     ];
-    // argv[0] is the program name, as everywhere else: the shell's option
-    // parsing skips it, exactly as `std::env::args()` presents it.
+    // argv[0] is the program name; the shell's option parsing skips it.
     let arg0 = *b"shell\0";
     let arg_c = *b"-c\0";
     let arg_cmd = *b"exit 7\0";

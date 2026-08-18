@@ -32,10 +32,8 @@ pub unsafe trait Pod: Copy + 'static {}
 macro_rules! impl_pod_prims {
     ($($t:ty),* $(,)?) => {
         $(
-            // SAFETY: integer primitive — every bit pattern is a
-            // valid value; layout is `#[repr(C)]`-compatible (the
-            // language guarantees fixed-size integer ABI on every
-            // supported target).
+            // SAFETY: integer primitive — every bit pattern is a valid
+            // value and the layout is `#[repr(C)]`-compatible.
             unsafe impl Pod for $t {}
         )*
     };
@@ -56,7 +54,6 @@ impl_pod_prims!(
     ()
 );
 
-// SAFETY: `[T; N]` is `#[repr(transparent)]`-equivalent over a
-// contiguous `T` run; if every `T` is Pod, every byte pattern is
+// SAFETY: a contiguous run of `T`, so if `T` is Pod every byte pattern is
 // valid for the array.
 unsafe impl<T: Pod, const N: usize> Pod for [T; N] {}

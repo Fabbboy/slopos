@@ -1,8 +1,5 @@
-//! Cell-granular damage for the terminal grid.
-//!
-//! Damage is one inclusive column span per screen row — the granularity a
-//! terminal actually changes at. A cursor blink reports one cell, a keystroke
-//! one span, a scroll every row; nothing reports a window.
+//! Cell-granular damage for the terminal grid: one inclusive column span per
+//! screen row, the granularity a terminal actually changes at.
 
 use alloc::vec::Vec;
 
@@ -102,7 +99,6 @@ impl CellDamage {
         self.spans.get(row).copied().flatten()
     }
 
-    /// Merge every span of `other` into this set.
     pub fn union(&mut self, other: &CellDamage) {
         for (row, span) in other.spans.iter().enumerate() {
             if let Some(s) = span {
@@ -115,12 +111,8 @@ impl CellDamage {
 /// Damage of recently presented frames, used to resolve what a recycled buffer
 /// needs repainted.
 ///
-/// A surface with more than one buffer hands back a slot whose contents are
-/// several frames old, so repainting only *this* frame's damage into it would
-/// resurrect whatever that slot last held. `age` follows the
-/// `EGL_EXT_buffer_age` convention the Wayland ecosystem settled on: `n` means
-/// the slot holds the frame presented `n` frames ago, and `0` means its
-/// contents are undefined.
+/// `age` follows the `EGL_EXT_buffer_age` convention: `n` means the slot holds
+/// the frame presented `n` frames ago, `0` that its contents are undefined.
 pub struct DamageHistory {
     frames: Vec<CellDamage>,
     cap: usize,

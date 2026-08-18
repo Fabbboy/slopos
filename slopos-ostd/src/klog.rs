@@ -1,30 +1,8 @@
 //! Kernel logging subsystem.
 //!
 //! All kernel log output funnels through a single **backend** function pointer.
-//! During early boot (before the serial driver is ready) the backend writes
-//! directly to COM1 via [`crate::early_console`].  Once the serial driver
-//! initialises it registers itself as the backend, and all subsequent output
-//! goes through the driver's `SpinLock`-protected path — giving us proper
-//! locking, FIFO awareness, and `\n → \r\n` conversion for free.
-//!
-//! # Backend contract
-//!
-//! The backend receives the pre-formatted arguments for a **single log line**
-//! and is responsible for:
-//!
-//! 1. Writing the formatted text **atomically** (no interleaving from other
-//!    CPUs).
-//! 2. Appending a trailing newline after the text.
-//!
-//! The early-boot fallback satisfies (1) trivially (single-threaded boot) and
-//! handles (2) by emitting `\n` (which `early_console` expands to `\r\n`).
-//!
-//! # Registration
-//!
-//! ```ignore
-//! // In your serial driver init:
-//! slopos_ostd::klog::klog_register_backend(my_backend_fn);
-//! ```
+//! Before the serial driver is ready the backend writes directly to COM1 via
+//! [`crate::early_console`]; the driver then registers itself as the backend.
 
 use crate::lock_class;
 use core::ffi::c_int;
@@ -32,10 +10,6 @@ use core::fmt;
 use core::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 use crate::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
-
-// ---------------------------------------------------------------------------
-// Log levels
-// ---------------------------------------------------------------------------
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,15 +40,10 @@ fn is_enabled(level: KlogLevel) -> bool {
     level as u8 <= CURRENT_LEVEL.load(Ordering::Relaxed)
 }
 
-// ---------------------------------------------------------------------------
-// Backend dispatch
-// ---------------------------------------------------------------------------
-
 /// Signature of a klog backend.
 ///
-/// The backend must write the formatted text **and** a trailing newline,
-/// all under a single lock acquisition (if applicable) so that log lines
-/// from different CPUs do not interleave.
+/// The backend must write the formatted text **and** a trailing newline under a
+/// single lock acquisition, so lines from different CPUs do not interleave.
 pub type KlogBackend = fn(fmt::Arguments<'_>);
 
 /// Stored as a raw pointer; `null` means "use early-boot fallback".
@@ -94,9 +63,6 @@ fn early_backend(args: fmt::Arguments<'_>) {
     crate::early_console::write_bytes(b"\n");
 }
 
-/// Dispatch a log line through the active backend.
-///
-/// If no backend has been registered yet the early-boot fallback is used.
 #[inline]
 fn dispatch(args: fmt::Arguments<'_>) {
     let ptr = BACKEND.load(Ordering::Acquire);
@@ -110,19 +76,6 @@ fn dispatch(args: fmt::Arguments<'_>) {
         backend(args);
     }
 }
-
-// ---------------------------------------------------------------------------
-// In-memory log ring buffer (userland-readable via /dev/kmsg)
-//
-// Every emitted log line is also captured here so it can be read back from
-// userland, which is the only log sink available with no serial console.
-//
-// The ring engages only once a real backend is registered (after the serial
-// driver and the per-CPU record are up), so it never touches a `SpinLock`
-// during early single-threaded boot. Writers use `try_lock` and skip on
-// contention — a dropped line is preferable to a stall in a path that runs
-// from IRQ context.
-// ---------------------------------------------------------------------------
 
 // Sized so a full boot log plus steady-state logging fits without wrapping:
 // `/dev/kmsg` reads the ring by byte offset, so a wrap during a `cat` shifts
@@ -160,8 +113,6 @@ impl KlogRing {
         if offset >= self.len {
             return 0;
         }
-        // Oldest logical byte sits at index 0 until the ring wraps, then at
-        // `head`.
         let start = if self.len < KLOG_RING_SIZE {
             0
         } else {
@@ -197,6 +148,8 @@ fn ring_capture(args: fmt::Arguments<'_>) {
     if BACKEND.load(Ordering::Acquire).is_null() {
         return;
     }
+    // A dropped line is preferable to a stall in a path that runs from IRQ
+    // context.
     if let Some(mut ring) = KLOG_RING.try_lock() {
         let _ = fmt::write(&mut RingWriter(&mut ring), args);
         ring.push(b'\n');
@@ -209,30 +162,19 @@ pub fn klog_read(offset: usize, out: &mut [u8]) -> usize {
     KLOG_RING.lock().read_at(offset, out)
 }
 
-/// Logical bytes the ring currently holds.
-///
-/// The offset a reader passes to [`klog_read`] to mean "from here on", so a
-/// caller can bracket a window of output rather than re-reading the whole ring.
+/// Logical bytes the ring currently holds — the offset to pass [`klog_read`]
+/// to mean "from here on".
 pub fn klog_len() -> usize {
     KLOG_RING.lock().len
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /// Register a backend that replaces the early-boot COM1 fallback.
-///
-/// Typically called once by the serial driver during its initialisation.
 pub fn klog_register_backend(backend: KlogBackend) {
     let _ = klog_swap_backend(Some(backend));
 }
 
-/// Atomically install `new` and return whatever was active before.
-///
-/// `None` represents the early-boot null-pointer fallback. The test harness
-/// uses this to stash the prior backend, install a buffering capture backend
-/// for the duration of one test, and restore the original on drop.
+/// Atomically install `new` and return whatever was active before; `None` is
+/// the early-boot null-pointer fallback.
 pub fn klog_swap_backend(new: Option<KlogBackend>) -> Option<KlogBackend> {
     let new_ptr = match new {
         Some(b) => b as *mut (),
@@ -248,16 +190,13 @@ pub fn klog_swap_backend(new: Option<KlogBackend>) -> Option<KlogBackend> {
     }
 }
 
-/// Force the backend back to the early-boot fallback.
-///
-/// Intended for the panic-recovery cleanup path: a `CaptureGuard` whose
+/// Force the backend back to the early-boot fallback: a `CaptureGuard` whose
 /// frame is destroyed by something other than an ordinary return leaves the
 /// buffering backend installed, and nothing else would take it out.
 pub fn klog_force_restore_default() {
     BACKEND.store(core::ptr::null_mut(), Ordering::Release);
 }
 
-/// Initialise klog (sets default level).  Called very early in boot.
 pub fn klog_init() {
     CURRENT_LEVEL.store(KlogLevel::Info as u8, Ordering::Relaxed);
 }
@@ -290,25 +229,16 @@ pub fn log_args(level: KlogLevel, args: fmt::Arguments<'_>) {
     dispatch(args);
 }
 
-/// Emit one line regardless of the current level.
+/// Emit one line regardless of the current level, for output an operator asked
+/// for directly.
 ///
-/// For output an operator asked for directly, where the level filter is not
-/// the right question: a diagnostic dump that prints nothing because the boot
-/// left the level at `Error` is indistinguishable from a broken one.
-///
-/// Raising [`CURRENT_LEVEL`] around the caller would be the other way to do
-/// it, and is wrong twice over: it is a global, so it changes every other
-/// CPU's logging for the duration, and restoring it races a concurrent
-/// [`klog_set_level`]. Emitting at `Error` instead would be wrong once — a
-/// dump is not an error, and counting it as one poisons error triage.
+/// Raising [`CURRENT_LEVEL`] around the caller instead would change every other
+/// CPU's logging and race a concurrent [`klog_set_level`]; emitting at `Error`
+/// would poison error triage.
 pub fn log_forced(args: fmt::Arguments<'_>) {
     ring_capture(args);
     dispatch(args);
 }
-
-// ---------------------------------------------------------------------------
-// Macros
-// ---------------------------------------------------------------------------
 
 #[macro_export]
 macro_rules! klog {

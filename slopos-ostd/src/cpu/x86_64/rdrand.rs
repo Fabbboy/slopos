@@ -1,8 +1,7 @@
 //! Hardware random number generation via RDRAND and RDSEED instructions.
 //!
-//! RDRAND draws from the CPU's DRBG (available since Ivy Bridge, 2012).
-//! RDSEED draws from the raw hardware entropy source (available since Broadwell, 2014).
-//! Both are emulated by QEMU using the host's `/dev/urandom`.
+//! RDRAND draws from the CPU's conditioned DRBG, RDSEED from the raw hardware
+//! entropy source. Both are emulated by QEMU using the host's `/dev/urandom`.
 
 use core::arch::asm;
 
@@ -11,30 +10,26 @@ use crate::arch::x86_64::cpuid::{
     cpuid, cpuid_count,
 };
 
-/// Check if the CPU supports the RDRAND instruction (CPUID.1:ECX bit 30).
+/// CPUID.1:ECX bit 30.
 #[inline]
 pub fn has_rdrand() -> bool {
     let (_, _, ecx, _) = cpuid(CPUID_LEAF_FEATURES);
     (ecx & CPUID_FEAT_ECX_RDRAND) != 0
 }
 
-/// Check if the CPU supports the RDSEED instruction (CPUID.7.0:EBX bit 18).
+/// CPUID.7.0:EBX bit 18.
 #[inline]
 pub fn has_rdseed() -> bool {
     let (_, ebx, _, _) = cpuid_count(CPUID_LEAF_STRUCTURED_EXT, 0);
     (ebx & CPUID_SEXT_EBX_RDSEED) != 0
 }
 
-/// Witness that CPUID reports RDRAND on this CPU.
-///
-/// [`RdRand::probe`] is the only way to get one, so a caller cannot reach
-/// the instruction without having asked — the obligation that used to read
-/// "caller must verify `has_rdrand()`" and that `mm::aslr` did not.
+/// Witness that CPUID reports RDRAND on this CPU. [`RdRand::probe`] is the
+/// only way to get one, so a caller cannot reach the instruction unprobed.
 #[derive(Clone, Copy)]
 pub struct RdRand(());
 
 impl RdRand {
-    /// `Some` when CPUID reports the instruction.
     #[inline]
     pub fn probe() -> Option<Self> {
         has_rdrand().then_some(Self(()))
@@ -52,7 +47,6 @@ impl RdRand {
 pub struct RdSeed(());
 
 impl RdSeed {
-    /// `Some` when CPUID reports the instruction.
     #[inline]
     pub fn probe() -> Option<Self> {
         has_rdseed().then_some(Self(()))
@@ -65,8 +59,7 @@ impl RdSeed {
     }
 }
 
-/// Retries up to 10 times per Intel's recommendation. Each attempt checks
-/// the carry flag: CF=1 means valid output, CF=0 means underflow (retry).
+/// Ten retries per Intel's recommendation; CF=0 means the DRBG underflowed.
 #[inline]
 fn rdrand64_raw() -> Option<u64> {
     for _ in 0..10 {
@@ -88,8 +81,6 @@ fn rdrand64_raw() -> Option<u64> {
     None
 }
 
-/// Retries up to 10 times. RDSEED can fail more often than RDRAND because
-/// it draws from the raw entropy source rather than a conditioned DRBG.
 #[inline]
 fn rdseed64_raw() -> Option<u64> {
     for _ in 0..10 {

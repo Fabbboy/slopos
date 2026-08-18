@@ -296,9 +296,9 @@ impl<K, U> ParkedTask<K, U> {
 ///
 /// This is the split that lets a task's final release happen in a context where
 /// the allocator-heavy destructor must not run (interrupts off, a lock held, or
-/// on the dying task's own stack): release here, park the token, destroy later.
-/// Whether this call is the final one is decided by the decrement itself, never
-/// by reading the count first — a `strong_count == 1` pre-check is racy.
+/// on the dying task's own stack). Whether this call is the final one is decided
+/// by the decrement itself, never by reading the count first — a
+/// `strong_count == 1` pre-check is racy.
 #[inline]
 pub fn task_release_strong<K, U>(arc: KArc<TaskInner<K, U>>) -> Option<ParkedTask<K, U>> {
     KArc::release_deferrable(arc).map(|node| ParkedTask { node })
@@ -306,10 +306,6 @@ pub fn task_release_strong<K, U>(arc: KArc<TaskInner<K, U>>) -> Option<ParkedTas
 
 /// Run the destructor that [`task_release_strong`] deferred, returning the
 /// allocation to the heap.
-///
-/// Consuming `parked` by value is what makes "not already destroyed" a fact
-/// rather than a contract: a second call would need a second token, and there
-/// is no way to obtain one.
 #[inline]
 pub fn task_destroy_parked<K, U>(parked: ParkedTask<K, U>) {
     // SAFETY: `parked` witnesses that its holder won the one-to-zero release
@@ -321,10 +317,7 @@ pub fn task_destroy_parked<K, U>(parked: ParkedTask<K, U>) {
 /// Surrender a reclaim token to a raw slot, yielding the node pointer to store.
 ///
 /// The graveyard is an intrusive stack threaded through the task bodies
-/// themselves, so what it can hold is a pointer, not a Rust value. This is the
-/// same park/reclaim shape as [`task_placement_leak`] and
-/// [`task_placement_reclaim`], applied to unique ownership rather than to a
-/// strong reference: token in, pointer out.
+/// themselves, so what it can hold is a pointer, not a Rust value.
 #[inline]
 pub fn task_parked_leak<K, U>(parked: ParkedTask<K, U>) -> NonNull<TaskInner<K, U>> {
     parked.node
@@ -334,9 +327,7 @@ pub fn task_parked_leak<K, U>(parked: ParkedTask<K, U>) -> NonNull<TaskInner<K, 
 ///
 /// This is the **only** way to obtain a [`ParkedTask`] other than winning a
 /// final release, and therefore the one point at which the token's guarantee
-/// rests on a caller obligation rather than on the type. It is deliberately
-/// narrow, named, and greppable so that the obligation has exactly one place to
-/// be audited.
+/// rests on a caller obligation rather than on the type.
 ///
 /// # Correctness
 /// `node` must be the result of exactly one [`task_parked_leak`], recovered
@@ -353,19 +344,14 @@ pub fn task_parked_reclaim<K, U>(node: NonNull<TaskInner<K, U>>) -> ParkedTask<K
 /// The reclaim path has to ask questions of a task it has just won the
 /// one-to-zero release on: `task_put` consults the dispatch-pin predicate
 /// before deciding whether the destructor may run in this context. At that
-/// moment the strong count is zero and no [`KArc`] exists, so there is no
-/// owning handle to borrow from and [`task_placement_clone`] would be
-/// resurrection rather than a clone.
+/// moment the strong count is zero and no [`KArc`] exists, so
+/// [`task_placement_clone`] would be resurrection rather than a clone.
 ///
-/// This is the one sanctioned way to form a `&TaskInner` without an owning
-/// reference behind it, and it is sound for the opposite reason to every other
-/// borrow in this module: not because someone else is keeping the task alive,
-/// but because *nobody else can reach it at all*.
-///
-/// Taking `&ParkedTask` rather than a bare pointer is what makes that argument
-/// checkable. The token cannot be fabricated, and borrowing it rather than
-/// consuming it means the allocation cannot be destroyed for as long as `f`
-/// holds the reference. There is no caller obligation left to state.
+/// Sound for the opposite reason to every other borrow in this module: not
+/// because someone else is keeping the task alive, but because *nobody else can
+/// reach it at all*. Borrowing the token rather than consuming it means the
+/// allocation cannot be destroyed while `f` holds the reference, so there is no
+/// caller obligation left to state.
 #[inline]
 pub fn with_parked<K, U, R>(parked: &ParkedTask<K, U>, f: impl FnOnce(&TaskInner<K, U>) -> R) -> R {
     // SAFETY: `parked` witnesses unique ownership of a still-initialised task
@@ -379,7 +365,6 @@ pub fn with_parked<K, U, R>(parked: &ParkedTask<K, U>, f: impl FnOnce(&TaskInner
 /// contract as [`task_placement_clone`].
 #[inline]
 pub fn task_placement_strong_count<K, U>(ptr: NonNull<TaskInner<K, U>>) -> usize {
-    // Reconstruct a borrowed handle, read the count, hand it back untouched.
     // SAFETY: per the contract `ptr`'s strong count is non-zero, so
     // reconstructing and re-parking the borrowed reference is a balanced no-op.
     let borrowed = unsafe { KArc::from_raw(ptr.as_ptr().cast_const()) };

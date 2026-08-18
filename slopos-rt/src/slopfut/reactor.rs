@@ -227,16 +227,12 @@ impl Reactor {
         }
     }
 
-    // --- cross-core wakeup self-pipe (Phase-6 Tier B, additive) ------------
-
     /// Submit a fresh **oneshot** `OP_POLL_ADD(read_fd, POLLIN)` and record its
-    /// cookie as the live wakeup-poll row. A oneshot (re-armed after each
-    /// service, see [`Reactor::service_wakeup`]) is used in preference to a
-    /// standing multishot because the kernel multishot poll is *edge*-triggered
-    /// off a `last_revents` cache the reactor's out-of-band pipe drain cannot
-    /// reset — a byte arriving after the drain would not re-fire. A oneshot
-    /// poll instead probes the *current* level on every (re)submit, so a byte
-    /// that lands after the drain is seen by the next arm and never lost.
+    /// cookie as the live wakeup-poll row. Oneshot rather than a standing
+    /// multishot: the kernel multishot poll is *edge*-triggered off a
+    /// `last_revents` cache the reactor's out-of-band pipe drain cannot reset,
+    /// so a byte arriving after the drain would not re-fire; a oneshot probes
+    /// the *current* level on every (re)submit.
     fn arm_wakeup_poll(&mut self, read_fd: i32) -> Result<u64, RingError> {
         let mut sqe = Sqe::ZERO;
         sqe.opcode = OP_POLL_ADD;
@@ -245,19 +241,16 @@ impl Reactor {
         self.submit(sqe, None)
     }
 
-    /// Lazily create this reactor's wakeup self-pipe and arm a oneshot
-    /// `OP_POLL_ADD(read_fd, POLLIN)` over it, returning the write end a
-    /// [`super::cross_core`] `Sender` writes to rouse the reactor. Idempotent:
-    /// a reactor with several cross-core receivers shares one pipe (all their
-    /// wakers join `waiters`). Returns `None` if the pipe or the poll arm fails
-    /// (the caller falls back to a receiver that cannot be roused cross-core —
-    /// degraded but not unsound on a single thread).
+    /// Lazily create this reactor's wakeup self-pipe and arm a oneshot poll
+    /// over it, returning the write end a [`super::cross_core`] `Sender` writes
+    /// to rouse the reactor. Idempotent: several cross-core receivers share one
+    /// pipe. `None` if the pipe or the poll arm fails — the caller degrades to
+    /// a receiver that cannot be roused cross-core.
     pub(super) fn ensure_wakeup(&mut self) -> Option<i32> {
         if self.wakeup.is_none() {
             let mut fds = [0i32; 2];
             // O_NONBLOCK on both ends: the read end so the drain can empty to
-            // EAGAIN, the write end so a full pipe (a wakeup already pending)
-            // never blocks a cross-core sender.
+            // EAGAIN, the write end so a full pipe never blocks a sender.
             let rc = unsafe { syscall2(SYSCALL_PIPE2, fds.as_mut_ptr() as u64, O_NONBLOCK as u64) }
                 as i64;
             if rc < 0 {
@@ -285,10 +278,9 @@ impl Reactor {
         self.wakeup.as_ref().map(|w| w.write_fd)
     }
 
-    /// Register `waker` to be fired on the next wakeup-byte arrival. Called by
-    /// a cross-core receiver when it finds its queue empty. Deduplicated by
-    /// waker identity so a receiver re-polled before the byte lands does not
-    /// stack duplicate entries.
+    /// Register `waker` to be fired on the next wakeup-byte arrival.
+    /// Deduplicated by waker identity so a receiver re-polled before the byte
+    /// lands does not stack duplicate entries.
     pub(super) fn register_wakeup_waiter(&mut self, waker: Waker) {
         if let Some(w) = self.wakeup.as_mut() {
             if !w.waiters.iter().any(|x| x.will_wake(&waker)) {
@@ -299,8 +291,7 @@ impl Reactor {
 
     /// The oneshot wakeup poll fired: drain the self-pipe to EAGAIN, fire every
     /// registered waiter, and re-arm a fresh oneshot poll. Re-arming probes the
-    /// pipe's current level, so any byte that arrived during/after the drain is
-    /// observed by the new poll (or its first reprobe) — no lost wakeup.
+    /// pipe's current level, so a byte arriving during the drain is not lost.
     fn service_wakeup(&mut self) {
         let Some(w) = self.wakeup.as_ref() else {
             return;
@@ -320,8 +311,8 @@ impl Reactor {
                 break;
             }
         }
-        // Take the waiters out before firing so a waker that re-registers
-        // during its own wake does not get drained by this pass.
+        // Take the waiters out before firing: a waker that re-registers during
+        // its own wake must not be drained by this pass.
         let waiters: Vec<Waker> = self
             .wakeup
             .as_mut()
@@ -330,7 +321,6 @@ impl Reactor {
         for waker in waiters {
             waker.wake();
         }
-        // Re-arm the oneshot poll for the next cross-core send.
         if let Ok(cookie) = self.arm_wakeup_poll(read_fd) {
             if let Some(w) = self.wakeup.as_mut() {
                 w.poll_cookie = cookie;
@@ -340,34 +330,27 @@ impl Reactor {
 
     /// The sole blocking point (SLOPRING §7.1): block on the ring until at
     /// least one completion lands, then drain every available CQE into its
-    /// slot and wake the owning task. Live slots get their `result` set and
-    /// their waker fired; orphaned slots are reaped; slot-less completions
-    /// (a cancel SQE's own CQE) are discarded.
+    /// slot and wake the owning task.
     pub(super) fn park(&mut self) {
         match self.ring.submit_and_wait(1) {
             Ok(_) => {}
-            // EINTR: a signal interrupted the wait. In-flight ops untouched —
-            // drain anything ready and let block_on re-park. (With the
-            // signalfd model the reactor blocks the signals it harvests, so
-            // this is now rare; kept as a transient-retry backstop.)
+            // EINTR leaves in-flight ops untouched: drain what is ready and let
+            // block_on re-park.
             Err(RingError::Enter(rc)) if rc == RES_EINTR => {}
             Err(_) => {
                 self.fail_all();
                 return;
             }
         }
-        // `terminated` is set only AFTER the terminal CQE is enqueued into
-        // `results`, so a slot reporting terminal always has its final
-        // result already queued (no terminal-without-result race).
+        // `terminated` is set only after the terminal CQE is enqueued into
+        // `results`, so no slot ever reports terminal without its final result.
         let mut wakeup_fired = false;
         while let Some(cqe) = self.ring.poll_completion() {
             let more = cqe.flags & SLOPRING_CQE_F_MORE != 0;
-            // The cross-core wakeup poll's CQE is not owned by any future, so it
-            // bypasses the slot machinery. It is a oneshot poll, so its CQE is
-            // terminal: retire its slot + in-flight count here (it is re-armed
-            // with a fresh cookie in `service_wakeup`).
-            // Defer the byte-drain + waiter wake until the whole CQ is drained
-            // (below) so one park batches all wakeup bytes into a single pass.
+            // The wakeup poll's CQE belongs to no future and is terminal
+            // (oneshot), so retire its slot here; `service_wakeup` re-arms with
+            // a fresh cookie. The drain is deferred until the whole CQ is
+            // drained so one park batches every wakeup byte into one pass.
             if matches!(&self.wakeup, Some(w) if w.poll_cookie == cqe.user_data) {
                 self.slots.remove(&cqe.user_data);
                 self.in_flight = self.in_flight.saturating_sub(1);
@@ -377,9 +360,7 @@ impl Reactor {
             match self.slots.get_mut(&cqe.user_data) {
                 None => { /* cancel-SQE or stray completion: discard */ }
                 Some(s) if s.orphaned => {
-                    // A dropped future's op. Interim multishot CQEs are
-                    // discarded; the slot is reaped only on the terminal
-                    // CQE (F_MORE clear) so the in-flight accounting and
+                    // Reap only on the terminal CQE, so the in-flight count and
                     // the kernel row retire together.
                     if !more {
                         self.slots.remove(&cqe.user_data);
@@ -388,9 +369,6 @@ impl Reactor {
                 }
                 Some(s) => {
                     s.results.push_back((cqe.res, cqe.flags));
-                    // An armed multishot row stays in flight while F_MORE is
-                    // set; a oneshot op (or the terminal multishot CQE)
-                    // retires it.
                     if !more {
                         s.terminated = true;
                         self.in_flight = self.in_flight.saturating_sub(1);
@@ -402,13 +380,9 @@ impl Reactor {
             }
         }
         if wakeup_fired {
-            // One or more cross-core sends roused us: drain the self-pipe to
-            // EAGAIN, wake the receiver tasks (they re-poll and drain their
-            // queues), and re-arm the oneshot wakeup poll.
             self.service_wakeup();
         }
         if self.ring.cq_overflow() {
-            // Unrecoverable completion loss — fail every in-flight op loud.
             self.fail_all();
         }
     }
@@ -420,8 +394,8 @@ impl Reactor {
             if slot.results.is_empty() {
                 slot.results.push_back((RES_IO_ERR, 0));
             }
-            // A broken ring yields no further completions — terminate every
-            // slot so even an armed multishot stream ends rather than hangs.
+            // A broken ring yields no further completions, so even an armed
+            // multishot stream must be terminated rather than left to hang.
             slot.terminated = true;
             if let Some(w) = slot.waker.take() {
                 w.wake();

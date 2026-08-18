@@ -12,10 +12,6 @@ use slopos_appkit::{
     Node, TableColumn, TableColumnWidth, TextAlignment,
 };
 
-// ---------------------------------------------------------------------------
-// Messages
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Debug)]
 pub enum FileMsg {
     NavBack,
@@ -24,10 +20,6 @@ pub enum FileMsg {
     FileSelect(usize),
     Bookmark(usize),
 }
-
-// ---------------------------------------------------------------------------
-// Bookmarks (richer format matching the old Nautilus-style sidebar)
-// ---------------------------------------------------------------------------
 
 struct Bookmark {
     icon: &'static str,
@@ -68,10 +60,6 @@ const BOOKMARKS: &[Bookmark] = &[
     },
 ];
 
-// ---------------------------------------------------------------------------
-// Data model
-// ---------------------------------------------------------------------------
-
 struct FileEntry {
     name: String,
     is_directory: bool,
@@ -84,10 +72,6 @@ enum LoadState {
     Empty,
     Error,
 }
-
-// ---------------------------------------------------------------------------
-// FileManagerApp
-// ---------------------------------------------------------------------------
 
 pub struct FileManagerApp {
     current_path: PathBuf,
@@ -113,10 +97,6 @@ impl FileManagerApp {
         app.refresh();
         app
     }
-
-    // -----------------------------------------------------------------------
-    // Directory loading
-    // -----------------------------------------------------------------------
 
     fn refresh(&mut self) {
         self.entries.clear();
@@ -157,7 +137,6 @@ impl FileManagerApp {
             });
         }
 
-        // Sort: directories first, then alphabetical (case-insensitive)
         self.entries.sort_by(|a, b| {
             b.is_directory.cmp(&a.is_directory).then_with(|| {
                 a.name
@@ -172,10 +151,6 @@ impl FileManagerApp {
             LoadState::Ok
         };
     }
-
-    // -----------------------------------------------------------------------
-    // Navigation
-    // -----------------------------------------------------------------------
 
     fn navigate_to(&mut self, path: PathBuf) {
         self.history_back.push(self.current_path.clone());
@@ -223,10 +198,6 @@ impl FileManagerApp {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // View helpers -- sidebar
-    // -----------------------------------------------------------------------
-
     fn active_bookmark_index(&self) -> Option<usize> {
         let path_str = self.current_path.to_string_lossy();
         BOOKMARKS.iter().position(|bm| path_str == bm.path)
@@ -235,7 +206,6 @@ impl FileManagerApp {
     fn build_sidebar(&self) -> Node<FileMsg> {
         let active_idx = self.active_bookmark_index();
 
-        // "Places" heading
         let heading = Node::Padding {
             padding: EdgeInsets::new(6, 8, 2, 8),
             child: Box::new(Node::StyledLabel {
@@ -245,7 +215,6 @@ impl FileManagerApp {
             }),
         };
 
-        // Bookmark entries as a ListView with styled content
         let items: Vec<Node<FileMsg>> = BOOKMARKS
             .iter()
             .enumerate()
@@ -257,7 +226,6 @@ impl FileManagerApp {
                     theme::FM_SIDEBAR_TEXT
                 };
 
-                // "icon  label" as HStack with colored icon + label
                 Node::Padding {
                     padding: EdgeInsets::new(0, 10, 0, 4),
                     child: Box::new(Node::HStack {
@@ -287,7 +255,6 @@ impl FileManagerApp {
             items,
         };
 
-        // Wrap in a SizedBox to fix width, with the dark sidebar background
         Node::SizedBox {
             width: Some(Length::Px(theme::FM_SIDEBAR_WIDTH)),
             height: None,
@@ -302,12 +269,7 @@ impl FileManagerApp {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // View helpers -- navigation bar
-    // -----------------------------------------------------------------------
-
     fn build_navbar(&self) -> Node<FileMsg> {
-        // Path breadcrumb with truncation from left
         let path_str = self.current_path.display().to_string();
         let display_path = if path_str.len() > 50 {
             let start = path_str.len() - 47;
@@ -356,10 +318,6 @@ impl FileManagerApp {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // View helpers -- file list rows
-    // -----------------------------------------------------------------------
-
     fn build_file_row(&self, entry: &FileEntry) -> Vec<Node<FileMsg>> {
         let (name_text, name_color) = if entry.is_directory {
             (format!("[D] {}", entry.name), theme::FM_DIR_COLOR)
@@ -386,10 +344,6 @@ impl FileManagerApp {
             },
         ]
     }
-
-    // -----------------------------------------------------------------------
-    // View helpers -- main content area
-    // -----------------------------------------------------------------------
 
     fn build_content(&self) -> Node<FileMsg> {
         let content_node = match self.load_state {
@@ -450,10 +404,6 @@ impl FileManagerApp {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // View helpers -- status bar
-    // -----------------------------------------------------------------------
-
     fn build_status_bar(&self) -> Node<FileMsg> {
         let text = match self.load_state {
             LoadState::Error => String::from("Error"),
@@ -499,10 +449,6 @@ impl FileManagerApp {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Size formatting
-// ---------------------------------------------------------------------------
-
 fn format_size(size: u32) -> String {
     if size < 1024 {
         format!("{} B", size)
@@ -513,10 +459,6 @@ fn format_size(size: u32) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// App trait implementation
-// ---------------------------------------------------------------------------
-
 impl App for FileManagerApp {
     type Message = FileMsg;
 
@@ -525,11 +467,8 @@ impl App for FileManagerApp {
             spacing: 0,
             align: CrossAxisAlignment::Stretch,
             children: vec![
-                // Sidebar (fixed width via SizedBox, dark background)
                 self.build_sidebar(),
-                // Vertical separator between sidebar and content
                 Node::Divider,
-                // Main content area (expanded to fill remaining space)
                 Node::Expand {
                     weight: 1,
                     child: Box::new(Node::VStack {
@@ -562,7 +501,7 @@ impl App for FileManagerApp {
                 Action::Rebuild
             }
             FileMsg::FileSelect(idx) => {
-                // Click on already-selected row = double-click -> open directory
+                // Re-selecting the selected row is the double-click gesture.
                 if self.selected == Some(idx) {
                     self.open_selected();
                 } else {
@@ -601,10 +540,6 @@ impl App for FileManagerApp {
         "org.slopos.files"
     }
 }
-
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
 
 pub fn file_manager_main() -> ! {
     let app = FileManagerApp::new();

@@ -1,35 +1,17 @@
 //! HHDM page-IO byte fill / verify helpers for kernel mm tests.
 //!
-//! The mm/src/tests/* suites paint a known byte pattern across a freshly
-//! mapped page (via the HHDM virtual address returned by the page allocator
-//! or COW path), then read it back to verify the underlying physical page
-//! is the one they expected. Today every site does the painting via
-//! `unsafe { *ptr.add(i) = ... }` or `unsafe { core::ptr::write_bytes(...) }`;
-//! these helpers fold the unsafe into one place per primitive.
-//!
-//! All helpers take a raw `*mut u8` / `*const u8`. Callers obtain the
-//! pointer from `VirtAddr::as_mut_ptr::<u8>()` or equivalent. The
-//! contract on every helper:
-//!
-//! - `ptr` is valid for reads (and writes, for the write helpers) of
-//!   `len` consecutive bytes,
-//! - the caller has exclusive access for the duration of the call
-//!   (single-threaded mm-test idiom on BSP).
-//!
-//! Volatile variants exist for the cases where the test deliberately
-//! exercises non-cacheable / dual-mapped views.
+//! The contract on every helper: `ptr` is valid for reads (and writes, for the
+//! write helpers) of `len` consecutive bytes, and the caller has exclusive
+//! access for the duration of the call.
 
 use crate::util::ptr_buf;
 
-/// Fill `len` bytes starting at `ptr` with `byte`.
 #[inline]
 pub fn fill_pattern(ptr: *mut u8, byte: u8, len: usize) {
     ptr_buf::with_buf_mut(ptr, len, |slice: &mut [u8]| slice.fill(byte));
 }
 
-/// Verify every byte in `[ptr, ptr+len)` equals `byte`. Returns the
-/// offset of the first mismatching byte, or `None` if the whole range
-/// matches.
+/// Returns the offset of the first byte that is not `byte`, or `None`.
 #[inline]
 pub fn verify_pattern(ptr: *const u8, byte: u8, len: usize) -> Option<usize> {
     ptr_buf::with_buf(ptr, len, |slice: &[u8]| {
@@ -37,7 +19,6 @@ pub fn verify_pattern(ptr: *const u8, byte: u8, len: usize) -> Option<usize> {
     })
 }
 
-/// Fill `len` bytes starting at `ptr` with `f(i)` for `i` in `0..len`.
 #[inline]
 pub fn fill_indexed(ptr: *mut u8, len: usize, f: impl Fn(usize) -> u8) {
     ptr_buf::with_buf_mut(ptr, len, |slice: &mut [u8]| {
@@ -47,8 +28,7 @@ pub fn fill_indexed(ptr: *mut u8, len: usize, f: impl Fn(usize) -> u8) {
     });
 }
 
-/// Verify every byte at offset `i` in `[ptr, ptr+len)` equals `f(i)`.
-/// Returns the offset of the first mismatching byte, or `None`.
+/// Returns the offset of the first byte that is not `f(i)`, or `None`.
 #[inline]
 pub fn verify_indexed(ptr: *const u8, len: usize, f: impl Fn(usize) -> u8) -> Option<usize> {
     ptr_buf::with_buf(ptr, len, |slice: &[u8]| {
@@ -59,7 +39,7 @@ pub fn verify_indexed(ptr: *const u8, len: usize, f: impl Fn(usize) -> u8) -> Op
     })
 }
 
-/// Write a single byte at `ptr + offset`. Non-volatile.
+/// Non-volatile.
 #[inline]
 pub fn write_byte(ptr: *mut u8, offset: usize, byte: u8) {
     // SAFETY: caller upholds module-level contract; one-byte write.
@@ -68,16 +48,15 @@ pub fn write_byte(ptr: *mut u8, offset: usize, byte: u8) {
     }
 }
 
-/// Read a single byte at `ptr + offset`. Non-volatile.
+/// Non-volatile.
 #[inline]
 pub fn read_byte(ptr: *const u8, offset: usize) -> u8 {
     // SAFETY: caller upholds module-level contract; one-byte read.
     unsafe { ptr.add(offset).read() }
 }
 
-/// Volatile fill — used by the physical-memory-pattern mm tests that
-/// must defeat compiler load elision when reading back via the HHDM
-/// alias.
+/// For tests that must defeat compiler load elision when reading back through
+/// the HHDM alias.
 #[inline]
 pub fn fill_volatile(ptr: *mut u8, byte: u8, len: usize) {
     for i in 0..len {
@@ -89,7 +68,6 @@ pub fn fill_volatile(ptr: *mut u8, byte: u8, len: usize) {
     }
 }
 
-/// Volatile single-byte write at `ptr + offset`.
 #[inline]
 pub fn write_volatile_byte(ptr: *mut u8, offset: usize, byte: u8) {
     // SAFETY: caller upholds module-level contract.
@@ -98,16 +76,14 @@ pub fn write_volatile_byte(ptr: *mut u8, offset: usize, byte: u8) {
     }
 }
 
-/// Volatile single-byte read at `ptr + offset`.
 #[inline]
 pub fn read_volatile_byte(ptr: *const u8, offset: usize) -> u8 {
     // SAFETY: caller upholds module-level contract.
     unsafe { ptr.add(offset).read_volatile() }
 }
 
-/// Bulk write of `byte` across `len` bytes via `core::ptr::write_bytes`.
-/// Equivalent in effect to [`fill_pattern`] but emits the compiler's
-/// builtin memset path (single `rep stosb` on x86_64).
+/// Equivalent in effect to [`fill_pattern`], but emits the compiler's builtin
+/// memset path (single `rep stosb` on x86_64).
 #[inline]
 pub fn write_bytes(ptr: *mut u8, byte: u8, len: usize) {
     // SAFETY: caller upholds module-level contract.

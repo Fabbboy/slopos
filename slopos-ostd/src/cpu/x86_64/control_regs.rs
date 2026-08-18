@@ -1,12 +1,9 @@
 //! Control register access (CR0, CR2, CR3, CR4) with type-safe bitflags.
 //!
-//! Host build behaviour (`cfg(not(target_os = "none"))`, including
-//! `cargo miri test`): each register is backed by a static `AtomicU64`
-//! so reads observe prior writes; the actual `mov cr*` / `stac` /
-//! `clac` / `xgetbv` / `xsetbv` instructions are skipped. This is
-//! sufficient for Miri's purposes — the tests in `mm/` and `sync/`
-//! that are the focus of Phase 1B do not depend on real control-
-//! register semantics.
+//! Host builds (`cfg(not(target_os = "none"))`, including `cargo miri
+//! test`) back each register with a static `AtomicU64` so reads observe
+//! prior writes; the `mov cr*` / `stac` / `clac` / `xgetbv` / `xsetbv`
+//! instructions are skipped.
 
 use bitflags::bitflags;
 #[allow(unused_imports)]
@@ -24,10 +21,6 @@ static MOCK_CR3: AtomicU64 = AtomicU64::new(0);
 static MOCK_CR4: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(target_os = "none"))]
 static MOCK_XCR0: AtomicU64 = AtomicU64::new(0x1); // x87 bit is hardware-forced to 1.
-
-// =============================================================================
-// CR0
-// =============================================================================
 
 bitflags! {
     /// Flags for the CR0 control register.
@@ -96,10 +89,6 @@ pub fn write_cr0_flags(flags: Cr0Flags) {
     write_cr0(flags.bits());
 }
 
-// =============================================================================
-// CR2 (page fault linear address, read-only)
-// =============================================================================
-
 #[inline(always)]
 pub fn read_cr2() -> u64 {
     #[cfg(target_os = "none")]
@@ -116,10 +105,6 @@ pub fn read_cr2() -> u64 {
         0
     }
 }
-
-// =============================================================================
-// CR3 (page directory base)
-// =============================================================================
 
 #[inline(always)]
 pub fn read_cr3() -> u64 {
@@ -148,10 +133,6 @@ pub fn write_cr3(value: u64) {
         MOCK_CR3.store(value, Ordering::Relaxed);
     }
 }
-
-// =============================================================================
-// CR4
-// =============================================================================
 
 bitflags! {
     /// Flags for the CR4 control register.
@@ -274,10 +255,6 @@ pub const CR4_SMEP: u64 = Cr4Flags::SMEP.bits();
 pub const CR4_SMAP: u64 = Cr4Flags::SMAP.bits();
 pub const CR4_PKE: u64 = Cr4Flags::PKE.bits();
 
-// =============================================================================
-// RFLAGS.AC helpers (SMAP)
-// =============================================================================
-
 /// Set `RFLAGS.AC` via `STAC`, allowing supervisor-mode code to access
 /// user pages while SMAP (CR4.SMAP) is enabled.
 ///
@@ -289,11 +266,9 @@ pub const CR4_PKE: u64 = Cr4Flags::PKE.bits();
 /// clac();
 /// ```
 ///
-/// Hardware clears `AC` on exception/interrupt entry, so a page fault
-/// during the windowed region cannot leak SMAP-disabled state back to
-/// unrelated code — on `iretq`, the saved `RFLAGS` restores the prior
-/// `AC` value. Callers are still responsible for pairing every `stac`
-/// with a `clac` on the success path.
+/// Hardware clears `AC` on exception entry and `iretq` restores it, so a
+/// fault inside the window cannot leak SMAP-disabled state; the caller must
+/// still pair every `stac` with a `clac` on the success path.
 #[inline(always)]
 pub fn stac() {
     #[cfg(target_os = "none")]
@@ -311,16 +286,9 @@ pub fn clac() {
     }
 }
 
-// =============================================================================
-// XCR0 (Extended Control Register 0) — XSAVE feature enable mask
-// =============================================================================
-
 bitflags! {
-    /// Feature-enable bits for the Extended Control Register 0 (XCR0).
-    ///
-    /// XCR0 controls which processor state components are managed by the
-    /// XSAVE/XRSTOR family of instructions.  Writing to XCR0 requires
-    /// `CR4.OSXSAVE` to be set first (see [`Cr4Flags::OSXSAVE`]).
+    /// Feature-enable bits for the Extended Control Register 0 (XCR0): the
+    /// processor state components XSAVE/XRSTOR manage.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Xcr0Flags: u64 {
         /// x87 FPU state (always set — hardware enforces bit 0 = 1).
@@ -348,10 +316,9 @@ bitflags! {
 
 /// Witness that `CR4.OSXSAVE` is set on the current CPU.
 ///
-/// `XGETBV`/`XSETBV` raise `#UD` when it is clear, which is a fault in the
-/// trusted core caused by an ordinary safe call elsewhere — so the bit is a
-/// token rather than a doc paragraph. Both mint paths establish it for real:
-/// [`enable`](Osxsave::enable) sets it, [`probe`](Osxsave::probe) observes it.
+/// `XGETBV`/`XSETBV` raise `#UD` when it is clear. Both mint paths establish
+/// it for real: [`enable`](Osxsave::enable) sets it, [`probe`](Osxsave::probe)
+/// observes it.
 ///
 /// `!Send`/`!Sync`, because `CR4` is per-CPU: a witness taken on a CPU that
 /// has enabled XSAVE says nothing about one that has not yet reached its
@@ -369,9 +336,8 @@ impl Osxsave {
 
     /// Witness the bit if it is already set on this CPU, else `None`.
     ///
-    /// For code that must not change control-register state — conformance
-    /// tests, diagnostics — and that would otherwise have to assert the bit
-    /// informally before reading XCR0.
+    /// For code that must not change control-register state: conformance
+    /// tests, diagnostics.
     #[inline]
     pub fn probe() -> Option<Self> {
         ((read_cr4() & Cr4Flags::OSXSAVE.bits()) != 0).then_some(Self(PhantomData))
@@ -381,9 +347,8 @@ impl Osxsave {
 /// An XCR0 value this CPU will actually accept.
 ///
 /// `XSETBV` raises `#GP` on a value with bit 0 clear or with any bit the CPU
-/// does not report in `CPUID.0Dh:EAX|(EDX << 32)`. [`new`](Xcr0Mask::new)
-/// checks both against the CPU it runs on, so the obligation is discharged
-/// where the value is built rather than asserted where it is written.
+/// does not report in `CPUID.0Dh:EAX|(EDX << 32)`; [`new`](Xcr0Mask::new)
+/// checks both, so the obligation is discharged where the value is built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Xcr0Mask(Xcr0Flags);
 
@@ -469,7 +434,6 @@ pub fn xcr0_write(_osxsave: &Osxsave, mask: Xcr0Mask) {
     }
 }
 
-// Legacy-style constants for XCR0 bits (match CR0_*/CR4_* naming convention).
 pub const XCR0_X87: u64 = Xcr0Flags::X87.bits();
 pub const XCR0_SSE: u64 = Xcr0Flags::SSE.bits();
 pub const XCR0_AVX: u64 = Xcr0Flags::AVX.bits();

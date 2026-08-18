@@ -1,11 +1,7 @@
-//! Terminal VT interpreter — a userland port of the kernel vconsole's pure
-//! grid logic, driven by the `slopos-vt` parser.
-//!
-//! Holds a `Cell` grid, ANSI color tables (standard 8 + bright 8 + 256-color),
-//! cursor attributes, alt-screen, scroll region, and a scrollback ring. All
-//! kernel-isms (framebuffer blits, atlas globals, dirty bitmasks, SpinLock
-//! statics) are gone: this module owns terminal *state* only; `render.rs`
-//! reads the grid and paints the surface.
+//! Terminal VT interpreter driven by the `slopos-vt` parser: a `Cell` grid,
+//! ANSI color tables (standard 8 + bright 8 + 256-color), cursor attributes,
+//! alt-screen, scroll region, and a scrollback ring. Terminal *state* only —
+//! the renderer reads the grid and paints the surface.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -29,10 +25,6 @@ const SCROLLBACK_LINES: usize = 1000;
 
 /// Continuation marker for the right half of a double-width character.
 const CONTINUATION_CODEPOINT: u32 = 0xFFFF_FFFF;
-
-// ---------------------------------------------------------------------------
-// ANSI color tables (standard 8 + bright 8)
-// ---------------------------------------------------------------------------
 
 const ANSI_COLORS: [u32; 8] = [
     0x0000_0000, // Black
@@ -76,10 +68,6 @@ fn color256_to_rgb(idx: u8) -> u32 {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Per-cell and cursor attribute types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct CellAttributes {
@@ -330,10 +318,6 @@ impl CursorAttributes {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Scrollback ring
-// ---------------------------------------------------------------------------
-
 struct ScrollbackBuf {
     buf: Vec<Cell>,
     /// Per-ring-slot soft-wrap bit, aligned to `head`/`count` exactly like
@@ -473,10 +457,6 @@ impl ScrollbackBuf {
         self.view_offset = 0;
     }
 }
-
-// ---------------------------------------------------------------------------
-// Width reflow
-// ---------------------------------------------------------------------------
 
 /// Result of a [`TerminalGrid::resize`]: whether a width reflow occurred, so
 /// the caller knows to apply the in-place anchor remap to its selection.
@@ -657,10 +637,6 @@ impl<'a> Reflow<'a> {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Terminal grid state
-// ---------------------------------------------------------------------------
 
 pub struct TerminalGrid {
     pub cursor_row: u16,
@@ -902,10 +878,6 @@ impl TerminalGrid {
         self.bracketed_paste
     }
 
-    // -----------------------------------------------------------------------
-    // Local scrollback control (Shift+PgUp / Shift+PgDn).
-    // -----------------------------------------------------------------------
-
     pub fn scroll_view_up(&mut self, lines: usize) {
         let before = self.scrollback.view_offset;
         self.scrollback.scroll_up(lines);
@@ -921,10 +893,6 @@ impl TerminalGrid {
             self.damage_all();
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Resize
-    // -----------------------------------------------------------------------
 
     /// Resize the grid to `rows`×`cols`.
     ///
@@ -1227,10 +1195,6 @@ impl TerminalGrid {
             self.saved_cursor_row = self.rows.saturating_sub(1);
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Byte processing
-    // -----------------------------------------------------------------------
 
     pub fn process_byte(&mut self, b: u8) {
         // Any live output cancels a scrollback view so new text is visible.

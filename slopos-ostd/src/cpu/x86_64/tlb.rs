@@ -1,22 +1,18 @@
 //! TLB and cache management instructions.
 //!
-//! On `target_os = "none"` (the real kernel build) these issue the
-//! corresponding x86_64 instructions. On host builds — including
-//! `cargo miri test` — they are no-ops, since the host process has
-//! no TLB or cache hierarchy that the OSTD model is responsible for.
+//! Outside `target_os = "none"` — host and `cargo miri test` builds — they
+//! are no-ops.
 
 use super::control_regs::{read_cr3, write_cr3};
 #[allow(unused_imports)]
 use core::arch::asm;
 
-/// Flush the entire TLB by reloading CR3.
 #[inline(always)]
 pub fn flush_tlb_all() {
     let cr3 = read_cr3();
     write_cr3(cr3);
 }
 
-/// Invalidate TLB entry for a single virtual address.
 #[inline(always)]
 pub fn invlpg(vaddr: u64) {
     #[cfg(target_os = "none")]
@@ -29,7 +25,6 @@ pub fn invlpg(vaddr: u64) {
     }
 }
 
-/// Write-back and invalidate all cache lines.
 #[inline(always)]
 pub fn wbinvd() {
     #[cfg(target_os = "none")]
@@ -45,16 +40,13 @@ struct InvpcidDescriptor {
     linear: u64,
 }
 
-/// Issue `INVPCID` with the given type, PCID, and linear address.
+/// SDM Vol 2A §3.2 "INVPCID" types:
+///   - 0: individual address invalidation within `pcid`
+///   - 1: single-context invalidation (non-globals for `pcid`)
+///   - 2: all-context invalidation including globals
+///   - 3: all-context invalidation excluding globals
 ///
-/// SDM Vol 2A §3.2 "INVPCID":
-///   - type 0: individual address invalidation within `pcid`
-///   - type 1: single-context invalidation (non-globals for `pcid`)
-///   - type 2: all-context invalidation including globals
-///   - type 3: all-context invalidation excluding globals
-///
-/// Caller must have already gated on CPUID-leaf availability (e.g.
-/// the `invpcid_available()` check in `mm/src/mmu/asid.rs`).
+/// Caller must have already gated on CPUID-leaf availability.
 #[inline(always)]
 pub fn invpcid(kind: u64, pcid: u16, linear: u64) {
     #[cfg(target_os = "none")]
@@ -75,7 +67,7 @@ pub fn invpcid(kind: u64, pcid: u16, linear: u64) {
     #[cfg(not(target_os = "none"))]
     {
         let _ = (kind, pcid, linear);
-        // Keep the InvpcidDescriptor type "used" so dead_code lints stay quiet.
+        // Keeps InvpcidDescriptor off the dead_code path on host builds.
         let _ = core::mem::size_of::<InvpcidDescriptor>();
     }
 }

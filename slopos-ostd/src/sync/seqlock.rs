@@ -1,24 +1,7 @@
 //! Sequence lock for read-dominated data.
 //!
-//! A `SeqLock<T>` allows any number of concurrent readers with **zero
-//! synchronization overhead** (no atomics, no locks on the read path beyond a
-//! sequence-counter check). Writers are exclusive and rare.
-//!
-//! # How it works
-//!
-//! A monotonically-increasing sequence counter tracks writer activity:
-//! - **Even** → data is stable, readers may proceed.
-//! - **Odd**  → a writer is mid-update, readers must retry.
-//!
-//! Writers acquire a spinlock for mutual exclusion (the sequence counter
-//! alone does NOT exclude concurrent writers on SMP), then bump the counter
-//! to odd. On exit, the counter goes even and the spinlock is released.
-//!
-//! # When to use
-//!
-//! - Data is small and `Copy` (read via register-width loads).
-//! - Reads vastly outnumber writes.
-//! - Readers can tolerate retrying on the rare writer race.
+//! Readers take no lock: they sample an even sequence counter, copy the
+//! value, and retry if the counter moved. Writers are exclusive and rare.
 
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
@@ -27,16 +10,13 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering, fence};
 use crate::cpu::preempt::PreemptGuard;
 use crate::cpu::x86_64 as cpu;
 
-/// A sequence lock protecting a small `Copy` value.
-///
-/// Writers are mutually exclusive via an internal spinlock (SMP-safe).
-/// Readers are wait-free in the uncontended case and retry only when
-/// racing with a writer.
+/// A sequence lock protecting a small `Copy` value. Readers are wait-free in
+/// the uncontended case and retry only when racing with a writer.
 pub struct SeqLock<T> {
     /// Monotonic sequence counter. Even = stable, odd = write in progress.
     seq: AtomicU32,
-    /// Writer mutual exclusion. The sequence counter alone does NOT prevent
-    /// two CPUs from writing simultaneously — this spinlock does.
+    /// Writer mutual exclusion: the sequence counter alone does not stop two
+    /// CPUs writing simultaneously on SMP.
     writer_lock: AtomicBool,
     data: UnsafeCell<T>,
 }
@@ -54,7 +34,6 @@ pub struct SeqLockWriteGuard<'a, T: Copy> {
 }
 
 impl<T: Copy> SeqLock<T> {
-    /// Create a new sequence lock with the given initial value.
     #[inline]
     pub const fn new(data: T) -> Self {
         Self {
@@ -64,10 +43,8 @@ impl<T: Copy> SeqLock<T> {
         }
     }
 
-    /// Read a consistent snapshot of the protected value.
-    ///
-    /// **Lock-free** in the uncontended case. If a writer is active,
-    /// the reader retries with a spin-loop hint.
+    /// Read a consistent snapshot of the protected value, retrying while a
+    /// writer is active.
     #[inline]
     pub fn read(&self) -> T {
         loop {
@@ -92,11 +69,8 @@ impl<T: Copy> SeqLock<T> {
         }
     }
 
-    /// Acquire exclusive write access.
-    ///
-    /// Disables IRQs and preemption, acquires the writer spinlock, then
-    /// bumps the sequence counter to odd. The returned guard provides
-    /// `&mut T` access and restores state on drop.
+    /// Acquire exclusive write access. IRQs and preemption stay disabled
+    /// until the returned guard drops.
     #[inline]
     pub fn write_lock(&self) -> SeqLockWriteGuard<'_, T> {
         let preempt = PreemptGuard::new();
@@ -112,7 +86,6 @@ impl<T: Copy> SeqLock<T> {
             }
         }
 
-        // Bump sequence to odd → readers will retry.
         self.seq.fetch_add(1, Ordering::Release);
 
         SeqLockWriteGuard {
@@ -122,7 +95,7 @@ impl<T: Copy> SeqLock<T> {
         }
     }
 
-    /// Read the raw sequence counter (for debugging / stats).
+    /// The raw sequence counter, for debugging and stats.
     #[inline]
     pub fn sequence(&self) -> u32 {
         self.seq.load(Ordering::Relaxed)
@@ -130,7 +103,6 @@ impl<T: Copy> SeqLock<T> {
 }
 
 impl<'a, T: Copy> SeqLockWriteGuard<'a, T> {
-    /// Get a mutable reference to the protected data.
     #[inline]
     pub fn get_mut(&mut self) -> &mut T {
         // SAFETY: we hold writer_lock; no concurrent reader can observe a
@@ -138,7 +110,6 @@ impl<'a, T: Copy> SeqLockWriteGuard<'a, T> {
         unsafe { &mut *self.lock.data.get() }
     }
 
-    /// Overwrite the protected data entirely.
     #[inline]
     pub fn write(&mut self, value: T) {
         // SAFETY: see `get_mut`.
@@ -149,13 +120,12 @@ impl<'a, T: Copy> SeqLockWriteGuard<'a, T> {
 impl<T: Copy> Drop for SeqLockWriteGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
-        // Bump sequence to even → readers will see stable data.
         self.lock.seq.fetch_add(1, Ordering::Release);
 
-        // Release writer spinlock.
         self.lock.writer_lock.store(false, Ordering::Release);
 
-        // Restore IRQs. _preempt drops after this, possibly triggering reschedule.
+        // `_preempt` drops after this, so any reschedule it triggers runs with
+        // the caller's IRQ state already restored.
         cpu::restore_flags(self.saved_flags);
     }
 }

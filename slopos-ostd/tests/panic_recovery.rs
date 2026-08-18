@@ -1,18 +1,8 @@
 //! Host-side tests for `slopos_ostd::sync::panic_recovery`.
 //!
-//! `poison_all_held_locks() -> !` halts forever via `cli; hlt`, so we
-//! can't invoke it directly under `cargo test`. Instead the tests
-//! exercise the load-bearing primitive the wrapper builds on:
-//! `lock_tracking::poison_unlock_all_held()`. The wrapper's halt-suffix
-//! is verified at the type-system level (the signature is
-//! `pub fn poison_all_held_locks() -> !`).
-//!
-//! Coverage: at least two locks pushed onto the per-CPU held-lock
-//! stack, both observed by the poison-walk, and the stack rewound to
-//! depth 0. Mirrors the acceptance floor of "≥ 2 held locks across
-//! CPUs" — host-side we use one CPU (slot 0) since the per-CPU register
-//! isn't installed in user-space, but the walk-and-poison invariant
-//! is the same shape as the kernel-side panic recovery.
+//! `poison_all_held_locks() -> !` halts forever, so these exercise the
+//! primitive it builds on, `lock_tracking::poison_unlock_all_held()`, and
+//! pin the wrapper's signature at the type level.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use slopos_ostd::lock_class;
@@ -23,14 +13,10 @@ use slopos_ostd::sync::lock_tracking::{
     push_lock,
 };
 
-/// Serialises every test that touches the per-CPU held-lock stack.
-/// `cargo test` parallelises `#[test]` items by default; the per-CPU
-/// stack is process-global on host so concurrent pushes from
-/// independent tests would interleave and confuse the depth checks.
+/// Serialises every test that touches the per-CPU held-lock stack: it is
+/// process-global on host, and `cargo test` runs tests in parallel.
 static LOCK_LOCK: Mutex<()> = Mutex::new(());
 
-// Counters incremented by the synthetic poison callbacks so the
-// walk-order invariant can be checked from outside.
 static POISON_A_COUNT: AtomicUsize = AtomicUsize::new(0);
 static POISON_B_COUNT: AtomicUsize = AtomicUsize::new(0);
 static LAST_POISON: AtomicUsize = AtomicUsize::new(0);
@@ -48,20 +34,15 @@ unsafe fn poison_b(_addr: *const ()) {
     LAST_POISON.store(TAG_B, Ordering::Relaxed);
 }
 
-/// Reset the lock-tracking state between tests. `enable_lock_tracking`
-/// only flips an atomic; the per-CPU slot is process-global so we
-/// drain it manually.
+/// Drain the process-global per-CPU slot between tests;
+/// `enable_lock_tracking` only flips an atomic.
 fn reset_held_stack() {
-    // Drain whatever's there from prior tests by popping until empty.
-    // Each pop is keyed by the synthetic addresses we registered.
     while held_lock_count() > 0 {
         unsafe {
             pop_lock(core::ptr::without_provenance::<()>(0x1));
             pop_lock(core::ptr::without_provenance::<()>(0x2));
             pop_lock(core::ptr::without_provenance::<()>(0x3));
         }
-        // Safety net: if the held entries weren't ours, do a
-        // poison-walk to clear them.
         if held_lock_count() > 0 {
             unsafe {
                 poison_unlock_all_held();
@@ -93,13 +74,10 @@ fn poison_walk_fires_each_held_lock_callback() {
         poison_unlock_all_held();
     }
 
-    // Both poison fns must have fired exactly once each.
     assert_eq!(POISON_A_COUNT.load(Ordering::Relaxed), 1);
     assert_eq!(POISON_B_COUNT.load(Ordering::Relaxed), 1);
-    // The walk runs in reverse (innermost lock first) so B fires
-    // before A; the last-poison tag is A.
+    // The walk runs innermost-first, so B fires before A.
     assert_eq!(LAST_POISON.load(Ordering::Relaxed), TAG_A);
-    // The stack must be empty after the walk.
     assert_eq!(held_lock_count(), 0);
 }
 
@@ -120,11 +98,7 @@ fn poison_walk_empty_stack_is_noop() {
 
 #[test]
 fn poison_all_held_locks_signature_is_never_returning() {
-    // Type-level assertion that the safe wrapper has the documented
-    // `-> !` signature. The function is exposed at the sync module
-    // root via the re-export in `slopos-ostd/src/sync/mod.rs`. We
-    // never invoke it under cargo test (it halts forever via `cli;
-    // hlt` on x86_64 / `spin_loop` on host) — pinning the signature
-    // here protects against accidental return-type drift.
+    // Never invoked: it halts forever. Pinning the type catches
+    // return-type drift.
     let _: fn() -> ! = slopos_ostd::sync::poison_all_held_locks;
 }

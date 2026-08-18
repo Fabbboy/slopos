@@ -315,7 +315,7 @@ mod tests {
         assert!(r.contains(0x3F8, 1));
         assert!(r.contains(0x3FF, 1));
         assert!(r.contains(0x3FE, 2));
-        assert!(!r.contains(0x3FF, 2)); // 0x3FF + 2 = 0x401 > 0x400
+        assert!(!r.contains(0x3FF, 2));
         assert!(!r.contains(0x400, 1));
     }
 
@@ -334,7 +334,6 @@ mod tests {
             start: 0xFFF0,
             end: 0xFFFF,
         };
-        // u16::MAX + 1 access overflows -> reject
         assert!(!r.contains(0xFFFE, 4));
     }
 

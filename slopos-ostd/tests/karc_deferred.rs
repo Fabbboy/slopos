@@ -5,22 +5,15 @@
 //! These back the task graveyard: a task's final reference may be released in a
 //! context where the allocator-heavy destructor must not run (interrupts off, a
 //! lock held, or on the dying task's own stack), so releasing the reference and
-//! destroying the allocation become separate steps.
+//! destroying the allocation are separate steps.
 //!
-//! The load-bearing property is that *finality is decided by the decrement*,
-//! never by reading the count beforehand. A `strong_count == 1` pre-check is
-//! racy — two holders can both observe two and both then drop — so the graveyard
-//! could not rely on one. Here that shows up as: across racing releasers exactly
-//! one gets `Some`, and it uniquely owns the allocation.
+//! Finality is decided by the decrement, never by a racy `strong_count == 1`
+//! pre-check: across racing releasers exactly one gets `Some`, and it uniquely
+//! owns the allocation.
 //!
-//! The racing tests use a plain `Send` payload rather than `TaskInner`, which is
-//! `!Send` by design (raw-pointer fields; in the kernel it crosses CPUs only
-//! through the audited placement primitives). The property under test belongs to
-//! the generic refcount, not to any one payload.
-//!
-//! Note `just check-miri` runs with `-Zmiri-ignore-leaks`, so a *leaked*
-//! allocation is invisible here — every test asserts destructor counts
-//! explicitly. A double destroy is a double free, which Miri does catch.
+//! The racing tests use a plain `Send` payload because `TaskInner` is `!Send`;
+//! the property belongs to the generic refcount. `just check-miri` runs with
+//! `-Zmiri-ignore-leaks`, so every test asserts destructor counts explicitly.
 
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -49,8 +42,6 @@ fn counted() -> (KArc<DropCounter>, StdArc<AtomicUsize>) {
     (arc, drops)
 }
 
-/// A release with another handle outstanding is not final and must not destroy;
-/// the final one reports itself and destroys only on `destroy_deferred`.
 #[test]
 fn release_is_deferred_until_destroy() {
     let (arc, drops) = counted();
@@ -74,7 +65,6 @@ fn release_is_deferred_until_destroy() {
     assert_eq!(drops.load(Ordering::Acquire), 1);
 }
 
-/// The split must be observationally identical to dropping the `KArc`.
 #[test]
 fn split_release_matches_plain_drop() {
     let (arc, via_drop) = counted();
@@ -104,9 +94,8 @@ fn parked_pointer_matches_as_ptr() {
     unsafe { KArc::destroy_deferred_for_test(node) };
 }
 
-/// Two threads racing the last two references: exactly one is told it won, and
-/// the destructor runs exactly once. This is the property the graveyard's
-/// single-pusher assumption rests on.
+/// The property the graveyard's single-pusher assumption rests on: racing the
+/// last two references, exactly one releaser is told it won.
 #[test]
 fn exactly_one_racing_releaser_wins() {
     for _ in 0..ROUNDS {
@@ -137,9 +126,9 @@ fn exactly_one_racing_releaser_wins() {
     }
 }
 
-/// A weak upgrade racing the final release must never resurrect a value whose
+/// An upgrade racing the final release must never resurrect a value whose
 /// strong count already hit zero, and a winning upgrade must keep the release
-/// non-final. Either way the value is destroyed exactly once and never leaks.
+/// non-final.
 #[test]
 fn upgrade_never_races_past_the_final_release() {
     for _ in 0..ROUNDS {
@@ -159,9 +148,9 @@ fn upgrade_never_races_past_the_final_release() {
         let upgraded = weak.upgrade();
 
         match (releaser.join().expect("releaser thread"), upgraded) {
-            // The upgrade lost: the releaser owned and destroyed it.
+            // Upgrade lost: the releaser owned and destroyed it.
             (true, None) => {}
-            // The upgrade won: it now holds the only reference.
+            // Upgrade won: it now holds the only reference.
             (false, Some(rescued)) => {
                 let node =
                     KArc::release_deferrable_for_test(rescued).expect("rescued handle is final");
@@ -181,8 +170,7 @@ fn upgrade_never_races_past_the_final_release() {
 }
 
 /// A weak handle keeps the allocation mapped after the strong side is gone, so
-/// the identity address stays readable for comparison and never upgrades. This
-/// is what lets the task registry answer "is this pointer one of mine?" without
+/// the task registry can answer "is this pointer one of mine?" without
 /// upgrading — an upgraded handle dropped under the registry lock could be the
 /// final reference and would run the destructor there.
 #[test]
@@ -206,15 +194,15 @@ fn weak_as_ptr_is_a_stable_comparison_token() {
     assert!(weak.upgrade().is_none(), "a dead weak never resurrects");
 }
 
-/// An empty weak handle has no referent and must report null rather than the
-/// sentinel address it stores internally.
+/// An empty weak handle must report null rather than the sentinel address it
+/// stores internally.
 #[test]
 fn empty_weak_as_ptr_is_null() {
     assert!(slopos_ostd::KWeak::<DropCounter>::new().as_ptr().is_null());
 }
 
 /// The task-typed wrappers are the surface `#![forbid(unsafe_code)]` crates
-/// drive; check they delegate faithfully for a real `TaskInner`.
+/// drive.
 #[test]
 fn task_wrappers_release_and_destroy_a_task() {
     let arc = KArc::try_new(TaskInner::<(), ()>::invalid()).expect("task allocation");

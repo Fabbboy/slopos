@@ -1,8 +1,7 @@
 //! nc -- SlopOS network Swiss army knife (UDP + TCP)
 //!
-//! Exercises the full socket lifecycle: socket() -> bind()/connect() -> send/recv -> shutdown().
-//! Supports UDP client and listen modes with half-duplex I/O, TCP client and
-//! listen (with `-k` keep-listening), and defaults to TCP.
+//! UDP client and listen modes with half-duplex I/O, TCP client and listen
+//! (with `-k` keep-listening); defaults to TCP.
 
 pub(super) mod ring_io;
 pub mod tcp;
@@ -13,10 +12,6 @@ use std::net::Ipv4Addr;
 
 use crate::syscall::{fs, process};
 use slopos_abi::syscall::LocalFlags;
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum NcMode {
@@ -30,7 +25,6 @@ enum NcProtocol {
     Tcp,
 }
 
-/// Parsed command-line configuration -- built once, never mutated.
 #[derive(Debug)]
 struct NcConfig {
     mode: NcMode,
@@ -52,23 +46,15 @@ enum NcError {
     UnknownFlag,
 }
 
-// ---------------------------------------------------------------------------
-// Stdin processing (raw mode)
-// ---------------------------------------------------------------------------
-
-/// Result of processing a single raw stdin character.
 pub(super) enum StdinResult {
-    /// No action needed.
     Continue,
     /// Line is ready: send `line_buf[..len]`, then reset `line_pos` to 0.
     SendLine(usize),
-    /// User requested exit (Ctrl+C or Ctrl+D).
     Quit,
 }
 
-/// Process one raw stdin byte: echo printable chars, handle backspace, detect
-/// Enter and Ctrl+C/D.  Caller is responsible for performing the actual network
-/// send when `SendLine` is returned and cleanup on `Quit`.
+/// Processes one raw stdin byte; the caller performs the network send on
+/// `SendLine` and the cleanup on `Quit`.
 pub(super) fn process_raw_stdin_char(
     c: u8,
     line_buf: &mut [u8; 1024],
@@ -76,7 +62,7 @@ pub(super) fn process_raw_stdin_char(
 ) -> StdinResult {
     let mut out = std::io::stdout().lock();
     match c {
-        // Ctrl+C / Ctrl+D -> quit
+        // Ctrl+C / Ctrl+D
         0x03 => {
             let _ = out.write_all(b"^C\n");
             let _ = out.flush();
@@ -122,11 +108,7 @@ pub(super) fn process_raw_stdin_char(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Verbose output helpers (stdout so the shell can capture them)
-// ---------------------------------------------------------------------------
-
-/// Print a verbose message: `nc: <msg>\n`.  Only emits output when verbose is on.
+/// Verbose output goes to stdout, not stderr, so the shell can capture it.
 fn verbose_msg(config: &NcConfig, msg: &str) {
     if !config.verbose {
         return;
@@ -159,10 +141,6 @@ fn verbose_recv(config: &NcConfig, count: usize, ip: [u8; 4], port: u16) {
         port
     );
 }
-
-// ---------------------------------------------------------------------------
-// Argument parsing
-// ---------------------------------------------------------------------------
 
 fn print_usage() {
     print!(
@@ -208,9 +186,7 @@ fn resolve_host(host: &[u8]) -> Result<[u8; 4], NcError> {
     crate::net::resolve_host_raw(host_str).map_err(NcError::Resolve)
 }
 
-/// Core argument parsing logic operating on clean Rust slices.
-///
-/// The first element (`args[0]`) is the program name and is skipped.
+/// `args[0]` is the program name and is skipped.
 fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
     let mut udp = false;
     let mut listen = false;
@@ -221,7 +197,7 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
     let mut positional: [&[u8]; 2] = [&[], &[]];
     let mut pos_count = 0usize;
 
-    let mut i = 1usize; // skip argv[0]
+    let mut i = 1usize;
     while i < args.len() {
         let arg = args[i];
 
@@ -231,14 +207,12 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
         }
 
         if arg[0] == b'-' {
-            // Flag processing -- may contain bundled flags like -ulvk
             if arg == b"-h" || arg == b"--help" {
                 print_usage();
                 std::process::exit(0);
             }
 
             if arg == b"-p" {
-                // Next arg is port number
                 i += 1;
                 if i >= args.len() {
                     return Err(NcError::MissingPort);
@@ -252,7 +226,6 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
             }
 
             if arg == b"-w" {
-                // Next arg is timeout in seconds
                 i += 1;
                 if i >= args.len() {
                     return Err(NcError::InvalidPort); // reuse error for missing value
@@ -268,7 +241,6 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
                 continue;
             }
 
-            // Process bundled flags: -ulvk
             let mut j = 1usize;
             while j < arg.len() {
                 match arg[j] {
@@ -281,7 +253,6 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
                 j += 1;
             }
         } else {
-            // Positional argument
             if pos_count < 2 {
                 positional[pos_count] = arg;
                 pos_count += 1;
@@ -291,7 +262,6 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
         i += 1;
     }
 
-    // TCP is the default; -u switches to UDP
     let protocol = if udp {
         NcProtocol::Udp
     } else {
@@ -306,7 +276,6 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
 
     match mode {
         NcMode::Listen => {
-            // Listen mode: expect exactly one positional arg (port)
             if pos_count == 0 {
                 return Err(NcError::MissingPort);
             }
@@ -326,7 +295,6 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
             })
         }
         NcMode::Client => {
-            // Client mode: expect host + port
             if pos_count < 1 {
                 return Err(NcError::MissingHost);
             }
@@ -352,11 +320,6 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
-/// Main entry point for nc, called from the binary crate.
 pub fn nc_main(args: Vec<String>) -> ! {
     if args.len() <= 1 {
         print_usage();
@@ -391,7 +354,6 @@ pub fn nc_main(args: Vec<String>) -> ! {
         (NcProtocol::Tcp, NcMode::Listen) => tcp::tcp_listen(&config),
     };
 
-    // Restore terminal state before exiting.
     if let Some(ref t) = saved_termios {
         let _ = fs::tcsetattr(0, t);
     }
@@ -399,17 +361,9 @@ pub fn nc_main(args: Vec<String>) -> ! {
     std::process::exit(exit_code as i32);
 }
 
-// ---------------------------------------------------------------------------
-// Tests (argument parsing & helpers -- no kernel needed)
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -----------------------------------------------------------------------
-    // Helper function tests
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_parse_port_valid() {
@@ -429,10 +383,6 @@ mod tests {
         assert_eq!(parse_port("12a"), None);
         assert_eq!(parse_port("99999"), None);
     }
-
-    // -----------------------------------------------------------------------
-    // Argument parsing tests
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_tcp_is_default_protocol() {

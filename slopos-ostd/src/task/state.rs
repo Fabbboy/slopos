@@ -1,20 +1,13 @@
 //! Fused task lifecycle state.
 //!
-//! Part of the scheduler's wait/wake/block protocol: this fused word is the
-//! third harmonic-cascade primitive that makes the two-atomic observation
-//! race structurally unrepresentable.
-//!
-//! `TaskState(AtomicU64)` packs the [`TaskStatus`], [`BlockReason`],
-//! and a 32-bit ABA epoch into a single 64-bit atomic. Replaces the
-//! pre-Phase-5 split of `state_atomic: AtomicU8` + `block_reason:
-//! AtomicU8`, which required two unrelated atomic stores to advertise a
-//! Blocked task's reason and exposed a window in which an observer
-//! could see a stale reason for a fresh status (or vice versa).
+//! `TaskState(AtomicU64)` packs the [`TaskStatus`], [`BlockReason`], and a
+//! 32-bit ABA epoch into a single 64-bit atomic, so no observer can see a
+//! stale reason alongside a fresh status.
 //!
 //! # Layout (little-endian word, low bit first)
 //!
 //! ```text
-//! bits  0..4    TaskStatus    (4 bits, 5 variants after WillBlock died)
+//! bits  0..4    TaskStatus    (4 bits, 5 variants)
 //! bits  4..12   BlockReason   (8 bits, 8 variants)
 //! bits 12..16   reserved      (must be zero)
 //! bits 16..32   cpu_hint      (16 bits, currently zero — reserved for
@@ -23,22 +16,6 @@
 //!                              wake/recycle so a stale comparator from
 //!                              before the wake fails its CAS)
 //! ```
-//!
-//! `epoch` lets a CAS that targets a specific (status, reason) pair
-//! distinguish "the value never changed" from "it changed and changed
-//! back": the epoch monotonically advances at every wake-related
-//! transition, so any caller that snapshotted before a wake will see a
-//! mismatched epoch in `try_transition`'s 64-bit comparator and the
-//! CAS will fail. Today no caller exploits this — the scheduler's
-//! correctness arguments are status-only — but it costs nothing to
-//! reserve the bits and the field is needed when we layer a bounded
-//! work-stealer on top in Phase 7.
-//!
-//! Memory ordering follows the Linux task-state convention:
-//! - Writers use Release on the publishing CAS so the data they
-//!   synchronise (e.g. wake-up payloads guarded by the new state)
-//!   happens-before any reader that observes the state with Acquire.
-//! - Readers use Acquire on the observing load.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -99,9 +76,8 @@ impl TaskStateView {
 pub struct TaskState(AtomicU64);
 
 impl TaskState {
-    /// Initial state for a freshly-allocated slot: `Invalid`, no
-    /// reason, epoch 0. Reads through this value before
-    /// [`force_set`] is called observe `TaskStatus::Invalid`.
+    /// Initial state for a freshly-allocated slot: `Invalid`, no reason,
+    /// epoch 0.
     #[inline]
     pub const fn invalid() -> Self {
         let view = TaskStateView {
@@ -118,15 +94,11 @@ impl TaskState {
         TaskStateView::unpack(self.0.load(Ordering::Acquire))
     }
 
-    /// Convenience wrapper around [`snapshot`] that returns just the
-    /// status field. Use this on hot paths that don't need the reason.
     #[inline]
     pub fn status(&self) -> TaskStatus {
         self.snapshot().status
     }
 
-    /// Convenience wrapper around [`snapshot`] that returns just the
-    /// block reason.
     #[inline]
     pub fn reason(&self) -> BlockReason {
         self.snapshot().reason

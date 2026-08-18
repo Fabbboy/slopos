@@ -10,14 +10,10 @@
 //! checked match in [`EventBus::queue_for`], so adding a resource variant
 //! without wiring its queue is a compile error.
 //!
-//! # Atomic-publish contract
-//!
 //! A producer must complete every state write that flips the subscribed
 //! condition *before* it calls [`publish`](EventBus::publish). The queue's
 //! own lock supplies the release/acquire barrier; a consumer woken by the
-//! publish therefore observes all of the producer's prior writes. This is the
-//! same contract a bare `WaitQueue::wake_all` carries — the bus only changes
-//! how the queue is named, not the ordering rules.
+//! publish therefore observes all of the producer's prior writes.
 
 use crate::lock_class;
 use crate::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
@@ -33,10 +29,8 @@ use crate::sync::wait_queue::{WaitQueue, WaitResult};
 
 /// One AF_INET socket's three wait queues, addressed by slab index.
 ///
-/// Split out so the socket queues can live on a **pinned, boot-allocated**
-/// spine rather than in the static below. See [`SocketQueues::spine`] for why
-/// they cannot simply be a bigger array, and why they cannot live in the
-/// socket slab either.
+/// Split out so the queues can live on a pinned, boot-allocated spine rather
+/// than in the static below; see `SOCKET_QUEUES`.
 struct SocketQueues {
     recv: WaitQueue,
     send: WaitQueue,
@@ -55,33 +49,18 @@ impl SocketQueues {
 
 /// The AF_INET socket wait queues, one set per slab slot.
 ///
-/// # Why a boot-allocated spine and not an array
-///
-/// The static array this replaced was `MAX_SOCKETS` (64) wide and indexed
-/// `slot % 64`, while the socket slab grows to `MAX_SOCKET_SLOTS` (1024). So
-/// sockets 0 and 64 shared a queue: correctness survived — every waiter parks
-/// on a predicate over its own socket and re-checks on each wake — but a busy
-/// system woke sixteen unrelated sockets per event, and the degradation
-/// arrived exactly when there was most to lose.
-///
-/// # Why not in the socket slab
-///
-/// The obvious fix is to put the queues in `Socket` itself. That is unsound
-/// here: `SlabSocketTable::grow` **reallocates** its slot vector, and a
-/// `WaitQueue` owns an intrusive list of `WaitNode`s whose links are held by
-/// parked tasks. Moving one would leave every live waiter pointing into freed
-/// memory. A queue must never move once a task can be on it.
-///
-/// So the spine is allocated once, at its full width, and never grows — the
-/// same shape `ensure_registry_allocated` uses for the task registry, and for
-/// the same reason. `slot` then indexes it directly and the fold is gone.
+/// A `WaitQueue` owns an intrusive list of `WaitNode`s whose links are held by
+/// parked tasks, so it must never move once a task can be on it. That rules out
+/// the socket slab, whose `grow` reallocates its slot vector. The spine is
+/// allocated once at its full width and never grows, so `slot` indexes it
+/// directly with no fold.
 static SOCKET_QUEUES: OnceLock<KVec<SocketQueues>> = OnceLock::new();
 
 /// Allocate the socket queue spine. Idempotent; safe to call from any
 /// context that may allocate.
 ///
 /// Returns `false` if the heap refused, in which case [`socket_queues`] falls
-/// back to the folded static array below — degraded, never wrong.
+/// back to the folded static array below.
 pub fn ensure_socket_queues_allocated() -> bool {
     SOCKET_QUEUES.call_once(|| {
         let mut spine = KVec::with_capacity(MAX_SOCKET_SLOTS).unwrap_or_default();
@@ -98,9 +77,8 @@ pub fn ensure_socket_queues_allocated() -> bool {
 
 /// The kernel's single typed event bus. See the module docs.
 pub struct EventBus {
-    /// Fallback socket queues, used only before the spine is allocated (early
-    /// boot) or if that allocation was refused. Folded by `% MAX_SOCKETS` as
-    /// the whole array once was, which is correctness-safe and merely noisy.
+    /// Fallback socket queues, used only before the spine is allocated or if
+    /// that allocation was refused. Folded by `% MAX_SOCKETS`.
     socket_recv: [WaitQueue; MAX_SOCKETS],
     socket_send: [WaitQueue; MAX_SOCKETS],
     socket_accept: [WaitQueue; MAX_SOCKETS],
@@ -117,9 +95,8 @@ pub struct EventBus {
 
 /// The kernel-wide event bus.
 ///
-/// Initialised with a direct struct literal so there is no runtime
-/// constructor for this large value — the backing queues are laid out as
-/// zero-initialised statics, never built on a stack frame.
+/// A direct struct literal, so this large value is laid out as a static and
+/// never built on a stack frame.
 pub static BUS: EventBus = EventBus {
     socket_recv: [const { WaitQueue::new(lock_class!("evbus.socket_recv", LOCK_LEVEL_RESOURCE)) };
         MAX_SOCKETS],
@@ -154,13 +131,10 @@ impl EventBus {
     /// refused, or for a slot outside it — every one of which falls back to
     /// the folded static array.
     ///
-    /// The fallback is degraded, never wrong, and the reason is that the
-    /// choice cannot change under a parked task. A subscriber and a publisher
-    /// must agree on the queue or a wake is lost; both are deterministic in
-    /// the slot, so they can only disagree if the spine appeared between them.
-    /// It cannot: [`OnceLock::call_once`] stores its result even when the
-    /// allocation was refused and produced an empty spine, so there is exactly
-    /// one attempt and its outcome is fixed for the life of the boot.
+    /// A subscriber and a publisher must agree on the queue or a wake is lost,
+    /// and they cannot disagree: [`OnceLock::call_once`] stores its result even
+    /// when the allocation was refused and produced an empty spine, so there is
+    /// exactly one attempt and its outcome is fixed for the life of the boot.
     #[inline]
     fn socket_queues(slot: usize) -> Option<&'static SocketQueues> {
         SOCKET_QUEUES.get()?.get(slot)
@@ -168,21 +142,12 @@ impl EventBus {
 
     /// Map an event to its backing wait queue.
     ///
-    /// The `% CAP` folds the id into a bucket. For pipes, TTYs and AF_UNIX the
-    /// id is already `< CAP`, so the modulo is the identity. For child-exit and
-    /// signal-pending it is not: task ids are unbounded, so several ids share a
-    /// bucket.
-    ///
-    /// A collision is benign in every case, and for the same reason: a bucket
-    /// is a place to be woken, not a statement about what happened. Every
-    /// waiter parks with `wait_event` on a predicate over its *own* state and
-    /// re-evaluates it on each wake, so a wake meant for a bucket-mate costs a
-    /// re-check and nothing else. What a collision cannot do is lose a wake —
-    /// publish folds by the same rule.
-    ///
-    /// AF_INET sockets no longer fold: their queues live on a boot-allocated
-    /// spine one set per slab slot, so the index is exact. See
-    /// [`SOCKET_QUEUES`].
+    /// The `% CAP` fold is the identity for pipes, TTYs and AF_UNIX, whose ids
+    /// are already `< CAP`; task ids are unbounded, so child-exit and
+    /// signal-pending really do share buckets. A collision costs a re-check and
+    /// nothing else — every waiter parks on a predicate over its *own* state —
+    /// and cannot lose a wake, because publish folds by the same rule. AF_INET
+    /// sockets index the [`SOCKET_QUEUES`] spine exactly.
     #[inline]
     fn queue_for(&'static self, ev: KernelEvent) -> &'static WaitQueue {
         match ev {
@@ -236,8 +201,7 @@ impl EventBus {
     /// [`unsubscribe_current`](EventBus::unsubscribe_current); used by the
     /// poll/select path that registers interest on several events and then
     /// blocks once. Registering before the readiness check is what closes the
-    /// lost-wakeup window (a producer that publishes between the enqueue and
-    /// the check has already marked this task).
+    /// lost-wakeup window.
     #[inline]
     pub fn subscribe_current(&'static self, ev: KernelEvent) -> bool {
         self.queue_for(ev).enqueue_current()
@@ -270,11 +234,8 @@ impl EventBus {
         self.queue_for(ev).has_waiters()
     }
 
-    /// Whether two events share a backing queue. Diagnostic / test use.
-    ///
-    /// The only way to observe the routing without a task to park, and what
-    /// makes "these two sockets no longer alias" a checkable claim rather than
-    /// an assertion about code that was changed.
+    /// Whether two events share a backing queue. Diagnostic / test use: the
+    /// only way to observe the routing without a task to park.
     #[inline]
     pub fn shares_queue(&'static self, a: KernelEvent, b: KernelEvent) -> bool {
         core::ptr::eq(self.queue_for(a), self.queue_for(b))
@@ -283,11 +244,8 @@ impl EventBus {
 
 /// A typed handle for blocking the current task on a single [`KernelEvent`].
 ///
-/// Replaces the bare `wait_queue.wait_event(closure)` call shape: the closure
-/// re-checks the resource condition under its own lock, exactly as before —
-/// only the queue lookup is now typed and centralised. The handle holds no
-/// state of its own (the underlying `wait_event` self-manages its wait node),
-/// so dropping it without waiting is a no-op.
+/// Holds no state of its own — the underlying `wait_event` self-manages its
+/// wait node — so dropping it without waiting is a no-op.
 #[must_use = "a Subscription does nothing until you wait on it"]
 pub struct Subscription {
     queue: &'static WaitQueue,

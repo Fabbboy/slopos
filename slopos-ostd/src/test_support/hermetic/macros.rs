@@ -1,12 +1,6 @@
 //! `hermetic_state!` function-like macro — one block, one impl, one
 //! linker-section vtable entry.
 //!
-//! Subsumes both the `unsafe impl HermeticState for T { ... }` body
-//! and the `.hermetic_state_registry` link-section registration that
-//! the legacy `register_hermetic_state!(T);` performed separately.
-//!
-//! ## Macro shape
-//!
 //! ```ignore
 //! hermetic_state! {
 //!     pub MyState {
@@ -18,23 +12,12 @@
 //! }
 //! ```
 //!
-//! The user-facing `restore` signature drops the `unsafe fn` token —
-//! the macro emits the required `unsafe fn restore(...)` impl item
-//! internally, so user bodies stay free of the `unsafe` keyword and
-//! the call site (test_hermetic.rs) is unsafe-token-free.
-//!
-//! Inspired by `bitflags!` / `pin_project!` — the trait body isn't
-//! field-composable (snapshot/restore touch external globals, not
-//! struct fields), so a `#[derive]` would have zero callers. A
-//! function-like macro covers the boilerplate (struct decl, impl,
-//! vtable registration) while leaving the per-impl custom logic
-//! to the user.
+//! The user-facing `restore` signature drops the `unsafe fn` token: the macro
+//! emits the required `unsafe fn restore(...)` impl item internally, so user
+//! bodies and call sites stay free of the `unsafe` keyword.
 
-/// Internal helper that emits the `#[link_section = ".hermetic_state_registry"]`
-/// static — the actual linker-section registration. Pulled out as a
-/// `macro_rules!` so `hermetic_state!` reuses it (and so consumer
-/// crates that want manual `unsafe impl HermeticState` blocks can
-/// still call `slopos_ostd::__hermetic_register!(T)` directly).
+/// Emits the `.hermetic_state_registry` entry. Consumer crates writing a manual
+/// `unsafe impl HermeticState` can call this directly.
 #[doc(hidden)]
 #[macro_export]
 #[allow_internal_unsafe]
@@ -53,11 +36,8 @@ macro_rules! __hermetic_register {
     };
 }
 
-/// Declare a hermetic-state singleton in one block.
-///
-/// Emits the marker struct, the `unsafe impl HermeticState`, and the
-/// `.hermetic_state_registry` linker-section entry. See module docs
-/// for usage shape.
+/// Declare a hermetic-state singleton in one block: marker struct, `unsafe impl
+/// HermeticState`, and the `.hermetic_state_registry` linker-section entry.
 #[macro_export]
 #[allow_internal_unsafe]
 macro_rules! hermetic_state {

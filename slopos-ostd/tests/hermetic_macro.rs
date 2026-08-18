@@ -1,21 +1,8 @@
 #![feature(allocator_api)]
 
-//! Host-side tests for the `hermetic_state!` function-like macro.
-//!
-//! Covers:
-//!
-//! - The macro emits a working `unsafe impl HermeticState` body.
-//! - `Foo::NAME` is the type's identifier (no manual literal needed).
-//! - `snapshot()` and `restore()` round-trip a value.
-//! - The optional `const DEPENDS_ON` line is honoured when present.
-//! - The macro also expands `__hermetic_register!`, which emits a
-//!   `#[link_section = ".hermetic_state_registry"]` static. We can't
-//!   walk the linker section under `cargo test`, but the static must
-//!   compile.
-//!
-//! These tests live in OSTD because the macro itself does; the
-//! 13-site kernel-side migration in `core/src/scheduler/test_hermetic.rs`
-//! is verified by the full `just test` suite, not here.
+//! Host-side tests for the `hermetic_state!` function-like macro: the impl it
+//! emits, and that the `.hermetic_state_registry` static it also emits
+//! compiles. The linker section itself is not walkable under `cargo test`.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -24,12 +11,7 @@ use slopos_ostd::AllocError;
 use slopos_ostd::hermetic_state;
 use slopos_ostd::test_support::hermetic::HermeticState;
 
-// Backing store the synthetic impls snapshot/restore.
 static GLOBAL_VALUE: AtomicU64 = AtomicU64::new(0xABCD);
-
-// ----------------------------------------------------------------------------
-// 1. Plain block: type + Snapshot + snapshot + restore.
-// ----------------------------------------------------------------------------
 
 hermetic_state! {
     pub PlainState {
@@ -49,12 +31,9 @@ fn plain_state_macro_emits_working_impl() {
     let snap = <PlainState as HermeticState>::snapshot().unwrap();
     assert_eq!(snap, 0x1234);
 
-    // Mutate, then restore from snapshot.
     GLOBAL_VALUE.store(0x9999, Ordering::Release);
-    // SAFETY: synthetic test — restore is called outside a real
-    // KernelTestScope drop, but the contract is "single-writer
-    // panic-or-test path", and `cargo test` is single-writer per
-    // test by `#[test]` semantics.
+    // SAFETY: restore runs outside a real KernelTestScope drop, but its
+    // single-writer contract holds — `#[test]` bodies are single-writer.
     unsafe {
         <PlainState as HermeticState>::restore(snap);
     }
@@ -70,10 +49,6 @@ fn plain_state_name_matches_type_ident() {
 fn plain_state_depends_on_defaults_to_empty() {
     assert_eq!(<PlainState as HermeticState>::DEPENDS_ON.len(), 0);
 }
-
-// ----------------------------------------------------------------------------
-// 2. Block with `const DEPENDS_ON` populated.
-// ----------------------------------------------------------------------------
 
 hermetic_state! {
     pub DependentState {
@@ -93,11 +68,6 @@ fn depends_on_propagates_to_const_item() {
     assert_eq!(deps[0], "PlainState");
     assert_eq!(<DependentState as HermeticState>::NAME, "DependentState");
 }
-
-// ----------------------------------------------------------------------------
-// 3. A more typical kernel-shape impl: state held in an atomic, snapshot
-//    captures the value, restore re-stores it.
-// ----------------------------------------------------------------------------
 
 static COUNTER: AtomicU64 = AtomicU64::new(42);
 
@@ -127,8 +97,7 @@ fn counter_state_round_trips_through_snapshot_restore() {
 
 #[test]
 fn associated_types_are_send_static() {
-    // The trait requires `Snapshot: Send + 'static`. If the macro
-    // emits a wrong shape this won't compile.
+    // Compile-time only: a macro emitting the wrong shape fails to build.
     fn assert_send_static<S: HermeticState>()
     where
         S::Snapshot: Send + 'static,

@@ -1,29 +1,9 @@
 //! Preemption control surface.
 //!
-//! [`DisabledPreemptGuard`] is the RAII gate drivers and OSTD-internal
-//! IRQ-dispatch use whenever they require atomic-context (no preemption
-//! between point A and point B). Construction increments the active
-//! [`PreemptBackend`]'s preempt count; drop decrements it.
-//!
-//! The backend is a one-shot-registered trait object. The default
-//! [`NoOpBackend`] just tracks a private `AtomicU32` so host-side unit
-//! tests have something to observe. Production wiring registers a
-//! per-CPU backend that proxies to the kernel's per-CPU preempt-count
-//! field.
-//!
-//! # Why a backend trait
-//!
-//! Per-CPU preempt counters live in the kernel's per-CPU region (PCR)
-//! which OSTD does not own yet — the per-CPU machinery + `CpuLocal<T>`
-//! land in a later subtask group. Until then, OSTD exposes the typed
-//! guard surface and lets the kernel install the actual storage.
-//!
-//! # Soundness
-//!
-//! Inv. 2: kernel-mode CPU state cannot be tampered with by OSTD
-//! clients. The guard mediates which contexts run with preemption
-//! disabled; the backend trait keeps the actual decrement-and-callback
-//! logic on the trusted side.
+//! [`DisabledPreemptGuard`] is the RAII gate for atomic context: construction
+//! increments the active [`PreemptBackend`]'s preempt count, drop decrements
+//! it. The backend is a one-shot registration because the per-CPU preempt
+//! counters live in the kernel's PCR, which OSTD does not own.
 
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
@@ -35,47 +15,31 @@ use crate::cpu::x86_64::pcr;
 use crate::cpu::x86_64::{restore_flags, save_flags_cli};
 use crate::sync::BspToken;
 
-// ---------------------------------------------------------------------------
-// PreemptBackend trait.
-// ---------------------------------------------------------------------------
-
 /// Per-CPU preempt-count operations.
 ///
-/// Implementations must:
-/// - operate only on the *current* CPU's preempt-count storage (the
-///   guard is `!Send` so it cannot escape its CPU);
-/// - keep `enter` / `leave` symmetric for nesting;
-/// - in `leave_quiet`, perform the decrement *without* invoking any
-///   deferred reschedule callback — this is the variant used at the
-///   tail of an IST exception handler, where running the scheduler
-///   would corrupt the IST stack.
+/// Implementations must operate only on the *current* CPU's preempt-count
+/// storage (the guard is `!Send`, so it cannot escape its CPU) and keep
+/// `enter` / `leave` symmetric for nesting.
 pub trait PreemptBackend: Send + Sync + 'static {
-    /// Increment the current CPU's preempt count.
     fn enter(&self);
 
-    /// Decrement the current CPU's preempt count and, if applicable,
-    /// run any pending reschedule callback when the count returns to
-    /// zero.
+    /// Decrement, running any pending reschedule callback when the count
+    /// returns to zero.
     fn leave(&self);
 
-    /// Decrement the current CPU's preempt count *without* running any
-    /// deferred reschedule callback. Used at the IRET-edge of IST
-    /// exception handlers.
+    /// Decrement *without* running any deferred reschedule callback: the
+    /// variant used at the IRET-edge of an IST exception handler, where running
+    /// the scheduler would corrupt the IST stack.
     fn leave_quiet(&self) {
         self.leave();
     }
 
-    /// Snapshot the current CPU's preempt count.
     fn count(&self) -> u32;
 }
 
-// ---------------------------------------------------------------------------
-// Default NoOp backend.
-// ---------------------------------------------------------------------------
-
-/// In-OSTD fallback used when no production backend is registered.
-/// Tracks a single global `AtomicU32`; useful for host-side unit tests
-/// that exercise the guard surface without a real per-CPU PCR.
+/// Fallback used until a production backend is registered. Tracks one global
+/// `AtomicU32` so host-side unit tests can observe the guard surface without a
+/// per-CPU PCR.
 pub struct NoOpBackend {
     count: AtomicU32,
 }
@@ -87,7 +51,6 @@ impl NoOpBackend {
         }
     }
 
-    /// Test-only count reset.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn reset(&self) {
         self.count.store(0, Ordering::Release);
@@ -126,48 +89,37 @@ impl PreemptBackend for NoOpBackend {
 
 static DEFAULT_BACKEND: NoOpBackend = NoOpBackend::new();
 
-/// Borrow the default no-op backend. Exposed for test setup that
-/// wants to assert against the default backend's count after
-/// `reset_for_test`.
+/// Exposed for test setup that asserts against the default backend's count
+/// after `reset_for_test`.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn default_backend() -> &'static NoOpBackend {
     &DEFAULT_BACKEND
 }
 
-// ---------------------------------------------------------------------------
-// PCR-backed preempt backend (production default for the kernel target).
-// ---------------------------------------------------------------------------
-
 /// `PreemptBackend` impl that proxies to the per-CPU preempt count
 /// living in `slopos_ostd::cpu::x86_64::pcr::ProcessorControlRegion::preempt_count`.
 ///
-/// Registered at boot via [`register_preempt_backend`] with a
-/// `&BspToken<'_>` witness. Pre-registration the [`NoOpBackend`]
-/// default is active; the kernel's main path passes through here only
-/// after the BSP PCR has been installed (`pcr.install()` happens
-/// before `register_preempt_backend` is called).
+/// Registered at boot via [`register_preempt_backend`], after the BSP PCR has
+/// been installed; the [`NoOpBackend`] default is active until then.
 pub struct PcrPreemptBackend;
 
-/// Shared instance — `register_preempt_backend(token, &DEFAULT_PCR_PREEMPT)`.
 pub static DEFAULT_PCR_PREEMPT: PcrPreemptBackend = PcrPreemptBackend;
 
 #[cfg(all(target_arch = "x86_64", not(test)))]
 impl PreemptBackend for PcrPreemptBackend {
     #[inline]
     fn enter(&self) {
-        // Single-instruction gs-relative increment — migration-atomic,
-        // same rationale as `PreemptGuard::new` (both families account
-        // against the same per-CPU field).
+        // Single-instruction gs-relative increment — migration-atomic, same
+        // rationale as `PreemptGuard::new`.
         crate::cpu::x86_64::pcr::preempt_count_inc();
     }
 
     #[inline]
     fn leave(&self) {
         let prev = crate::cpu::x86_64::pcr::preempt_count_dec_fetch_prev();
-        // Always-on (not debug-only): an unmatched backend decrement
-        // wraps the unsigned count to ~u32::MAX silently and primes a
-        // later, context-free `PreemptGuard::drop` underflow. Fail here,
-        // at the actual unbalanced leave, instead.
+        // Always-on: an unmatched decrement wraps the unsigned count silently
+        // and resurfaces as a context-free `PreemptGuard::drop` underflow, so
+        // fail here at the unbalanced leave instead.
         assert!(prev > 0, "preempt_count underflow (backend leave)");
     }
 
@@ -177,7 +129,7 @@ impl PreemptBackend for PcrPreemptBackend {
     }
 }
 
-// Host-test stub: no PCR, no GS-base — fall back to NoOp-style atomics.
+// Host-test stub: no PCR, no GS-base.
 #[cfg(not(all(target_arch = "x86_64", not(test))))]
 impl PreemptBackend for PcrPreemptBackend {
     fn enter(&self) {}
@@ -186,10 +138,6 @@ impl PreemptBackend for PcrPreemptBackend {
         0
     }
 }
-
-// ---------------------------------------------------------------------------
-// One-shot backend registration.
-// ---------------------------------------------------------------------------
 
 struct BackendSlot(UnsafeCell<MaybeUninit<&'static dyn PreemptBackend>>);
 // SAFETY: writes are gated by `BACKEND_INSTALLED.swap(true, AcqRel)`
@@ -200,13 +148,9 @@ unsafe impl Sync for BackendSlot {}
 static BACKEND_SLOT: BackendSlot = BackendSlot(UnsafeCell::new(MaybeUninit::uninit()));
 static BACKEND_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// One-shot wiring point for the production preempt backend. The
-/// kernel registers a backend that proxies to the per-CPU preempt
-/// count field; before this is called, [`DisabledPreemptGuard`] uses
-/// the OSTD-internal [`NoOpBackend`]. The `&BspToken<'brand>`
-/// witnesses BSP-only init; `backend` must live for the static
-/// lifetime of the kernel and only access per-CPU state the kernel
-/// authorises (Inv. 2 — kernel-mode state untamperable).
+/// One-shot wiring point for the production preempt backend; until it is
+/// called, [`DisabledPreemptGuard`] uses the OSTD-internal [`NoOpBackend`].
+/// The `&BspToken<'brand>` witnesses BSP-only init.
 pub fn register_preempt_backend<'brand>(
     _token: &BspToken<'brand>,
     backend: &'static dyn PreemptBackend,
@@ -223,7 +167,6 @@ pub fn register_preempt_backend<'brand>(
     }
 }
 
-/// Test-only reset hook.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_test() {
     DEFAULT_BACKEND.reset();
@@ -235,20 +178,15 @@ fn current_backend() -> &'static dyn PreemptBackend {
     if !BACKEND_INSTALLED.load(Ordering::Acquire) {
         return &DEFAULT_BACKEND;
     }
-    // SAFETY: paired Release in `register_preempt_backend`. Once the
-    // flag is observed set, the slot is initialised and the reference
-    // is `'static`.
+    // SAFETY: paired Release in `register_preempt_backend`; once the flag is
+    // observed set, the slot is initialised and the reference is `'static`.
     unsafe { *(*BACKEND_SLOT.0.get()).as_ptr() }
 }
 
-// ---------------------------------------------------------------------------
-// DisabledPreemptGuard.
-// ---------------------------------------------------------------------------
-
 /// RAII guard that disables preemption while held.
 ///
-/// `!Send` (carries `PhantomData<*const ()>`): a guard cannot migrate
-/// across CPUs because the count it manipulates is per-CPU.
+/// `!Send`: a guard cannot migrate across CPUs, because the count it
+/// manipulates is per-CPU.
 #[must_use = "if unused, preemption will immediately re-enable"]
 pub struct DisabledPreemptGuard {
     _not_send: PhantomData<*const ()>,
@@ -277,62 +215,47 @@ impl Drop for DisabledPreemptGuard {
     }
 }
 
-/// Snapshot of the current CPU's preempt count.
 #[inline]
 pub fn preempt_count() -> u32 {
     current_backend().count()
 }
 
-/// True if preemption is currently disabled on this CPU.
 #[inline]
 pub fn is_preempt_disabled() -> bool {
     preempt_count() > 0
 }
 
-// ---------------------------------------------------------------------------
-// IRQ-entry-side guard (consumed by `irq::idt::IrqEntryGuard`).
-// ---------------------------------------------------------------------------
-
-/// Internal hook called by [`crate::irq::idt::IrqEntryGuard::enter`]
-/// for IST-using vectors. Bumps the count via the active backend.
+/// Internal hook called by [`crate::irq::idt::IrqEntryGuard::enter`] for
+/// IST-using vectors.
 #[inline]
 pub(crate) fn irq_entry_bump() {
     current_backend().enter();
 }
 
-/// Internal hook called by [`crate::irq::idt::IrqEntryGuard::drop`]
-/// for IST-using vectors. Decrements *without* invoking any deferred
-/// reschedule callback — yielding from an IST handler would corrupt
-/// the per-vector IST stack.
+/// Internal hook called by [`crate::irq::idt::IrqEntryGuard::drop`] for
+/// IST-using vectors; decrements via the quiet path.
 #[inline]
 pub(crate) fn irq_entry_leave_quiet() {
     current_backend().leave_quiet();
 }
 
 /// Release the single exception/IRQ-entry preempt hold when a handler
-/// **diverges** instead of returning, so the [`crate::irq::idt`]
-/// entry-guard's `Drop` never runs to balance its `irq_entry_bump`.
-/// Decrements exactly once via the quiet (no deferred-reschedule) path.
+/// **diverges** instead of returning, so the [`crate::irq::idt`] entry-guard's
+/// `Drop` never runs to balance its `irq_entry_bump`.
 ///
 /// Use *only* on a path that abandons its exception-handler frame via an
-/// unconditional reschedule or halt (e.g. retiring a CPU after a fatal
-/// user fault). On any normal return path the RAII guard performs the
-/// leave and calling this as well would double-decrement.
+/// unconditional reschedule or halt; on any normal return path the RAII guard
+/// performs the leave and calling this as well would double-decrement.
 #[inline]
 pub fn release_diverging_exception_hold() {
     irq_entry_leave_quiet();
 }
 
-// ---------------------------------------------------------------------------
-// PreemptGuard / IrqPreemptGuard (PCR-backed).
-//
-// These complement [`DisabledPreemptGuard`] by carrying deferred-reschedule
-// callback semantics: when a `PreemptGuard` drop sees the count returning to
-// zero with `reschedule_pending` set, it invokes a registered callback. They
-// run against the kernel's per-CPU PCR storage directly via `crate::cpu::x86_64::pcr`
-// rather than through [`PreemptBackend`], because the kernel call sites
-// observe the PCR field directly.
-// ---------------------------------------------------------------------------
+// `PreemptGuard` complements `DisabledPreemptGuard` with deferred-reschedule
+// semantics: a drop that sees the count return to zero with
+// `reschedule_pending` set invokes the registered callback. It runs against the
+// PCR directly rather than through `PreemptBackend`, because the kernel call
+// sites observe that field directly.
 
 static RESCHEDULE_CALLBACK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
@@ -347,19 +270,13 @@ pub struct PreemptGuard {
 impl PreemptGuard {
     #[inline]
     pub fn new() -> Self {
-        // Single-instruction gs-relative increment (migration-atomic).
-        //
-        // This guard is constructed at the preemptible baseline
-        // (count == 0, IRQs on — the head of every `SpinLock::lock`).
-        // Resolving the PCR pointer and incrementing through it as two
-        // separate steps opens a preemption window between them: an
-        // IRQ-driven reschedule can migrate the task after the pointer
-        // fetch, so the increment lands on the PREVIOUS CPU's count.
-        // That CPU then never preempts again (its count never returns
-        // to zero — stranded READY tasks), while this CPU's count
-        // stays 0 and the matching drop underflows. A single
-        // gs-relative RMW has no such window: interrupts are only
-        // recognised at instruction boundaries.
+        // A single gs-relative RMW is migration-atomic: interrupts are only
+        // recognised at instruction boundaries. This guard is constructed at
+        // the preemptible baseline, so resolving the PCR pointer and then
+        // incrementing through it would open a window where a reschedule
+        // migrates the task and the increment lands on the previous CPU's
+        // count — that CPU never preempts again, and the matching drop here
+        // underflows.
         pcr::preempt_count_inc();
         Self {
             _marker: PhantomData,
@@ -401,55 +318,32 @@ impl Default for PreemptGuard {
 impl Drop for PreemptGuard {
     #[inline]
     fn drop(&mut self) {
-        // Single-instruction gs-relative decrement (migration-atomic,
-        // see `new`). While the count is non-zero the task is pinned
-        // to its CPU — preemption is gated on `is_active` and blocking
-        // with a guard held panics in `assert_switch_preempt_safe` —
-        // so this decrement always executes on the same CPU as the
+        // Migration-atomic, see `new`. A non-zero count pins the task to its
+        // CPU, so this decrement always executes on the CPU that ran the
         // matching increment.
         let prev = pcr::preempt_count_dec_fetch_prev();
-        // Always-on: a `prev == 0` here is a real accounting bug (an
-        // unbalanced guard, or a count corrupted elsewhere). Panic at the
-        // decrement rather than letting the unsigned wrap propagate.
         assert!(prev > 0, "preempt_count underflow");
 
-        // Deferred reschedule fires ONLY at the running, IRQs-enabled
-        // baseline (Linux's `preempt_schedule` discipline: never from a
-        // `preempt_enable()` with IRQs off). With IRQs disabled we are
-        // inside an interrupt/exception handler or an explicit
-        // IRQ-disabled critical section — contexts where a guard drop
-        // hitting 1→0 must NOT context-switch:
+        // The deferred reschedule fires only at the running, IRQs-enabled
+        // baseline. With IRQs disabled this 1→0 is inside a handler or an
+        // IRQ-disabled critical section, where a nested `schedule()` would run
+        // `switch_context`'s count swap from a non-baseline context, saving and
+        // restoring the per-task preempt_count under the wrong logical task.
+        // Nothing is lost: the handler's tail consumes the pending flag at the
+        // correct boundary (`scheduler_handoff_on_trap_exit`), so it is
+        // deliberately left set on this path.
         //
-        // - Inside an IRQ handler (the LAPIC timer / device ISRs take
-        //   SpinLocks; only vectors < 32 carry the IstPreemptHold), a
-        //   nested `schedule()` runs `switch_context`'s count swap from a
-        //   non-baseline context, saving/restoring the per-task
-        //   preempt_count under the wrong logical task. The corruption
-        //   surfaces later as both "switch attempted with
-        //   preempt_count=N" and "preempt_count underflow" panics on
-        //   unrelated tasks.
-        // - The handler's tail already consumes the pending flag at the
-        //   correct boundary (`scheduler_handoff_on_trap_exit`), so the
-        //   reschedule is deferred, not lost. `reschedule_pending` is
-        //   deliberately left set on this path.
-        //
-        // Once `prev == 1` lands the count at zero the task is
-        // preemptible again, so a migration may slip in before the
-        // pending check below. That is benign by the same argument as
-        // Linux's `preempt_enable()`: the migrating IRQ's own trap-exit
-        // handoff consumes the OLD CPU's pending flag before switching,
-        // and the gs-relative check below targets whichever CPU this
-        // task is executing on now — whose pending flag it, as that
-        // CPU's current task, is the right party to act on. The cheap
-        // load gates the (implicitly locked) `xchg` take so the common
-        // no-pending unlock path stays a plain read.
+        // Once the count reaches zero the task is preemptible again and a
+        // migration may slip in before the check below. Benign: the migrating
+        // IRQ's own trap-exit handoff consumes the old CPU's pending flag, and
+        // the gs-relative check targets whichever CPU runs this task now. The
+        // cheap load gates the locked `xchg` take.
         if prev == 1 && crate::cpu::x86_64::interrupts::are_interrupts_enabled() {
-            // Bottom half first, reschedule second — Linux's `local_bh_enable`
-            // before `preempt_enable`. The drain is bounded and does not switch,
-            // and a reschedule request survives it; the other order would switch
-            // away and leave the work for an arbitrary later moment. This is the
-            // only point a lock-taking kernel task that never returns to
-            // userland reaches.
+            // Bottom half first: the drain is bounded and does not switch, and
+            // a reschedule request survives it, where the other order would
+            // switch away and leave the work for an arbitrary later moment.
+            // This is the only such point a lock-taking kernel task that never
+            // returns to userland reaches.
             crate::sync::bh::run_pending_if_due();
 
             if pcr::reschedule_pending_get() != 0 && pcr::reschedule_pending_take() != 0 {
@@ -497,8 +391,8 @@ impl Default for IrqPreemptGuard {
 impl Drop for IrqPreemptGuard {
     #[inline]
     fn drop(&mut self) {
-        // Restore flags first. _preempt drops after this body completes,
-        // which is correct: reschedule callback runs with interrupts enabled.
+        // Flags first: `_preempt` drops after this body, so its reschedule
+        // callback runs with interrupts enabled.
         restore_flags(self.saved_flags);
     }
 }
@@ -510,29 +404,19 @@ pub fn register_reschedule_callback<'brand>(_token: &BspToken<'brand>, callback:
     RESCHEDULE_CALLBACK.store(callback as *mut (), Ordering::Release);
 }
 
-/// True if preemption is currently disabled on this CPU (PCR-backed).
-///
-/// Companion to [`PreemptGuard`]; reads the per-CPU PCR directly
-/// rather than going through [`PreemptBackend`]. Re-exported from
-/// [`crate::sync`] under the historical `is_preemption_disabled` name.
+/// True if preemption is currently disabled on this CPU, read from the per-CPU
+/// PCR directly rather than through [`PreemptBackend`].
 #[inline]
 pub fn is_preemption_disabled() -> bool {
     PreemptGuard::is_active()
 }
 
-/// PCR-backed preempt count snapshot.
-///
-/// Companion to [`PreemptGuard`]. Distinct from [`preempt_count`] (which
-/// reads the [`PreemptBackend`] surface) because kernel call sites
-/// observe the per-CPU PCR field directly.
+/// PCR-backed preempt count, distinct from [`preempt_count`], which reads the
+/// [`PreemptBackend`] surface.
 #[inline]
 pub fn preempt_count_pcr() -> u32 {
     PreemptGuard::count()
 }
-
-// ---------------------------------------------------------------------------
-// Lib unit tests.
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -540,10 +424,8 @@ mod tests {
     extern crate std;
 
     fn isolate<R>(f: impl FnOnce() -> R) -> R {
-        // The lib unit tests share process state with whatever has
-        // already poked `BACKEND_INSTALLED` / `DEFAULT_BACKEND` —
-        // including `irq::idt`'s tests, which reset and count against
-        // the same backend. Serialise, then reset to a known baseline.
+        // These tests share `BACKEND_INSTALLED` / `DEFAULT_BACKEND` with every
+        // other test in the process, so serialise and reset to a baseline.
         let _g = crate::test_support::global_lock::lock_global_test_state();
         reset_for_test();
         let r = f();
@@ -578,7 +460,6 @@ mod tests {
             let _c = DisabledPreemptGuard::new();
             assert_eq!(preempt_count(), 3);
         });
-        // After all three drop the isolate teardown asserts zero via reset.
         assert_eq!(preempt_count(), 0);
     }
 
