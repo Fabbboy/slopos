@@ -174,10 +174,8 @@ fn write_u8_decimal(buf: &mut [u8], value: u8) -> usize {
 }
 
 /// Emit `bytes` to fd 1 wrapped in a truecolor SGR run for `color_idx`, then
-/// reset.  COLOR_DEFAULT emits no SGR (terminal's default foreground).
-///
-/// A broken fd 1 (EBADF in a test binary) falls back to the serial console
-/// exactly once per call, carrying the payload — never the SGR escapes.
+/// reset. `COLOR_DEFAULT` emits no SGR. A broken fd 1 falls back to the serial
+/// console carrying the payload — never the SGR escapes.
 fn emit_colored(bytes: &[u8], color_idx: u8) -> bool {
     if color_idx == COLOR_DEFAULT || PLAIN.load(Ordering::Relaxed) {
         return emit_stdout(bytes);
@@ -195,15 +193,10 @@ fn emit_colored(bytes: &[u8], color_idx: u8) -> bool {
     ok
 }
 
-// =============================================================================
-// Public API
-// =============================================================================
-
 /// Write text to the current output destination (redirect fd or fd 1).
 ///
-/// When redirected, raw bytes are written with no color.  Returns `true` on
-/// success, `false` when the write fails (e.g. broken pipe).  Callers in tight
-/// loops (`yes`, `seq`) check the return value and exit early on `false`.
+/// When redirected, raw bytes are written with no color. Returns `false` when
+/// the write fails, e.g. a broken pipe.
 pub fn shell_write(buf: &[u8]) -> bool {
     let redirected_fd = OUTPUT_FD.load(Ordering::Relaxed);
     if redirected_fd >= 0 {
@@ -212,10 +205,8 @@ pub fn shell_write(buf: &[u8]) -> bool {
     emit_stdout(buf)
 }
 
-/// Write colored text to the current output destination.
-///
-/// When redirected (pipe/file), color is stripped and raw text is written.
-/// Otherwise the text is wrapped in a truecolor SGR run derived from `fg`.
+/// Write colored text to the current output destination. When redirected to a
+/// pipe or file, color is stripped.
 pub fn shell_write_colored(buf: &[u8], fg: Color32) -> bool {
     let redirected_fd = OUTPUT_FD.load(Ordering::Relaxed);
     if redirected_fd >= 0 {
@@ -225,9 +216,6 @@ pub fn shell_write_colored(buf: &[u8], fg: Color32) -> bool {
 }
 
 /// Write text with a palette color index to the current output destination.
-///
-/// Convenience wrapper that avoids a palette lookup when the caller already
-/// has an index.
 pub fn shell_write_idx(buf: &[u8], color_idx: u8) -> bool {
     let redirected_fd = OUTPUT_FD.load(Ordering::Relaxed);
     if redirected_fd >= 0 {

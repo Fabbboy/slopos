@@ -8,14 +8,9 @@ use crate::ring::{Ring, slopfut};
 
 use super::{NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg, verbose_recv};
 
-/// UDP client — ported to the async ring edge.
-///
-/// A datagram socket is `connect()`ed to the peer (a plain syscall that, for
-/// UDP, just pins `remote_addr`), after which the socket carries the same
-/// connected `recv`/`send` semantics a TCP socket does. So the established
-/// loop is the *identical* async [`Session`](super::ring_io) the TCP path
-/// uses — `OP_READ`/`OP_WRITE` over the ring, no `poll(2)`, no
-/// `std::net::UdpSocket`, no raw-fd transmute.
+/// `connect()` on a datagram socket only pins `remote_addr`, after which the
+/// socket carries the connected `recv`/`send` semantics a TCP socket does, so
+/// the loop is the same [`Session`](super::ring_io) the TCP path uses.
 pub(super) fn udp_client(config: &NcConfig) -> u8 {
     use slopos_abi::net::{AF_INET, SOCK_DGRAM};
 
@@ -61,15 +56,9 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
         .unwrap_or(0)
 }
 
-/// UDP listen — ported to the async ring edge with `OP_RECVFROM`.
-///
-/// Listen mode must learn each datagram's *source* address to reply
-/// (`last_peer`). `OP_RECVFROM` (SLOPRING § 12) returns that source
-/// `SockAddrIn` alongside the data, so the loop is now the same
-/// `slopfut::block_on` + `select` shape the UDP *client* and TCP use — no
-/// `poll(2)`, no `std::net::UdpSocket`, no raw-fd transmute. Receive is
-/// `OP_RECVFROM`; replies to `last_peer` go out as a connected `OP_SEND`
-/// after a per-line `connect` (UDP `connect` just pins the remote addr).
+/// Listen mode must learn each datagram's source address to reply, which is
+/// what `OP_RECVFROM` (SLOPRING § 12) returns alongside the data. Replies to
+/// `last_peer` go out as a connected `OP_SEND` after a per-line `connect`.
 pub(super) fn udp_listen(config: &NcConfig) -> u8 {
     use slopos_abi::net::{AF_INET, SOCK_DGRAM};
 
@@ -108,16 +97,12 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
     slopfut::block_on(ring, listen_async(config, sock_fd))
 }
 
-/// stdin read buffer capacity (one keystroke burst at a time).
 const STDIN_CAP: usize = 64;
-/// datagram receive buffer capacity.
 const RECV_CAP: usize = 2048;
-/// Periodic timer tick (ns) — bounds the otherwise I/O-only `select` so
-/// the inactivity timeout is checked even while no data flows.
+/// Bounds the otherwise I/O-only `select` so the inactivity timeout is checked
+/// even while no data flows.
 const TIMER_TICK_NS: u64 = 200_000_000;
 
-/// The async UDP-listen loop: race stdin-read / socket-`recvfrom` / timer,
-/// act on whichever fires, re-arm, repeat.
 async fn listen_async(config: &NcConfig, sock_fd: i32) -> u8 {
     type DynStdin = core::pin::Pin<Box<dyn core::future::Future<Output = slopfut::BufResult>>>;
     type DynRecv = core::pin::Pin<Box<dyn core::future::Future<Output = slopfut::RecvFromResult>>>;
@@ -130,9 +115,8 @@ async fn listen_async(config: &NcConfig, sock_fd: i32) -> u8 {
     let clock_start = Instant::now();
     let mut last_activity_ms = clock_start.elapsed().as_millis() as u64;
 
-    // Buffers ping-pong between this loop and the in-flight reads (the
-    // winner returns its buffer; a cancelled loser keeps its buffer in the
-    // reactor until the cancel lands, so the loser gets a fresh one).
+    // The select winner returns its buffer; a cancelled loser keeps its buffer
+    // in the reactor until the cancel lands, so the loser gets a fresh one.
     let mut stdin_buf = vec![0u8; STDIN_CAP];
     let mut recv_buf = vec![0u8; RECV_CAP];
 
@@ -222,7 +206,6 @@ async fn listen_async(config: &NcConfig, sock_fd: i32) -> u8 {
     }
 }
 
-/// What an stdin burst resolved to.
 enum StdinAction {
     Continue,
     Sent,
@@ -230,9 +213,7 @@ enum StdinAction {
     Quit,
 }
 
-/// Process an stdin read completion: assemble lines and reply to
-/// `last_peer` (a connected `OP_SEND` after pinning the peer). A reply with
-/// no known peer is dropped, matching the old poll path.
+/// A line with no known peer to reply to is dropped.
 async fn on_stdin(
     config: &NcConfig,
     sock_fd: i32,
@@ -246,7 +227,7 @@ async fn on_stdin(
         return StdinAction::Eof;
     }
     if res < 0 {
-        // A genuine stdin error (would-block stays in-flight). Stop reading.
+        // Would-block stays in-flight, so this is a genuine stdin error.
         return StdinAction::Eof;
     }
     let n = (res as usize).min(buf.len());
@@ -273,9 +254,6 @@ async fn on_stdin(
     }
 }
 
-/// Send `data` to `peer` over the ring: pin the datagram socket's remote
-/// addr with a (cheap, non-blocking) `connect`, then `OP_SEND`. Returns
-/// `true` on a successful send.
 async fn send_to_peer(config: &NcConfig, sock_fd: i32, peer: SocketAddrV4, data: &[u8]) -> bool {
     let dest = SockAddrIn {
         family: slopos_abi::net::AF_INET,

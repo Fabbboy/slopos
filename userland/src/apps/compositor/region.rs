@@ -1,16 +1,11 @@
 //! Rectangle-set region algebra for occlusion culling and damage tracking.
 //!
-//! A [`Region`] is a set of inclusive integer rectangles supporting the three
-//! operations the occlusion pass needs: union ([`push`](Region::push)),
-//! intersection with a clip rect ([`intersect_rect`](Region::intersect_rect)),
-//! and **subtraction** of an occluding rect ([`subtract`](Region::subtract)).
 //! Subtracting each opaque window's box front-to-back carves the covered area
 //! out of the still-visible region.
 //!
-//! `subtract` fragments each stored rect into up to four disjoint remainder rects
-//! (left/right/above/below the cut), so a region is not necessarily disjoint
-//! after a `push`; every `subtract`/`intersect_rect` result, however, is exact —
-//! it covers precisely the set-operation area with no pixel double-counted.
+//! A region is not necessarily disjoint after a [`push`](Region::push); every
+//! [`subtract`](Region::subtract) / [`intersect_rect`](Region::intersect_rect)
+//! result is exact, with no pixel double-counted.
 
 use slopos_abi::damage::DamageRect;
 use std::vec::Vec;
@@ -22,7 +17,6 @@ pub struct Region {
 }
 
 impl Region {
-    /// An empty region.
     pub fn new() -> Self {
         Self { rects: Vec::new() }
     }
@@ -34,7 +28,6 @@ impl Region {
         r
     }
 
-    /// A region covering the whole `width`×`height` output.
     pub fn full(width: u32, height: u32) -> Self {
         Self::from_rect(DamageRect {
             x0: 0,
@@ -46,9 +39,8 @@ impl Region {
 
     /// Add a rect to the region, allowing overlap with existing rects.
     ///
-    /// Cheap (a single push), but the region may then double-cover pixels. Use
-    /// for accumulating into a region that will only ever be *subtracted* from
-    /// or intersected (where overlap is harmless), never blend-painted.
+    /// The region may then double-cover pixels: use it only for one that will be
+    /// subtracted from or intersected, never blend-painted.
     pub fn push(&mut self, rect: DamageRect) {
         if rect.is_valid() {
             self.rects.push(rect);
@@ -57,9 +49,6 @@ impl Region {
 
     /// Add a rect as a **disjoint** union: the new rect's area is first removed
     /// from every existing rect, so the region stays a non-overlapping cover.
-    ///
-    /// Damage accumulation uses this: a disjoint frame-damage region guarantees
-    /// the occlusion pass never blend-paints a pixel twice.
     pub fn add(&mut self, rect: DamageRect) {
         if !rect.is_valid() {
             return;
@@ -68,13 +57,10 @@ impl Region {
         self.rects.push(rect);
     }
 
-    /// Add every rect of `other` to this region (set union).
     pub fn push_region(&mut self, other: &Region) {
         self.rects.extend_from_slice(&other.rects);
     }
 
-    /// Disjoint-union an inclusive rect given by its corners. Convenience over
-    /// [`add`](Region::add) for the compositor's damage helpers.
     #[inline]
     pub fn add_rect(&mut self, x0: i32, y0: i32, x1: i32, y1: i32) {
         self.add(DamageRect { x0, y0, x1, y1 });
@@ -96,7 +82,7 @@ impl Region {
     }
 
     /// The region clipped to `clip`: every stored rect intersected with `clip`,
-    /// empties dropped. Returns the parts of `self` that lie inside `clip`.
+    /// empties dropped.
     pub fn intersect_rect(&self, clip: &DamageRect) -> Region {
         let mut out = Region::new();
         for r in &self.rects {
@@ -109,16 +95,12 @@ impl Region {
 
     /// Subtract `cut` from every rect in the region (set difference).
     ///
-    /// Each stored rect is replaced by the (up to four) disjoint rectangles
-    /// covering the part of it **not** inside `cut`. This is the occlusion
-    /// primitive: subtracting an opaque window's box removes exactly the pixels
-    /// it covers from the still-visible region.
+    /// Each stored rect is replaced by the up to four disjoint rectangles
+    /// covering the part of it **not** inside `cut`.
     pub fn subtract(&mut self, cut: &DamageRect) {
         if !cut.is_valid() {
             return;
         }
-        // Rebuild in place: each rect either survives whole (no overlap) or is
-        // shattered into its remainder pieces.
         let old = core::mem::take(&mut self.rects);
         for r in old {
             subtract_into(&r, cut, &mut self.rects);
@@ -126,13 +108,11 @@ impl Region {
     }
 
     /// Coalesce down to at most `N` rects by repeatedly merging the pair whose
-    /// bounding-box union has the smallest area, returning them as a fixed array
-    /// + count. Hands the kernel a bounded damage list that is a superset of the
+    /// bounding-box union has the smallest area. The result is a superset of the
     /// precise region — never fewer pixels than were painted.
     pub fn to_bounded<const N: usize>(&self) -> ([DamageRect; N], usize) {
         let mut work: Vec<DamageRect> = self.rects.clone();
         while work.len() > N {
-            // Find the pair with the smallest combined area and merge it.
             let mut best = (0usize, 1usize);
             let mut best_area = i32::MAX;
             for i in 0..work.len() {
@@ -176,7 +156,6 @@ fn subtract_into(r: &DamageRect, cut: &DamageRect, out: &mut Vec<DamageRect>) {
         out.push(*r);
         return;
     };
-    // Top strip: rows above the overlap.
     if r.y0 < overlap.y0 {
         out.push(DamageRect {
             x0: r.x0,
@@ -185,7 +164,6 @@ fn subtract_into(r: &DamageRect, cut: &DamageRect, out: &mut Vec<DamageRect>) {
             y1: overlap.y0 - 1,
         });
     }
-    // Bottom strip: rows below the overlap.
     if r.y1 > overlap.y1 {
         out.push(DamageRect {
             x0: r.x0,
@@ -194,7 +172,6 @@ fn subtract_into(r: &DamageRect, cut: &DamageRect, out: &mut Vec<DamageRect>) {
             y1: r.y1,
         });
     }
-    // Left strip: columns left of the overlap, within the overlap's row span.
     if r.x0 < overlap.x0 {
         out.push(DamageRect {
             x0: r.x0,
@@ -203,7 +180,6 @@ fn subtract_into(r: &DamageRect, cut: &DamageRect, out: &mut Vec<DamageRect>) {
             y1: overlap.y1,
         });
     }
-    // Right strip: columns right of the overlap, within the overlap's row span.
     if r.x1 > overlap.x1 {
         out.push(DamageRect {
             x0: overlap.x1 + 1,
@@ -240,9 +216,7 @@ mod tests {
             x1: 6,
             y1: 6,
         });
-        // 100 total minus the 4x4 hole = 84 pixels, no double-count.
         assert_eq!(area(&r), 100 - 16);
-        // Hole interior is gone; the ring is present.
         assert!(!covers(&r, 4, 4));
         assert!(covers(&r, 0, 0));
         assert!(covers(&r, 9, 9));
@@ -286,8 +260,6 @@ mod tests {
 
     #[test]
     fn subtract_remainder_rects_are_pairwise_disjoint() {
-        // After subtracting a centered hole, no two remainder rects overlap —
-        // the occlusion invariant (no pixel counted twice).
         let mut r = Region::from_rect(DamageRect {
             x0: 0,
             y0: 0,
@@ -343,7 +315,6 @@ mod tests {
         }
         let (arr, n) = r.to_bounded::<4>();
         assert!(n <= 4);
-        // Every original rect's corner is still covered by some merged rect.
         for i in 0..10 {
             let (px, py) = (i * 4, 0);
             assert!(
@@ -383,7 +354,6 @@ mod tests {
 
     #[test]
     fn occlusion_pass_carves_opaque_window() {
-        // frame damage = whole 100x100 output; one opaque window covers [20,20]..[60,60].
         let mut uncovered = Region::full(100, 100);
         uncovered.subtract(&DamageRect {
             x0: 20,
@@ -391,7 +361,6 @@ mod tests {
             x1: 60,
             y1: 60,
         });
-        // Background visible everywhere except under the opaque window.
         assert!(!covers(&uncovered, 40, 40));
         assert!(covers(&uncovered, 0, 0));
         assert!(covers(&uncovered, 99, 99));

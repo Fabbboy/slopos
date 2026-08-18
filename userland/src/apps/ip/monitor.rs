@@ -1,17 +1,14 @@
 //! `ip monitor` — the network event stream.
 //!
-//! The only user-runnable demonstration of a pollable fd in the tree, and the
-//! only way the in-band overflow record is ever observable: a dropped event is
-//! reported as a `NET_EV_OVERFLOW` ordered before the records that followed the
-//! drop, so a reader never loses its position and never has to guess whether
-//! the stream is complete.
+//! A dropped event is reported as a `NET_EV_OVERFLOW` ordered before the
+//! records that followed the drop, so a reader never loses its position.
 //!
-//! **Bounded by default.** A monitor that blocks forever is indistinguishable
-//! from a hang in a serial transcript, so with no `-c` or `-t` it stops after
-//! ten seconds. `-t 0` asks for no deadline.
+//! Bounded by default: with no `-c` or `-t` it stops after ten seconds, since a
+//! monitor that blocks forever reads as a hang in a serial transcript. `-t 0`
+//! asks for no deadline.
 //!
 //! Events name an interface by index, so the interface table is snapshotted at
-//! start and re-read when an interface appears — an index the table does not
+//! start and re-read when an interface appears; an index the table does not
 //! have prints as `if#N` rather than being dropped.
 
 use std::string::String;
@@ -75,7 +72,7 @@ pub fn run(filter: Option<&[u8]>, bounds: MonitorBounds) -> Outcome {
         }];
         let ready = poll(&mut fds, timeout).map_err(|err| Failure::from_errno("monitor", err))?;
         if ready == 0 {
-            break; // The deadline passed with nothing to say.
+            break;
         }
 
         let n =
@@ -109,12 +106,9 @@ pub fn run(filter: Option<&[u8]>, bounds: MonitorBounds) -> Outcome {
     Ok(())
 }
 
-/// Map the optional filter word to a subscription mask.
-///
 /// Neighbour churn is not in the default set: ARP is the only high-rate source
 /// in the stack, and subscribing to it keeps a bounded ring in permanent
-/// overflow, which masks the interface events a subscriber opened the fd for.
-/// Asking for it by name is fine; getting it by default is not.
+/// overflow, masking the interface events a subscriber opened the fd for.
 fn mask_for(word: &[u8]) -> Result<u32, Failure> {
     let mask = match word {
         b"link" => NET_MON_IFACE,
@@ -230,8 +224,6 @@ fn print_event(event: &NetEvent, ifaces: &Ifaces) {
             println!("[NEIGH] {dev}: {} {}", Ipv4(p.addr), neigh_state(p.state));
         }
         NET_EV_OVERFLOW => {
-            // In band and ordered before the records that followed the drop, so
-            // this line marks exactly where the gap is.
             println!("[OVERFLOW] {} event(s) dropped", event.as_u32());
         }
         other => println!("[?] kind {other} ifindex {}", event.ifindex),

@@ -32,7 +32,6 @@ fn test_fork_exit_waitpid() -> bool {
     process::waitpid(pid as u32) == CHILD_EXIT_CODE
 }
 
-/// `pidfd_open` succeeds for a child of the caller and yields a real fd.
 fn test_pidfd_open() -> bool {
     let pid = fork_exiting_child();
     if pid <= 0 {
@@ -47,7 +46,6 @@ fn test_pidfd_open() -> bool {
     true
 }
 
-/// pidfd + `poll(2)`: the fd becomes `POLLIN`-ready when the child exits.
 fn test_pidfd_poll() -> bool {
     let pid = fork_exiting_child();
     if pid <= 0 {
@@ -86,8 +84,6 @@ fn test_pidfd_poll() -> bool {
     ready
 }
 
-/// pidfd + SlopRing `OP_POLL_ADD`: the ring completes with `POLLIN` when the
-/// child exits.
 fn test_pidfd_ring_poll_add() -> bool {
     let pid = fork_exiting_child();
     if pid <= 0 {

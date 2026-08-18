@@ -1,30 +1,18 @@
-// TCP MSG_ZEROCOPY send-queue pin-lifetime proof.
-//
-// Machine-checks the two properties the kernel's TCP zero-copy send queue
+// Verus mirror of the kernel's TCP MSG_ZEROCOPY send queue
 // (`net/src/tcp/buffer.rs`'s `SendChunk::Zerocopy` + `poll_transmit`'s
-// re-DMA-on-retransmit path) relies on — the obligation the TCP MSG_ZEROCOPY
-// work names ("the pinned pages are read in-bounds on every (re)transmit and are
-// never freed before the bytes are cumulatively ACKed"):
+// re-DMA-on-retransmit path):
 //
 //   (INV-TCPZC-PIN-IN-BOUNDS) Every in-flight zero-copy segment's read window
 //        `[pin_base, pin_base + len)` lies inside its pinned buffer
-//        `[0, pin_len)` — so a transmit and every retransmit (re-DMA) of that
-//        segment, and the cold-neighbor copy fallback, read only the segment's
-//        own pinned bytes. The kernel builds the window from
-//        `coalesce_io_runs(keepalive, base_off + intra, len)` /
-//        `copy_out_frames(..)`, both bounded by `off + len <= pin.len`; modelled
-//        here as: a segment only enters the queue with `pin_base + len <=
-//        pin_len`, and no step ever widens an existing window.
+//        `[0, pin_len)`, so a transmit, every retransmit re-DMA and the
+//        cold-neighbor copy fallback read only that segment's own pinned bytes.
 //
 //   (INV-TCPZC-HELD-UNTIL-ACK) A segment's pin is released only once its bytes
 //        are cumulatively ACKed (`snd_una >= seq + len`) or the connection is
-//        torn down. A Transmit (initial send or retransmit re-DMA) and a driver
-//        TX Reclaim never drop a segment, so a retransmit always finds its pin
-//        live; an Ack drops a head segment only when it is fully covered. This is
-//        the no-use-after-free / no-free-mid-DMA guarantee for the retransmit
-//        window (the refcounted `ZcNotifToken` enforces the matching
-//        buffer-reusable signal at runtime; that weak-memory protocol is
-//        audited-only — see verification/STATUS.md).
+//        torn down; Transmit and driver TX Reclaim never drop a segment. The
+//        refcounted `ZcNotifToken` carrying the matching buffer-reusable signal
+//        at runtime is a weak-memory protocol Verus cannot model — it stays
+//        audited-only, see verification/STATUS.md.
 
 use vstd::prelude::*;
 

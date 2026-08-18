@@ -1,8 +1,7 @@
 //! `ip status` — the whole stack in one screen.
 //!
-//! Not an iproute2 command: it renders `NET_Q_GLOBAL`, the single record a
-//! status indicator reads, so a person at a terminal and the compositor's bar
-//! are looking at the same numbers through the same renderer.
+//! Not an iproute2 command: it renders `NET_Q_GLOBAL` through the same renderer
+//! the compositor's status bar uses, so both show the same numbers.
 
 use slopos_abi::net::{NET_IFINDEX_NONE, NET_Q_GLOBAL, UserNetGlobal};
 use slopos_net_core::Ipv4;

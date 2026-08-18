@@ -1,28 +1,14 @@
 //! Software rendering surface backed by shared memory.
 //!
-//! `SoftSurface` owns a pair of [`MemfdBuffer`]s and presents frames to the
-//! compositor via the display protocol. It implements [`RenderSurface`] so it
-//! can be used as a drop-in CPU rendering backend for any compositor-managed
-//! window.
-//!
-//! # Double buffering
-//!
-//! The surface keeps two buffers and never draws into one the compositor is
-//! still compositing from. Each frame is drawn into a free buffer, attached, and
-//! committed; the compositor then returns the previous buffer with a
-//! `BufferRelease` event ([`release_buffer`](SoftSurface::release_buffer)),
-//! marking it drawable again. Each buffer's fd is sent only on first use; later
-//! frames re-select the slot by id, so the compositor keeps a stable mapping per
-//! slot.
-//!
-//! Tear-free operation requires `BufferRelease` events to reach
-//! [`release_buffer`](SoftSurface::release_buffer). [`Window`](crate::window::Window)
-//! forwards them automatically; a consumer polling the socket directly must
-//! forward them itself, or both buffers stay in flight and the surface falls back
-//! to single-buffer in-place updates.
-//!
-//! This type is the rendering half of the windowing/rendering split.
+//! `SoftSurface` owns a pair of [`MemfdBuffer`]s and implements [`RenderSurface`]
+//! as a CPU rendering backend for compositor-managed windows;
 //! [`Surface`](crate::surface::Surface) handles the windowing lifecycle.
+//!
+//! `BufferRelease` events must reach
+//! [`release_buffer`](SoftSurface::release_buffer) — [`Window`](crate::window::Window)
+//! forwards them, but a consumer polling the socket directly must do so itself,
+//! or both buffers stay in flight and the surface falls back to single-buffer
+//! in-place updates.
 
 use slopos_abi::pixel::PixelFormat;
 use slopos_gfx::{DrawBuffer, RenderError, RenderSurface};
@@ -32,10 +18,8 @@ use crate::connection::ProtocolHandle;
 use crate::memfd_buf::MemfdBuffer;
 use crate::surface::SurfaceError;
 
-/// Number of buffers cycled by the surface (double buffering).
 const NUM_BUFFERS: usize = 2;
 
-/// Age at or past which a slot's contents are treated as undefined.
 const AGE_UNDEFINED: u32 = u32::MAX;
 
 /// A CPU/SHM rendering backend for compositor-managed surfaces.
@@ -46,8 +30,7 @@ pub struct SoftSurface {
     registered: [bool; NUM_BUFFERS],
     /// Whether this slot is committed and awaiting a `BufferRelease`.
     busy: [bool; NUM_BUFFERS],
-    /// Frames presented since each slot last held a presented frame, saturating
-    /// at `AGE_UNDEFINED`. Backs [`buffer_age`](SoftSurface::buffer_age).
+    /// Frames since each slot last held a presented frame; saturates at `AGE_UNDEFINED`.
     age: [u32; NUM_BUFFERS],
     /// The slot `frame()` last handed out / `present()` will commit.
     current: usize,

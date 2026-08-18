@@ -4,13 +4,9 @@ use super::numbers::*;
 use super::raw::syscall2;
 use slopos_abi::InputEvent;
 
-/// Drain queued input events into `events`, returning how many were
-/// written. A kernel error (negative errno — e.g. `ENOMEM` from the
-/// handler's scratch allocation under memory pressure) is mapped to 0:
-/// returned raw, the errno wraps to a huge unsigned count and any
-/// `events[..count]` indexing panics the caller (observed live: the
-/// compositor died on `index out of bounds: 64` during a boot-time
-/// event flood). The count is additionally clamped to the buffer length.
+/// Drain queued input events into `events`, returning how many were written.
+/// A negative errno is clamped to 0: raw, it reads as a huge unsigned count and
+/// panics the caller's `events[..count]` indexing.
 #[inline(always)]
 pub fn poll_batch(events: &mut [InputEvent]) -> usize {
     let raw = unsafe {

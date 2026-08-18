@@ -1,19 +1,12 @@
 #![feature(restricted_std)]
 
 //! `slopfut` production-runtime test: real wakers + multi-task scheduler.
-//!
-//! Exercises the Phase-2 surfaces — `spawn`/`JoinHandle`, `join2`, `timeout`,
-//! the async sync primitives (`Notify`/`oneshot`/`mpsc`), `Child::wait` (via
-//! pidfd), and async signal delivery (via signalfd) — all driven by one
-//! `block_on` over a ring, proving the executor wakes tasks on completion
-//! rather than re-polling everything.
 
 use slopos_abi::signal::{SIGCHLD, sig_bit};
 use slopos_userland as _;
 use slopos_userland::ring::{Ring, slopfut};
 use slopos_userland::syscall::{core as sys_core, process};
 
-/// spawn a task doing a ring op, await its JoinHandle for the value.
 fn test_spawn_join() -> bool {
     let Ok(ring) = Ring::setup(8) else {
         return false;
@@ -29,7 +22,6 @@ fn test_spawn_join() -> bool {
     got == 7
 }
 
-/// join2 runs two futures concurrently to completion.
 fn test_join2() -> bool {
     let Ok(ring) = Ring::setup(8) else {
         return false;
@@ -40,7 +32,6 @@ fn test_join2() -> bool {
     })
 }
 
-/// timeout(short, long-sleep) elapses; timeout(long, nop) completes.
 fn test_timeout() -> bool {
     let Ok(r1) = Ring::setup(8) else {
         return false;
@@ -57,7 +48,6 @@ fn test_timeout() -> bool {
     elapsed && completed
 }
 
-/// Notify: a spawned task wakes the awaiting root.
 fn test_notify() -> bool {
     let Ok(ring) = Ring::setup(8) else {
         return false;
@@ -66,7 +56,6 @@ fn test_notify() -> bool {
         let n = slopfut::sync::Notify::new();
         let n2 = n.clone();
         slopfut::spawn(async move {
-            // Suspend once on a ring op so ordering exercises the waker path.
             let _ = slopfut::nop().await;
             n2.notify_one();
         });
@@ -75,7 +64,6 @@ fn test_notify() -> bool {
     })
 }
 
-/// oneshot channel carries a value from a spawned task.
 fn test_oneshot() -> bool {
     let Ok(ring) = Ring::setup(8) else {
         return false;
@@ -90,7 +78,6 @@ fn test_oneshot() -> bool {
     })
 }
 
-/// unbounded mpsc carries multiple values then closes.
 fn test_mpsc() -> bool {
     let Ok(ring) = Ring::setup(8) else {
         return false;
@@ -111,7 +98,6 @@ fn test_mpsc() -> bool {
     })
 }
 
-/// yield_now lets a spawned sibling run before the root resumes.
 fn test_yield() -> bool {
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -125,13 +111,12 @@ fn test_yield() -> bool {
             o2.borrow_mut().push(2);
         });
         order.borrow_mut().push(1);
-        slopfut::yield_now().await; // sibling runs here
+        slopfut::yield_now().await;
         order.borrow_mut().push(3);
         *order.borrow() == [1, 2, 3]
     })
 }
 
-/// Child::wait awaits a child's exit via pidfd and reaps the code.
 fn test_child_wait() -> bool {
     let pid = process::fork();
     if pid == 0 {
@@ -151,8 +136,6 @@ fn test_child_wait() -> bool {
     code == 7
 }
 
-/// Async signal delivery: a child's SIGCHLD arrives via a signalfd-backed
-/// SignalListener as an awaited event.
 fn test_signal_recv() -> bool {
     let Some(listener) = slopfut::signal::SignalListener::new(sig_bit(SIGCHLD)) else {
         return false;

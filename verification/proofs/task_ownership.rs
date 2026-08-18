@@ -257,9 +257,6 @@ pub enum Step {
 pub open spec fn step(s: TaskOwn, t: Step) -> TaskOwn {
     match t {
         Step::RegisterAndPark =>
-            // Insert succeeded and the flag CAS `false -> true` won. The
-            // retain has already happened (it precedes the CAS), so the
-            // reference exists before the flag advertises it.
             if !s.exist_flag && s.exist_refs == 0 && s.transient > 0 && s.body_live {
                 TaskOwn {
                     strong: (s.strong + 1) as nat,
@@ -272,12 +269,8 @@ pub open spec fn step(s: TaskOwn, t: Step) -> TaskOwn {
                 s
             },
         Step::ParkLoses =>
-            // Flag was already claimed: retain, lose the CAS, undo the retain.
             s,
         Step::ReapAndRelease =>
-            // `true -> false` won and the task is not dispatch-pinned, and the
-            // reaper holds its own upgrade. The reference moves into the caller
-            // ledger and the registry entry goes, under one lock.
             if s.exist_flag && !s.pinned && s.transient > 0 {
                 TaskOwn {
                     transient: (s.transient + 1) as nat,
@@ -373,14 +366,9 @@ pub open spec fn step(s: TaskOwn, t: Step) -> TaskOwn {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Induction.
-// ---------------------------------------------------------------------------
-
-/// Every `Step` preserves `own_inv`. Because each step is the image of an
-/// atomic-bounded method body, and any concurrent interleaving is a sequence
-/// of such steps against the shared task, this single fact is the whole-system
-/// concurrency guarantee.
+/// Every `Step` preserves `own_inv`. Since each step is the image of an
+/// atomic-bounded method body and any interleaving is a sequence of such steps
+/// against the shared task, this is the whole-system concurrency guarantee.
 pub proof fn step_preserves(s: TaskOwn, t: Step)
     requires
         own_inv(s),
@@ -409,10 +397,8 @@ pub proof fn init_inv(s: TaskOwn)
 {
 }
 
-/// Replay a finite trace from a start state. A trace is any interleaving of
-/// registrations, wakes, enqueues, dispatches, releases and reaps from any
-/// number of CPUs, since each leaves the shared task only through these
-/// atomic-bounded transitions.
+/// Replay a finite trace: any interleaving of steps from any number of CPUs,
+/// since each touches the shared task only through these transitions.
 pub open spec fn run(s: TaskOwn, trace: Seq<Step>) -> TaskOwn
     decreases trace.len(),
 {
@@ -424,7 +410,7 @@ pub open spec fn run(s: TaskOwn, trace: Seq<Step>) -> TaskOwn
 }
 
 /// MAIN THEOREM. From any freshly allocated task, after any trace of ownership
-/// steps (any concurrent interleaving), `own_inv` still holds.
+/// steps, `own_inv` still holds.
 pub proof fn invariant_holds_on_every_trace(s0: TaskOwn, trace: Seq<Step>)
     requires
         own_init(s0),
@@ -457,14 +443,9 @@ pub proof fn flag_agreement_on_every_trace(s0: TaskOwn, trace: Seq<Step>)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Named corollaries, one per obligation.
-// ---------------------------------------------------------------------------
-
-/// (T1) The existence reference is singular: in every reachable state a task
-/// holds at most one, and the flag never advertises one that has not been
-/// minted. This is what makes the parked tally (`EXISTENCE_REFS_PARKED`) a
-/// faithful leak tripwire against registry occupancy.
+/// (T1) The existence reference is singular in every reachable state, and the
+/// flag never advertises one that has not been minted — which is what makes
+/// `EXISTENCE_REFS_PARKED` a faithful tripwire against registry occupancy.
 pub proof fn t1_existence_reference_is_singular(s0: TaskOwn, trace: Seq<Step>)
     requires
         own_init(s0),
@@ -485,17 +466,14 @@ pub proof fn t1_release_is_flag_elected_and_idempotent(s: TaskOwn)
     requires
         own_inv(s),
     ensures
-        // Never held one, or already released: `None`.
         !s.exist_flag ==> step(s, Step::ReapAndRelease) == s,
-        // Idempotent: the second reaper sees the flag down.
         step(step(s, Step::ReapAndRelease), Step::ReapAndRelease) == step(
             s,
             Step::ReapAndRelease,
         ),
-        // The winner moves a reference, it does not mint one.
         step(s, Step::ReapAndRelease).strong == s.strong,
-        // And the handle it returns is not the last one at the moment of
-        // return, because the reaper's own upgrade is still outstanding.
+        // The returned handle is not the last: the reaper's own upgrade is
+        // still outstanding.
         (s.exist_flag && !s.pinned && s.transient > 0) ==> step(
             s,
             Step::ReapAndRelease,
@@ -526,8 +504,7 @@ pub proof fn t2_step_ledger(s: TaskOwn)
 }
 
 /// (T2) Linked implies owned, on every trace: the strong count is exactly the
-/// sum of its owner classes, so a container can never name a task it does not
-/// own and an unmatched park is arithmetically impossible.
+/// sum of its owner classes, so an unmatched park is arithmetically impossible.
 pub proof fn t2_ledger_holds_on_every_trace(s0: TaskOwn, trace: Seq<Step>)
     requires
         own_init(s0),
@@ -539,11 +516,10 @@ pub proof fn t2_ledger_holds_on_every_trace(s0: TaskOwn, trace: Seq<Step>)
     invariant_holds_on_every_trace(s0, trace);
 }
 
-/// (T3) Registered iff holding the existence reference. This is the statement
-/// that lets the registry hold only `KWeak` and own nothing: a registry entry
-/// keeps nothing alive, and every registered task is kept alive by exactly the
-/// reference this proof tracks — so `reap_task_registration`'s "this upgrade
-/// cannot fail for an entry that is present" is a theorem, not a hope.
+/// (T3) Registered iff holding the existence reference, which is what lets the
+/// registry hold only `KWeak` and own nothing, and what makes
+/// `reap_task_registration`'s "this upgrade cannot fail for an entry that is
+/// present" a theorem rather than a hope.
 pub proof fn t3_registered_iff_existence_reference(s0: TaskOwn, trace: Seq<Step>)
     requires
         own_init(s0),
@@ -556,8 +532,7 @@ pub proof fn t3_registered_iff_existence_reference(s0: TaskOwn, trace: Seq<Step>
 }
 
 /// (T4) No use-after-free: in every reachable state a positive strong count
-/// implies the body is still initialised. Every holder of a strong reference
-/// may dereference.
+/// implies the body is still initialised.
 pub proof fn t4_referenced_task_body_is_live(s0: TaskOwn, trace: Seq<Step>)
     requires
         own_init(s0),
@@ -570,9 +545,8 @@ pub proof fn t4_referenced_task_body_is_live(s0: TaskOwn, trace: Seq<Step>)
     flag_agreement_on_every_trace(s0, trace);
 }
 
-/// (T5) The one-to-zero transition elects exactly one owner. A caller whose
-/// decrement did not land on zero gets nothing; the one whose did owns the
-/// allocation outright — no container, no existence reference, no other
+/// (T5) The one-to-zero transition elects exactly one owner: the winner owns
+/// the allocation outright — no container, no existence reference, no other
 /// handle can reach it — and a second attempt is a no-op. Finality is the
 /// outcome of the decrement: with `strong != 1` the step is identity, so no
 /// count pre-check appears anywhere.
@@ -602,10 +576,9 @@ pub proof fn t5_final_release_elects_one_owner(s: TaskOwn)
 
 /// (T5) Destruction runs at most once on any trace, and only from a parked
 /// node — so the graveyard's single-pusher assumption holds and a double
-/// `task_destroy_parked` is unreachable. The last two conjuncts are
-/// `with_parked`'s safety contract restated: a parked node is unreachable by
-/// anyone else and its body is still initialised, so the borrow it hands out
-/// is exclusive by construction.
+/// `task_destroy_parked` is unreachable. A parked node is unreachable by anyone
+/// else with its body still initialised, so `with_parked`'s borrow is exclusive
+/// by construction.
 pub proof fn t5_destruction_runs_at_most_once(s0: TaskOwn, trace: Seq<Step>)
     requires
         own_init(s0),
@@ -618,12 +591,9 @@ pub proof fn t5_destruction_runs_at_most_once(s0: TaskOwn, trace: Seq<Step>)
     invariant_holds_on_every_trace(s0, trace);
 }
 
-/// (T6) The reap declines while dispatch-pinned, and a pinned task therefore
-/// stays in the registry and keeps its existence reference on every trace.
-/// `CurrentTask`'s soundness rests on exactly this: the guard takes no
-/// reference count, and what stops the task being freed underneath it is that
-/// the reap gate's second disjunct is the very condition under which the guard
-/// exists.
+/// (T6) The reap declines while dispatch-pinned, so a pinned task stays in the
+/// registry and keeps its existence reference on every trace. `CurrentTask`
+/// takes no reference count and rests on exactly this.
 pub proof fn t6_reap_declines_while_dispatch_pinned(s: TaskOwn, s0: TaskOwn, trace: Seq<Step>)
     requires
         own_inv(s),
@@ -640,8 +610,8 @@ pub proof fn t6_reap_declines_while_dispatch_pinned(s: TaskOwn, s0: TaskOwn, tra
 }
 
 /// (T7) A destroyed task is fully detached: unregistered, unpinned, in no
-/// container, holding no existence reference, with no outstanding handle.
-/// This is the fact each of `Task::drop`'s debug assertions checks at runtime.
+/// container, holding no existence reference and no outstanding handle — the
+/// facts `Task::drop`'s debug assertions check at runtime.
 pub proof fn t7_destruction_implies_full_detachment(s0: TaskOwn, trace: Seq<Step>)
     requires
         own_init(s0),
@@ -657,17 +627,10 @@ pub proof fn t7_destruction_implies_full_detachment(s0: TaskOwn, trace: Seq<Step
     flag_agreement_on_every_trace(s0, trace);
 }
 
-// ---------------------------------------------------------------------------
-// Broken variant 1 — a release elected by reading `strong_count == 1`.
-// ---------------------------------------------------------------------------
-
 /// A release that decides finality by READING the count first, then destroying
-/// — the shape `task_put` and `reap_task_registration` deliberately refuse
-/// (`task_reclaim.rs`: "finality is decided by the decrement rather than by
-/// reading the count first"; `placement.rs`: "a `strong_count == 1` pre-check
-/// is racy"). It destroys whenever it observes one, without performing the
-/// electing decrement and therefore without discovering who else owns the
-/// task.
+/// — the shape `task_put` and `reap_task_registration` deliberately refuse. It
+/// destroys whenever it observes one, without performing the electing decrement
+/// and therefore without discovering who else owns the task.
 pub open spec fn broken_release_by_count(s: TaskOwn) -> TaskOwn {
     if s.strong == 1 {
         TaskOwn {
@@ -684,15 +647,12 @@ pub open spec fn broken_release_by_count(s: TaskOwn) -> TaskOwn {
 
 /// Witness that deciding finality by the decrement is load-bearing.
 ///
-/// Take a task whose one remaining reference is PARKED IN A CONTAINER and not
-/// held by any caller — a reaped-but-still-queued task, reached by the trace in
-/// `broken_release_witness_is_reachable` below. A count-elected releaser reads
-/// `strong == 1`, concludes it is the last, and destroys — while the
-/// container's parked reference still names the allocation. The result violates
-/// the ledger conjunct (`strong == 0` with `containers == 1`) and the
-/// no-use-after-free conjunct. The real `ReleaseStrongFinal` is identity here
-/// (its guard needs a caller handle, which the decrement is what would
-/// produce), so the fix genuinely depends on electing by the decrement.
+/// With the task's one remaining reference PARKED IN A CONTAINER and held by no
+/// caller — reachable by the trace in `broken_release_witness_is_reachable` —
+/// a count-elected releaser reads `strong == 1`, concludes it is the last, and
+/// destroys while the container's parked reference still names the allocation.
+/// The real `ReleaseStrongFinal` is identity there, its guard needing a caller
+/// handle that only the decrement produces.
 pub proof fn broken_count_elected_release_violates_ledger()
     ensures
         exists|s: TaskOwn|
@@ -730,20 +690,9 @@ pub proof fn broken_count_elected_release_violates_ledger()
     }
 }
 
-// ---------------------------------------------------------------------------
-// Broken variant 2 — a park that CASes the flag BEFORE retaining.
-// ---------------------------------------------------------------------------
-//
-// `task_existence_park` is two writes another CPU can interleave with: mint the
-// reference, then claim the flag. `RegisterAndPark` models them atomically
-// *because the fix retains first*: the only sub-step a peer observes (the flag
-// going up) happens after the reference already exists, so a releaser that wins
-// the `true -> false` CAS is guaranteed a reference to take back. The specs
-// below expose both orderings and prove the fix is not cosmetic.
-
 /// FIXED, sub-step 1: mint the reference (`task_placement_retain`). The flag is
-/// still down, so no releaser can act on it yet. The cost of this ordering is
-/// that a loser must undo its retain — which `ParkLoses` does.
+/// still down, so no releaser can act on it yet; the cost is that a loser must
+/// undo its retain.
 pub open spec fn park_retain(s: TaskOwn) -> TaskOwn {
     TaskOwn { strong: (s.strong + 1) as nat, exist_refs: 1, ..s }
 }
@@ -756,13 +705,12 @@ pub open spec fn park_claim(s: TaskOwn) -> TaskOwn {
 
 /// Witness that the retain-before-claim ordering is load-bearing.
 ///
-/// The BROKEN ordering is `park_claim` applied FIRST: claim the flag, retain
-/// afterwards. In the window between the two, the flag advertises a reference
-/// that has not been minted; a concurrent `task_existence_release` wins the
-/// `true -> false` CAS and reclaims a strong reference that does not exist —
-/// one decrement too many, with no bad pointer anywhere in sight. The fixed
-/// ordering keeps both sub-states invariant, and composing the two sub-steps
-/// reproduces the atomic `RegisterAndPark` exactly.
+/// The BROKEN ordering is `park_claim` applied FIRST: in the window before the
+/// retain the flag advertises a reference that has not been minted, so a
+/// concurrent `task_existence_release` wins the `true -> false` CAS and
+/// reclaims a strong reference that does not exist — one decrement too many,
+/// with no bad pointer in sight. The fixed ordering keeps both sub-states
+/// invariant and composes to the atomic `RegisterAndPark`.
 pub proof fn broken_park_ordering_violates_invariant()
     ensures
         exists|s: TaskOwn|
@@ -797,7 +745,6 @@ pub proof fn broken_park_ordering_violates_invariant()
     assert(exists|s: TaskOwn|
         #![trigger park_claim(s)]
         own_inv(s) && s.registered && !s.exist_flag && !own_inv(park_claim(s)));
-    // The fixed ordering keeps both sub-states invariant.
     assert forall|s: TaskOwn|
         (own_inv(s) && s.registered && !s.exist_flag && s.exist_refs == 0
             && s.transient > 0) implies #[trigger] own_inv(park_retain(s)) && own_inv(
@@ -808,18 +755,6 @@ pub proof fn broken_park_ordering_violates_invariant()
         assert(own_inv(park_claim(minted)));
     }
 }
-
-// ---------------------------------------------------------------------------
-// Broken variant 3 — a reap that unhashes BEFORE winning the release.
-// ---------------------------------------------------------------------------
-//
-// `reap_task_registration` is also two writes: win `task_existence_release`,
-// then drop the registry entry. Both happen under the registry cli-spinlock,
-// so no peer observes the intermediate — but the ORDER is still load-bearing,
-// and the code spells out why it unhashes second: while the existence
-// reference is still held, the weak count is at least two, so dropping the
-// entry is a bare decrement that provably cannot reach the allocator from
-// under that lock. The model exposes the ownership half of the same ordering.
 
 /// FIXED, sub-step 1: win the `true -> false` compare-exchange and reclaim the
 /// existence reference as an ordinary handle. The registry entry is still
@@ -841,15 +776,12 @@ pub open spec fn reap_unhash(s: TaskOwn) -> TaskOwn {
 /// Witness that unhashing only after winning the release is load-bearing.
 ///
 /// The BROKEN ordering is `reap_unhash` applied FIRST. It reaches a state where
-/// the task still holds its own existence reference but no longer has a
-/// registry entry: nothing can look it up, so nothing will ever reap it, and
-/// `EXISTENCE_REFS_PARKED` permanently exceeds registry occupancy — the exact
-/// divergence that counter is a tripwire for. That violates `own_inv`'s
-/// `exist_flag ==> registered` conjunct. The fixed order keeps both sub-states
-/// invariant and composes to the atomic `ReapAndRelease`. Note that
-/// `flag_agrees` is momentarily false in the fixed intermediate (flag down,
-/// entry still present) — which is precisely why the two biconditionals are
-/// carried outside `own_inv`.
+/// the task still holds its existence reference but no longer has a registry
+/// entry: nothing can look it up, so nothing will ever reap it, and
+/// `EXISTENCE_REFS_PARKED` permanently exceeds registry occupancy. The fixed
+/// order keeps both sub-states invariant and composes to the atomic
+/// `ReapAndRelease` — though `flag_agrees` is momentarily false in that fixed
+/// intermediate, which is why the biconditionals sit outside `own_inv`.
 pub proof fn broken_reap_unhash_before_release_violates_invariant()
     ensures
         exists|s: TaskOwn|
@@ -900,10 +832,6 @@ pub proof fn broken_reap_unhash_before_release_violates_invariant()
     }
 }
 
-// ---------------------------------------------------------------------------
-// Broken variant 4 — a reap that ignores the dispatch-pinned gate.
-// ---------------------------------------------------------------------------
-
 /// A reap without the `task_is_dispatch_pinned` check: it unhashes and takes
 /// the existence reference back while a CPU is still executing the task or
 /// still names it as `PCR.current_task`.
@@ -923,17 +851,12 @@ pub open spec fn broken_reap_ignoring_pin(s: TaskOwn) -> TaskOwn {
 
 /// Witness that the dispatch-pin gate is load-bearing.
 ///
-/// Take a task that is registered, holds its existence reference, is the
-/// dispatching CPU's live dispatch reference, and is currently on a CPU — the
-/// ordinary running state. The ungated reap unhashes it and takes back the one
-/// reference that is not the dispatcher's own, reaching a state where a CPU's
-/// `PCR.current_task` names a task the registry does not know and whose last
-/// reference is now the dispatcher's. When that one drops, the destructor FREES
-/// THE KERNEL STACK THE CPU IS EXECUTING ON. The gated reap is identity on that
-/// state. This also deletes `CurrentTask`'s and `IdleTask`'s soundness
-/// arguments, which is why the gate is spelled out at both the reap and the
-/// destructor (`destroy_context_is_safe` shares the predicate so the two can
-/// never disagree).
+/// On the ordinary running state, the ungated reap unhashes the task and takes
+/// back the one reference that is not the dispatcher's own; when that last one
+/// drops, the destructor FREES THE KERNEL STACK THE CPU IS EXECUTING ON. It
+/// also deletes `CurrentTask`'s and `IdleTask`'s soundness arguments, which is
+/// why `destroy_context_is_safe` shares the predicate with the reap gate rather
+/// than restating it.
 pub proof fn broken_reap_ignoring_pin_violates_invariant()
     ensures
         exists|s: TaskOwn|
@@ -970,10 +893,6 @@ pub proof fn broken_reap_ignoring_pin_violates_invariant()
     ) == s by {}
 }
 
-// ---------------------------------------------------------------------------
-// Broken variant 5 — a destroy that runs without winning the one-to-zero.
-// ---------------------------------------------------------------------------
-
 /// `task_destroy_parked` called on a node that was NOT handed back by a `Some`
 /// release — the mistake `KArc::destroy_deferred`'s safety contract exists to
 /// forbid. It runs the destructor regardless of who still owns the task.
@@ -982,10 +901,9 @@ pub open spec fn broken_destroy_unelected(s: TaskOwn) -> TaskOwn {
 }
 
 /// Witness that `task_destroy_parked`'s "must be the result of exactly one
-/// `Some` release" contract is load-bearing: destroying a task two owners
-/// still reference reaches a state with a positive strong count and a dead
-/// body — the classic use-after-free — while `DestroyParked` is identity
-/// unless a node was actually won.
+/// `Some` release" contract is load-bearing: destroying a task two owners still
+/// reference leaves a positive strong count with a dead body, while
+/// `DestroyParked` is identity unless a node was actually won.
 pub proof fn broken_destroy_without_winning_violates_invariant()
     ensures
         exists|s: TaskOwn|
@@ -1021,10 +939,6 @@ pub proof fn broken_destroy_without_winning_violates_invariant()
     ) == s by {}
 }
 
-// ---------------------------------------------------------------------------
-// Reachability of the flagship broken variant's witness.
-// ---------------------------------------------------------------------------
-
 /// Appending one step to a trace applies one `step` to its result. `run` is
 /// defined by `drop_last`, so a trace built by `push` needs this to unfold;
 /// without it the SMT backend sees `run` of an opaque sequence.
@@ -1039,10 +953,9 @@ pub proof fn run_push(s: TaskOwn, trace: Seq<Step>, t: Step)
 
 /// The count-elected release's witness state is genuinely reachable, not merely
 /// invariant-satisfying: allocate, register, retain into a container, reap,
-/// then release the two caller handles. What remains is exactly one reference,
-/// parked in a container — the state `broken_release_by_count` frees out from
-/// under that container. Exhibiting the trace makes "reachable" machine-checked
-/// rather than argued in prose.
+/// then release the two caller handles, leaving exactly one reference parked in
+/// a container. Exhibiting the trace makes "reachable" machine-checked rather
+/// than argued in prose.
 pub proof fn broken_release_witness_is_reachable(s0: TaskOwn)
     requires
         own_init(s0),
@@ -1077,4 +990,4 @@ pub proof fn broken_release_witness_is_reachable(s0: TaskOwn)
     invariant_holds_on_every_trace(s0, put_twice);
 }
 
-} // verus!
+}

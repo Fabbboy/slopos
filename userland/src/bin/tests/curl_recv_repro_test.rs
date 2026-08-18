@@ -2,21 +2,11 @@
 
 //! Regression test for `curl: receive failed` on SlopOS.
 //!
-//! Before the fix, the upstream nightly's
-//! `library/std/src/sys/io/error/generic.rs` decoder was selected
-//! for `target_os = "slopos"` and mapped every errno to
-//! `ErrorKind::Uncategorized`. That dropped curl into the
-//! `Err(_) => CurlError::RecvFailed` arm of
-//! `userland/src/apps/curl.rs::receive_http_response` for what was
-//! really a `WouldBlock`/`TimedOut`, surfacing `curl: receive
-//! failed` for any slow or stalled server.
-//!
-//! `scripts/patch_std.sh` now installs a dedicated `slopos.rs`
-//! decoder (sourced from `slibc/std_pal/io_error/slopos.rs`) that
-//! mirrors the unix decoder's shape. These subtests assert the
-//! post-fix kind mapping so a regression — accidental fallback to
-//! the generic decoder or a missed errno in the table — fails CI
-//! loudly.
+//! `scripts/patch_std.sh` installs a dedicated `slopos.rs` io-error decoder
+//! (from `slibc/std_pal/io_error/slopos.rs`); std's generic decoder maps every
+//! errno to `ErrorKind::Uncategorized`, which curl reports as a receive
+//! failure. These cases assert the kind mapping, so an accidental fallback to
+//! the generic decoder or a missed errno in the table fails CI.
 
 use slopos_userland as _;
 
@@ -27,9 +17,7 @@ use std::time::{Duration, Instant};
 const ENOENT: i32 = 2;
 const EINTR: i32 = 4;
 
-/// `File::open` on a missing path must surface `ErrorKind::NotFound`,
-/// not `Uncategorized` — the generic-decoder failure mode that
-/// originally hit curl.
+/// `NotFound`, not the `Uncategorized` the generic decoder would give.
 fn errno_kind_decoded_as_not_found() -> bool {
     let path = "/nonexistent_curl_recv_repro_target";
     match File::open(path) {
@@ -53,9 +41,7 @@ fn errno_kind_decoded_as_not_found() -> bool {
     }
 }
 
-/// `recv()` on an unconnected TCP socket must surface
-/// `ErrorKind::NotConnected`, not `Uncategorized` — the recv-side
-/// twin of the curl regression.
+/// The recv-side twin of the case above.
 fn recv_on_unconnected_socket_is_not_connected() -> bool {
     use slopos_userland::syscall::net as syscall_net;
 
@@ -81,8 +67,7 @@ fn recv_on_unconnected_socket_is_not_connected() -> bool {
             return false;
         }
         Err(err) => {
-            // Reconstruct an io::Error the way std::sys::pal::slopos::cvt does
-            // in slibc/std_pal/pal/slopos/mod.rs.
+            // Reconstructed the way `std::sys::pal::slopos::cvt` does.
             let io_err = Error::from_raw_os_error(err.errno());
             (io_err.kind(), io_err.raw_os_error())
         }
@@ -97,10 +82,8 @@ fn recv_on_unconnected_socket_is_not_connected() -> bool {
 extern "C" fn sigint_noop(_signum: i32) {}
 
 fn main() {
-    // We bypass `test_harness::run` so we can attach a diagnostic
-    // message (the observed `ErrorKind`) to the kernel-side report.
-    // The harness otherwise reports just pass/fail with no payload,
-    // which makes mismatches opaque under `tests.verbosity=summary`.
+    // `test_harness::run` reports only pass/fail with no payload, which makes
+    // a kind mismatch opaque under `tests.verbosity=summary`.
     use slopos_slibc::test_harness::{TestStatus, report};
     let mut failed: u32 = 0;
     let cases: &[(&str, fn() -> (bool, String))] = &[
@@ -187,10 +170,8 @@ fn recv_returns_eintr_on_pending_signal_with_diag() -> (bool, String) {
         return (false, format!("setsockopt errno={}", err.errno()));
     }
 
-    // Spawn a watchdog thread that sleeps ~150 ms then sends SIGINT
-    // to ourselves. By then the main thread is firmly parked inside
-    // `socket_recv`'s wait queue; without the kernel-side fix the
-    // wait would consume the full 1500 ms timeout.
+    // 150 ms leaves the main thread firmly parked in `socket_recv`'s wait
+    // queue, so a wait that ignores the signal burns the full 1500 ms.
     let pid = process::getpid() as i32;
     let watchdog = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(150));

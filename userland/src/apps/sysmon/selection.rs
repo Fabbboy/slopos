@@ -1,20 +1,14 @@
 //! Durable task identity, so a selection names a task rather than a position.
 //!
-//! The process table re-sorts on every refresh (once a second, and on any
-//! CPU%/runtime change), so a row index designates a different task from one
-//! frame to the next. Selecting by index meant the highlight sat still while
-//! the tasks slid underneath it — and, worse, that the row-context menu and
-//! the kill dialog acted on whoever had arrived at that coordinate.
+//! The process table re-sorts on every refresh, so a row index designates a
+//! different task from one frame to the next.
 
 use slopos_abi::syscall::types::UserTaskEntry;
 
 /// Identity of one task instantiation.
 ///
-/// `pid` alone is not an identity: ids recycle, so the same number can name a
-/// different task after an exit. `started_ms` is the task's creation time,
-/// which the kernel never rewrites, so the pair stays distinct across a
-/// recycle — the case a name comparison misses when a respawned service
-/// reuses both the number and the name.
+/// Ids recycle, so `pid` alone is not an identity; `started_ms` is the creation
+/// time the kernel never rewrites, keeping the pair distinct across a recycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TaskKey {
     pub pid: u32,

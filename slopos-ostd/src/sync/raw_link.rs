@@ -1,10 +1,10 @@
 //! Send-safe owning slot for a typed raw pointer with a safe-by-convention
 //! reborrow surface.
 //!
-//! **Caller's contract.** Any thread that calls `with_mut` (or `load_mut`)
-//! is responsible for ensuring exclusive access to `*ptr` for the duration
-//! of the borrow — typically by holding the surrounding container's lock or
-//! by being the sole owner of the `RawLink` slot.
+//! **Caller's contract.** Any thread that calls `with_mut` is responsible for
+//! ensuring exclusive access to `*ptr` for the duration of the borrow —
+//! typically by holding the surrounding container's lock or by being the sole
+//! owner of the `RawLink` slot.
 //!
 //! This is **not** a synchronisation primitive — it provides only the
 //! lifetime and Send/Sync paperwork.

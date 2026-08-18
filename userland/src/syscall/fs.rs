@@ -1,10 +1,4 @@
-//! File descriptor operations.
-//!
-//! This module provides two API layers:
-//! - **Typed safe wrappers** (public): Return `SyscallResult<T>` for proper error handling
-//! - **Raw C-ABI wrappers** (pub(crate)): Return raw `i64` for the libc compatibility layer
-//!
-//! Applications should use the typed APIs. The raw APIs are only for `libc/syscall.rs`.
+//! File descriptor operations, as typed wrappers returning `SyscallResult<T>`.
 
 use core::ffi::{CStr, c_char};
 
@@ -19,18 +13,7 @@ use slopos_abi::syscall::{
 use slopos_abi::{UserFsList, UserFsStat};
 use slopos_slibc::pal::{Pal, Sys};
 
-// =============================================================================
-// Typed Safe Wrappers (Public API)
-// =============================================================================
-
 /// Open a file by path.
-///
-/// # Arguments
-/// * `path` - Null-terminated path string
-/// * `flags` - POSIX open flags (O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, etc.)
-///
-/// # Returns
-/// File descriptor on success
 ///
 /// # Errors
 /// * `ENOENT` - File not found
@@ -44,36 +27,26 @@ pub fn open_path(path: *const c_char, flags: u32) -> SyscallResult<super::OwnedF
         .map_err(Into::into)
 }
 
-/// Open a file using a CStr path.
 #[inline(always)]
 pub fn open_cstr(path: &CStr, flags: u32) -> SyscallResult<super::OwnedFd> {
     open_path(path.as_ptr(), flags)
 }
 
-/// Close a file descriptor by raw number.
-///
-/// Prefer dropping an `OwnedFd` instead.  This is the low-level escape
-/// hatch for closing well-known fds (0/1/2) or fds extracted via
-/// `OwnedFd::into_raw()`.
+/// Escape hatch for well-known fds (0/1/2) and fds taken out of an `OwnedFd`;
+/// prefer dropping the `OwnedFd`.
 #[inline(always)]
 pub fn close_fd_raw(fd: RawFd) -> SyscallResult<()> {
     Sys::close(fd).map_err(Into::into)
 }
 
-/// Close an owned file descriptor, returning any kernel error.
-///
-/// Extracts the raw fd (preventing the `Drop` double-close), then
-/// performs the close syscall.  On failure the fd is already consumed
-/// — the kernel closed it or it was invalid.
+/// Consumes the handle so `Drop` cannot double-close. On failure the fd is
+/// still consumed: the kernel either closed it or it was invalid.
 #[inline(always)]
 pub fn close_fd(fd: super::OwnedFd) -> SyscallResult<()> {
     close_fd_raw(fd.into_raw())
 }
 
-/// Read from a file descriptor into a buffer.
-///
-/// # Returns
-/// Number of bytes read, or 0 on EOF
+/// Read from a file descriptor into a buffer. Returns 0 at EOF.
 ///
 /// # Errors
 /// * `EBADF` - Invalid file descriptor
@@ -84,9 +57,6 @@ pub fn read_slice(fd: RawFd, buf: &mut [u8]) -> SyscallResult<usize> {
 }
 
 /// Write to a file descriptor from a buffer.
-///
-/// # Returns
-/// Number of bytes written
 ///
 /// # Errors
 /// * `EBADF` - Invalid file descriptor
@@ -99,10 +69,6 @@ pub fn write_slice(fd: RawFd, buf: &[u8]) -> SyscallResult<usize> {
 
 /// Get file status/metadata.
 ///
-/// # Arguments
-/// * `path` - Null-terminated path string
-/// * `out_stat` - Output buffer for file status
-///
 /// # Errors
 /// * `ENOENT` - File not found
 #[inline(always)]
@@ -112,9 +78,6 @@ pub fn stat_path(path: *const c_char, out_stat: &mut UserFsStat) -> SyscallResul
 }
 
 /// Create a directory.
-///
-/// # Arguments
-/// * `path` - Null-terminated path string
 ///
 /// # Errors
 /// * `EEXIST` - Directory already exists

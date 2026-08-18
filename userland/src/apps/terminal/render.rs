@@ -1,13 +1,8 @@
 //! Glyph rendering for the terminal grid.
 //!
-//! Paints the visible `TerminalGrid` into the surface's `DrawBuffer`: every
-//! cell is blitted via the per-app `GlyphAtlas` (the `crate::gfx::font`
-//! OnceLock), the cursor cell is drawn in inverse video when visible (subject
-//! to the blink phase), and any pointer selection is highlighted.
-//!
 //! Only cells the grid marked damaged are repainted, and the presented damage
-//! rect is their bounding box. A cursor blink therefore moves one cell's worth
-//! of pixels through the compositor, not a window's.
+//! rect is their bounding box, so a cursor blink moves one cell's worth of
+//! pixels through the compositor rather than a window's.
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::Color32;
@@ -21,9 +16,9 @@ use super::surface;
 
 use slopos_terminal_core::damage::CellDamage;
 
-/// Default window background (matches the grid's default cell background).
+/// Matches the grid's default cell background.
 const WINDOW_BG: Color32 = Color32::rgb(0x1E, 0x1E, 0x1E);
-/// Selection highlight background (matches the shell's selection blue).
+/// Matches the shell's selection blue.
 const SELECTION_BG: Color32 = Color32::rgb(0x26, 0x4F, 0x78);
 
 #[inline]
@@ -36,13 +31,12 @@ fn cell_height() -> i32 {
     font::cell_height()
 }
 
-/// Convert a grid color (`0x00RRGGBB`) to an opaque `Color32`.
+/// Grid colors are `0x00RRGGBB`.
 #[inline]
 fn color_from_rgb(rgb: u32) -> Color32 {
     Color32(0xFF00_0000 | (rgb & 0x00FF_FFFF))
 }
 
-/// Draw one cell at grid (row, col) with the given fg/bg overrides.
 fn draw_cell_at(
     buf: &mut DrawBuffer,
     row: usize,
@@ -56,9 +50,8 @@ fn draw_cell_at(
     font::draw_glyph(buf, x, y, cell.glyph(), fg, bg);
 }
 
-/// The union of `damage`'s spans as a pixel rect, or `None` when nothing is
-/// damaged. Rows below the last grid row are not included, so the trailing
-/// partial-cell remainder is only repainted by a full paint.
+/// Rows below the last grid row are excluded, so the trailing partial-cell
+/// remainder is only repainted by a full paint.
 fn damage_bounds(damage: &CellDamage) -> Option<DamageRect> {
     let cw = cell_width();
     let ch = cell_height();
@@ -81,11 +74,8 @@ fn damage_bounds(damage: &CellDamage) -> Option<DamageRect> {
     out
 }
 
-/// Paint the damaged cells of `grid` and present exactly that region.
-///
-/// `damage` is consumed: a repaint that is dropped rather than presented would
-/// leave the compositor showing stale cells forever, since the grid has already
-/// forgotten they changed.
+/// A repaint that is dropped rather than presented leaves the compositor
+/// showing stale cells forever, since the grid has forgotten they changed.
 pub fn render_damage(
     grid: &TerminalGrid,
     selection: &Selection,
@@ -97,9 +87,8 @@ pub fn render_damage(
     };
 
     surface::draw(|buf| {
-        // Confine every primitive to the damaged region: a glyph's cell is the
-        // atlas cell size, which need not equal the grid's, and an overhanging
-        // blit would dirty pixels outside the rect being presented.
+        // A glyph's cell is the atlas cell size, which need not equal the
+        // grid's, so an unscissored blit can overhang the presented rect.
         buf.set_scissor(Some(bounds));
         for row in 0..damage.rows() {
             let Some(span) = damage.span(row) else {
@@ -118,16 +107,15 @@ pub fn render_damage(
     );
 }
 
-/// Repaint every cell and present the whole surface. Used for the first frame
-/// and after a resize, where the backing buffer's contents are undefined and no
-/// per-cell damage set describes what has to be written.
+/// For the first frame and after a resize, where the backing buffer's contents
+/// are undefined and no per-cell damage set describes what has to be written.
 pub fn render_full(grid: &TerminalGrid, selection: &Selection, cursor_on: bool) {
     let rows = grid.rows as usize;
     let cols = grid.cols as usize;
 
     surface::draw(|buf| {
-        // Clear to the window background first so partial-cell remainder pixels
-        // (when pixel dims aren't a clean multiple of the cell size) match the theme.
+        // Partial-cell remainder pixels, left when the pixel dims are not a
+        // clean multiple of the cell size, must match the theme.
         let w = buf.width() as i32;
         let h = buf.height() as i32;
         crate::gfx::fill_rect(buf, 0, 0, w, h, WINDOW_BG);
@@ -141,7 +129,6 @@ pub fn render_full(grid: &TerminalGrid, selection: &Selection, cursor_on: bool) 
     surface::present();
 }
 
-/// Paint cells `first..=last` of one screen row.
 fn draw_row_span(
     buf: &mut DrawBuffer,
     grid: &TerminalGrid,
@@ -164,16 +151,14 @@ fn draw_row_span(
         let mut fg = color_from_rgb(cell.attrs.fg);
         let mut bg = color_from_rgb(cell.attrs.bg);
 
-        // Selection highlight. Content-anchored, so it tracks the selected text
-        // through scrollback (unlike the cursor, which is suppressed while
-        // viewing history).
+        // The selection is content-anchored, so it tracks the selected text
+        // through scrollback; the cursor below is suppressed there instead.
         if let Some((lo, hi)) = sel_range {
             if cell_in_selection(abs, col, lo, hi) {
                 bg = SELECTION_BG;
             }
         }
 
-        // Cursor: inverse video on the cursor cell when blinking on.
         let is_cursor = !grid.viewing_history()
             && grid.cursor_visible
             && cursor_on

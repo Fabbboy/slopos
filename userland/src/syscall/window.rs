@@ -10,13 +10,11 @@ pub fn fb_info(out: &mut DisplayInfo) -> i64 {
     unsafe { syscall1(SYSCALL_FB_INFO, out as *mut _ as u64) as i64 }
 }
 
-/// Present a memfd-backed buffer to the display.
 #[inline(always)]
 pub fn fb_flip(memfd_fd: u32) -> i64 {
     unsafe { syscall3(SYSCALL_FB_FLIP, memfd_fd as u64, 0, 0) as i64 }
 }
 
-/// Present a memfd-backed buffer with damage regions.
 #[inline(always)]
 pub fn fb_flip_damage(memfd_fd: u32, damage: &[DamageRect]) -> i64 {
     if damage.is_empty() {
@@ -32,9 +30,9 @@ pub fn fb_flip_damage(memfd_fd: u32, damage: &[DamageRect]) -> i64 {
     }
 }
 
-/// Upload a 64×64 BGRA hardware-cursor image. `hot_x`/`hot_y` are the hotspot
-/// offset within the image. Returns 0 on success, negative if no hardware
-/// cursor is available (caller should fall back to software compositing).
+/// Upload a 64×64 BGRA hardware-cursor image; `hot_x`/`hot_y` are the hotspot
+/// within it. Returns 0, or negative when there is no hardware cursor and the
+/// caller must composite in software.
 #[inline(always)]
 pub fn cursor_set_image(image: &[u8], hot_x: u32, hot_y: u32) -> i64 {
     let hotspot = ((hot_x & 0xFFFF) << 16) | (hot_y & 0xFFFF);
@@ -55,7 +53,6 @@ pub fn cursor_move(x: u32, y: u32) -> i64 {
     unsafe { syscall1(SYSCALL_CURSOR_MOVE, pos as u64) as i64 }
 }
 
-/// Request a runtime display-mode (resolution) change.
 #[inline(always)]
 pub fn set_display_mode(width: u32, height: u32) -> i64 {
     unsafe { syscall2(SYSCALL_SET_DISPLAY_MODE, width as u64, height as u64) as i64 }

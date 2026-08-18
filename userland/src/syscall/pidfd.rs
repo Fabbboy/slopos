@@ -1,9 +1,8 @@
 //! pidfd syscall wrapper.
 //!
-//! `pidfd_open(pid)` returns a `FileKind::Pidfd` fd that becomes
-//! `POLLIN`-ready once the target child task exits — pollable via
-//! [`fs::poll`](super::fs::poll) or SlopRing `OP_POLL_ADD`, then reaped
-//! with `waitpid`.
+//! The returned fd becomes `POLLIN`-ready once the target child exits —
+//! pollable via [`fs::poll`](super::fs::poll) or SlopRing `OP_POLL_ADD`, then
+//! reaped with `waitpid`.
 
 use super::raw::syscall1;
 use slopos_abi::syscall::SYSCALL_PIDFD_OPEN;

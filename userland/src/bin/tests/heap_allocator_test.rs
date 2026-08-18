@@ -1,20 +1,14 @@
 #![feature(restricted_std)]
 
-// Pull in the `slopos-userland` lib crate so its `_start` ELF entry
-// point is linked into the binary. Without this `use _` reference, the
-// binary has no `_start`, the linker emits an entry of 0x0, and the
-// kernel's `do_exec` rejects the ELF as `NoExec`.
 use slopos_userland as _;
 
 use slopos_slibc::alloc::RawBuffer;
 
 fn test_simd_fill_survives_demand_fault() -> bool {
-    // A non-zero `[u32; 3]` fill (the terminal grid's Cell layout) compiles
-    // to an AVX `vmovups` memset. On FRESH pages the fill hits demand faults
-    // mid-SIMD; a kernel that fails to preserve user vector state across a
-    // page fault corrupts the in-flight store, leaving stale zeros in the
-    // buffer (the "garbage glyphs after resize" terminal bug). Each ~3.6 MB
-    // round forces fresh, never-faulted pages.
+    // A non-zero `[u32; 3]` fill compiles to an AVX `vmovups` memset, and on
+    // fresh pages it faults mid-SIMD: a kernel that loses user vector state
+    // across a page fault leaves stale zeros behind. Each ~3.6 MB round forces
+    // never-faulted pages.
     const FILL: [u32; 3] = [0x20, 0xe6e6e6, 0x1e1e1e];
     for _ in 0..20 {
         let mut v: Vec<[u32; 3]> = Vec::new();
@@ -145,11 +139,8 @@ fn test_small_recycling() -> bool {
 }
 
 fn test_mass_free_then_realloc() -> bool {
-    // Fill the arena with a batch of sub-threshold buffers, free the
-    // whole batch (coalescing it back into segment-spanning chunks),
-    // then allocate and touch fresh chunks. Catches stale bookkeeping
-    // that survives a mass free — the access pattern of a terminal
-    // grid resize.
+    // Catches bookkeeping that survives a mass free: the batch coalesces back
+    // into segment-spanning chunks before the fresh allocations below.
     let mut batch = Vec::new();
     for round in 0..16usize {
         let Some(mut buf) = RawBuffer::new(32 * 1024) else {
@@ -183,9 +174,8 @@ fn test_mass_free_then_realloc() -> bool {
 fn test_segment_release() -> bool {
     use slopos_slibc::mem::malloc::heap_stats;
 
-    // A batch larger than one segment forces the arena to grow; once
-    // every chunk is freed the extra segments must be munmapped (the
-    // last default-sized one stays resident as the warm arena).
+    // A batch larger than one segment forces the arena to grow; freeing it all
+    // must munmap the extra segments, one default-sized one staying resident.
     let before = heap_stats();
     let mut batch = Vec::new();
     for round in 0..64usize {
@@ -209,8 +199,8 @@ fn test_segment_release() -> bool {
 fn test_direct_registry() -> bool {
     use slopos_slibc::mem::malloc::heap_stats;
 
-    // Threshold-sized allocations get a dedicated mapping tracked in
-    // the direct registry; the count must follow create and free.
+    // Threshold-sized allocations get a dedicated mapping tracked in the direct
+    // registry; the count must follow create and free.
     let base = heap_stats().direct_count;
     let size = 256 * 1024;
     let Some(mut buf) = RawBuffer::new(size) else {
@@ -229,9 +219,6 @@ fn test_direct_registry() -> bool {
 }
 
 fn main() {
-    // Reports each subtest to the kernel via SYSCALL_TEST_REPORT; exit
-    // code is the failure count. Kernel utest runner uses the structured
-    // reports for fine-grained roll-up.
     slopos_slibc::test_harness::run(&[
         ("alloc_dealloc_basic", test_alloc_dealloc_basic),
         ("forward_coalesce", test_forward_coalesce),
