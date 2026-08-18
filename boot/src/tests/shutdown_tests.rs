@@ -1,7 +1,4 @@
-//! Shutdown subsystem tests.
-//!
-//! Tests verify the kernel shutdown machinery: StateFlag atomicity,
-//! scheduler/task teardown, and reinit-after-shutdown correctness.
+//! Shutdown subsystem tests: `StateFlag`, scheduler/task teardown, reinit.
 
 use slopos_ostd::klog_info;
 use slopos_ostd::sync::StateFlag;
@@ -18,10 +15,6 @@ use slopos_testing::{TestResult, assert_eq_test, assert_test};
 use core::ffi::{c_char, c_void};
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
-
-// =============================================================================
-// Test Helpers
-// =============================================================================
 
 struct ShutdownFixture {
     _scope: KernelTestScope,
@@ -55,24 +48,16 @@ fn create_n_tasks(n: usize) -> usize {
     created
 }
 
-// =============================================================================
-// StateFlag Tests
-// =============================================================================
-
 pub fn test_stateflag_lifecycle() -> TestResult {
     let flag = StateFlag::new();
 
-    // Starts inactive
     assert_test!(!flag.is_active(), "should start inactive");
 
-    // First enter succeeds
     assert_test!(flag.enter(), "first enter should return true");
     assert_test!(flag.is_active(), "should be active after enter");
 
-    // Second enter is idempotent
     assert_test!(!flag.enter(), "second enter should return false");
 
-    // Leave and re-enter
     flag.leave();
     assert_test!(!flag.is_active(), "should be inactive after leave");
     assert_test!(flag.enter(), "re-enter after leave should succeed");
@@ -133,10 +118,6 @@ pub fn test_stateflag_relaxed_access() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// Scheduler Shutdown Tests
-// =============================================================================
-
 pub fn test_scheduler_shutdown_disables() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
@@ -183,10 +164,6 @@ pub fn test_scheduler_shutdown_clears_state() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// Task Shutdown Tests
-// =============================================================================
-
 pub fn test_task_shutdown_all_terminates() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
@@ -221,13 +198,8 @@ pub fn test_task_shutdown_all_idempotent() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// Shutdown Sequence Tests
-// =============================================================================
-
-/// The canonical shutdown order is task_shutdown_all() → scheduler_shutdown().
-/// Tasks must be torn down while the scheduler is still enabled so that any
-/// CPU whose current task is destroyed can schedule() to idle.
+/// Tasks must be torn down while the scheduler is still enabled, so a CPU whose
+/// current task is destroyed can still `schedule()` to idle.
 pub fn test_shutdown_sequence_ordering() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
@@ -240,7 +212,6 @@ pub fn test_shutdown_sequence_ordering() -> TestResult {
     );
     assert_test!(task_id != INVALID_TASK_ID);
 
-    // Correct order: tasks first, scheduler second.
     let _result = task_shutdown_all();
     scheduler_shutdown();
     TestResult::Pass
@@ -362,9 +333,8 @@ pub fn test_kernel_pml4_root_matches_ostd_master() -> TestResult {
     let recorded = kernel_pml4_phys();
     assert_test!(!recorded.is_null(), "init_paging recorded no kernel PML4");
 
-    // The kernel-half descent in `slopos_mm::paging` and the OSTD
-    // cursor must root on the same frame, or a mapping written through
-    // one is invisible to the other.
+    // `slopos_mm::paging` and the OSTD cursor must root on the same frame, or a
+    // mapping written through one is invisible to the other.
     let installed = slopos_kernel_services::kernel_vm_space::try_kernel_vm_space();
     assert_test!(installed.is_some(), "kernel_vm_space not installed");
     let ostd_master = installed.unwrap().lock().pml4_paddr();
@@ -458,14 +428,8 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// Regression Tests
-// =============================================================================
-
-/// Regression: task_terminate must be idempotent.  Calling it on an
-/// already-terminated task should return 0 without re-running teardown
-/// side-effects.  Before the fix, repeated terminate calls would spam
-/// log output and redo cleanup hooks on dead tasks.
+/// `task_terminate` on an already-terminated task returns 0 without re-running
+/// teardown side-effects.
 pub fn test_task_terminate_idempotent() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
@@ -478,10 +442,8 @@ pub fn test_task_terminate_idempotent() -> TestResult {
     );
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
 
-    // First terminate succeeds.
     assert_eq_test!(task_terminate(task_id), 0, "first terminate should succeed");
 
-    // Verify the task is actually terminated.
     if let Some(task) = task_find_by_id(task_id) {
         let status = task.status();
         assert_eq_test!(
@@ -491,14 +453,12 @@ pub fn test_task_terminate_idempotent() -> TestResult {
         );
     }
 
-    // Second terminate must also return 0 (idempotent), not -1 or panic.
     assert_eq_test!(
         task_terminate(task_id),
         0,
         "second terminate should be idempotent"
     );
 
-    // Third time for good measure.
     assert_eq_test!(
         task_terminate(task_id),
         0,
@@ -508,36 +468,28 @@ pub fn test_task_terminate_idempotent() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression: scheduler must stay enabled during task_shutdown_all() so
-/// that faulting CPUs can schedule() to idle.  Verify that the scheduler
-/// is still operational after task_shutdown_all returns.
+/// The scheduler must stay enabled across `task_shutdown_all` so faulting CPUs
+/// can still `schedule()` to idle.
 pub fn test_shutdown_scheduler_alive_during_task_teardown() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
-    // The fixture leaves the scheduler disabled (init_scheduler resets to 0).
-    // Enable it so we can verify task_shutdown_all preserves the enabled state.
+    // The fixture leaves the scheduler disabled; enable it to observe preservation.
     scheduler_enable();
 
     let created = create_n_tasks(5);
     assert_test!(created > 0, "failed to create tasks");
 
-    // After task teardown, scheduler should still be enabled.
     let _result = task_shutdown_all();
     assert_test!(
         scheduler_is_enabled() != 0,
         "scheduler must remain enabled after task_shutdown_all"
     );
 
-    // Now disable it (as kernel_shutdown would).
     scheduler_shutdown();
     assert_eq_test!(scheduler_is_enabled(), 0, "scheduler should be disabled");
 
     TestResult::Pass
 }
-
-// =============================================================================
-// ACPI FADT / DSDT _S5 Parser Tests (pure, synthetic tables)
-// =============================================================================
 
 use slopos_acpi::fadt::{ACPI_ADDR_SPACE_IO, Fadt, find_s5_sleep_types};
 

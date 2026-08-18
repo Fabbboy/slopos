@@ -8,7 +8,6 @@ use super::constraints::{
 };
 use super::event::{Key, Modifiers};
 
-/// Button visual style.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum ButtonStyle {
     #[default]
@@ -17,7 +16,6 @@ pub enum ButtonStyle {
     Destructive,
 }
 
-/// Menu item definition.
 #[derive(Clone, Debug)]
 pub struct MenuItem {
     pub label: &'static str,
@@ -26,7 +24,6 @@ pub struct MenuItem {
     pub kind: MenuItemKind,
 }
 
-/// Menu item kind.
 #[derive(Clone, Debug)]
 pub enum MenuItemKind {
     Action,
@@ -34,7 +31,6 @@ pub enum MenuItemKind {
     Submenu(Vec<MenuItem>),
 }
 
-/// Table column width specification.
 #[derive(Copy, Clone, Debug)]
 pub enum TableColumnWidth {
     /// Fixed pixel width.
@@ -43,18 +39,14 @@ pub enum TableColumnWidth {
     Flex(u16),
 }
 
-/// Sort indicator for table column headers.
 #[derive(Copy, Clone, Debug)]
 pub enum SortIndicator {
     Ascending,
     Descending,
 }
 
-/// Where a context-menu request landed.
-///
-/// `x`/`y` are window coordinates. For a keyboard-raised request (Menu key,
-/// Shift+F10) they are the selected row's left edge, so a popup anchored to
-/// them appears in the same place a pointer-raised one would.
+/// `x`/`y` are window coordinates; for a keyboard-raised request (Menu key,
+/// Shift+F10) they are the selected row's left edge.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ContextMenuAt {
     pub row: usize,
@@ -83,7 +75,6 @@ impl ImageData {
     }
 }
 
-/// Table column definition.
 #[derive(Clone, Debug)]
 pub struct TableColumn {
     pub label: String,
@@ -91,12 +82,10 @@ pub struct TableColumn {
     pub sort_indicator: Option<SortIndicator>,
 }
 
-/// Declarative tree description. Apps build a tree of `Node<M>` in `view()`.
-/// The framework diffs against the previous tree to update retained widgets.
-/// `M` is the application's message type — widgets emit concrete `M` values
-/// instead of opaque integer IDs.
+/// Declarative tree an app builds in `view()`; the framework diffs it against
+/// the previous one to update retained widgets. Widgets emit the application's
+/// own message type `M` rather than opaque integer IDs.
 pub enum Node<M> {
-    // --- Leaf widgets ---
     Label {
         text: String,
         alignment: TextAlignment,
@@ -105,9 +94,7 @@ pub enum Node<M> {
     },
     Button {
         label: String,
-        /// None = no action (button is non-interactive). Some = emits this message on click.
-        /// This makes silent no-ops impossible — if you want a clickable button, you MUST
-        /// provide a message. If you don't want an action, use None explicitly.
+        /// `None` leaves the button non-interactive; `Some` emits on click.
         on_press: Option<M>,
         style: ButtonStyle,
         enabled: bool,
@@ -125,8 +112,7 @@ pub enum Node<M> {
         on_toggle: Option<M>,
         enabled: bool,
     },
-    /// Divider line. Automatically detects orientation from parent layout context:
-    /// horizontal in VStack, vertical in HStack.
+    /// Orientation follows the parent: horizontal in a VStack, vertical in an HStack.
     Divider,
     Image {
         image: ImageData,
@@ -145,14 +131,13 @@ pub enum Node<M> {
         alignment: TextAlignment,
     },
 
-    // --- Container widgets ---
     ScrollView {
         child: Box<Node<M>>,
         direction: ScrollDirection,
         show_scrollbar: ScrollbarVisibility,
         /// Initial scroll offset (preserved across rebuilds).
         scroll_y: i32,
-        /// Emitted when scroll offset changes (argument = new offset_y).
+        /// Emitted with the new `offset_y` whenever it changes.
         on_scroll: Option<fn(i32) -> M>,
     },
     ListView {
@@ -177,10 +162,10 @@ pub enum Node<M> {
         row_height: i32,
         selected: Option<usize>,
         on_select: Option<fn(usize) -> M>,
-        /// None = headers not clickable. Some = emits with column index as argument.
+        /// `None` leaves headers unclickable; `Some` emits with the column index.
         on_header_click: Option<fn(usize) -> M>,
-        /// None = rows have no context menu. Some = emits on secondary click and
-        /// on the Menu / Shift+F10 keys, after moving selection to the row.
+        /// Emitted on secondary click and on Menu / Shift+F10, after selection
+        /// has moved to the row.
         on_context_menu: Option<fn(ContextMenuAt) -> M>,
     },
     Dialog {
@@ -189,10 +174,9 @@ pub enum Node<M> {
         actions: Vec<Node<M>>,
         on_dismiss: Option<M>,
     },
-    /// Child floated at an absolute window position, over the rest of the
-    /// parent's area. Clamped to stay on-screen. A click outside the child or
-    /// an Escape press emits `on_dismiss`, so the owning app's state stays the
-    /// single source of truth for whether the popup is open.
+    /// Child floated at an absolute window position, clamped on-screen. A click
+    /// outside it or an Escape press emits `on_dismiss`, leaving the app's own
+    /// state the single source of truth for whether the popup is open.
     Popup {
         x: i32,
         y: i32,
@@ -200,7 +184,6 @@ pub enum Node<M> {
         on_dismiss: Option<M>,
     },
 
-    // --- Layout containers ---
     VStack {
         children: Vec<Node<M>>,
         spacing: i32,
@@ -226,46 +209,36 @@ pub enum Node<M> {
         child: Box<Node<M>>,
     },
 
-    /// Container that paints a solid background color behind its child.
     Background {
         color: Color32,
         child: Box<Node<M>>,
     },
-    /// Container with explicit width and/or height constraints.
     SizedBox {
         width: Option<Length>,
         height: Option<Length>,
         child: Box<Node<M>>,
     },
 
-    /// Escape hatch: raw drawing callback.
     Canvas {
         width: i32,
         height: i32,
     },
 
-    /// Empty placeholder.
     Empty,
 }
 
-/// Application trait driven by the widget framework.
 pub trait App {
-    /// The message type for this application's events.
     type Message: Clone + 'static;
 
-    /// Build the widget tree. Called when the tree needs to be (re)constructed.
     fn view(&self) -> Node<Self::Message>;
 
-    /// Handle a widget event. Return an Action indicating what happened.
     fn update(&mut self, msg: Self::Message) -> Action;
 
-    /// Optional periodic tick interval in milliseconds.
-    /// Return Some(ms) to receive tick() calls at that interval.
+    /// Return `Some(ms)` to receive [`App::tick`] calls at that interval.
     fn tick_interval_ms(&self) -> Option<u64> {
         None
     }
 
-    /// Called periodically if tick_interval_ms() returns Some.
     fn tick(&mut self) -> Action {
         Action::None
     }
@@ -275,7 +248,7 @@ pub trait App {
         Action::None
     }
 
-    /// Window title. Called once at startup.
+    /// Read once at startup.
     fn title(&self) -> &str {
         "SlopOS App"
     }
@@ -286,13 +259,10 @@ pub trait App {
     }
 }
 
-/// Action returned from App::update().
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Action {
-    /// Nothing changed; no rebuild needed.
     None,
-    /// State changed; rebuild the widget tree on next frame.
+    /// Rebuild the widget tree on the next frame.
     Rebuild,
-    /// Exit the application.
     Exit,
 }

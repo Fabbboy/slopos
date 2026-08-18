@@ -1,6 +1,5 @@
 use super::traits::WidgetId;
 
-/// Pointer button identifiers.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PointerButton {
     Left,
@@ -8,7 +7,6 @@ pub enum PointerButton {
     Middle,
 }
 
-/// Modifier key state.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Modifiers {
     pub shift: bool,
@@ -39,13 +37,10 @@ impl Modifiers {
     }
 }
 
-/// Named (non-character) keys.
-///
-/// Re-exported from the canonical ABI keycode vocabulary (shared with the
-/// kernel via `keymap-core`) so the named-key set is defined in one place.
+/// Re-exported from the ABI keycode vocabulary the kernel shares via
+/// `keymap-core`, so the named-key set is defined in one place.
 pub use slopos_keymap_core::keycode::NamedKey;
 
-/// Key produced by the keymap.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Key {
     Char(char),
@@ -53,10 +48,8 @@ pub enum Key {
     Unknown,
 }
 
-/// Widget events dispatched through the tree.
 #[derive(Clone, Debug)]
 pub enum WidgetEvent {
-    // Pointer events
     PointerDown {
         x: i32,
         y: i32,
@@ -78,7 +71,6 @@ pub enum WidgetEvent {
         delta_y: i32,
     },
 
-    // Keyboard events
     KeyDown {
         key: Key,
         modifiers: Modifiers,
@@ -92,18 +84,15 @@ pub enum WidgetEvent {
         character: char,
     },
 
-    // Focus events
     FocusGained,
     FocusLost,
 
-    // Lifecycle
     Configure {
         width: u32,
         height: u32,
     },
 }
 
-/// Phase of event dispatch.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum EventPhase {
     /// Root -> target (preview / intercept).
@@ -114,7 +103,6 @@ pub enum EventPhase {
     Bubble,
 }
 
-/// Response from an event handler.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum EventResponse {
     /// Event not consumed, continue propagation.
@@ -133,7 +121,6 @@ impl EventResponse {
     }
 }
 
-/// Result of hit testing: which widget is under the pointer.
 pub struct HitTestResult {
     /// The deepest widget containing the point.
     pub target: WidgetId,
@@ -141,9 +128,7 @@ pub struct HitTestResult {
     pub chain: Vec<WidgetId>,
 }
 
-/// Perform hit testing on a widget tree.
-/// Walks in reverse paint order (last child first = topmost tested first).
-/// Returns the deepest widget containing the point.
+/// Walks in reverse paint order, so the topmost child is tested first.
 pub fn hit_test(
     root: &dyn super::traits::Widget,
     point_x: i32,
@@ -170,8 +155,8 @@ fn hit_test_recursive(
         return false;
     }
 
-    // All widgets use absolute coordinates from layout, so pass
-    // the original point through without local conversion.
+    // Layout leaves every rect in absolute coordinates, so the point needs no
+    // per-level conversion.
     let children = widget.children();
     for child in children.iter().rev() {
         if hit_test_recursive(child.as_ref(), px, py, chain) {
@@ -180,15 +165,12 @@ fn hit_test_recursive(
         }
     }
 
-    // No child hit — this widget is the target.
     chain.push(widget.id());
     true
 }
 
-/// Message queue that widgets push to during event handling.
-/// Uses type erasure (`Box<dyn Any>`) so that the object-safe `Widget` trait
-/// can emit messages without knowing the concrete message type.
-/// `run_app()` drains messages with `drain_typed::<M>()`.
+/// Message queue widgets push to during event handling. Type-erased so the
+/// object-safe `Widget` trait need not know the application's message type.
 pub struct MessageSink {
     messages: Vec<Box<dyn std::any::Any>>,
 }
@@ -200,7 +182,6 @@ impl MessageSink {
         }
     }
 
-    /// Emit a type-erased message from a widget.
     pub fn emit_raw(&mut self, msg: Box<dyn std::any::Any>) {
         self.messages.push(msg);
     }
@@ -219,7 +200,6 @@ impl MessageSink {
         typed
     }
 
-    /// Whether any messages are pending.
     pub fn has_messages(&self) -> bool {
         !self.messages.is_empty()
     }
@@ -231,9 +211,8 @@ impl Default for MessageSink {
     }
 }
 
-/// Dispatch event from root. Containers forward to their children
-/// in their own event() implementations. The hit test result is used
-/// by the framework for focus management, not event routing.
+/// Containers route to their own children, so the hit test result is only the
+/// framework's focus input and plays no part in routing.
 pub fn dispatch_event(
     root: &mut dyn super::traits::Widget,
     _hit: &HitTestResult,

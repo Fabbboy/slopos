@@ -1,22 +1,11 @@
-//! TTY subsystem error types.
-//!
-//! Canonical definitions for TTY errors shared across the kernel.  Moved here
-//! from the drivers crate so that service interfaces in `kernel-services` can
-//! reference `TtyError` directly in function pointer signatures, eliminating
-//! the need for lossy `Result -> i32` adapter functions.
+//! TTY subsystem error types, shared across the kernel so service interfaces
+//! can name `TtyError` directly instead of a lossy `Result -> i32` adapter.
 
-/// Errors returned by TTY operations.
-///
-/// # `to_errno()` boundary mapping
-///
-/// Each variant maps to a POSIX errno at the syscall boundary via
-/// [`TtyError::to_errno()`].  Internal code matches on variants directly;
-/// the syscall return path calls `to_errno()` at the very edge.
+/// Errors returned by TTY operations. Internal code matches variants directly;
+/// [`TtyError::to_errno()`] is called only at the syscall return edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TtyError {
-    /// TTY index is out of range (>= MAX_TTYS).
     InvalidIndex,
-    /// TTY slot is not allocated (None).
     NotAllocated,
     /// Caller is a background process — should receive SIGTTIN.
     BackgroundRead,
@@ -26,28 +15,20 @@ pub enum TtyError {
     HungUp,
     /// No data available and O_NONBLOCK is set — EAGAIN.
     WouldBlock,
-    /// Permission denied (e.g. different session for TIOCSPGRP).
     PermissionDenied,
-    /// Unsupported line discipline ID.
     UnsupportedLineDiscipline,
-    /// Caller belongs to a different session than the TTY's controlling
-    /// session — hard denial.
+    /// Caller belongs to a different session than the TTY's controlling session.
     CrossSessionDenied,
-    /// Operation was interrupted by a signal.
     SignalInterrupt,
     /// Background process in an orphaned process group tried to change
     /// terminal settings — returns EIO instead of SIGTTOU.
     OrphanedProcessGroup,
-    /// Invalid argument.
     InvalidArg,
     /// Device is in exclusive mode and already open.
     DeviceBusy,
-    /// Blocking syscall was interrupted by a signal and
-    /// may be transparently restarted.  Maps to the kernel-internal
-    /// ERESTARTSYS (-512) — the syscall return path converts this to EINTR
-    /// or restarts depending on SA_RESTART.  MUST NEVER reach userland.
+    /// Kernel-internal ERESTARTSYS (-512): the syscall return path converts it
+    /// to EINTR or restarts per SA_RESTART. MUST NEVER reach userland.
     Restart,
-    /// Allocator returned out of memory during a TTY operation.
     OutOfMemory,
 }
 

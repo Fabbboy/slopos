@@ -1,16 +1,10 @@
 //! The network indicator's artwork, described as geometry rather than pixels.
 //!
-//! The icon has to be drawn in three inks and four badges.
 //! `gfx::image::draw_image` takes no colour-modulation parameter, so a sprite
-//! sheet would mean one bitmap per combination and a tinting blitter that does
-//! not exist. A rect table costs neither: the renderer recolours the same shape
-//! per state, and first-party geometry carries no third-party icon licence,
-//! where an icon set such as Adwaita (CC-BY-SA-3.0) or Material (Apache-2.0)
-//! would.
-//!
-//! The wired glyph is a bus with three drops and three nodes on a 14×9 unit
-//! grid. Every edge is axis-aligned, so it needs no anti-aliasing at scale 1
-//! and scales by an integer multiplier without resampling.
+//! sheet would mean one bitmap per ink×badge combination; a rect table is
+//! recoloured per state and carries no third-party icon licence. Every edge is
+//! axis-aligned, so the shape scales by an integer multiplier without
+//! resampling.
 
 use crate::netstate::NetIndicatorState;
 
@@ -19,10 +13,8 @@ pub const GLYPH_W: i32 = 14;
 /// Height of the unit grid every glyph is drawn on.
 pub const GLYPH_H: i32 = 9;
 
-/// Which shape the indicator draws.
-///
-/// There is deliberately no wireless variant: the tree has no wireless driver,
-/// and an unreachable arm in the renderer is a worse lie than a missing one.
+/// Which shape the indicator draws. No wireless variant: the tree has no
+/// wireless driver, and an unreachable arm claims a capability that is absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlyphBase {
     Wired,
@@ -44,13 +36,12 @@ pub enum Ink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Badge {
     None,
-    /// Reachable, but not all the way — the amber of a window's minimize
-    /// button.
+    /// Reachable, but not all the way.
     Warn,
-    /// The link itself is broken — the red of a window's close button.
+    /// The link itself is broken.
     Error,
-    /// Switched off deliberately. A diagonal stroke, not a dot: "off" is not a
-    /// fault and must not borrow a fault's colour.
+    /// Switched off deliberately. A stroke, not a dot: "off" is not a fault and
+    /// must not borrow a fault's colour.
     Slash,
 }
 
@@ -113,11 +104,9 @@ const WIRED: [GlyphRect; 7] = [
     },
 ];
 
-/// The wired glyph's rect table.
 pub const WIRED_RECTS: &[GlyphRect] = &WIRED;
 
-/// A shape, an ink and a badge — everything the renderer needs, and nothing
-/// about pixels.
+/// A shape, an ink and a badge — nothing about pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlyphSpec {
     pub base: GlyphBase,
@@ -126,25 +115,20 @@ pub struct GlyphSpec {
 }
 
 impl GlyphSpec {
-    /// The rectangles making up this spec's shape.
     #[inline]
     pub const fn rects(&self) -> &'static [GlyphRect] {
         rects_for(self.base)
     }
 }
 
-/// The rectangles making up `base`.
 pub const fn rects_for(base: GlyphBase) -> &'static [GlyphRect] {
     match base {
         GlyphBase::Wired => WIRED_RECTS,
     }
 }
 
-/// How an indicator state looks.
-///
-/// The ink says whether the link works, the badge says what is wrong with it.
-/// Exactly one state carries each of the two fault badges, so a person learns
-/// the mapping from one look at the bar rather than from a legend.
+/// How an indicator state looks: the ink says whether the link works, the badge
+/// says what is wrong with it. Exactly one state carries each fault badge.
 pub const fn glyph_for(state: NetIndicatorState) -> GlyphSpec {
     let (ink, badge) = match state {
         NetIndicatorState::Connected => (Ink::Ok, Badge::None),
@@ -236,9 +220,6 @@ mod tests {
         assert_eq!(glyph_for(NetIndicatorState::Disabled).ink, Ink::Down);
     }
 
-    /// Axis-aligned edges are what let the renderer scale by an integer
-    /// multiplier without resampling; a rect table that only happens to be
-    /// integral today would break that quietly.
     #[test]
     fn the_shape_scales_by_an_integer_multiplier() {
         for scale in 1..=4 {
@@ -250,9 +231,6 @@ mod tests {
         }
     }
 
-    /// The drops must actually connect the bus to the nodes, and the nodes
-    /// must not touch each other — otherwise the icon is a solid blob at
-    /// 14 px rather than a recognisable topology.
     #[test]
     fn the_wired_shape_is_a_connected_bus_with_separated_nodes() {
         let bus = WIRED_RECTS[0];

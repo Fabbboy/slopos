@@ -1,13 +1,8 @@
 //! Input translation: windowing events → widget events.
 //!
-//! Text characters come from the **kernel-resolved codepoint** the event already
-//! carries: the kernel is the single keyboard-layout authority (it applies the
-//! active runtime layout, AltGr levels, and dead-key composition before the
-//! event crosses to userland), so switching the layout with `keymap <name>`
-//! flows into every GUI app for free — no per-app layout engine. Named action
-//! keys are layout-independent and come from the shared `keymap-core`
-//! classifier driven by the canonical keycode; Ctrl-shortcut letters are
-//! recovered from the kernel codepoint so they follow the active layout too.
+//! The kernel is the single keyboard-layout authority, so text comes from the
+//! codepoint the event already carries and appkit runs no layout engine of its
+//! own; only layout-independent action keys go through `keymap-core`.
 
 use super::event::{Key, Modifiers, WidgetEvent};
 use slopos_keymap_core::{UiKey, mods_locks_from_raw, ui_classify};
@@ -15,17 +10,11 @@ use slopos_windowing::Event;
 
 /// Classify a windowing key event into an appkit [`Key`].
 ///
-/// - Named action keys (arrows, F-keys, keypad navigation, Enter/Tab/Esc/Space/
-///   Backspace) are layout-independent → from the keycode classifier.
-/// - Printable text uses the kernel-resolved `codepoint` (honors the active
-///   layout incl. AltGr + dead keys). A freshly-pressed dead key carries
-///   `codepoint == 0` and classifies as [`Key::Unknown`] (no text yet).
-/// - When Ctrl makes the codepoint a letter control code (`Ctrl+A` → 0x01 …
-///   `Ctrl+Z` → 0x1A), the letter is recovered by inverting that transform, so
-///   shortcuts follow the **active layout** (on QWERTZ, Ctrl on the key
-///   labelled Z is Ctrl+Z). Enter/Tab/Backspace/Esc are returned as Named
-///   above, so their control codes never reach the inversion. The keycode
-///   classifier remains the fallback for events without a codepoint.
+/// A freshly-pressed dead key carries `codepoint == 0` and yields
+/// [`Key::Unknown`]. Ctrl+letter control codes (0x01..=0x1A) are inverted back
+/// to the letter so shortcuts follow the active layout — on QWERTZ, Ctrl on the
+/// key labelled Z is Ctrl+Z. Named keys are matched first, so Enter/Tab/Esc
+/// control codes never reach that inversion.
 fn classify_key(keycode: u16, codepoint: u32, modifiers: u8) -> Key {
     let (mods, locks) = mods_locks_from_raw(modifiers);
 
@@ -91,9 +80,8 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
             let mods = Modifiers::from_raw(*modifiers);
             let key = classify_key(*keycode, *codepoint, *modifiers);
             match key {
-                // Printable text with no Ctrl and no *plain* Alt is text input
-                // (AltGr-composed characters are text); everything else (named
-                // keys, shortcuts, modifier keys) is a key-down.
+                // AltGr-composed characters are text; Ctrl and plain Alt make
+                // the press a shortcut instead.
                 Key::Char(c) if !mods.ctrl && !mods.plain_alt() => {
                     Some(WidgetEvent::TextInput { character: c })
                 }

@@ -1,15 +1,9 @@
 //! The network indicator's model: what the panel knows, and the one state the
 //! bar draws.
 //!
-//! The model is a fixed-size snapshot rather than a live view of the kernel.
-//! The compositor refreshes it on a slow timer and diffs the result, so an
-//! unchanged network produces no damage at all — a status indicator that
-//! repaints every frame costs more than the rest of the bar put together.
-//!
-//! Every human-readable string comes from [`slopos_net_core::render`]. `ip`
-//! and this indicator name the same states, and if each spelled them itself a
-//! person reading a terminal and the bar at the same time would get two
-//! answers to one question.
+//! A fixed-size snapshot the compositor refreshes on a slow timer and diffs, so
+//! an unchanged network produces no damage. Human-readable strings come from
+//! [`slopos_net_core::render`] so the bar and `ip` cannot disagree.
 
 use slopos_abi::net::{
     NET_CONN_FULL, NET_CONN_LIMITED, NET_CONN_LOCAL, NET_CONN_NONE, NET_CONN_PORTAL,
@@ -18,8 +12,7 @@ use slopos_abi::net::{
 };
 use slopos_net_core::render;
 
-/// Interfaces the model can hold. The kernel's interface table is short and
-/// the panel lists all of it; overflow drops the tail rather than growing.
+/// Interfaces the model can hold; overflow drops the tail rather than growing.
 pub const MAX_IFACES: usize = 6;
 
 /// Resolvers the model can hold, matching what the panel shows.
@@ -28,11 +21,8 @@ pub const MAX_DNS: usize = 3;
 /// Longest interface name the model stores, matching the ABI's field width.
 pub const IFNAME_LEN: usize = 16;
 
-/// What kind of link an interface is.
-///
-/// There is deliberately no wireless variant: the tree has no wireless driver,
-/// so a `Wireless` arm would be unreachable code claiming a capability that
-/// does not exist. Appending one later is a non-breaking change.
+/// What kind of link an interface is. No wireless variant: the tree has no
+/// wireless driver, and appending one later is non-breaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IfaceKind {
     Loopback,
@@ -40,9 +30,7 @@ pub enum IfaceKind {
 }
 
 impl IfaceKind {
-    /// The `NET_IFKIND_*` value this kind serialises to, so the panel can hand
-    /// it to [`slopos_net_core::render::iface_kind`] instead of spelling the
-    /// word itself.
+    /// The `NET_IFKIND_*` value this kind serialises to.
     pub const fn abi(self) -> u8 {
         match self {
             IfaceKind::Loopback => NET_IFKIND_LOOPBACK,
@@ -52,12 +40,9 @@ impl IfaceKind {
 
     /// Read a `NET_IFKIND_*` value from the ABI.
     ///
-    /// Everything that is not loopback reads as Ethernet, including a kernel's
-    /// `NET_IFKIND_WIRELESS`. Lossy and deliberately so: the distinction the
-    /// indicator draws is "loopback, which never speaks for the machine"
-    /// against "a link that does". A kernel that grows 802.11 wants a variant
-    /// here and a glyph to go with it, not a silent third meaning attached to
-    /// this one.
+    /// Deliberately lossy: everything that is not loopback reads as Ethernet,
+    /// because the only distinction the indicator draws is loopback against a
+    /// link that speaks for the machine.
     pub const fn from_abi(kind: u8) -> IfaceKind {
         match kind {
             NET_IFKIND_LOOPBACK => IfaceKind::Loopback,
@@ -66,12 +51,8 @@ impl IfaceKind {
     }
 }
 
-/// The one state the bar's glyph shows.
-///
-/// Ordered by how much attention each deserves, not by any ABI value: this is
-/// a presentation decision, and it is deliberately coarser than the kernel's
-/// `NET_CONN_*` because a person glancing at a 14 px icon can distinguish six
-/// things, not twelve.
+/// The one state the bar's glyph shows, ordered by how much attention each
+/// deserves rather than by any ABI value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetIndicatorState {
     /// Addressed and the internet is reachable.
@@ -89,9 +70,8 @@ pub enum NetIndicatorState {
     Disabled,
 }
 
-/// Every [`NetIndicatorState`], for exhaustive iteration. Kept beside the enum
-/// so adding a variant without extending this list fails the tests that walk
-/// it rather than silently skipping the new state.
+/// Every [`NetIndicatorState`]; the tests walk it, so a variant missing here
+/// fails rather than being silently skipped.
 pub const ALL_INDICATOR_STATES: &[NetIndicatorState] = &[
     NetIndicatorState::Connected,
     NetIndicatorState::Limited,
@@ -101,24 +81,18 @@ pub const ALL_INDICATOR_STATES: &[NetIndicatorState] = &[
     NetIndicatorState::Disabled,
 ];
 
-/// What the bar says when the link is up and no address has arrived yet.
-/// `slopos_net_core` has no sentence for this — it is an interface state, not
-/// a connectivity verdict — so it is spelled once, here.
+/// Spelled here rather than in `slopos_net_core`: this is an interface state,
+/// not a connectivity verdict, and that vocabulary has no sentence for it.
 pub const CONFIGURING_LABEL: &str = "Getting an address";
 
-/// What the bar says when an interface is up and its link is not.
 pub const NO_CARRIER_LABEL: &str = "Cable unplugged";
 
-/// Title of the network panel.
 pub const PANEL_TITLE: &str = "Network";
 
-/// What a panel row says for an interface with no address.
 pub const NO_ADDRESS_LABEL: &str = "no address";
 
-/// Every literal the network panel can draw that is not already a renderer's
-/// output. Kept beside the strings themselves so the coverage guard below
-/// walks all of them — a label added to the panel and not to this list is a
-/// label nothing checks the font can draw.
+/// Every literal the panel can draw that is not a renderer's output. A label
+/// missing here is a label nothing checks the font can draw.
 pub const PANEL_LABELS: &[&str] = &[
     PANEL_TITLE,
     NO_ADDRESS_LABEL,
@@ -129,30 +103,21 @@ pub const PANEL_LABELS: &[&str] = &[
     TRUNCATION,
 ];
 
-/// The panel's label for the default gateway.
 pub const GATEWAY_LABEL: &str = "Gateway";
 
-/// What separates an interface's kind from its status on the detail line.
-///
-/// U+00B7 MIDDLE DOT, which the atlas covers (Latin-1) and which is the
-/// conventional inline-metadata separator, leaving the hyphen to mean only
-/// range or minus.
+/// U+00B7 MIDDLE DOT, which the atlas covers (Latin-1), leaving the hyphen to
+/// mean only range or minus.
 pub const IFACE_SEPARATOR: &str = " \u{B7} ";
 
-/// What a panel row says for an administratively down interface.
 pub const IFACE_OFF_LABEL: &str = "off";
 
-/// What a panel row says for an interface whose link is down.
 pub const IFACE_NO_CARRIER_LABEL: &str = "unplugged";
 
-/// What a truncated string ends with. Two periods, not an ellipsis: the atlas
-/// has no U+2026.
+/// Two periods, not an ellipsis: the atlas has no U+2026.
 pub const TRUNCATION: &str = "..";
 
-/// What a panel row is currently doing, as one ordered decision.
-///
-/// The dot's colour and the detail line's status word are two renderings of
-/// this one value, so they cannot disagree. `carrier` on its own is not that
+/// What a panel row is currently doing, as one ordered decision the dot's
+/// colour and the status word both render. `carrier` on its own is not that
 /// value: a `LOWERLAYERDOWN` interface still reports one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IfaceState {
@@ -166,9 +131,9 @@ pub enum IfaceState {
     Up,
 }
 
-/// Classify one row. The order is the order the causes mask each other in:
-/// an interface someone switched off has no carrier worth reporting, and an
-/// interface with no carrier cannot be blamed for having no address.
+/// Classify one row. The order is the order the causes mask each other in: a
+/// switched-off interface has no carrier worth reporting, and one with no
+/// carrier cannot be blamed for having no address.
 pub const fn iface_state(row: &IfaceRow) -> IfaceState {
     if !row.admin_up {
         IfaceState::Off
@@ -212,8 +177,7 @@ impl IfaceRow {
     };
 
     /// A named row of `kind`, with everything else at its down/unset value.
-    /// Names longer than [`IFNAME_LEN`] are truncated rather than rejected;
-    /// the name is a label, and a caller has no useful recovery.
+    /// Names longer than [`IFNAME_LEN`] are truncated rather than rejected.
     pub fn named(name: &[u8], kind: IfaceKind) -> IfaceRow {
         let len = name.len().min(IFNAME_LEN);
         let mut row = IfaceRow {
@@ -225,13 +189,11 @@ impl IfaceRow {
         row
     }
 
-    /// The interface name's bytes.
     pub fn name_bytes(&self) -> &[u8] {
         &self.name[..(self.name_len as usize).min(IFNAME_LEN)]
     }
 
-    /// The interface name, or `""` if it is not UTF-8. Interface names are
-    /// bytes in the ABI and stay bytes until something has to draw one.
+    /// The interface name, or `""` if it is not UTF-8.
     pub fn name_str(&self) -> &str {
         core::str::from_utf8(self.name_bytes()).unwrap_or("")
     }
@@ -267,9 +229,8 @@ pub struct NetPanelModel {
 }
 
 impl NetPanelModel {
-    /// The model before the first refresh: networking on, nothing known yet.
-    /// [`indicator_state_for`] reads this as `Disconnected` — no interface —
-    /// which is the honest answer until the first query returns.
+    /// The model before the first refresh: networking on, nothing known yet,
+    /// which [`indicator_state_for`] reads as `Disconnected`.
     pub const EMPTY: NetPanelModel = NetPanelModel {
         enabled: true,
         connectivity: NET_CONN_NONE,
@@ -301,32 +262,24 @@ impl NetPanelModel {
         }
     }
 
-    /// The interface the indicator speaks for: the first non-loopback row.
-    ///
-    /// Loopback is never it. A machine with only `lo` is not connected to
-    /// anything, and reporting `127.0.0.1` as an address would put a
-    /// connected glyph in the bar of a machine with no network at all.
+    /// The interface the indicator speaks for: the first non-loopback row. A
+    /// machine holding only `lo` is not connected to anything.
     pub fn primary(&self) -> Option<&IfaceRow> {
         self.ifaces().iter().find(|r| r.kind != IfaceKind::Loopback)
     }
 
-    /// The interfaces a person should be shown, which excludes loopback.
-    ///
-    /// `lo` is not a network anyone connects to or disconnects from. It also
-    /// drags `UNKNOWN` into the panel: loopback's operational state is
-    /// genuinely unknowable per RFC 2863, which is the right thing for
-    /// `ip link` to print and jargon in a status menu.
+    /// The interfaces a person should be shown, which excludes loopback — not a
+    /// network anyone connects to, and per RFC 2863 its operational state is
+    /// unknowable, which reads as jargon in a status menu.
     ///
     /// Kept separate from [`ifaces`](Self::ifaces) rather than filtered at the
-    /// source, because the indicator's own logic still has to see loopback to
-    /// know that a machine holding only `lo` is not connected.
+    /// source, because the indicator still has to see loopback.
     pub fn listed_ifaces(&self) -> impl Iterator<Item = &IfaceRow> {
         self.ifaces()
             .iter()
             .filter(|r| r.kind != IfaceKind::Loopback)
     }
 
-    /// How many rows [`listed_ifaces`](Self::listed_ifaces) will yield.
     pub fn listed_count(&self) -> usize {
         self.listed_ifaces().count()
     }
@@ -340,10 +293,8 @@ impl Default for NetPanelModel {
 
 /// Reduce the model to the one state the bar draws.
 ///
-/// The order of the tests is the order of the questions a person asks: is it
-/// switched on, is there an interface, is it up, is there a link, does it have
-/// an address, and only then — can it reach anything. Each answer outranks
-/// every later one, so an unplugged cable never shows as "no internet".
+/// Each check outranks every later one, so an unplugged cable never shows as
+/// "no internet".
 pub fn indicator_state_for(model: &NetPanelModel) -> NetIndicatorState {
     if !model.enabled {
         return NetIndicatorState::Disabled;
@@ -357,7 +308,7 @@ pub fn indicator_state_for(model: &NetPanelModel) -> NetIndicatorState {
     if !iface.has_carrier() {
         return NetIndicatorState::NoCarrier;
     }
-    // Dormant is a link that exists but is not passing traffic yet.
+    // Dormant: the link exists but is not passing traffic yet.
     if iface.oper == NET_OPER_DORMANT {
         return NetIndicatorState::Configuring;
     }
@@ -369,17 +320,13 @@ pub fn indicator_state_for(model: &NetPanelModel) -> NetIndicatorState {
         NET_CONN_LIMITED | NET_CONN_PORTAL | NET_CONN_LOCAL => NetIndicatorState::Limited,
         NET_CONN_NONE => NetIndicatorState::Disconnected,
         // NET_CONN_UNKNOWN and anything a newer kernel adds: the stack has not
-        // finished deciding, which is a state worth showing rather than hiding.
+        // finished deciding, which is worth showing rather than hiding.
         _ => NetIndicatorState::Configuring,
     }
 }
 
-/// The one-line sentence that goes with a state.
-///
-/// A function of the state alone, not of the model, so the sentence and the
-/// glyph can never contradict each other. Four of the six delegate to
-/// [`slopos_net_core::render`]; the two that do not are interface states the
-/// connectivity vocabulary has no word for.
+/// The one-line sentence that goes with a state. A function of the state alone,
+/// not of the model, so the sentence and the glyph cannot contradict each other.
 pub const fn indicator_label(state: NetIndicatorState) -> &'static str {
     match state {
         NetIndicatorState::Connected => render::connectivity(NET_CONN_FULL),
@@ -442,8 +389,6 @@ mod tests {
         );
     }
 
-    /// A machine with only `lo` has no network. Loopback must never be the
-    /// interface the indicator speaks for.
     #[test]
     fn loopback_alone_is_disconnected() {
         assert_eq!(
@@ -459,8 +404,6 @@ mod tests {
 
     #[test]
     fn interface_state_outranks_connectivity() {
-        // Every connectivity value the kernel can report, against an interface
-        // whose own state already answers the question.
         for connectivity in 0u8..=255 {
             assert_eq!(
                 indicator_state_for(&model(
@@ -529,9 +472,6 @@ mod tests {
         }
     }
 
-    /// The whole cross product the indicator is a function of. Total, so a
-    /// future reordering of the checks changes a recorded answer rather than
-    /// slipping through.
     #[test]
     fn the_state_is_total_over_the_inputs() {
         for enabled in [false, true] {
@@ -626,8 +566,6 @@ mod tests {
             );
             seen[i] = label;
         }
-        // The four states connectivity has a word for take that word rather
-        // than a second spelling of it.
         assert_eq!(
             indicator_label(NetIndicatorState::Connected),
             render::connectivity(NET_CONN_FULL)
@@ -638,10 +576,8 @@ mod tests {
         );
     }
 
-    /// Every string this crate can put on screen must be drawable by the
-    /// console font — ASCII, Latin-1, and exactly `€ ˚ ˇ`. An em dash is a
-    /// rendering bug that only shows up on a framebuffer, so it is caught
-    /// here instead.
+    /// The console font covers ASCII, Latin-1 and exactly `€ ˚ ˇ`; an em dash
+    /// would otherwise only surface as a bad glyph on a framebuffer.
     #[test]
     fn every_produced_string_is_renderable() {
         let mut checked = 0usize;

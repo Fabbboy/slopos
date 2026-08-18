@@ -1,32 +1,4 @@
 //! Limine bootloader handoff layer.
-//!
-//! # Surviving `unsafe` sites — file-level SAFETY
-//!
-//! All remaining `unsafe` in this file falls into one of three irreducible
-//! classes:
-//!
-//! 1. **`unsafe impl Send + Sync` markers over bootloader-published pointers.**
-//!    `SystemInfo` carries `cmdline_ptr: *const c_char` and a framebuffer
-//!    `*mut u8`. Both point at memory the bootloader installs and Limine
-//!    promises is mapped read-only (cmdline) or device-side (framebuffer)
-//!    for the kernel's lifetime — Inv. 8. Rust cannot encode that promise,
-//!    so the contract is asserted via `unsafe impl`. `SyncMemmapPtrArray`
-//!    has the same shape: it stores `*const LimineMemmapEntry` values that
-//!    point into our own static `LEGACY_MEMMAP` cell, which never moves.
-//!
-//! 2. **The legacy `LimineMemmapResponse` C-ABI shim.** `init_legacy_memmap`
-//!    builds a self-referential structure (`LimineMemmapResponse` whose
-//!    `entries: *const LimineMemmapEntry` points into a sibling field of
-//!    the same `SyncUnsafeCell`). Retiring the `SyncUnsafeCell` would
-//!    require flipping the consumer contract from `*const` to `&[…]` —
-//!    downstream `mm/` and `boot/` callers read through the `*const`
-//!    pointer and the shape is part of the published handoff. Init is
-//!    gated on a `swap(true, SeqCst)` so the cell is written exactly
-//!    once, then exposed as a `*const` for life.
-//!
-//! 3. **Limine request placement.** The three section labels the boot
-//!    protocol reads belong to OSTD's `limine_request!`, so this module
-//!    names a placement rather than a section string.
 
 use core::{
     ffi::{c_char, c_void},
@@ -179,10 +151,7 @@ struct SystemInfo {
     rsdp_virt_addr: u64,
     memmap_entry_count: u64,
     cmdline: Option<&'static str>,
-    /// Raw NUL-terminated cmdline pointer published by the bootloader.
-    /// `KernelSync` wraps the raw pointer so the surrounding `SystemInfo`
-    /// auto-derives `Send + Sync`; the cmdline buffer is read-only for
-    /// the kernel's lifetime.
+    /// Bootloader-published NUL-terminated cmdline; read-only for the kernel's lifetime.
     cmdline_ptr: KernelSync<*const c_char>,
     flags: SystemFlags,
 }
@@ -205,12 +174,6 @@ impl SystemInfo {
         }
     }
 }
-
-// `SystemInfo` auto-derives `Send + Sync`: the two previously-
-// problematic raw-pointer fields (`cmdline_ptr`,
-// `framebuffer.address`) live behind `KernelSync<T>` wrappers, so
-// the surrounding struct's auto-derived markers cover the contract
-// without a hand-written `unsafe impl`.
 
 static SYSTEM_INFO: OnceLock<SystemInfo> = OnceLock::new();
 
@@ -358,12 +321,8 @@ pub fn boot_info() -> slopos_ostd::boot_info::BootInfo {
 
 /// Bytes of the initramfs module loaded by Limine, if present.
 ///
-/// The initramfs is a `newc` cpio archive declared in `limine.conf` with
-/// `module_string: initramfs`; Limine maps it into the HHDM and exposes it via
-/// the modules response. The returned slice borrows the bootloader-published
-/// module memory, which Limine keeps mapped for the kernel's lifetime, so it is
-/// `'static`. The `limine` crate owns the only `unsafe` here (`File::data`);
-/// this crate stays `#![forbid(unsafe_code)]`.
+/// A `newc` cpio archive declared in `limine.conf` as `module_string: initramfs`.
+/// `'static` because Limine keeps module memory mapped for the kernel's lifetime.
 pub fn initramfs() -> Option<&'static [u8]> {
     let response = MODULES_REQUEST.response()?;
     let modules = response.modules();
@@ -423,9 +382,8 @@ pub fn get_rsdp_phys_address() -> u64 {
     if !info.flags.rsdp_available || info.rsdp_phys_addr == 0 {
         return 0;
     }
-    // Limine v11 (base revision 6) returns the RSDP address as an HHDM
-    // virtual pointer; older revisions returned a physical address.
-    // Normalise to physical regardless.
+    // Base revision 6 returns the RSDP as an HHDM virtual pointer; older
+    // revisions returned a physical address. Normalise to physical.
     let addr = info.rsdp_phys_addr;
     if info.flags.hhdm_available && addr >= info.hhdm_offset {
         addr - info.hhdm_offset
@@ -434,9 +392,9 @@ pub fn get_rsdp_phys_address() -> u64 {
     }
 }
 
-/// Virtual address of the `EFI_SYSTEM_TABLE`, or `0` when the platform
-/// was not booted via UEFI (BIOS / no EFI response). With base revision 6
-/// Limine returns this as an HHDM-virtual pointer; the EFI runtime regions
+/// Virtual address of the `EFI_SYSTEM_TABLE`, or `0` when not booted via UEFI.
+///
+/// Base revision 6 returns this as an HHDM-virtual pointer; the runtime regions
 /// it points into are mapped by [`crate::uefi_runtime`].
 pub fn efi_system_table_addr() -> u64 {
     match EFI_REQUEST.response() {
@@ -445,9 +403,9 @@ pub fn efi_system_table_addr() -> u64 {
     }
 }
 
-/// Borrow the raw UEFI memory-map blob and its per-descriptor stride
-/// (`desc_size`), or `None` when not booted via UEFI. Must be consumed
-/// early in boot: the array can live in bootloader-reclaimable memory.
+/// Raw UEFI memory-map blob and its per-descriptor stride (`desc_size`), or
+/// `None` when not booted via UEFI. Must be consumed early in boot: the array
+/// can live in bootloader-reclaimable memory.
 pub fn efi_memmap() -> Option<(&'static [u8], usize)> {
     let resp = EFI_MEMMAP_REQUEST.response()?;
     Some((resp.memmap(), resp.desc_size as usize))
@@ -461,17 +419,13 @@ pub fn get_rsdp_address() -> *const c_void {
 
     let addr = info.rsdp_phys_addr;
 
-    // With base revision 6 (Limine v11), the RSDP address is returned as a
-    // virtual (HHDM) pointer again (unlike revision 3 which returned physical).
-    // Detect whether the address is already in the HHDM range or needs conversion.
+    // Base revision 6 returns the RSDP as an HHDM virtual pointer; older
+    // revisions returned physical, so detect which form this is.
     if addr >= info.hhdm_offset && info.flags.hhdm_available {
-        // Already an HHDM virtual address
         addr as *const c_void
     } else if info.flags.hhdm_available {
-        // Physical address - convert to HHDM virtual
         (addr + info.hhdm_offset) as *const c_void
     } else {
-        // Fallback: return as-is (will likely fault)
         addr as *const c_void
     }
 }
@@ -502,25 +456,17 @@ pub fn memory_regions() -> impl Iterator<Item = MemoryRegion> {
         .map(|e| limine_entry_to_region(e))
 }
 
-/// Single backing cell for the C-ABI legacy memmap shim. Kept as a
-/// [`SyncUnsafeCell`] (rather than a `OnceLock`) because the three
-/// fields are self-referential — `ptrs[i]` points into `entries[i]`
-/// and `response.entries` points into `ptrs.0` — so the storage must
-/// be initialised in place at its final static address. A single
-/// [`AtomicBool`] gates one-shot initialisation; the previous
-/// three-static layout collapses into this one.
+/// Backing cell for the C-ABI legacy memmap shim. Self-referential —
+/// `ptrs[i]` points into `entries[i]` and `response.entries` into `ptrs.0` —
+/// so it must be initialised in place at its final static address.
 struct LegacyMemmap {
     entries: [LimineMemmapEntry; 256],
     ptrs: SyncMemmapPtrArray,
     response: LimineMemmapResponse,
 }
 
-/// Wrapper for the legacy memmap pointer array. The inner array's
-/// pointers self-reference `LEGACY_MEMMAP.entries[i]`, which lives in
-/// a `'static` `SyncUnsafeCell` and is written exactly once (gated by
-/// `LEGACY_MEMMAP_INIT.swap(true, SeqCst)` in `init_legacy_memmap`).
-/// `KernelSync` provides the `Sync` impl for the surrounding cell;
-/// the underlying memory is stable for the kernel's lifetime.
+/// Pointers into `LEGACY_MEMMAP.entries`, written exactly once by
+/// `init_legacy_memmap` and stable for the kernel's lifetime.
 #[repr(transparent)]
 struct SyncMemmapPtrArray(KernelSync<[*const LimineMemmapEntry; 256]>);
 
@@ -547,13 +493,6 @@ fn init_legacy_memmap() {
         let entries = memmap.entries();
         let count = entries.len().min(256);
 
-        // The cell is at its final `'static` address (InitInPlace
-        // contract); writing self-referential `*const` pointers into
-        // `cell.ptrs.0[i] = &cell.entries[i]` produces addresses that
-        // remain valid for the kernel's lifetime. The
-        // `LimineMemmapResponse` C-ABI consumer contract requires
-        // this self-referential layout — retiring the cell would
-        // require flipping the consumer to `&[LimineMemmapEntry]`.
         for (i, entry) in entries.iter().take(count).enumerate() {
             cell.entries[i] = LimineMemmapEntry {
                 base: entry.base,
@@ -570,12 +509,6 @@ fn init_legacy_memmap() {
 
 pub fn limine_get_memmap_response() -> *const LimineMemmapResponse {
     init_legacy_memmap();
-    // Post-init the response struct is read-only for the kernel's
-    // lifetime; returning a `*const` to the cell is sound for the
-    // boot consumer's downstream `*const` reads. `as_ptr` projects
-    // the `*const LegacyMemmap` from the cell; we further `.cast` to
-    // `*const LimineMemmapResponse` via the `response` field offset
-    // (which is `repr(C)`-stable).
     let base = LEGACY_MEMMAP.as_ptr();
     let offset = core::mem::offset_of!(LegacyMemmap, response);
     (base as *const u8).wrapping_add(offset) as *const LimineMemmapResponse

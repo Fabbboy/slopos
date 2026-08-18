@@ -29,7 +29,6 @@ use crate::syscall::args::{Fd, UserPtr};
 
 const SELECT_MAX_FDS: usize = 256;
 
-// ioctl helper return: Ok(value) → SyscallResult::Ok(value); Err(()) → EINVAL.
 type IoctlResult = Result<u64, ()>;
 
 #[inline(never)]
@@ -677,6 +676,5 @@ define_syscall!(syscall_ioctl
     }
 });
 
-// Suppress unused warning for UserPtr re-export.
 #[allow(dead_code)]
 type _Unused<T> = UserPtr<T>;

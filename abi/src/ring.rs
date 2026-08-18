@@ -1,189 +1,131 @@
 //! SlopRing — io_uring-style submission/completion ring ABI.
 //!
-//! Single source of truth for the wire format shared between the kernel
-//! `ring` crate and the userland SlopRing runtime. The public SlopRing docs
-//! describe the design; this module pins the `#[repr(C)]` layout and the opcode
-//! and flag constants.
-//!
-//! Nothing here is `unsafe` or kernel-only: it is plain POD definitions
-//! both sides agree on, exactly like [`crate::syscall::numbers`].
-
-// ---------------------------------------------------------------------------
-// Limits.
-// ---------------------------------------------------------------------------
+//! Single source of truth for the wire format shared between the kernel `ring`
+//! crate and the userland SlopRing runtime: the `#[repr(C)]` layouts, the
+//! opcodes and the flag constants.
 
 /// Maximum SQ entries a single `ring_setup` may request (SLOPRING § 6.1).
-/// Power of two; the CQ is twice this, so the largest region is a few
-/// hundred KiB of `Frame<RingMeta>`.
+/// Power of two; the CQ is twice this.
 pub const SLOPRING_MAX_ENTRIES: u32 = 4096;
 
 /// CQ headroom multiplier over the SQ (`cq_entries = SQ_TO_CQ * sq_entries`),
 /// matching Linux io_uring's default (SLOPRING § 4.3).
 pub const SLOPRING_SQ_TO_CQ: u32 = 2;
 
-// ---------------------------------------------------------------------------
-// Opcodes (SLOPRING § 12).
-// ---------------------------------------------------------------------------
-
-/// No-op; completes immediately with `res = 0`. Benchmark / fence.
+/// No-op; completes immediately with `res = 0`.
 pub const OP_NOP: u8 = 0;
-/// `read(fd, buf, len)` — `file_read_fd`.
+/// `read(fd, buf, len)`.
 pub const OP_READ: u8 = 1;
-/// `write(fd, buf, len)` — `file_write_fd`.
+/// `write(fd, buf, len)`.
 pub const OP_WRITE: u8 = 2;
-/// `recvmsg(fd, msghdr)` — `unix_recvmsg` / `socket_recvfrom`.
+/// `recvmsg(fd, msghdr)`.
 pub const OP_RECVMSG: u8 = 3;
-/// `send(fd, buf, len)` — `unix_send` / `socket_send`.
+/// `send(fd, buf, len)`.
 pub const OP_SEND: u8 = 4;
-/// `accept(fd)` — `unix_accept` / `socket_accept`.
+/// `accept(fd)`.
 pub const OP_ACCEPT: u8 = 5;
-/// `poll(fd, mask)` — `file_poll_register_fd` + readiness probe.
+/// `poll(fd, mask)`.
 pub const OP_POLL_ADD: u8 = 6;
-/// Harvest-wait deadline in nanoseconds (SLOPRING § 12 note).
+/// Harvest-wait deadline in nanoseconds.
 pub const OP_TIMEOUT: u8 = 7;
-/// Cancel an in-flight op by `user_data` — in-flight-table walk.
+/// Cancel an in-flight op by `user_data`.
 pub const OP_CANCEL: u8 = 8;
-/// `recvfrom(fd, buf, len, src*)` — `socket_recvfrom`. Like `OP_RECVMSG`
-/// but returns the datagram's *source* `SockAddrIn` in `addr2` (closes
-/// the nc UDP-listen gap). `addr` = data buf VA, `len` = buf len,
-/// `addr2` = user VA of a `SockAddrIn` out-struct.
+/// `recvfrom(fd, buf, len, src*)` — like `OP_RECVMSG`, but returns the
+/// datagram's *source* `SockAddrIn` in `addr2`.
 pub const OP_RECVFROM: u8 = 9;
-/// `openat(path, flags)` — `file_open_for_process`. Non-blocking file
-/// open (SlopOS fs opens are immediate). `addr` = path ptr, `len` = path
-/// len, `op_flags` = open flags. Installs an fd (ownership op).
+/// `openat(path, flags)`: `addr` = path ptr, `len` = path len, `op_flags` =
+/// open flags. Installs an fd (ownership op).
 pub const OP_OPENAT: u8 = 10;
-/// `close(fd)` — `file_close_fd`. `fd` = fd to close. Completes inline.
+/// `close(fd)`; completes inline.
 pub const OP_CLOSE: u8 = 11;
 
-/// Zero-copy send from a **registered fixed buffer** (`SLOPRING_SQE_FIXED_BUFFER`
-/// + `Sqe.buf_index`) — the io_uring `IORING_OP_SEND_ZC` analogue. The NIC DMAs
-/// the payload straight from the pinned user pages (no CPU copy); the pin is
-/// held until the TX is reclaimed, then a second, terminal CQE carrying
-/// [`SLOPRING_CQE_F_NOTIF`] (the first CQE carries [`SLOPRING_CQE_F_MORE`])
-/// signals the buffer is reusable. Sound for UDP/raw datagrams (single
-/// transmit); other families fall back to the single-copy `OP_SEND` path
-/// (SLOPRING § 13).
+/// Zero-copy send from a registered fixed buffer (`SLOPRING_SQE_FIXED_BUFFER`
+/// + `Sqe.buf_index`). The NIC DMAs from the pinned user pages, so the result
+/// CQE carries [`SLOPRING_CQE_F_MORE`] and a later terminal
+/// [`SLOPRING_CQE_F_NOTIF`] one signals the pin is dropped and the buffer
+/// reusable. Sound only for single-transmit datagrams (UDP/raw); other
+/// families fall back to the single-copy `OP_SEND` path (SLOPRING § 13).
 pub const OP_SEND_ZC: u8 = 12;
 
-/// `connect(fd, sockaddr)` — async, non-blocking socket connect. `addr` = user
-/// VA of a [`crate::net::SockAddrIn`] input struct, `len` = 16. Single-CQE:
-/// `res = 0` on success or a negated errno (`-ECONNREFUSED`, `-ETIMEDOUT`, …);
-/// no `F_MORE` / `F_NOTIF`. The probe is re-entrant — it initiates the handshake
-/// once and then polls it on each harvest re-probe, deferring (`WouldBlock`)
-/// while the connection is in progress. Not an ownership op (installs no fd,
-/// consumes no bytes). AF_INET (`SockAddrIn`) and AF_UNIX (`SockAddrUn`); carries
-/// no buffer selection.
+/// `connect(fd, sockaddr)` — `addr` is the user VA of a
+/// [`crate::net::SockAddrIn`] (`len` = 16) or a `SockAddrUn`. Single-CQE (no
+/// `F_MORE` / `F_NOTIF`): `res = 0` or a negated errno. Re-entrant — it
+/// initiates the handshake once and then defers (`WouldBlock`) on each harvest
+/// re-probe while the connection is in progress. Installs no fd and consumes
+/// no bytes, and carries no buffer selection.
 pub const OP_CONNECT: u8 = 13;
 
-/// Largest opcode value (inclusive). Used by the kernel to reject
-/// out-of-range opcodes with `-EINVAL`.
+/// Largest opcode value (inclusive); anything above is `-EINVAL`.
 pub const OP_MAX: u8 = OP_CONNECT;
 
-// ---------------------------------------------------------------------------
-// CQE flags (SLOPRING § 4.5).
-// ---------------------------------------------------------------------------
-
-/// Multishot continuation bit: this CQE is an *interim* completion of an
-/// armed multishot row (OP_ACCEPT/OP_RECVMSG/OP_POLL_ADD) — more CQEs for
-/// the same `user_data` are expected. Cleared on the terminal CQE
-/// (error / EOF / cancel), which retires the row.
+/// Interim completion of an armed multishot row — more CQEs for the same
+/// `user_data` are expected. Cleared on the terminal CQE (error / EOF /
+/// cancel), which retires the row.
 pub const SLOPRING_CQE_F_MORE: u32 = 1 << 0;
 
-/// Provided-buffer id is valid in the high 16 bits of `flags`
-/// ([`SLOPRING_CQE_BUFFER_SHIFT`]). Set on a completion that filled a
-/// kernel-picked provided buffer (`SLOPRING_SQE_BUFFER_SELECT`).
+/// A kernel-picked provided-buffer id is valid in the high 16 bits of `flags`
+/// ([`SLOPRING_CQE_BUFFER_SHIFT`]).
 pub const SLOPRING_CQE_F_BUFFER: u32 = 1 << 1;
 
-/// Incremental provided-buffer consumption: the kernel filled part of a
-/// provided buffer and will hand back the rest in a later CQE. Reserved for
-/// incremental recv; not yet emitted.
+/// Incremental provided-buffer consumption: the rest of the buffer comes back
+/// in a later CQE. Reserved; not yet emitted.
 pub const SLOPRING_CQE_F_BUF_MORE: u32 = 1 << 2;
 
-/// Zero-copy-send notification: this is the **terminal** CQE of an `OP_SEND_ZC`
-/// whose first (result) CQE carried [`SLOPRING_CQE_F_MORE`]. It is posted once
-/// the kernel has released its last reference to the pinned send buffer (the
-/// NIC reclaimed the TX descriptor), telling userland the buffer is safe to
-/// reuse — the io_uring `IORING_CQE_F_NOTIF` analogue (MSG_ZEROCOPY model).
+/// Terminal CQE of an `OP_SEND_ZC`, posted once the kernel has released its
+/// last reference to the pinned send buffer: userland may reuse it.
 pub const SLOPRING_CQE_F_NOTIF: u32 = 1 << 3;
 
-/// Bit shift of the provided-buffer id within `Cqe.flags` (the buffer id
-/// occupies the high 16 bits, mirroring Linux io_uring's
-/// `IORING_CQE_BUFFER_SHIFT`).
+/// Bit shift of the provided-buffer id within `Cqe.flags` (the high 16 bits,
+/// mirroring Linux io_uring's `IORING_CQE_BUFFER_SHIFT`).
 pub const SLOPRING_CQE_BUFFER_SHIFT: u32 = 16;
 
-/// Mask selecting the provided-buffer id bits in `Cqe.flags`.
 pub const SLOPRING_CQE_BUFFER_MASK: u32 = 0xFFFF_0000;
 
-// ---------------------------------------------------------------------------
-// CQ flags word (the shared `cq_off_flags` u32).
-// ---------------------------------------------------------------------------
-
-/// Set by the kernel in the shared CQ-flags word when at least one CQE
-/// was dropped because the CQ was full (`cq_off_overflow` counts how
-/// many). Mirrors Linux io_uring's `IORING_SQ_CQ_OVERFLOW`. Userland
-/// reads it to detect a missed completion and recover.
-///
-/// This is a **sticky one-way latch**: once any CQE is dropped the bit
-/// stays set for the ring's lifetime and is cleared only at the next
-/// `ring_setup`. The kernel never clears it (the dropped completions are
-/// unrecoverable, so re-arming the flag would hide a real data loss).
-/// `cq_off_overflow` carries the running drop count.
+/// Set in the shared CQ-flags word when at least one CQE was dropped because
+/// the CQ was full (`cq_off_overflow` counts them). A sticky one-way latch:
+/// the dropped completions are unrecoverable, so the kernel never clears it
+/// and only the next `ring_setup` does.
 pub const SLOPRING_CQ_OVERFLOW: u32 = 1 << 1;
-
-// ---------------------------------------------------------------------------
-// SQE op_flags (SLOPRING § 10).
-// ---------------------------------------------------------------------------
 
 /// `OP_CANCEL`: cancel *every* in-flight op matching the target fd, not
 /// just the one whose `user_data` is named.
 pub const SLOPRING_ASYNC_CANCEL_ALL: u32 = 1 << 0;
 
-// ---------------------------------------------------------------------------
-// SQE behaviour flags — `Sqe.sqe_flags2` (ABI v2, SLOPRING § 10).
-// ---------------------------------------------------------------------------
-
-/// `Sqe.sqe_flags2`: arm this op as **multishot** — the kernel keeps the
-/// row in flight and posts a CQE (each carrying [`SLOPRING_CQE_F_MORE`])
-/// every time the resource yields, until a terminal event (error / EOF /
-/// cancel). Honoured for OP_ACCEPT / OP_RECVMSG / OP_POLL_ADD.
+/// `Sqe.sqe_flags2`: arm this op as multishot — the kernel keeps the row in
+/// flight and posts a CQE (each carrying [`SLOPRING_CQE_F_MORE`]) every time
+/// the resource yields, until a terminal event. Honoured for OP_ACCEPT /
+/// OP_RECVMSG / OP_POLL_ADD.
 pub const SLOPRING_SQE_MULTISHOT: u16 = 1 << 0;
 
 /// `Sqe.flags`: the kernel picks a provided buffer from `Sqe.buf_group`'s
-/// registered buffer ring and reports its id in [`SLOPRING_CQE_F_BUFFER`]
-/// (the io_uring `IOSQE_BUFFER_SELECT` analogue — recv-family ops only).
+/// registered ring and reports its id in [`SLOPRING_CQE_F_BUFFER`].
+/// Recv-family ops only.
 pub const SLOPRING_SQE_BUFFER_SELECT: u8 = 1 << 0;
 
-/// `Sqe.flags`: the op's data buffer is the **registered fixed buffer** named
-/// by `Sqe.buf_index` (the io_uring `IOSQE_FIXED_BUFFER` / `READ_FIXED`
-/// analogue), not the user VA in `Sqe.addr`. Pre-pinned at
+/// `Sqe.flags`: the op's data buffer is the registered fixed buffer named by
+/// `Sqe.buf_index`, not the user VA in `Sqe.addr` — pre-pinned at
 /// `ring_register(RING_REGISTER_BUFFERS)`, so the op skips the per-op
-/// page-table walk + staging copy. Mutually exclusive with
+/// page-table walk and staging copy. Mutually exclusive with
 /// [`SLOPRING_SQE_BUFFER_SELECT`].
 pub const SLOPRING_SQE_FIXED_BUFFER: u8 = 1 << 1;
 
-// ---------------------------------------------------------------------------
-// Registered / provided buffer limits + flags (SLOPRING § 13, ABI v2).
-// ---------------------------------------------------------------------------
-
-/// Maximum registered fixed buffers in one `RING_REGISTER_BUFFERS` set
-/// (mirrors io_uring's default `IORING_MAX_REG_BUFFERS` order of magnitude).
+/// Maximum registered fixed buffers in one `RING_REGISTER_BUFFERS` set.
 pub const SLOPRING_MAX_FIXED_BUFFERS: u32 = 1024;
 
-/// Per-registered-buffer byte ceiling (1 GiB, io_uring parity). Also the
-/// pin ceiling enforced kernel-side.
+/// Per-registered-buffer byte ceiling (1 GiB, io_uring parity); also the
+/// kernel-side pin ceiling.
 pub const SLOPRING_MAX_REG_BUF_BYTES: u64 = 1 << 30;
 
-/// Maximum provided-buffer groups per ring (`buf_group` is `1..=this`; group
-/// `0` means "no provided buffer / inline path").
+/// Maximum provided-buffer groups per ring; `buf_group` is `1..=this`, and 0
+/// means the inline path.
 pub const SLOPRING_MAX_BUF_GROUPS: u16 = 64;
 
 /// Maximum entries in one provided buffer ring (power of two; matches Linux
 /// io_uring's `IOU_PBUF_RING` cap so a `u16` tail/head never wraps mid-ring).
 pub const SLOPRING_PBUF_RING_MAX_ENTRIES: u32 = 32768;
 
-/// `RegisterBufRingCmd.flags`: incremental buffer consumption — the kernel
-/// fills part of a provided buffer and hands the remainder back in a later
-/// CQE carrying [`SLOPRING_CQE_F_BUF_MORE`] (io_uring `IOU_PBUF_RING_INC`).
+/// `RegisterBufRingCmd.flags`: incremental buffer consumption — the remainder
+/// comes back in a later CQE carrying [`SLOPRING_CQE_F_BUF_MORE`].
 pub const SLOPRING_PBUF_RING_INC: u16 = 1 << 0;
 
 /// Byte offset of the user-owned producer `tail` (`u16`) within a registered
@@ -191,42 +133,27 @@ pub const SLOPRING_PBUF_RING_INC: u16 = 1 << 0;
 /// `io_uring_buf_ring` union, so `bufs[0]` is still a usable buffer slot.
 pub const SLOPRING_PBUF_RING_TAIL_OFFSET: usize = 14;
 
-// ---------------------------------------------------------------------------
-// RingParams flags (SLOPRING § 4.3).
-// ---------------------------------------------------------------------------
-
 /// The whole ring region is a single mapping (the only mode today).
 pub const SLOPRING_FEAT_SINGLE_MMAP: u32 = 1 << 0;
 
-/// The kernel honours [`SLOPRING_SQE_MULTISHOT`] on OP_ACCEPT /
-/// OP_RECVMSG / OP_POLL_ADD. Userland gates multishot submission on this
-/// bit so a new userland on an old kernel degrades gracefully.
+/// The kernel honours [`SLOPRING_SQE_MULTISHOT`]. Userland gates multishot
+/// submission on this bit so it degrades gracefully on an older kernel.
 pub const SLOPRING_FEAT_MULTISHOT: u32 = 1 << 1;
 
 /// The kernel implements `ring_register` provided/fixed buffers. Userland
-/// gates registered-buffer use on this bit so a new userland on an old kernel
-/// degrades gracefully.
+/// gates registered-buffer use on this bit.
 pub const SLOPRING_FEAT_REG_BUFFERS: u32 = 1 << 2;
-
-// ---------------------------------------------------------------------------
-// `ring_enter` flags (SLOPRING § 6.2). Reserved (0) today.
-// ---------------------------------------------------------------------------
 
 /// Reserved: wait for events even when nothing was submitted.
 pub const SLOPRING_ENTER_GETEVENTS: u32 = 1 << 0;
 
-// ---------------------------------------------------------------------------
-// Sqe — Submission Queue Entry (64 bytes, SLOPRING § 4.4).
-// ---------------------------------------------------------------------------
-
-/// One submission. 64 bytes, `#[repr(C)]`; SQ slot `i` *is* SQE `i`
-/// (direct array, no indirection — SLOPRING § 4.1).
+/// One submission, 64 bytes. SQ slot `i` *is* SQE `i` — a direct array, no
+/// indirection (SLOPRING § 4.1).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sqe {
-    /// `OP_*` opcode.
     pub opcode: u8,
-    /// SQE flags (reserved = 0 today).
+    /// [`SLOPRING_SQE_BUFFER_SELECT`] / [`SLOPRING_SQE_FIXED_BUFFER`].
     pub flags: u8,
     pub _pad0: u16,
     /// Target fd, or -1 for `OP_NOP` / `OP_TIMEOUT`.
@@ -243,26 +170,23 @@ pub struct Sqe {
     pub user_data: u64,
     /// Secondary VA (e.g. accept's `socklen*` out-ptr).
     pub addr2: u64,
-    /// Op-behaviour flags ([`SLOPRING_SQE_MULTISHOT`], …). Offset 48.
+    /// Op-behaviour flags ([`SLOPRING_SQE_MULTISHOT`], …).
     pub sqe_flags2: u16,
     /// Provided-buffer group id (with [`SLOPRING_SQE_BUFFER_SELECT`]); 0 for
-    /// the inline path. Offset 50.
+    /// the inline path.
     pub buf_group: u16,
     /// Registered/fixed-buffer index (with [`SLOPRING_SQE_FIXED_BUFFER`]).
-    /// Offset 52.
     pub buf_index: u16,
-    /// Reserved, must be zero. Offset 54.
+    /// Reserved, must be zero.
     pub _resv0: u16,
-    /// Reserved, must be zero. Offset 56.
+    /// Reserved, must be zero.
     pub _resv1: u64,
 }
 
 const _: () = assert!(core::mem::size_of::<Sqe>() == 64);
 const _: () = assert!(core::mem::align_of::<Sqe>() == 8);
-// ABI v2 carved named fields out of the former `_resv: [u64; 2]` (offset
-// 48–63) without changing the 64-byte size. Pin their offsets so any
-// future reorder that shifts them fails the build (the serializer below
-// hand-writes each field at these literal offsets).
+// The serializer below hand-writes these fields at literal offsets, so pin
+// them here: a reorder that shifts one must fail the build.
 const _: () = assert!(core::mem::offset_of!(Sqe, sqe_flags2) == 48);
 const _: () = assert!(core::mem::offset_of!(Sqe, buf_group) == 50);
 const _: () = assert!(core::mem::offset_of!(Sqe, buf_index) == 52);
@@ -270,8 +194,6 @@ const _: () = assert!(core::mem::offset_of!(Sqe, _resv0) == 54);
 const _: () = assert!(core::mem::offset_of!(Sqe, _resv1) == 56);
 
 impl Sqe {
-    /// A zeroed SQE (all fields 0, fd 0). Convenience for userland
-    /// builders.
     pub const ZERO: Self = Self {
         opcode: 0,
         flags: 0,
@@ -290,10 +212,8 @@ impl Sqe {
         _resv1: 0,
     };
 
-    /// Decode a 64-byte little-endian record into an `Sqe`. The kernel
-    /// snapshots SQE bytes through the volatile `UFrame` accessor, then
-    /// calls this to parse the private copy (never a `&Sqe` over ring
-    /// memory — AD-3). `bytes.len()` must be at least 64.
+    /// Decode a 64-byte little-endian record. The kernel parses a private
+    /// snapshot of ring memory this way, never a `&Sqe` over it (AD-3).
     pub fn from_bytes(bytes: &[u8; 64]) -> Self {
         let r16 = |o: usize| u16::from_le_bytes([bytes[o], bytes[o + 1]]);
         let r32 =
@@ -351,11 +271,7 @@ impl Sqe {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Cqe — Completion Queue Entry (16 bytes, SLOPRING § 4.5).
-// ---------------------------------------------------------------------------
-
-/// One completion. 16 bytes, `#[repr(C)]`.
+/// One completion, 16 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cqe {
@@ -392,12 +308,9 @@ impl Cqe {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Registered / provided buffer ABI structs (ABI v2). Each is hand-serialized
-// at pinned `offset_of!` positions (same discipline as `RingParams`/`Sqe`), so
-// the wire image equals the `#[repr(C)]` layout and the kernel marshals a
-// private snapshot — never a `&T` over user memory.
-// ---------------------------------------------------------------------------
+// Each struct below is hand-serialized at pinned `offset_of!` positions, so the
+// wire image equals the `#[repr(C)]` layout and the kernel marshals a private
+// snapshot rather than a `&T` over user memory.
 
 /// One registered fixed buffer (a user iovec). A `RING_REGISTER_BUFFERS` call
 /// passes `nr_args` of these at the `arg` user pointer; each is pinned and
@@ -482,9 +395,8 @@ impl RegisterBufRingCmd {
 }
 
 /// One provided buffer ring slot, byte-identical to Linux's
-/// `struct io_uring_buf`. Userland publishes `{addr, len, bid}`; the kernel
-/// echoes the chosen `bid` in the CQE ([`SLOPRING_CQE_F_BUFFER`]). `resv` of
-/// slot 0 doubles as the ring `tail` (see [`SLOPRING_PBUF_RING_TAIL_OFFSET`]).
+/// `struct io_uring_buf`. `resv` of slot 0 doubles as the ring `tail` (see
+/// [`SLOPRING_PBUF_RING_TAIL_OFFSET`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IouringBuf {
@@ -524,15 +436,9 @@ impl IouringBuf {
     }
 }
 
-// ---------------------------------------------------------------------------
-// RingParams — header, immutable post-setup (SLOPRING § 4.3).
-// ---------------------------------------------------------------------------
-
-/// Ring geometry returned by `ring_setup`, written into the head of the
-/// shared region *and* copied to the user's out-pointer so userland
-/// learns the layout without first reading the mapping.
-///
-/// All offsets are byte offsets from the base of the mapped region.
+/// Ring geometry returned by `ring_setup`, written into the head of the shared
+/// region *and* copied to the user's out-pointer so userland learns the layout
+/// without first reading the mapping. Offsets are bytes from the region base.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RingParams {
@@ -550,9 +456,7 @@ pub struct RingParams {
     pub sq_off_tail: u32,
     /// Offset of the SQ ring mask (`= sq_entries - 1`).
     pub sq_off_mask: u32,
-    /// Offset of the SQ dropped counter.
     pub sq_off_dropped: u32,
-    /// Offset of the SQE array.
     pub sq_off_array: u32,
 
     /// Offset of the CQ `head` index (user-owned consumer cursor).
@@ -561,14 +465,10 @@ pub struct RingParams {
     pub cq_off_tail: u32,
     /// Offset of the CQ ring mask (`= cq_entries - 1`).
     pub cq_off_mask: u32,
-    /// Offset of the CQ overflow counter.
     pub cq_off_overflow: u32,
-    /// Offset of the CQE array.
     pub cq_off_array: u32,
 
-    /// Offset of the CQ flags word (a u32 holding [`SLOPRING_CQ_OVERFLOW`]
-    /// and any future CQ-state bits). Repurposed from the former `_pad1`
-    /// reserved field, so the struct offsets below are unchanged.
+    /// Offset of the CQ flags word (holds [`SLOPRING_CQ_OVERFLOW`]).
     pub cq_off_flags: u32,
     /// User VA the region was mapped at (filled by `ring_setup`).
     pub region_addr: u64,
@@ -578,25 +478,19 @@ pub struct RingParams {
 
 const _: () = assert!(core::mem::size_of::<RingParams>() % 8 == 0);
 
-// The kernel copies `RingParams::to_bytes()` straight into the user's
-// `&mut RingParams` out-pointer, and userland reads it back as a
-// `#[repr(C)]` struct. For that to be sound the wire image MUST equal
-// the in-memory layout — including the 4 bytes of implicit padding the
-// compiler inserts before the first `u64` to 8-align it. These offsets
-// are asserted so any field reorder that shifts them fails the build
-// (a 4-byte skip here once mapped nc's ring to 0x300000000000).
+// The kernel copies `to_bytes()` straight into the user's `&mut RingParams`,
+// which userland reads back as a `#[repr(C)]` struct, so the wire image must
+// equal the in-memory layout — including the 4 bytes of implicit padding before
+// the first `u64`. Pin the offsets so a field reorder fails the build.
 const _: () = assert!(core::mem::size_of::<RingParams>() == 80);
 const _: () = assert!(core::mem::offset_of!(RingParams, region_addr) == 64);
 const _: () = assert!(core::mem::offset_of!(RingParams, region_bytes) == 72);
 
 impl RingParams {
-    /// Length of the canonical little-endian byte image — exactly the
-    /// `#[repr(C)]` size, so a `to_bytes()` buffer can be reinterpreted
-    /// as a `RingParams` directly.
+    /// Exactly the `#[repr(C)]` size, so a `to_bytes()` buffer can be
+    /// reinterpreted as a `RingParams` directly.
     pub const SERIALIZED_LEN: usize = core::mem::size_of::<Self>();
 
-    /// Zeroed params (every field 0). The kernel fills this in
-    /// `ring_setup`.
     pub const ZERO: Self = Self {
         sq_entries: 0,
         cq_entries: 0,
@@ -617,12 +511,9 @@ impl RingParams {
         region_bytes: 0,
     };
 
-    /// Encode into the canonical little-endian byte image. Every field
-    /// is written at its true `offset_of!` position, so the image is
-    /// byte-identical to the `#[repr(C)]` memory layout (padding bytes
-    /// stay zero). The kernel copies this verbatim to the user
-    /// out-pointer; userland reinterprets the bytes as a `RingParams`,
-    /// so the two layouts cannot disagree.
+    /// Encode into the canonical little-endian byte image: every field at its
+    /// true `offset_of!` position, so the image is byte-identical to the
+    /// `#[repr(C)]` layout and padding bytes stay zero.
     pub fn to_bytes(&self) -> [u8; Self::SERIALIZED_LEN] {
         let mut b = [0u8; Self::SERIALIZED_LEN];
         macro_rules! put {
@@ -652,10 +543,8 @@ impl RingParams {
         b
     }
 
-    /// Decode the canonical little-endian byte image produced by
-    /// [`RingParams::to_bytes`]. Reads each field from its true
-    /// `offset_of!` position, so it is the exact inverse regardless of
-    /// any padding the compiler inserts.
+    /// The exact inverse of [`RingParams::to_bytes`], reading each field from
+    /// its true `offset_of!` position regardless of padding.
     pub fn from_bytes(b: &[u8; Self::SERIALIZED_LEN]) -> Self {
         macro_rules! get32 {
             ($field:ident) => {{
@@ -700,20 +589,12 @@ impl RingParams {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Canonical region layout (kernel + userland compute it identically).
-// ---------------------------------------------------------------------------
-
-/// Byte size of one `u32` control word.
 const U32: u32 = 4;
 
-/// Computed offsets and sizes for a ring with `sq_entries` SQ slots.
-///
-/// Both the kernel (`ring_setup`) and userland (`slibc-ring`) derive the
-/// region layout from `sq_entries` with this single function, so they
-/// can never disagree. Layout order matches SLOPRING § 4.1:
-/// header → SQ control → CQ control → SQE array → CQE array, each
-/// sub-area 64-byte aligned for cache friendliness.
+/// Computed offsets and sizes for a ring with `sq_entries` SQ slots. Kernel and
+/// userland both derive the region layout from this one function, so they
+/// cannot disagree: header → SQ control → CQ control → SQE array → CQE array,
+/// each sub-area 64-byte aligned (SLOPRING § 4.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RingLayout {
     pub sq_entries: u32,
@@ -744,38 +625,30 @@ impl RingLayout {
     pub const fn new(sq_entries: u32) -> Self {
         let cq_entries = sq_entries * SLOPRING_SQ_TO_CQ;
 
-        // Header: a RingParams worth of bytes, 64-aligned.
         let params_bytes = align_up(core::mem::size_of::<RingParams>() as u32, 64);
 
-        // SQ control block: head, tail, mask, dropped — 4 u32s.
         let sq_ctrl = params_bytes;
         let sq_off_head = sq_ctrl;
         let sq_off_tail = sq_ctrl + U32;
         let sq_off_mask = sq_ctrl + 2 * U32;
         let sq_off_dropped = sq_ctrl + 3 * U32;
 
-        // CQ control block: head, tail, mask, overflow — 4 u32s.
         let cq_ctrl = align_up(sq_ctrl + 4 * U32, 64);
         let cq_off_head = cq_ctrl;
         let cq_off_tail = cq_ctrl + U32;
         let cq_off_mask = cq_ctrl + 2 * U32;
         let cq_off_overflow = cq_ctrl + 3 * U32;
-        // CQ flags word: the 5th u32, carved from the currently-unused
-        // padding between the CQ control block and the page-aligned SQE
-        // array (which begins at `align_up(cq_ctrl + 4 * U32, 4096)`), so
-        // this costs no extra region bytes.
+        // Carved from the padding before the page-aligned SQE array, so the
+        // flags word costs no extra region bytes.
         let cq_off_flags = cq_ctrl + 4 * U32;
 
-        // SQE array: sq_entries * 64. Page-aligned so that — since 64
-        // divides 4096 — no SQE ever straddles a page boundary. The ring
-        // region is backed by separate (possibly non-contiguous) frames,
-        // so a straddling entry would split across two frames; aligning
-        // the array to a page removes that case entirely.
+        // Page-aligned: the region is backed by separate, possibly
+        // non-contiguous frames, and 64 divides 4096, so no SQE can straddle
+        // two of them.
         let sqe_array_off = align_up(cq_ctrl + 4 * U32, 4096);
         let sqe_bytes = sq_entries * core::mem::size_of::<Sqe>() as u32;
 
-        // CQE array: cq_entries * 16. Page-aligned for the same reason
-        // (16 divides 4096).
+        // Page-aligned for the same reason (16 divides 4096).
         let cqe_array_off = align_up(sqe_array_off + sqe_bytes, 4096);
         let cqe_bytes = cq_entries * core::mem::size_of::<Cqe>() as u32;
 
@@ -810,7 +683,6 @@ impl RingLayout {
         self.cqe_array_off + i * core::mem::size_of::<Cqe>() as u32
     }
 
-    /// Build the `RingParams` header from this layout.
     pub const fn to_params(&self) -> RingParams {
         RingParams {
             sq_entries: self.sq_entries,
@@ -860,9 +732,6 @@ mod tests {
         assert_eq!(Sqe::from_bytes(&s.to_bytes()), s);
     }
 
-    /// ABI v2: the carved fields survive the byte round-trip at their
-    /// pinned offsets — `sqe_flags2`@48, `buf_group`@50, `buf_index`@52
-    /// (offsets themselves are `const _`-asserted beside the struct).
     #[test]
     fn sqe_v2_layout_round_trips() {
         let mut s = Sqe::ZERO;
@@ -876,8 +745,6 @@ mod tests {
         assert_eq!(Sqe::from_bytes(&b), s);
     }
 
-    /// CQE provided-buffer bits: a buffer id packs into the high 16 bits
-    /// alongside `F_BUFFER`, and the shift/mask recover it exactly.
     #[test]
     fn cqe_buffer_bits() {
         let bid: u32 = 0xBEEF;
@@ -911,15 +778,10 @@ mod tests {
         let l = RingLayout::new(64);
         assert_eq!(l.sq_entries, 64);
         assert_eq!(l.cq_entries, 128);
-        // SQE array begins after both control blocks.
         assert!(l.sqe_array_off >= l.cq_off_overflow + 4);
-        // CQE array begins after the SQE array.
         assert!(l.cqe_array_off >= l.sqe_array_off + 64 * 64);
-        // Everything fits in the region.
         assert!(l.cqe_array_off + 128 * 16 <= l.region_bytes);
-        // Region is page-aligned.
         assert_eq!(l.region_bytes % 4096, 0);
-        // All sub-areas 64-aligned.
         assert_eq!(l.sqe_array_off % 64, 0);
         assert_eq!(l.cqe_array_off % 64, 0);
     }
@@ -961,16 +823,13 @@ mod tests {
         assert_eq!(&b[12..14], &7u16.to_le_bytes());
     }
 
-    /// The provided-ring `tail` overlaps `bufs[0].resv` exactly like Linux's
-    /// `io_uring_buf_ring` union: a `u16` written at byte 14 of slot 0 is the
-    /// producer tail, and slot 0 is still a usable buffer.
     #[test]
     fn iouring_buf_tail_overlaps_resv() {
         let buf = IouringBuf {
             addr: 0x4000,
             len: 256,
             bid: 3,
-            resv: 0x0102, // doubles as `tail` for slot 0
+            resv: 0x0102,
         };
         let bytes = buf.to_bytes();
         assert_eq!(
@@ -983,11 +842,8 @@ mod tests {
         assert_eq!(IouringBuf::from_bytes(&bytes), buf);
     }
 
-    /// Regression guard: `to_bytes()` must place `region_addr` at the
-    /// struct's true offset (64), not at the naive 15-`u32` offset (60).
-    /// The 4-byte skip mapped nc's ring to `region_bytes << 32`
-    /// (0x300000000000 for a 16-entry ring) and page-faulted on first
-    /// touch.
+    /// `to_bytes()` must place `region_addr` at the struct's true offset (64),
+    /// not at the naive 15-`u32` offset (60).
     #[test]
     fn region_addr_serialized_at_struct_offset() {
         let mut p = RingParams::ZERO;
@@ -996,26 +852,16 @@ mod tests {
         let b = p.to_bytes();
         assert_eq!(&b[64..72], &0xAABB_CCDD_1122_3344u64.to_le_bytes());
         assert_eq!(&b[72..80], &0x3000u64.to_le_bytes());
-        // The buggy serializer wrote region_addr at 60; bytes 60..64 are
-        // the implicit padding after `cq_off_flags` (offset 56) and must
-        // be zero for ZERO params.
+        // Bytes 60..64 are the implicit padding after `cq_off_flags`.
         assert_eq!(&b[60..64], &[0u8; 4]);
     }
 
-    /// `to_bytes()` / `from_bytes()` round-trip every field exactly.
-    /// Because `to_bytes()` writes each field at its `offset_of!`
-    /// position, the byte image is identical to the `#[repr(C)]` memory
-    /// layout — the invariant that lets userland reinterpret the kernel's
-    /// out-copy as a `RingParams` struct (verified by the offset asserts
-    /// above and `region_addr_serialized_at_struct_offset`).
     #[test]
     fn params_to_from_bytes_round_trip() {
         let mut p = RingLayout::new(16).to_params();
         p.region_addr = 0x4000_0000;
         assert_eq!(RingParams::from_bytes(&p.to_bytes()), p);
 
-        // A fully-populated value (distinct bytes in every field) also
-        // round-trips, catching any field that to/from disagree on.
         let p2 = RingParams {
             sq_entries: 0x0102_0304,
             cq_entries: 0x0506_0708,
@@ -1038,17 +884,10 @@ mod tests {
         assert_eq!(RingParams::from_bytes(&p2.to_bytes()), p2);
     }
 
-    /// The CQ-flags word lives in the free padding before the
-    /// page-aligned SQE array (no region growth), and `cq_off_flags`
-    /// round-trips through `to_bytes`/`from_bytes` carrying the
-    /// `SLOPRING_CQ_OVERFLOW` bit pattern intact.
     #[test]
     fn cq_off_flags_in_padding_and_round_trips() {
         let l = RingLayout::new(64);
-        // Flags word sits just past the four CQ control u32s …
         assert_eq!(l.cq_off_flags, l.cq_off_overflow + 4);
-        // … and entirely before the (page-aligned) SQE array, so it
-        // consumes only otherwise-unused padding.
         assert!(l.cq_off_flags + 4 <= l.sqe_array_off);
         assert_eq!(l.to_params().cq_off_flags, l.cq_off_flags);
 

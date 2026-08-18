@@ -1,11 +1,9 @@
 //! Spawn file-action ABI shared between kernel and userland.
 //!
-//! A spawn issues a per-fd action list (the `posix_spawn` file-actions model):
-//! the child begins with an empty descriptor table and each action installs
-//! exactly the descriptors it should inherit. This replaces whole-table
-//! inheritance, so a spawner never mutates its own fd table around the call.
+//! Follows the `posix_spawn` file-actions model: the child begins with an empty
+//! descriptor table and each action installs exactly what it should inherit, so
+//! a spawner never mutates its own fd table around the call.
 
-/// One file action, tagged by [`SpawnFdActionKind`].
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpawnFdActionKind {
@@ -20,7 +18,6 @@ pub enum SpawnFdActionKind {
 }
 
 impl SpawnFdActionKind {
-    /// Decode a wire `kind` field.
     #[inline]
     pub const fn from_u32(raw: u32) -> Option<Self> {
         match raw {
@@ -65,7 +62,6 @@ pub struct SpawnAttrs {
     pub _pad2: u16,
     /// User pointer to the [`SpawnFdAction`] array.
     pub actions_ptr: u64,
-    /// Number of actions.
     pub actions_len: u64,
     /// Signals forced to `SIG_DFL` in the child (POSIX_SPAWN_SETSIGDEF).
     pub sigdefault_mask: u64,

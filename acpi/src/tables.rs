@@ -1,15 +1,6 @@
-//! ACPI table lookup over the OSTD `Rsdp` / `AcpiTable` primitives.
-//!
-//! `slopos_ostd::acpi` provides the validated `Rsdp::validate` /
-//! `AcpiTable::from_bytes` primitives over byte slices. This module
-//! is the kernel-side consumer: it takes the bootloader-published
-//! RSDP physical address, slices the HHDM-mapped ACPI region, and
-//! returns checksum-validated `AcpiTable<'static>` views over each
-//! discovered table.
-//!
-//! All HHDM byte-borrows funnel through
-//! [`slopos_ostd::boot::handoff::acpi_region_bytes`]; this module
-//! holds no `unsafe` of its own.
+//! Kernel-side ACPI table lookup: takes the bootloader-published RSDP physical
+//! address, slices the HHDM-mapped ACPI region, and returns checksum-validated
+//! `AcpiTable<'static>` views over the OSTD primitives.
 
 use core::mem;
 
@@ -21,14 +12,7 @@ use slopos_ostd::util::packed_view::read_packed;
 
 pub use slopos_ostd::acpi::{AcpiTable, RSDP_SIGNATURE, RSDP_V1_SIZE, Rsdp, SdtHeader};
 
-/// Borrow `len` bytes of the HHDM-mapped ACPI region starting at the
-/// given physical address. Returns `None` if HHDM is unavailable or
-/// the address translates to a null pointer.
-///
-/// Thin delegate over [`slopos_ostd::boot::handoff::acpi_region_bytes`]:
-/// gates on the kernel-side `hhdm::is_available()` flag (the OSTD
-/// helper independently re-checks its own HHDM-offset registry), then
-/// forwards.
+/// `None` when HHDM is unavailable or the address translates to null.
 fn acpi_region_bytes(phys: u64, len: usize) -> Option<&'static [u8]> {
     if !hhdm::is_available() {
         return None;
@@ -36,7 +20,6 @@ fn acpi_region_bytes(phys: u64, len: usize) -> Option<&'static [u8]> {
     ostd_acpi_region_bytes(PhysAddr::new(phys), len)
 }
 
-/// Validated handle to the ACPI table hierarchy rooted at an RSDP.
 pub struct AcpiTables {
     rsdt_phys: u32,
     xsdt_phys: u64,
@@ -44,22 +27,18 @@ pub struct AcpiTables {
 }
 
 impl AcpiTables {
-    /// Probe the RSDP at the given physical address, validate the
-    /// checksum, and return a handle for table lookups.
     pub fn from_phys(rsdp_phys: u64) -> Option<Self> {
         if !hhdm::is_available() {
             klog_info!("ACPI: HHDM unavailable, cannot parse tables");
             return None;
         }
-        // Probe the v1 prefix to check the signature and read the
-        // revision byte.
         let probe = acpi_region_bytes(rsdp_phys, RSDP_V1_SIZE)?;
         if probe.len() < RSDP_V1_SIZE {
             return None;
         }
         let revision = probe[15];
         let rsdp = if revision >= 2 {
-            // V2: re-borrow the full structure for the v2 checksum.
+            // The v2 checksum covers the full structure, not just the v1 prefix.
             let full = acpi_region_bytes(rsdp_phys, mem::size_of::<Rsdp>())?;
             Rsdp::validate(full)?
         } else {
@@ -73,10 +52,7 @@ impl AcpiTables {
         })
     }
 
-    /// Find an ACPI table by its 4-byte ASCII signature.
-    ///
-    /// Searches XSDT first (64-bit entries) when the RSDP is v2+;
-    /// falls back to RSDT (32-bit entries) otherwise.
+    /// Searches the XSDT when the RSDP is v2+, else the RSDT.
     pub fn find_table(&self, signature: &[u8; 4]) -> Option<AcpiTable<'static>> {
         if self.revision >= 2 && self.xsdt_phys != 0 {
             if let Some(hit) = self.scan_root(self.xsdt_phys, mem::size_of::<u64>(), signature) {
@@ -89,14 +65,8 @@ impl AcpiTables {
         None
     }
 
-    /// Call `f` with the raw bytes (header + payload, checksum **not**
-    /// validated) of every table in the root whose 4-byte signature
-    /// matches `signature`, returning the first `Some(..)` `f` produces.
-    ///
-    /// Unlike [`find_table`](Self::find_table) this visits *all* matches,
-    /// not just the first — needed because a platform can ship several
-    /// SSDTs and the `\_S5` sleep object may live in any of them. Prefers
-    /// the XSDT (64-bit entries) when present, else the RSDT.
+    /// Raw bytes, checksum **not** validated. Visits *every* match rather than
+    /// the first: a platform can ship several SSDTs and `\_S5` may be in any.
     pub fn find_map_raw<T>(
         &self,
         signature: &[u8; 4],
@@ -131,8 +101,6 @@ impl AcpiTables {
         None
     }
 
-    /// Walk an XSDT/RSDT root table, looking for `signature` among
-    /// its entries.
     fn scan_root(
         &self,
         root_phys: u64,
@@ -160,13 +128,8 @@ impl AcpiTables {
     }
 }
 
-/// Borrow the full bytes (header + payload) of the SDT at `phys`
-/// *without* checksum validation.
-///
-/// Probes the SDT header to read its declared length, then re-borrows
-/// that many bytes. Used for the DSDT — its AML body is scanned for the
-/// `\_S5` sleep package, and some firmware ships a DSDT with a stale
-/// checksum that [`AcpiTable::from_bytes`] would (correctly) reject.
+/// Checksum *not* validated: some firmware ships a DSDT with a stale checksum
+/// that [`AcpiTable::from_bytes`] would (correctly) reject.
 pub fn table_bytes_at(phys: u64) -> Option<&'static [u8]> {
     let header_size = mem::size_of::<SdtHeader>();
     let header_bytes = acpi_region_bytes(phys, header_size)?;
@@ -180,10 +143,7 @@ pub fn table_bytes_at(phys: u64) -> Option<&'static [u8]> {
     acpi_region_bytes(phys, length)
 }
 
-/// Load a checksum-validated table at a physical address.
-///
-/// Probes the SDT header to read its declared length, then re-borrows
-/// the full table and validates via [`AcpiTable::from_bytes`].
+/// Checksum-validated, unlike [`table_bytes_at`].
 fn load_table(phys: u64) -> Option<AcpiTable<'static>> {
     let header_size = mem::size_of::<SdtHeader>();
     let header_bytes = acpi_region_bytes(phys, header_size)?;

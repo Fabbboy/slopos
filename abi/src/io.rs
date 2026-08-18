@@ -20,16 +20,11 @@ pub trait IoBufWrite {
     }
 }
 
-// ---------------------------------------------------------------------------
-// KernelIoBuf — wraps a plain kernel `&mut [u8]`
-// ---------------------------------------------------------------------------
-
 pub struct KernelIoBuf<'a> {
     buf: &'a mut [u8],
 }
 
 impl<'a> KernelIoBuf<'a> {
-    /// Wrap an existing kernel slice.
     #[inline]
     pub fn new(buf: &'a mut [u8]) -> Self {
         Self { buf }
@@ -53,16 +48,11 @@ impl IoBufWrite for KernelIoBuf<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// KernelIoBufRef — read-only variant
-// ---------------------------------------------------------------------------
-
 pub struct KernelIoBufRef<'a> {
     buf: &'a [u8],
 }
 
 impl<'a> KernelIoBufRef<'a> {
-    /// Wrap an existing read-only kernel slice.
     #[inline]
     pub fn new(buf: &'a [u8]) -> Self {
         Self { buf }

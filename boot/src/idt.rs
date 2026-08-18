@@ -4,8 +4,6 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use slopos_arch::cpu;
-// Re-export the OSTD IDT types/constants the legacy `boot::idt::*`
-// surface exposed (consumed by `boot/src/tests/gdt_tests.rs` and similar).
 pub use slopos_ostd::irq::{
     EXCEPTION_ALIGNMENT_CHECK, EXCEPTION_BOUND_RANGE, EXCEPTION_BREAKPOINT, EXCEPTION_DEBUG,
     EXCEPTION_DEVICE_NOT_AVAIL, EXCEPTION_DIVIDE_ERROR, EXCEPTION_DOUBLE_FAULT,
@@ -22,27 +20,17 @@ use crate::exception::*;
 use crate::ist_stacks;
 use crate::user_fault::*;
 
-// =============================================================================
-// ABI razors — fail the build if a load-bearing field offset drifts.
-// =============================================================================
-
 const _: () = {
     use core::mem::offset_of;
-    // CPU-pushed portion of the InterruptFrame (must match the asm
-    // unwind in slopos-ostd/src/irq/asm/handlers.s).
+    // Must match the asm unwind in slopos-ostd/src/irq/asm/handlers.s.
     assert!(offset_of!(slopos_ostd::irq::InterruptFrame, rip) == 136);
     assert!(offset_of!(slopos_ostd::irq::InterruptFrame, cs) == 144);
     assert!(offset_of!(slopos_ostd::irq::InterruptFrame, rflags) == 152);
     assert!(offset_of!(slopos_ostd::irq::InterruptFrame, rsp) == 160);
     assert!(offset_of!(slopos_ostd::irq::InterruptFrame, ss) == 168);
-    // Per-CPU kernel RSP slot read by the OSTD `__ostd_user_return`
-    // trampoline as `gs:[16]`.
+    // OSTD's `__ostd_user_return` trampoline reads this slot as `gs:[16]`.
     assert!(slopos_ostd::cpu::x86_64::pcr::offsets::KERNEL_RSP == 16);
 };
-
-// =============================================================================
-// IDT storage — single OSTD-owned builder.
-// =============================================================================
 
 static BUILDER: IdtBuilder = IdtBuilder::new();
 
@@ -70,13 +58,10 @@ impl ExceptionMode {
     }
 }
 
-/// Per-vector handler tables.
+/// Per-vector handler tables; null encodes "no handler installed".
 ///
-/// Both the panic table and the override table are stored as
-/// `[AtomicPtr<()>; 32]`, with null encoding "no handler installed". The
-/// fn-ptr ↔ `*mut ()` round-trip lives once inside `decode`. Per-slot
-/// stores avoid copying the 256-byte fn-pointer array as a single value,
-/// which is what the kernel's stack-frame budget would otherwise reject.
+/// Per-slot atomic stores keep the 256-byte fn-pointer array off the stack,
+/// which the kernel's stack-frame budget would otherwise reject.
 mod handler_tables {
     use super::ExceptionHandler;
     use core::sync::atomic::{AtomicPtr, Ordering};
@@ -150,12 +135,10 @@ impl IrqNestHold {
         }
     }
 
-    /// Run the trap-exit scheduler handoff outside interrupt-nesting context
-    /// (so a switched-in task is not observed as in-interrupt), forcing any
-    /// panic in the pre-switch scheduler prologue fatal. That prologue runs on
-    /// the ISR stack beneath the non-unwindable asm trampoline while the
-    /// interrupted task's recovery depth is still live, so an unwind there
-    /// could not reach a catch boundary.
+    /// Runs outside interrupt-nesting context so a switched-in task is not
+    /// observed as in-interrupt. The pre-switch scheduler prologue sits on the
+    /// ISR stack beneath the non-unwindable asm trampoline, so a panic there
+    /// must abort rather than unwind towards a catch boundary it cannot reach.
     fn handoff(&mut self, source: TrapExitSource) {
         self.leave();
         let abort = slopos_ostd::panic::AbortOnUnwind::new();
@@ -171,10 +154,8 @@ impl Drop for IrqNestHold {
     }
 }
 
-/// One-shot BSP-only IDT initialisation: install OSTD's default
-/// handlers into the static `BUILDER` and seed our exception-handler
-/// tables. The `&BspToken<'brand>` witness binds the call to the BSP-init
-/// scope opened by `slopos_ostd::sync::run_bsp_init`.
+/// One-shot BSP-only IDT initialisation; the `BspToken` witness binds the call
+/// to the BSP-init scope opened by `slopos_ostd::sync::run_bsp_init`.
 pub fn idt_init<'b>(_token: &slopos_ostd::sync::BspToken<'b>) {
     klog_debug!("IDT: init start");
     BUILDER.install_default_handlers();
@@ -214,11 +195,9 @@ pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
     klog_debug!("IDT: Registered override handler for exception {}", vector);
 }
 
-/// Bind an IDT entry to an IST slot. `&mut BootCtx<'_, K>` gates the
-/// call so production code (post-boot) cannot accidentally rebind
-/// interrupt stacks. `K: CpuInitKind` keeps the surface dual-callable
-/// from BSP-init, AP-init, and test scopes — every CPU brings up its
-/// own IDT IST bindings.
+/// Bind an IDT entry to an IST slot. `&mut BootCtx<'_, K>` gates the call so
+/// post-boot code cannot rebind interrupt stacks; `K: CpuInitKind` keeps it
+/// callable from BSP-init, AP-init and test scopes alike.
 pub fn idt_set_ist<'b, K: slopos_hermetic::CpuInitKind>(
     _ctx: &mut slopos_hermetic::BootCtx<'b, K>,
     vector: u8,
@@ -238,14 +217,10 @@ pub fn exception_is_critical(vector: u8) -> i32 {
     slopos_arch::arch::exception::exception_is_critical(vector) as i32
 }
 
-/// Load the static IDT on the current CPU. Both BSP-init and per-AP
-/// bringup paths call this, so it accepts any `CpuInitWitness`
-/// (`BspToken` or `ApToken`) — the witness gates the call to a
-/// boot-init scope without distinguishing BSP from AP.
+/// Load the static IDT on the current CPU. Any `CpuInitWitness` is accepted:
+/// the witness gates the call to a boot-init scope without distinguishing BSP
+/// from AP, and both bringup paths call this.
 pub fn idt_load<W: slopos_ostd::sync::CpuInitWitness>(witness: &W) {
-    // BUILDER is `static` and BSP-init / AP-init ordering guarantees
-    // gate population + GDT/TSS load already happened — encoded by
-    // the typed `&'static IdtBuilder` + `CpuInitWitness` signature.
     BUILDER.load_static(witness);
 }
 
@@ -262,66 +237,41 @@ fn handle_tlb_shootdown_ipi() {
     send_eoi();
 }
 
-// `IstPreemptHold` is provided by OSTD's `slopos_ostd::irq` module —
-// see the import at the top of this file. The boot-side path used to
-// duplicate the inc/dec body; now it just borrows the canonical guard
-// type.
-
 /// Answer an NMI: the lockup detector's probe, the TLB ladder's, or one
 /// nobody armed.
 ///
-/// # Vector 2 stays on `ist = 0`
+/// Vector 2 stays on `ist = 0`: on x86-64 *any* `IRET` unblocks NMI, so a
+/// nested NMI must push deeper on the same stack rather than reset RSP to an
+/// IST top and overwrite the frame this handler is still using.
 ///
-/// The fatal branch's `%rbp` walk deliberately faults, and the recovery
-/// rewrites RIP and returns through the page-fault handler's `iretq` — and
-/// on x86-64 *any* `IRET` unblocks NMI, not only the one leaving this
-/// handler. With no IST a nested NMI merely pushes deeper on the same
-/// stack; with one it would reset RSP to the IST top and overwrite the
-/// frame this handler is still using.
-///
-/// # The returning path may take no lock
-///
-/// `klog!`'s serial backend spins on a blocking ticket lock the interrupted
-/// CPU may already hold, and `early_console::write_bytes` funnels through
-/// `fblog::capture`, whose `try_lock` runs `push_lock` — a `&mut` on a
-/// per-CPU cell this NMI may have interrupted mid-update. Output goes
-/// through the watchdog's own byte-at-a-time emitter, which touches
-/// neither.
-///
-/// [`nmi_die`] does reach `write_bytes`, through `panic_abort_raw`. That is
-/// the constraint relaxing where it stops mattering: nothing resumes, so a
-/// corrupted held-lock stack has no reader and a wedged UART only costs the
-/// last line. The constraint is about what a *returning* handler leaves
-/// behind.
+/// A *returning* NMI may take no lock — `klog!`'s serial backend spins on a
+/// ticket lock the interrupted CPU may hold, and `fblog::capture` takes a
+/// `&mut` on a per-CPU cell this NMI may have interrupted — so output goes
+/// through the watchdog's byte-at-a-time emitter. [`nmi_die`] is exempt:
+/// nothing resumes there.
 fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
     use slopos_ostd::watchdog::{self, NmiDisposition};
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
-    // Reliable Abort Core — panic stop-the-world. If a peer CPU has won the
-    // fatal-panic election, this NMI is its stop broadcast, NOT a watchdog
-    // wedge: stop cleanly and silently so the owner can drive the console
-    // alone. (A self-directed NMI on the owner itself must not self-stop.)
+    // A peer CPU winning the fatal-panic election makes this NMI its stop
+    // broadcast, not a watchdog wedge: stop silently so the owner drives the
+    // console alone. A self-directed NMI on the owner must not self-stop.
     if slopos_ostd::panic::panic_owner_claimed()
         && !slopos_ostd::panic::panic_owner_is(cpu_id as u32)
     {
-        // Force-ack any TLB shootdowns we owe so a non-panicking initiator
-        // does not spin forever waiting for an ack we will never deliver
-        // (we are about to halt). Set-only — never clears an ack.
+        // We are about to halt, so a non-panicking initiator would spin forever
+        // on an ack we will never deliver. Set-only — never clears an ack.
         slopos_mm::tlb::force_ack_local_shootdowns(cpu_id);
-        // Release every lock we hold so the owner's console/diagnostics paths
-        // are not blocked behind us.
+        // Unblock the owner's console/diagnostics paths.
         slopos_ostd::sync::panic_recovery::poison_all_held_locks_no_halt();
-        // Tell the owner we have stopped, then halt for good. No backtrace, no
-        // panic, no console writes — minimal and format-free.
         slopos_ostd::panic::mark_cpu_stopped();
         slopos_arch::cpu::disable_interrupts();
         slopos_arch::cpu::halt_loop();
     }
 
-    // Registers only. The wait-for chain is the watcher's to print: it
-    // reads the same per-CPU slots and it runs whether or not this NMI is
-    // ever delivered.
+    // Registers only: the wait-for chain is the watcher's to print, and it runs
+    // whether or not this NMI is ever delivered.
     let disposition = watchdog::probe_disposition(cpu_id);
     nmi_emit_context(cpu_id, frame, disposition);
 
@@ -329,10 +279,9 @@ fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
         nmi_die(cpu_id, frame);
     }
 
-    // Neither an unsolicited NMI nor an operator-requested probe is evidence
-    // of a fault on this CPU, so neither may spend the recovered-fault budget
-    // `panic.oops_limit=` bounds — otherwise reading the machine's state
-    // enough times would eventually take it down.
+    // Neither an unsolicited NMI nor an operator probe is evidence of a fault
+    // here, so neither may spend the budget `panic.oops_limit=` bounds —
+    // otherwise reading the machine's state enough times takes it down.
     if disposition != NmiDisposition::Unsolicited && disposition != NmiDisposition::Probe {
         let (count, _limit_reached) = slopos_ostd::panic_recovery::oops_record();
         watchdog::nmi_emit("NMI: oops ");
@@ -340,15 +289,13 @@ fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
         watchdog::nmi_emit_line(" recorded, resuming");
     }
 
-    // Last act, so the next check can arm a fresh probe. Until this runs,
-    // the detector will not re-send — which is what lets a stalled CPU
-    // finish its dump instead of restarting it 100 times a second.
+    // Must be last: the detector will not re-send until this runs, which is
+    // what lets a stalled CPU finish its dump instead of restarting it.
     watchdog::release_probe(cpu_id);
 }
 
-/// Emit the interrupted context. Format-free and fault-free: a returning
-/// NMI must take no page fault, because that fault's own `iretq` would
-/// unblock NMI while this handler is still running.
+/// Format-free and fault-free: a returning NMI must take no page fault, because
+/// that fault's own `iretq` would unblock NMI while this handler still runs.
 fn nmi_emit_context(
     cpu_id: usize,
     frame: &slopos_arch::InterruptFrame,
@@ -369,10 +316,8 @@ fn nmi_emit_context(
     });
     nmi_emit(" rip=");
     nmi_emit_hex(frame.rip);
-    // Symbolizing is a binary search over a `'static` rodata array: no lock,
-    // no allocation, and no dereference of anything the fault could have
-    // corrupted. It is the one thing that makes this line readable without
-    // the matching ELF in hand.
+    // Binary search over a `'static` rodata array: no lock, no allocation, and
+    // no dereference of anything the fault could have corrupted.
     if let Some(sym) = slopos_ostd::ksym::lookup(frame.rip) {
         nmi_emit(" <");
         nmi_emit(sym.symbol);
@@ -389,23 +334,16 @@ fn nmi_emit_context(
     nmi_emit_line("");
 }
 
-/// Terminal branch. Everything destructive lives here and nowhere else:
-/// `set_panic_cpu_state` arms a one-shot that seeds the *next* panic's
-/// backtrace, and `poison_all_held_locks_no_halt` force-releases locks a
-/// still-running context is holding and latches the lock-order validator
-/// off machine-wide. Both are corrections on the way out, not diagnostics.
+/// Terminal branch: everything destructive lives here and nowhere else, because
+/// force-releasing locks and latching the validator off are corrections on the
+/// way out rather than diagnostics.
 fn nmi_die(cpu_id: usize, frame: &slopos_arch::InterruptFrame) -> ! {
     use slopos_ostd::watchdog::{nmi_emit, nmi_emit_dec, nmi_emit_hex, nmi_emit_line};
 
-    // Walk the saved-frame chain via %rbp. Each frame: [saved_rbp][return_addr][...].
-    // Stop on null/non-canonical/misaligned pointer or after 16 frames.
-    //
-    // Validate before each read — canonical kernel half, 8-byte aligned,
-    // room for two u64s. Not a tight bounds check (we cannot cheaply prove
-    // rbp lies inside the interrupted task's kernel stack), but it
-    // eliminates the obvious fault classes: null, user-half, unaligned, and
-    // end-of-canonical-space wrap-around. A fault that does slip through is
-    // recoverable, which is why this runs only where we are already dying.
+    // Each frame is [saved_rbp][return_addr]. The per-read validation is not a
+    // tight bounds check — rbp cannot cheaply be proved inside the interrupted
+    // task's stack — so a fault can still slip through, which is why the walk
+    // runs only here, where we are already dying.
     {
         use slopos_ostd::arch::x86_64::kernel_ptr::read_volatile_canonical_kernel_u64;
         let mut rbp = frame.rbp;
@@ -432,8 +370,7 @@ fn nmi_die(cpu_id: usize, frame: &slopos_arch::InterruptFrame) -> ! {
         }
     }
 
-    // Surface the locked-up CPU's RIP/RSP/RBP on the panic screen (not just
-    // the serial log) so the wedge site is visible without a serial console.
+    // Puts the wedge site on the panic screen, not just the serial log.
     crate::panic::set_panic_cpu_state(frame.rip, frame.rsp, frame.rbp);
     // Force-release all tracked locks so other CPUs can make progress.
     slopos_ostd::sync::panic_recovery::poison_all_held_locks_no_halt();
@@ -443,52 +380,33 @@ fn nmi_die(cpu_id: usize, frame: &slopos_arch::InterruptFrame) -> ! {
     crate::panic::panic_abort_raw("NMI watchdog: CPU made no progress, sustained")
 }
 
-/// `int 0x80` is not a SlopOS syscall ABI.
-///
-/// Userland issues every syscall through the `SYSCALL` instruction, which
-/// enters via `LSTAR` -> `__ostd_user_return` and runs on the task's own
-/// persistent `UserContext`. This vector used to bridge the interrupt frame
-/// onto a transient one and re-run the syscall dispatcher behind a second copy
-/// of the panic-recovery policy — a copy free to drift from the real path, and
-/// one whose transient context carried no FPU state, so a signal delivered
-/// from it saved and restored the wrong register file.
-///
-/// The gate stays present and user-reachable so the trap is answered rather
-/// than escalating, but the answer is the truthful one.
+/// `int 0x80` is not a SlopOS syscall ABI — userland enters through `SYSCALL` /
+/// `LSTAR`. The gate stays user-reachable so the trap is answered rather than
+/// escalating.
 fn answer_legacy_syscall(frame_ref: &mut slopos_arch::InterruptFrame) {
     frame_ref.rax = slopos_abi::syscall::ENOSYS_RETURN;
 }
 
-/// Implementation of common_exception_handler - called from FFI boundary
+/// Called from the `common_exception_handler` FFI boundary.
 pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
-    // The frame lives for exactly this handler invocation, so a frame-local
-    // is the honest anchor for a borrow of it.
+    // The frame lives for exactly this invocation, so a frame-local is the
+    // honest anchor for a borrow of it.
     let mut frame_anchor = ();
     let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
         .expect("common_exception_handler_impl: null frame ptr");
     let vector = (frame_ref.vector & 0xFF) as u8;
 
-    // Prevent deferred rescheduling during IST-based exception handlers.
-    //
-    // IST stacks are per-vector, per-CPU fixed addresses.  If an SpinLock guard
-    // drops while preempt_count is 1, the PreemptGuard::drop callback will call
-    // the scheduler, context-switching away from the IST stack.  A subsequent
-    // exception of the same vector would reuse the same IST stack, overwriting
-    // the suspended handler's state → corruption / triple fault.
-    //
-    // By bumping preempt_count here (and manually decrementing on exit WITHOUT
-    // calling the reschedule callback), we ensure all inner SpinLock drops see
-    // preempt_count > 1 and skip the callback.
-    //
-    // All CPU exceptions (vectors 0-31) use IST stacks in SlopOS.
+    // IST stacks are per-vector, per-CPU fixed addresses, and every exception
+    // (vectors 0-31) uses one. Switching away from an IST stack lets a second
+    // exception on the same vector overwrite the suspended handler's state, so
+    // no inner SpinLock drop may reach the reschedule callback.
     let _ist_hold = IstPreemptHold::new(vector < 32);
 
-    // NMI is answered before `IrqNestHold`, and `IstPreemptHold` is kept.
-    // `interrupt_nesting_enter` stores `in_interrupt` and bumps the depth
-    // as two instructions; an NMI landing between them runs a whole
-    // enter/exit pair whose exit clears `in_interrupt` under a context that
-    // is still nested one deep. `IstPreemptHold` is a single gs-relative
-    // increment and has no such window.
+    // NMI is answered before `IrqNestHold`: `interrupt_nesting_enter` stores
+    // `in_interrupt` and bumps the depth as two instructions, and an NMI landing
+    // between them runs an enter/exit pair whose exit clears `in_interrupt`
+    // while still nested one deep. `IstPreemptHold` is one increment, so it has
+    // no such window and is taken first.
     if vector == EXCEPTION_NMI {
         nmi_handler(frame_ref);
         return;
@@ -508,11 +426,9 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     }
 
     if vector == RCU_QS_IPI_VECTOR {
-        // Conditional, and more sharply needed here than at the tick:
-        // `synchronize_rcu` sends this IPI precisely to break a stall, so an
-        // unconditional report would force a false quiescent state on the very
-        // CPU the grace period is waiting for — turning "this CPU is slow" into
-        // "this CPU's reader is done" while it is still inside one.
+        // Must stay conditional: `synchronize_rcu` sends this IPI to break a
+        // stall, so an unconditional report would declare a reader done on the
+        // very CPU still inside one.
         slopos_ostd::sync::rcu_note_qs_from_interrupt();
         send_eoi();
         return;
@@ -528,23 +444,20 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
 
     if vector == SHUTDOWN_VECTOR {
         send_eoi();
-        // This CPU never runs again, so it must leave the sets that assume a
-        // CPU answers: the TLB ladder would wait on its ack and the lockup
-        // detector would watch a CPU that can never tick.
+        // This CPU never runs again, so it must leave the sets that assume an
+        // answer: the TLB ladder would wait on its ack, the lockup detector on
+        // a tick that never comes.
         slopos_mm::tlb::notify_cpu_offline();
         slopos_arch::pcr::mark_cpu_offline(slopos_arch::get_current_cpu());
         cpu::disable_interrupts();
         cpu::halt_loop();
     }
 
-    // LAPIC timer: per-CPU preemption tick — handled directly, not through
-    // the IOAPIC IRQ dispatch table.  Each CPU has its own LAPIC timer.
     if vector == LAPIC_TIMER_VECTOR {
         slopos_core::irq::increment_timer_ticks();
-        // EOI before handler: prevents timer starvation if the handler is
-        // slow (e.g. blocked on a lock). Safe because the interrupt gate
-        // clears IF, so the next timer interrupt won't nest — it stays
-        // pending until IRET re-enables interrupts.
+        // EOI before the handler avoids starving the timer when the handler is
+        // slow; the gate cleared IF, so the next tick stays pending until IRET
+        // rather than nesting.
         send_eoi();
         slopos_sched::scheduler::scheduler_handle_timer_interrupt(frame);
         irq_nest.handoff(TrapExitSource::Irq);
@@ -553,15 +466,9 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     }
 
     if vector >= IRQ_BASE_VECTOR {
-        // Snapshot the (CS, RIP) pair before the dispatch closure runs so
-        // we can detect a registered handler scribbling through a stale
-        // pointer onto our IRET frame. Mirrors the legacy
-        // `core::irq::irq_dispatch` check both in scope (just CS+RIP, not
-        // the full 5-field IRET payload) and in ordering (the check runs
-        // *before* EOI + scheduler_handoff_on_trap_exit, since handoff
-        // may legitimately context-switch and the IRET frame's RFLAGS /
-        // RSP / SS shape on resume is not byte-identical to the pre-IRQ
-        // snapshot in every user-mode-preemption edge case).
+        // Catches a registered handler scribbling through a stale pointer onto
+        // our IRET frame. Only CS+RIP, and checked before the handoff, because a
+        // context switch legitimately changes the other frame fields on resume.
         let expected_cs = frame_ref.cs;
         let expected_rip = frame_ref.rip;
 
@@ -627,23 +534,19 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
 }
 
 fn initialize_handler_tables() {
-    // Default fallback for the entire vector range.
     for vector in 0u8..32 {
         handler_tables::install_panic(vector, exception_default_panic);
     }
     handler_tables::clear_overrides();
 
-    // Fatal: log name, dump frame, panic.
     handler_tables::install_panic(EXCEPTION_DIVIDE_ERROR, exception_fatal);
-    // NMI (vector 2) is handled directly in common_exception_handler_impl
-    // by the watchdog handler -- no table entry needed.
+    // NMI (vector 2) is answered in `common_exception_handler_impl`; no entry.
     handler_tables::install_panic(EXCEPTION_DOUBLE_FAULT, exception_fatal);
     handler_tables::install_panic(EXCEPTION_INVALID_TSS, exception_fatal);
     handler_tables::install_panic(EXCEPTION_SEGMENT_NOT_PRES, exception_fatal);
     handler_tables::install_panic(EXCEPTION_STACK_FAULT, exception_fatal);
     handler_tables::install_panic(EXCEPTION_MACHINE_CHECK, exception_fatal);
 
-    // Non-fatal: log name, dump frame, resume.
     handler_tables::install_panic(EXCEPTION_DEBUG, exception_nonfatal);
     handler_tables::install_panic(EXCEPTION_BREAKPOINT, exception_nonfatal);
     handler_tables::install_panic(EXCEPTION_OVERFLOW, exception_nonfatal);
@@ -652,29 +555,20 @@ fn initialize_handler_tables() {
     handler_tables::install_panic(EXCEPTION_ALIGNMENT_CHECK, exception_nonfatal);
     handler_tables::install_panic(EXCEPTION_SIMD_FP_EXCEPTION, exception_nonfatal);
 
-    // Specialized: user-mode check before fatal/nonfatal fallback.
     handler_tables::install_panic(EXCEPTION_INVALID_OPCODE, exception_invalid_opcode);
     handler_tables::install_panic(EXCEPTION_DEVICE_NOT_AVAIL, exception_device_not_available);
     handler_tables::install_panic(EXCEPTION_GENERAL_PROTECTION, exception_general_protection);
     handler_tables::install_panic(EXCEPTION_PAGE_FAULT, exception_page_fault);
 }
 
-/// Called when the ISR's pre-IRETQ CS validation detects a corrupt IRET
-/// frame.  Logs the corruption for debugging, then panics.
-///
-/// Safe-fn surface: the OSTD helper `read_unaligned_u64` centralises
-/// the `read_unaligned` unsafe; the caller-supplied pointer arrives
-/// from the ISR-asm stub (described by the FFI boundary contract in
-/// `ffi_boundary::isr_iret_frame_corrupt`), so the `pub(crate)` shim
-/// here only needs to forward.
+/// Called when the ISR's pre-IRETQ CS validation detects a corrupt IRET frame;
+/// the pointer comes from the ISR-asm stub via `ffi_boundary`.
 pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
     use slopos_ostd::arch::x86_64::kernel_ptr::{read_iret_frame, read_unaligned_u64_in_range};
     use slopos_ostd::klog_info;
 
-    // Safe helper centralises the `read_unaligned`. If the ISR-asm
-    // pointer fails the canonical-kernel pre-check (should not happen
-    // for a real corrupt-frame trap), fall back to zeros so the dump
-    // can still proceed without nested-faulting.
+    // Zeros rather than a fault: a pointer failing the canonical-kernel
+    // pre-check must not nested-fault out of the dump.
     let [rip, cs, rflags, rsp, ss] = read_iret_frame(iret_frame).unwrap_or([0u64; 5]);
 
     klog_info!(
@@ -690,13 +584,8 @@ pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
         iret_frame
     );
 
-    // Dump the surrounding stack words for forensics.
-    // Limit the probe range to avoid nested faults on invalid addresses:
-    // use the current task's kernel stack bounds when available, otherwise
-    // conservatively bound to ±128 bytes around iret_frame.
     // One racy snapshot, reused for the probe bounds and the task line below.
-    // This is a fault path — it must take no lock and upgrade no `KArc`, both
-    // for the reasons `slopos_ostd::task::diag` sets out — so the fields come
+    // A fault path may take no lock and upgrade no `KArc`, so the fields come
     // from a volatile read behind the PCR's id filter rather than a lookup.
     let diag = slopos_sched::task_struct::current_task_diag();
 
@@ -704,8 +593,7 @@ pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
     let (dump_lo, dump_hi) =
         slopos_ostd::task::TaskDiag::probe_range(diag.as_ref(), iret_frame as usize, 128);
     for offset in -4isize..10 {
-        // Use wrapping_offset to avoid UB when the resulting pointer
-        // falls outside the allocated object (negative offsets).
+        // Wrapping: negative offsets deliberately leave the allocated object.
         let addr = iret_frame.wrapping_offset(offset);
         let Some(val) = read_unaligned_u64_in_range(addr, dump_lo, dump_hi) else {
             klog_info!("  [{:+}] {:p} = <out of bounds>", offset, addr);
@@ -736,20 +624,14 @@ pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
         );
     }
 
-    // User-mode IRET corruption is fatal — a corrupted frame cannot be
-    // recovered and the panic below fires regardless.
     panic!("Unrecoverable IRET frame corruption");
 }
 
 /// Kernel-mode #GP inside the fault-recoverable XRSTOR64 band: redirect RIP to
-/// the failure tail, which reports the rejection to the Rust caller.
-///
-/// A ring-0 #GP is otherwise terminal — `exception_general_protection` routes it
-/// to `exception_fatal`, and panic recovery cannot unwind out of interrupt
-/// context. The RIP-range match is exact, so this masks no other fault.
+/// the failure tail, which reports the rejection to the Rust caller. A ring-0
+/// #GP is otherwise terminal, and the RIP-range match is exact, so this masks
+/// no other fault.
 fn try_handle_general_protection(frame: *mut slopos_arch::InterruptFrame) -> bool {
-    // The frame lives for exactly this handler invocation, so a frame-local
-    // is the honest anchor for a borrow of it.
     let mut frame_anchor = ();
     let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
         .expect("try_handle_general_protection: null frame ptr");
@@ -763,18 +645,14 @@ fn try_handle_general_protection(frame: *mut slopos_arch::InterruptFrame) -> boo
 }
 
 fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
-    // The frame lives for exactly this handler invocation, so a frame-local
-    // is the honest anchor for a borrow of it.
     let mut frame_anchor = ();
     let fault_addr = cpu::read_cr2();
     let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
         .expect("try_handle_page_fault: null frame ptr");
 
-    // Fault-recoverable kernel probe read (diagnostic walkers). Checked
-    // before the IST guard-fault classifier: a probe deliberately reads
-    // addresses it cannot prove mapped — including stack guard pages —
-    // and a hit there is the probe failing, not a stack overflow. The
-    // RIP-range match is exact, so this cannot mask a real fault.
+    // Checked before the IST guard-fault classifier: a probe deliberately reads
+    // addresses it cannot prove mapped, guard pages included, and a hit there is
+    // the probe failing rather than a stack overflow.
     if !in_user(frame_ref) && slopos_ostd::arch::x86_64::kernel_ptr::is_probe_read_ip(frame_ref.rip)
     {
         frame_ref.rip = slopos_ostd::arch::x86_64::kernel_ptr::probe_read_fault_ip();
@@ -785,12 +663,9 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
         return false;
     }
 
-    // Kernel-mode fault inside the OSTD usercopy assembly region:
-    // recover gracefully by redirecting RIP to the fault return
-    // label, which returns a nonzero "remaining bytes" value to the
-    // Rust caller. This makes the user-copy primitives safe against
-    // concurrent munmap on SMP. The OSTD region is the only
-    // fault-recoverable copy band in the kernel.
+    // Redirecting into the usercopy fault label returns a nonzero "remaining
+    // bytes" to the Rust caller, which is what makes the copy primitives safe
+    // against a concurrent munmap on SMP. It is the only recoverable copy band.
     if !in_user(frame_ref) {
         if slopos_ostd::user::copy::is_ostd_usercopy_ip(frame_ref.rip) {
             frame_ref.rip = slopos_ostd::user::copy::ostd_usercopy_fault_ip();
@@ -801,8 +676,6 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     let Some(task_ref) = resolve_user_fault_task() else {
         return false;
     };
-    // Recoverable user fault, not the panic path: `resolve_user_fault_task`
-    // keeps its registry lookup and the guard derefs straight to the fields.
     let vm_handle = task_ref.process_vm_handle_raw();
     let tid = task_ref.task_id;
 
@@ -813,12 +686,9 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
         tid,
     ) {
         slopos_mm::page_fault::FaultOutcome::Resolved => true,
-        // Recorded rather than returned: the fatal path runs in
-        // `exception_page_fault`, several frames above, and threading a reason
-        // back through a `bool`-shaped IST dispatcher would change the
-        // signature of every handler. Read and cleared by
-        // `take_pending_fault_reason` on the very next statement of the only
-        // caller, on this CPU, with interrupts off.
+        // Recorded rather than returned because the `bool`-shaped IST dispatcher
+        // has no channel for a reason. Read and cleared by
+        // `take_pending_fault_reason` on this CPU with interrupts off.
         slopos_mm::page_fault::FaultOutcome::Fatal(reason) => {
             crate::exception::record_fault_reason(reason);
             false

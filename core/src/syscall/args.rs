@@ -1,14 +1,9 @@
 //! Typed syscall arguments.
 //!
-//! Each handler parameter declared in [`crate::define_syscall!`] must
-//! implement [`SyscallArg`]. The macro threads a running register
-//! cursor across the parameter list, slicing `ctx.regs()` into each
-//! `from_raw` call.
-//!
-//! Some parameters consume more than one register slot — a
-//! `UserSlice<T>` reads `(base, count)` from two consecutive register
-//! positions. The associated const [`SyscallArg::ARITY`] declares how
-//! many slots each type takes.
+//! Each handler parameter declared in [`crate::define_syscall!`] implements
+//! [`SyscallArg`]; the macro slices `ctx.regs()` into each `from_raw` call,
+//! advancing by [`SyscallArg::ARITY`] slots — a `UserSlice<T>` takes two,
+//! `(base, count)`.
 
 use slopos_abi::Errno;
 use slopos_abi::fs::USER_PATH_MAX;
@@ -19,24 +14,13 @@ use slopos_mm::user_ptr::{UserPtr as MmUserPtr, UserSlice as MmUserSlice};
 use crate::syscall::common::syscall_copy_user_str;
 use crate::syscall::context::SyscallContext;
 
-/// One typed syscall parameter.
-///
-/// * `ARITY` — number of consecutive register slots the parameter
-///   consumes. Plain integers and FDs are arity 1; [`UserSlice<T>`]
-///   (and aliases) are arity 2 (base + count). The macro asserts at
-///   expansion time that the sum of arities across a handler's
-///   parameter list is `<= 6`.
-/// * `from_raw` — given a slice of exactly `ARITY` raw register values
-///   and the syscall context, decode the typed value or return an
-///   [`Errno`] describing why the decode failed.
+/// One typed syscall parameter: `ARITY` consecutive register slots decoded by
+/// `from_raw`, or an [`Errno`] saying why the decode failed. The macro asserts
+/// at expansion time that a handler's arities sum to `<= 6`.
 pub trait SyscallArg: Sized {
     const ARITY: usize;
     fn from_raw(regs: &[u64], ctx: &SyscallContext) -> Result<Self, Errno>;
 }
-
-// ─────────────────────────────────────────────────────────────────────
-// Plain integer primitives — single-register, value-preserving cast
-// ─────────────────────────────────────────────────────────────────────
 
 macro_rules! impl_int_arg {
     ($($t:ty),+) => {
@@ -51,14 +35,8 @@ macro_rules! impl_int_arg {
 }
 impl_int_arg!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
 
-// ─────────────────────────────────────────────────────────────────────
-// Typed identifiers
-// ─────────────────────────────────────────────────────────────────────
-
-/// File descriptor that **must** be non-negative.
-///
-/// Rejects negative values with `EBADF`. Use [`RawFd`] for syscalls
-/// such as `mmap` where `-1` (anonymous mapping) is a valid argument.
+/// File descriptor that **must** be non-negative; negatives are `EBADF`. Use
+/// [`RawFd`] where `-1` is a valid argument (`mmap`'s anonymous mapping).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Fd(i32);
 
@@ -180,20 +158,12 @@ impl SyscallArg for SigPid {
     }
 }
 
-/// `waitpid(2)` target: one named child, or any of them.
-///
-/// An enum rather than a bare `i32` because the two cases resolve through
-/// different paths — one registry lookup versus a scan of the caller's own
-/// children — and a handler that took the integer would have to re-derive
-/// which it holds. `0` and `< -1` (POSIX process-group waits) are refused at
-/// the boundary rather than silently treated as wait-any: SlopOS has no
-/// group-wait implementation, and mapping them onto one would make a future
-/// group-wait a behaviour change instead of a new capability.
+/// `waitpid(2)` target: one named child, or any of them. `0` and `< -1`
+/// (process-group waits) are refused rather than folded into wait-any, since
+/// SlopOS implements no group wait.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WaitTarget {
-    /// Wait for the child with this id.
     Child(u32),
-    /// Wait for whichever child exits first (`waitpid(-1)`).
     Any,
 }
 
@@ -201,11 +171,10 @@ impl SyscallArg for WaitTarget {
     const ARITY: usize = 1;
     #[inline]
     fn from_raw(regs: &[u64], _ctx: &SyscallContext) -> Result<Self, Errno> {
-        // Narrow to 32 bits before taking the sign. The userland wrapper's
-        // parameter is a `u32`, so wait-any arrives as `0xFFFF_FFFF`
-        // zero-extended, while a caller spelling it `-1i64` sign-extends to
-        // all ones. Both narrow to `-1i32`; reading the register as `i64`
-        // would see the first as 4294967295 and reject it.
+        // Narrow to 32 bits before taking the sign: wait-any arrives either
+        // zero-extended (`0xFFFF_FFFF`, from the `u32` wrapper) or
+        // sign-extended, and reading the register as `i64` would reject the
+        // first.
         let signed = regs[0] as u32 as i32;
         if signed == -1 {
             return Ok(WaitTarget::Any);
@@ -217,23 +186,12 @@ impl SyscallArg for WaitTarget {
     }
 }
 
-/// Signal number, validated to fall inside `1..=NSIG`.
-///
-/// The bound is `NSIG` rather than a round number because the only
-/// consumer, `rt_sigaction`, turns the value into `signum - 1` and
-/// indexes `Task::signal_actions`, which is `[SignalActionCell; NSIG]`.
-/// A looser bound here is an out-of-range index there, and with
-/// `tests=on` `production_recovery_enabled()` is false, so that index
-/// takes the whole run down rather than failing one syscall.
-///
-/// `crate::syscall::signal::parse_signum` applies the same bound for
-/// `kill`, which takes a raw `u64` because signal 0 is meaningful there.
+/// Signal number, validated to fall inside `1..=NSIG`: `rt_sigaction` turns it
+/// into `signum - 1` and indexes `[SignalActionCell; NSIG]`, so a looser bound
+/// here is an out-of-range index there.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Signum(u8);
 
-// `from_raw` narrows the validated value to `u8`. That is lossless only
-// while `NSIG` fits in a `u8`; a larger signal space needs a wider
-// newtype before it needs a wider bound.
 const _: () = assert!(
     NSIG <= u8::MAX as usize,
     "Signum stores the validated signal number in a u8"
@@ -258,15 +216,8 @@ impl SyscallArg for Signum {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// User-space pointer / slice wrappers
-// ─────────────────────────────────────────────────────────────────────
-
-/// Typed user-space pointer argument. One register: `addr`.
-///
-/// Wraps [`slopos_mm::user_ptr::UserPtr<T>`]; use [`UserPtr::inner`]
-/// to pass to the kernel's user-copy primitives (which take a
-/// `T: Copy` bound at the call site).
+/// Typed user-space pointer argument, one register. [`UserPtr::inner`] yields
+/// the [`slopos_mm::user_ptr::UserPtr<T>`] the user-copy primitives take.
 #[derive(Clone, Copy)]
 pub struct UserPtr<T> {
     inner: MmUserPtr<T>,
@@ -309,11 +260,8 @@ impl<T> SyscallArg for Option<UserPtr<T>> {
     }
 }
 
-/// Typed user-space slice argument. Two registers: `base`, `count`.
-///
-/// Empty slices (`count == 0`) at a null base must be declared as
-/// `Option<UserSlice<T>>` so the typed parser can map `base == 0`
-/// to `None`.
+/// Typed user-space slice argument. Two registers: `base`, `count`. A null base
+/// must be declared as `Option<UserSlice<T>>`, which maps `base == 0` to `None`.
 #[derive(Clone, Copy)]
 pub struct UserSlice<T> {
     inner: MmUserSlice<T>,
@@ -364,20 +312,12 @@ impl<T> SyscallArg for Option<UserSlice<T>> {
     }
 }
 
-/// Convenience alias for the byte-buffer case (e.g., `read`/`write`
-/// payloads). Two registers: `base`, `count`.
 pub type UserBytes = UserSlice<u8>;
 
-// ─────────────────────────────────────────────────────────────────────
-// Inline NUL-terminated user C-string buffer
-// ─────────────────────────────────────────────────────────────────────
-
-/// Inline NUL-terminated copy of a user-space C string.
-///
-/// `from_raw` allocates `N` bytes on the handler's stack and copies up
-/// to `N - 1` payload bytes (the trailing NUL is always written).
-/// Stays under the 2 KiB frame gate when `N <= 1024`; the
-/// default `N = USER_PATH_MAX = 256` is the canonical choice.
+/// Inline NUL-terminated copy of a user-space C string: `from_raw` copies up to
+/// `N - 1` payload bytes onto the handler's stack. `N <= 1024` stays under the
+/// 2 KiB frame gate; the default `N = USER_PATH_MAX = 256` is the canonical
+/// choice.
 #[derive(Clone, Copy)]
 pub struct UserCStr<const N: usize> {
     buf: [u8; N],

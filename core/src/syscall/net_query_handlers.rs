@@ -1,32 +1,11 @@
 //! `net_query` — enumerate one class of network state.
 //!
-//! One multiplexed read-only syscall, because every `what` produces the same
-//! shape: a [`UserNetQueryHdr`] followed by an array of one fixed-size record.
-//! That makes it one bounds check, one copy-out loop and one truncation rule —
-//! the `getdents`/`sysctl` shape rather than the ioctl shape. Mutation is
-//! deliberately *not* multiplexed; those live in their own narrow syscalls,
-//! each taking exactly one struct, so no handler ever has to decide how to
-//! reinterpret user memory from an op code.
-//!
-//! # The copy-out shape
-//!
-//! Two rules force it. `copy_to_user` can fault, so it must never run under a
-//! lock; and the kernel must not reach the allocator from under a
-//! cli-disabling lock. So every query is:
-//!
-//! 1. allocate the staging vector **before** taking anything,
-//! 2. fill it under the lock, copying nothing,
-//! 3. drop the lock,
-//! 4. copy out record by record, each built on the stack from
-//!    `Default::default()` so no uninitialised padding can reach user space.
-//!
-//! # Truncation
-//!
-//! The return value is bytes written; whether the answer was complete is read
-//! from the header, where `total_count > record_count` says it was not. So the
-//! sizing query is a **header-sized** buffer, not a zero-length one — the
-//! counts live in the header, so a caller that supplies nowhere to put them
-//! gets `EINVAL` rather than a success it cannot read.
+//! Every `what` answers with a [`UserNetQueryHdr`] followed by an array of one
+//! fixed-size record. `copy_to_user` can fault and the allocator must not be
+//! reached under a cli-disabling lock, so each query allocates its staging
+//! vector first, fills it under the lock, then copies out after dropping it.
+//! Truncation is read from the header (`total_count > record_count`), so a
+//! buffer too small to hold the header is `EINVAL`.
 
 use slopos_abi::Errno;
 use slopos_abi::net::{
@@ -43,7 +22,6 @@ use slopos_net::resolver::RESOLVER;
 use slopos_net::route::ROUTE_TABLE;
 use slopos_ostd::KVec;
 
-/// Write one `#[repr(C)]` record at `base + index * size_of::<T>()`.
 fn write_record<T: Copy>(base: u64, index: usize, value: &T) -> Result<(), Errno> {
     let offset = (index * core::mem::size_of::<T>()) as u64;
     let addr = base.checked_add(offset).ok_or(Errno::EFAULT)?;
@@ -86,10 +64,8 @@ fn render_iface(src: &Iface, enabled: bool) -> UserIface {
         .stats_by_index(src.dev)
         .unwrap_or_default();
 
-    // Field by field from a zeroed value, not a struct literal. The ABI has no
-    // implicit padding, so `Default` writes every byte that will be copied out
-    // and nothing uninitialised can reach user space. A field that introduced
-    // padding would break that argument.
+    // Field by field from a zeroed value, not a struct literal: the ABI has no
+    // implicit padding, so no uninitialised byte can reach user space.
     let mut out = UserIface::default();
     out.ifindex = src.ifindex;
     out.flags = src.flags(enabled);
@@ -119,8 +95,7 @@ fn render_addr(ifindex: u32, src: &IfaceAddr) -> UserAddr {
     out.family = slopos_abi::net::AF_INET as u8;
     out.scope = src.scope as u8;
     out.origin = src.origin as u8;
-    // Lifetimes are absolute deadlines internally and remaining seconds on the
-    // wire, because a client renders "expires in", not "expires at".
+    // Absolute deadlines internally, remaining seconds on the wire.
     out.valid_lft_s = remaining_secs(src.valid_until_ms);
     out.pref_lft_s = remaining_secs(src.pref_until_ms);
     out
@@ -139,8 +114,7 @@ fn render_route(src: &slopos_net::RouteEntry) -> UserRoute {
     out.prefix = src.prefix.0;
     out.gateway = src.gateway.0;
     out.prefix_len = src.prefix_len;
-    // The table records no origin; a connected route is the one with no
-    // gateway, which is the distinction a renderer needs.
+    // The table records no origin; a connected route is the one with no gateway.
     out.origin = if src.gateway.is_unspecified() {
         slopos_abi::net::NET_ROUTE_ORIGIN_KERNEL
     } else {
@@ -153,10 +127,8 @@ fn render_route(src: &slopos_net::RouteEntry) -> UserRoute {
     out
 }
 
-/// Collect every interface into a freshly reserved vector.
-///
-/// The reservation happens first and the visit pushes into it, so the fill
-/// under the table lock cannot reach the allocator.
+/// Collect every interface, reserving up front so the fill under the table
+/// lock never reaches the allocator.
 fn collect_ifaces() -> Result<KVec<Iface>, Errno> {
     let mut staging: KVec<Iface> =
         KVec::with_capacity(slopos_abi::net::NET_MAX_IFACES).map_err(|_| Errno::ENOMEM)?;
@@ -169,8 +141,6 @@ fn collect_ifaces() -> Result<KVec<Iface>, Errno> {
 fn query_ifaces(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
     let enabled = iface::is_enabled();
     let mut staging = collect_ifaces()?;
-    // The filter is honoured, never accepted and ignored: an ignored filter
-    // hands `ip link show dev eth0` a plausible answer to a different question.
     if ifindex != NET_IFINDEX_NONE {
         staging.retain(|i| i.ifindex == ifindex);
     }
@@ -213,14 +183,11 @@ fn query_addrs(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
 fn query_routes(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
     // `all_routes` allocates and returns with the table lock already released.
     let mut routes = ROUTE_TABLE.all_routes();
-    // Same rule as `query_ifaces`. Routes carry a device, so the filter
-    // resolves the interface once and matches on that.
     if ifindex != NET_IFINDEX_NONE {
         let dev = iface::get(ifindex).map(|i| i.dev);
         match dev {
             Some(dev) => routes.retain(|r| r.dev == dev),
-            // An unknown interface has no routes, which is a different
-            // answer from "every route".
+            // An unknown interface has no routes — not every route.
             None => routes.clear(),
         }
     }
@@ -234,30 +201,16 @@ fn query_routes(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
     Ok(core::mem::size_of::<UserNetQueryHdr>() as u64 + (written * size) as u64)
 }
 
-/// Enumerate every socket, with the owner disclosed only where it may be.
-///
-/// **Every caller sees every row.** A tool is never the process that opened the
-/// socket it was asked to report on, so a rule keyed on the caller's identity
-/// would leave `ss` permanently empty.
-///
-/// What is restricted is the **attribution**: the owner is disclosed for rows
-/// the caller's address space owns, or for every row to a caller holding
-/// `NET_ADMIN`, and is otherwise [`INVALID_PROCESS_ID`]. Who is talking to what
-/// is the sensitive pairing; the four-tuple alone is not.
-///
-/// So `total_count` is the number of sockets that exist, and a truncated read
-/// means the buffer was short rather than that rows were withheld.
+/// Enumerate every socket. Rows are never withheld, but the owner is disclosed
+/// only for the caller's own address space, or to a holder of `NET_ADMIN`.
 fn query_sockets(
     buf: u64,
     len: usize,
     caller_table: FdTable,
     net_admin: bool,
 ) -> Result<u64, Errno> {
-    // Allocated before anything is taken: the collector fills it under the
-    // socket table lock, and the allocator is where every subsystem meets.
-    // Sized from the table's live capacity rather than `MAX_SOCKETS`: the slab
-    // grows past that constant, and a short buffer drops exactly the rows a
-    // busy system was asked about.
+    // Allocated before the collector takes the socket table lock, and sized
+    // from the table's live capacity: the slab grows past `MAX_SOCKETS`.
     let capacity = slopos_net::socket::socket_table_capacity();
     let mut staging: KVec<slopos_net::socket::SocketRow> =
         KVec::with_capacity(capacity).map_err(|_| Errno::ENOMEM)?;
@@ -279,23 +232,19 @@ fn render_sock(
     net_admin: bool,
 ) -> UserSockInfo {
     // Field by field from a zeroed value: the ABI has no implicit padding, so
-    // `Default` writes every byte that will be copied out.
+    // no uninitialised byte can reach user space.
     let mut out = UserSockInfo::default();
     out.local_addr = src.local_ip;
     out.remote_addr = src.remote_ip;
-    // Host byte order here, unlike `SockAddrIn`: every consumer formats these
-    // for a person rather than putting them on a wire.
+    // Host byte order, unlike `SockAddrIn`: these are formatted, never sent.
     out.local_port = src.local_port;
     out.remote_port = src.remote_port;
     out.family = slopos_abi::net::AF_INET as u8;
     out.sock_type = src.sock_type;
     out.protocol = src.protocol;
     out.state = src.state;
-    // The one redacted field. Decided on the address space, so a task sees the
-    // sockets its siblings opened, but reported as the task id — the number
-    // `getpid` returns and `kill` takes. A caller that may not have it gets the
-    // same sentinel an unowned socket carries, so "not disclosed to you" is not
-    // itself a disclosure.
+    // An undisclosed owner gets the same sentinel an unowned socket carries, so
+    // the refusal is not itself a disclosure.
     out.owner_pid = if net_admin || src.owner.process == Some(caller_table) {
         src.owner.task_id
     } else {
@@ -345,18 +294,14 @@ fn query_global(buf: u64, len: usize) -> Result<u64, Errno> {
     Ok(core::mem::size_of::<UserNetQueryHdr>() as u64 + (written * size) as u64)
 }
 
-/// DHCP client state, one record per interface running a client.
-///
-/// Interfaces with no client produce no record rather than a zeroed one: "no
-/// client here" and "a client in state 0" are different answers, and the ABI's
-/// `NET_DHCP_DISABLED` is the second.
+/// DHCP client state, one record per interface running a client. An interface
+/// with no client is omitted; `NET_DHCP_DISABLED` means a client in that state.
 fn query_dhcp(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
     let mut staging: KVec<UserDhcpStatus> =
         KVec::with_capacity(slopos_abi::net::NET_MAX_IFACES).map_err(|_| Errno::ENOMEM)?;
 
-    // Collect the interfaces first, then ask the DHCP client about each: the
-    // interface table's lock is released before the client's is taken, never
-    // nested.
+    // Interfaces first: the interface table's lock is released before the DHCP
+    // client's is taken, never nested.
     let ifaces = collect_ifaces()?;
     for row in ifaces.iter() {
         if ifindex != NET_IFINDEX_NONE && row.ifindex != ifindex {
@@ -387,11 +332,8 @@ fn query_dhcp(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
     Ok(core::mem::size_of::<UserNetQueryHdr>() as u64 + (written * size) as u64)
 }
 
-/// The neighbour cache, filtered to one interface when asked.
-///
-/// The cache keys on `DevIndex` while the ABI speaks `ifindex`, so the filter
-/// resolves once here and an unknown interface yields nothing rather than
-/// everything — the same rule `query_routes` follows.
+/// The neighbour cache, filtered to one interface when asked. An unknown
+/// interface yields nothing rather than everything.
 fn query_neigh(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
     let dev = if ifindex == NET_IFINDEX_NONE {
         None
@@ -399,7 +341,6 @@ fn query_neigh(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
         match iface::get(ifindex) {
             Some(i) => Some(i.dev),
             None => {
-                // No such interface: an empty answer, not every neighbour.
                 let size = core::mem::size_of::<UserNeigh>();
                 write_header(buf, len, NET_Q_NEIGH, size, 0, 0)?;
                 return Ok(core::mem::size_of::<UserNetQueryHdr>() as u64);
@@ -415,8 +356,6 @@ fn query_neigh(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
     let base = write_header(buf, len, NET_Q_NEIGH, size, written, total)?;
     for (i, snap) in staging.iter().take(written).enumerate() {
         let mut record = UserNeigh::default();
-        // The cache stores a device; the reported ifindex is whatever interface
-        // currently owns it, or `NONE` for a device with no interface attached.
         record.ifindex = iface::get_by_dev(snap.dev).map_or(NET_IFINDEX_NONE, |i| i.ifindex);
         record.addr = snap.ip.0;
         record.mac = snap.mac.0;

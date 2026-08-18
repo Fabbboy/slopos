@@ -6,10 +6,8 @@ use crate::node::{MenuItem, MenuItemKind};
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
-/// Popup menu rendered as a regular widget.
-///
-/// Positioning is the enclosing `PopupWidget`'s job; this widget just renders
-/// the items and handles navigation.
+/// Renders items and handles navigation; positioning is the enclosing
+/// `PopupWidget`'s job.
 pub struct MenuWidget {
     core: WidgetCore,
     items: Vec<MenuItem>,
@@ -56,7 +54,7 @@ impl MenuWidget {
             .is_some_and(|i| matches!(i.kind, MenuItemKind::Action) && i.enabled)
     }
 
-    /// Find the next actionable (non-separator, enabled) item index, wrapping around.
+    /// Next non-separator, enabled item, wrapping around.
     fn next_actionable(&self, from: Option<usize>, forward: bool) -> Option<usize> {
         if self.items.is_empty() {
             return None;
@@ -106,7 +104,6 @@ impl Widget for MenuWidget {
         self.item_height = item_h;
         let padding_h = ctx.style.spacing_md;
 
-        // Width = max(label_width + padding + shortcut_width, menu_min_width).
         let mut max_label_w = 0i32;
         let mut max_shortcut_w = 0i32;
 
@@ -142,7 +139,6 @@ impl Widget for MenuWidget {
         let padding_h = ctx.style.spacing_md;
         let radius = ctx.style.corner_radius;
 
-        // Background with rounded corners and border.
         ctx.fill_rounded_rect(
             rect.x,
             rect.y,
@@ -167,7 +163,6 @@ impl Widget for MenuWidget {
 
             match &item.kind {
                 MenuItemKind::Separator => {
-                    // 1px horizontal line centered in the item row.
                     let line_y = y + item_h / 2;
                     ctx.fill_rect(
                         rect.x + padding_h,
@@ -178,12 +173,10 @@ impl Widget for MenuWidget {
                     );
                 }
                 MenuItemKind::Action | MenuItemKind::Submenu(_) => {
-                    // Hover highlight.
                     if self.hovered_index == Some(i) && item.enabled {
                         ctx.fill_rect(rect.x + 1, y, rect.width - 2, item_h, ctx.style.bg_accent);
                     }
 
-                    // Label.
                     let fg = if !item.enabled {
                         ctx.style.text_disabled
                     } else if self.hovered_index == Some(i) {
@@ -196,7 +189,6 @@ impl Widget for MenuWidget {
                     let label_y = y + (item_h - text_h) / 2;
                     ctx.draw_text_transparent(label_x, label_y, item.label, fg);
 
-                    // Shortcut (right-aligned).
                     if let Some(sc) = item.shortcut {
                         let sc_w = ctx.text_width(sc);
                         let sc_x = rect.x + rect.width - padding_h - sc_w;
@@ -273,7 +265,6 @@ impl Widget for MenuWidget {
 
             WidgetEvent::FocusGained => {
                 self.focused = true;
-                // Auto-select first actionable item on focus.
                 if self.hovered_index.is_none() {
                     self.hovered_index = self.next_actionable(None, true);
                 }

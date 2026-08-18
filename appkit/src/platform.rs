@@ -1,8 +1,5 @@
-//! Backward-compatibility re-exports from slopos-windowing.
-//!
-//! New code should depend on `slopos-windowing` directly.
-//! These re-exports exist so that `slopos_appkit::platform::*`
-//! paths continue to resolve during the migration period.
+//! Backward-compatibility re-exports so `slopos_appkit::platform::*` paths keep
+//! resolving; new code should depend on `slopos-windowing` directly.
 
 pub mod protocol_client {
     pub use slopos_windowing::connection::*;

@@ -3,15 +3,13 @@ use super::focus::{FocusManager, FocusScopeId};
 use super::paint::PaintContext;
 use super::traits::{Widget, WidgetId};
 
-/// An overlay entry (popup, menu, tooltip).
+/// A popup, menu or tooltip layered above the main widget tree.
 pub struct OverlayEntry {
-    /// The widget tree for this overlay.
     pub root: Box<dyn Widget>,
     /// Position in window coordinates.
     pub position: (i32, i32),
     /// Whether clicking outside dismisses this overlay.
     pub light_dismiss: bool,
-    /// Focus scope for this overlay.
     pub scope: Option<FocusScopeId>,
 }
 
@@ -27,7 +25,7 @@ impl OverlayManager {
         }
     }
 
-    /// Push a new overlay. Returns its index.
+    /// Push a new overlay; returns its index.
     pub fn push(
         &mut self,
         root: Box<dyn Widget>,
@@ -51,7 +49,7 @@ impl OverlayManager {
         idx
     }
 
-    /// Pop the topmost overlay. Returns true if one was removed.
+    /// Pop the topmost overlay; returns whether one was removed.
     pub fn pop(&mut self, focus: &mut FocusManager) -> bool {
         if let Some(entry) = self.overlays.pop() {
             if entry.scope.is_some() {
@@ -63,25 +61,21 @@ impl OverlayManager {
         }
     }
 
-    /// Dismiss all overlays with light_dismiss.
     pub fn dismiss_light(&mut self, focus: &mut FocusManager) {
         while self.overlays.last().map_or(false, |e| e.light_dismiss) {
             self.pop(focus);
         }
     }
 
-    /// Whether any overlays are active.
     pub fn is_empty(&self) -> bool {
         self.overlays.is_empty()
     }
 
-    /// Number of active overlays.
     pub fn len(&self) -> usize {
         self.overlays.len()
     }
 
-    /// Hit test overlays in reverse z-order (topmost first).
-    /// Returns the overlay index and widget ID if hit.
+    /// Hit test in reverse z-order (topmost first); yields the overlay index.
     pub fn hit_test(&self, x: i32, y: i32) -> Option<(usize, WidgetId)> {
         for (i, entry) in self.overlays.iter().enumerate().rev() {
             let local_x = x - entry.position.0;
@@ -93,7 +87,6 @@ impl OverlayManager {
         None
     }
 
-    /// Paint all overlays in z-order.
     pub fn paint(&self, ctx: &mut PaintContext) {
         for entry in &self.overlays {
             let rect = entry.root.layout_rect();
@@ -106,7 +99,6 @@ impl OverlayManager {
         }
     }
 
-    /// Access overlays slice.
     pub fn overlays(&self) -> &[OverlayEntry] {
         &self.overlays
     }

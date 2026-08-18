@@ -22,8 +22,7 @@ use super::tree;
 /// Run a widget-framework-driven application.
 ///
 /// Sets up one ring and drives the event loop as an async root via
-/// [`slopfut::block_on`]; the wait/wake step races the compositor socket,
-/// the cross-thread wakeup pipe, and (when bounded) a timer.
+/// [`slopfut::block_on`].
 pub fn run_app<A: App>(app: A, width: u32, height: u32) -> ! {
     let ring = Ring::setup(16).expect("appkit: ring setup failed");
     slopfut::block_on(ring, run_app_async(app, width, height))
@@ -41,11 +40,9 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
     let mut focus = FocusManager::new();
     let mut overlays = OverlayManager::new();
 
-    // Build initial widget tree.
     let node = app.view();
     let mut root = tree::build_widget_tree(&node);
 
-    // Initial measure + layout.
     let mut window_size = super::constraints::Size::new(width as i32, height as i32);
     tree::layout_tree(root.as_mut(), window_size, &style);
     focus.rebuild_tab_chain(root.as_ref());
@@ -60,12 +57,9 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
     let mut last_tick_ms: u64 = slopos_windowing::get_time_ms();
 
     loop {
-        // Flush any deferred Surface::drop destroy requests and execute
-        // any closures posted by background threads via UiSender.
         handle.flush_pending_destroys();
         handle.drain_ui_queue();
 
-        // --- Poll input events ---
         let count = win.poll_protocol_events(&mut proto_events);
         let mut unhandled_key: Option<(super::event::Key, super::event::Modifiers)> = None;
         let mut sink = MessageSink::new();
@@ -99,7 +93,6 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             let (px, py) = win.pointer();
             let widget_event = fill_pointer_pos(widget_event, px, py);
 
-            // Track focus modality.
             match &widget_event {
                 WidgetEvent::PointerDown { .. } => focus.note_pointer_input(),
                 WidgetEvent::KeyDown { .. } | WidgetEvent::TextInput { .. } => {
@@ -108,7 +101,6 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 _ => {}
             }
 
-            // Tab/Shift+Tab focus navigation.
             if let WidgetEvent::KeyDown {
                 key: super::event::Key::Named(super::event::NamedKey::Tab),
                 modifiers: mods,
@@ -124,7 +116,6 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 continue;
             }
 
-            // Hit test and dispatch.
             let (px, py) = win.pointer();
             let resp = if let Some(hit) = event::hit_test(root.as_ref(), px, py) {
                 if matches!(widget_event, WidgetEvent::PointerDown { .. }) {
@@ -148,7 +139,6 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             if resp.is_consumed() {
                 needs_repaint = true;
             } else {
-                // Key event not consumed by any widget — forward to app.
                 if let WidgetEvent::KeyDown {
                     key, modifiers: m, ..
                 } = &widget_event
@@ -158,19 +148,16 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             }
         }
 
-        // --- Deliver widget messages to app ---
         for msg in sink.drain_typed::<A::Message>() {
             let action = app.update(msg);
             process_action(action, &mut needs_rebuild, &mut needs_repaint);
         }
 
-        // --- Forward unhandled keys to app ---
         if let Some((key, mods)) = unhandled_key {
             let action = app.on_key(key, mods);
             process_action(action, &mut needs_rebuild, &mut needs_repaint);
         }
 
-        // --- Timer tick ---
         if let Some(interval) = app.tick_interval_ms() {
             let now_ms = slopos_windowing::get_time_ms();
             if now_ms.wrapping_sub(last_tick_ms) >= interval {
@@ -180,7 +167,6 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             }
         }
 
-        // --- Rebuild tree if needed ---
         if needs_rebuild {
             let node = app.view();
             root = tree::build_widget_tree(&node);
@@ -190,7 +176,6 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             needs_repaint = true;
         }
 
-        // --- Paint if needed ---
         if needs_repaint {
             if let Some(mut fb) = win.renderer_mut().frame() {
                 let fmt = fb.pixel_format();
@@ -204,9 +189,8 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             needs_repaint = false;
         }
 
-        // Sleep until the compositor sends an event, a UiSender posts work,
-        // or the next tick/refresh is due.  Replaces the old yield_now()
-        // busy-spin with a proper poll()-based sleep.
+        // Sleep until the compositor sends an event, a UiSender posts work, or
+        // the next tick is due.
         let timeout_ms: i64 = if needs_repaint || needs_rebuild {
             0
         } else if let Some(interval) = app.tick_interval_ms() {
@@ -220,11 +204,8 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
         } else {
             -1
         };
-        // Race the compositor socket, the cross-thread wakeup pipe, and (for a
-        // bounded wait) a timer — the async equivalent of `wait_events`.
-        //   timeout_ms == 0 — non-blocking: return immediately, no await.
-        //   timeout_ms  < 0 — wait indefinitely: race only the two poll_adds.
-        //   timeout_ms  > 0 — bounded wait: add a timer arm.
+        // A zero timeout deliberately awaits nothing; otherwise race the
+        // compositor socket, the wakeup pipe, and — when bounded — a timer.
         if timeout_ms < 0 {
             match slopfut::select2(
                 slopfut::poll_add(handle.compositor_fd(), POLLIN),
@@ -236,10 +217,8 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
                 slopfut::Either2::B(_) => handle.drain_wakeup(),
             }
         } else if timeout_ms > 0 {
-            // `sleep_ms` is an `async fn` (not `Unpin`); `Box::pin` makes it
-            // usable by the by-reference `select3`. It takes milliseconds and
-            // does the ms→ns conversion internally, so feed `timeout_ms`
-            // directly — no manual multiply.
+            // `sleep_ms` is an `async fn` and so not `Unpin`; the by-reference
+            // `select3` needs it pinned.
             let timer: core::pin::Pin<Box<dyn core::future::Future<Output = ()>>> =
                 Box::pin(slopfut::time::sleep_ms(timeout_ms as u64));
             match slopfut::select3(

@@ -104,7 +104,7 @@ define_syscall!(syscall_fs_unlink
 define_syscall!(syscall_fs_list
     (ctx, path: UserCStr<USER_PATH_MAX>, list: UserPtr<UserFsList>) -> Result<(), Errno>
 {
-    let _ = pod_slice_as_bytes::<i8>;  // keep the helper symbol live for legacy users
+    let _ = pod_slice_as_bytes::<i8>;  // TODO(tech-debt): no-op keeping the helper symbol referenced — delete once the legacy users are gone.
     let mut list_hdr = copy_from_user(list.inner()).map_err(|_| Errno::EFAULT)?;
 
     let cap = list_hdr.max_entries;

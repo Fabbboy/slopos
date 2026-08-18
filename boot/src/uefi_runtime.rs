@@ -1,14 +1,9 @@
 //! UEFI Runtime Services region mapping.
 //!
-//! Firmware Runtime Services (`ResetSystem`, see [`slopos_ostd::uefi`]) stay
-//! callable after `ExitBootServices` only while their memory is mapped.
-//! Since the kernel uses its own page tables, this maps every UEFI runtime
-//! region into the kernel page table early in boot.
-//!
-//! Each region is mapped at BOTH its identity (`virt == phys`) and HHDM
-//! (`virt == phys + offset`) address: the firmware's internal pointers may
-//! be physical (identity alias) while Limine reports the system table at
-//! its HHDM alias, so mapping both keeps `ResetSystem` reachable either way.
+//! Runtime Services stay callable after `ExitBootServices` only while their
+//! memory is mapped, and the kernel runs on its own page tables. Each region is
+//! mapped at both its identity and its HHDM address: firmware's own pointers may
+//! be physical while Limine reports the system table at its HHDM alias.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_mm::kernel_mappings::{kernel_is_mapped, kernel_map_io_4kb};
@@ -27,25 +22,20 @@ const DESC_ATTRIBUTE: usize = 32;
 /// `EFI_MEMORY_RUNTIME` — the region must remain mapped for runtime calls.
 const EFI_MEMORY_RUNTIME: u64 = 0x8000_0000_0000_0000;
 
-// EFI memory-mapped device I/O (mapped uncached, non-executable).
 const EFI_MEMORY_MAPPED_IO: u32 = 11;
 // EFI I/O *port* space: accessed via `in`/`out`, not memory — its
 // `PhysicalStart` is a port range, so it must not be page-mapped.
 const EFI_MEMORY_MAPPED_IO_PORT_SPACE: u32 = 12;
 
-/// Per-descriptor page cap. Runtime code/data regions are a few MiB at
-/// most; this bounds a pathological / corrupt descriptor without aborting
-/// the whole map. Truncation is logged rather than silently swallowed.
+/// Bounds a corrupt descriptor without aborting the whole map; real runtime
+/// regions are a few MiB at most, and truncation is logged.
 const MAX_PAGES_PER_DESC: u64 = 0x10000; // 256 MiB
 
-/// Install one alias of a runtime-services page, unless the address
-/// already resolves.
+/// Install one alias of a runtime-services page, unless the address already
+/// resolves.
 ///
-/// Firmware memory is not allocator memory — the buddy has never owned
-/// these pages and must never be handed them — so the mapping owns no
-/// frame reference. A VA that already translates is left alone: the
-/// cursor refuses to overwrite a present leaf, and both aliases of a
-/// region the HHDM already covers are exactly that case.
+/// Firmware memory is not allocator memory — the buddy has never owned these
+/// pages and must never be handed them — so the mapping owns no frame reference.
 fn map_alias_if_absent(virt: VirtAddr, phys: PhysAddr, flags: u64) {
     if kernel_is_mapped(virt) {
         return;
@@ -53,9 +43,8 @@ fn map_alias_if_absent(virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let _ = kernel_map_io_4kb(virt, phys, flags);
 }
 
-/// Map every UEFI runtime region into the kernel page table (identity +
-/// HHDM aliases). Runs after paging/HHDM are up and while the EFI memory
-/// map is still mapped. No-op on a non-UEFI boot.
+/// Map every UEFI runtime region (identity + HHDM aliases). Runs after paging
+/// and the HHDM are up, while the EFI memory map is still mapped.
 pub fn map_runtime_regions(hhdm_offset: u64) {
     let Some((memmap, desc_size)) = limine_protocol::efi_memmap() else {
         klog_info!("UEFI: no EFI memory map (BIOS boot?); runtime services unavailable");
@@ -83,13 +72,12 @@ pub fn map_runtime_regions(hhdm_offset: u64) {
         if attr & EFI_MEMORY_RUNTIME == 0 {
             continue;
         }
-        // I/O port space is reached via `in`/`out`, not page mappings.
         if typ == EFI_MEMORY_MAPPED_IO_PORT_SPACE {
             continue;
         }
 
-        // Device MMIO must be uncached + NX; code/data is mapped RWX
-        // (KERNEL_RW leaves the NX bit clear) so runtime code can execute.
+        // Runtime code must execute, so code/data gets KERNEL_RW (NX clear);
+        // device MMIO is uncached + NX.
         let flags = if typ == EFI_MEMORY_MAPPED_IO {
             PageFlags::MMIO.bits()
         } else {

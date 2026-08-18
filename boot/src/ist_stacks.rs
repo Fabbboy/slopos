@@ -1,54 +1,10 @@
-//! Interrupt Stack Table (IST) Management for SlopOS
+//! Per-CPU Interrupt Stack Table (IST) stacks: the TSS's 7 slots give the
+//! critical exception vectors and the two high-rate IRQs a known-good stack
+//! regardless of what the interrupted context had done to its own.
 //!
-//! This module manages dedicated stacks for interrupt and exception handling using
-//! the x86-64 IST (Interrupt Stack Table) mechanism. IST allows specific interrupt
-//! vectors to automatically switch to a pre-configured stack, preventing stack
-//! overflow when interrupts occur on an already-stressed stack.
-//!
-//! # IST Slot Allocation Strategy
-//!
-//! The TSS provides 7 IST slots (IST1-IST7). We allocate them by priority:
-//!
-//! | IST | Category            | Vector(s) | Rationale                                    |
-//! |-----|---------------------|-----------|----------------------------------------------|
-//! | 1   | Critical Exception  | 8 (DF)    | Double fault MUST have its own stack         |
-//! | 2   | Stack Exception     | 12 (SF)   | Stack fault cannot use current stack         |
-//! | 3   | Memory Exception    | 13 (GP)   | GP faults need isolation for debugging       |
-//! | 4   | Memory Exception    | 14 (PF)   | Page faults need clean stack for handlers    |
-//! | 5   | High-Freq IRQ       | 33 (KB)   | Keyboard IRQ can rapid-fire, causes nesting  |
-//! | 6   | High-Freq IRQ       | 44 (MS)   | Mouse IRQ same rapid-fire potential          |
-//! | 7   | Reserved            | -         | Future use (NMI, timer, etc.)                |
-//!
-//! # Why Hardware IRQs Need IST
-//!
-//! When a hardware IRQ fires, the CPU pushes an interrupt frame (~40 bytes) onto
-//! the current stack. If the IRQ handler calls functions, more stack is used.
-//! With rapid input (e.g., holding multiple keys), IRQs can queue up faster than
-//! they're processed, causing:
-//!
-//! 1. Deep call stacks as handlers call scheduler, input routing, etc.
-//! 2. If interrupts nest (shouldn't with proper EOI, but edge cases exist),
-//!    each nested IRQ consumes more stack
-//! 3. Eventually the kernel stack overflows into adjacent memory regions
-//!
-//! By assigning high-frequency IRQs to dedicated IST stacks, each IRQ handler
-//! gets a fresh, known-good stack regardless of what was happening before.
-//!
-//! # Memory Layout
-//!
-//! Each IST stack has a guard page (unmapped) below it to catch overflows:
-//!
-//! ```text
-//! +------------------+ <- stack_top (IST entry points here)
-//! |                  |
-//! |   Usable Stack   |  32 KB (8 pages)
-//! |                  |
-//! +------------------+ <- stack_base
-//! |   Guard Page     |  4 KB (unmapped, triggers page fault on overflow)
-//! +------------------+ <- guard_start = region_base
-//! ```
-//!
-//! Stacks are spaced 64 KB apart in virtual address space.
+//! Every region is 64 KiB apart and carries an unmapped guard page at its base,
+//! so an overflow lands in the page-fault classifier rather than in the
+//! neighbouring stack.
 
 use core::ffi::CStr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -74,28 +30,18 @@ use slopos_mm::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use slopos_ostd::mm::frame::Frame;
 use slopos_ostd::{klog_debug, klog_info};
 
-// =============================================================================
-// IST Categories
-// =============================================================================
-
-/// Category of interrupt/exception for logging and diagnostics.
+/// Purely a logging/diagnostics label; it selects no behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum IstCategory {
-    /// Critical exceptions that must never share a stack (Double Fault)
     CriticalException = 0,
-    /// Stack-related exceptions (Stack Fault)
     StackException = 1,
-    /// Memory protection exceptions (GP, PF)
     MemoryException = 2,
-    /// High-frequency hardware IRQs (Keyboard, Mouse)
     HighFreqIrq = 3,
-    /// Reserved for future use
     Reserved = 4,
 }
 
 impl IstCategory {
-    /// Returns a human-readable name for the category.
     pub const fn name(&self) -> &'static str {
         match self {
             IstCategory::CriticalException => "Critical",
@@ -107,44 +53,23 @@ impl IstCategory {
     }
 }
 
-// =============================================================================
-// IST Stack Configuration
-// =============================================================================
-
-/// Configuration for a single IST stack entry.
 #[repr(C)]
 pub struct IstStackConfig {
-    /// Human-readable name (null-terminated bytes)
+    /// NUL-terminated.
     name: &'static [u8],
-    /// Interrupt/exception vector number
     vector: u8,
-    /// IST index (1-7, as stored in IDT entry)
+    /// TSS slot 1-7, as stored in the IDT entry.
     ist_index: u8,
-    /// Category for logging/diagnostics
     category: IstCategory,
-    /// Base of the entire region (guard page start)
     region_base: u64,
-    /// Start of guard page
     guard_start: u64,
-    /// End of guard page (= start of usable stack)
     guard_end: u64,
-    /// Base of usable stack
     stack_base: u64,
-    /// Top of usable stack (IST entry points here)
     stack_top: u64,
-    /// Size of usable stack in bytes
     stack_size: u64,
 }
 
 impl IstStackConfig {
-    /// Creates a new IST stack configuration.
-    ///
-    /// # Arguments
-    /// * `index` - Position in the stack array (0-based), determines virtual address
-    /// * `name` - Human-readable name (must be null-terminated)
-    /// * `vector` - Interrupt vector number
-    /// * `ist_index` - IST slot (1-7)
-    /// * `category` - Category for logging
     const fn new(
         index: usize,
         name: &'static [u8],
@@ -173,7 +98,6 @@ impl IstStackConfig {
         }
     }
 
-    /// Returns the name as a string slice (for logging).
     fn name_str(&self) -> &str {
         CStr::from_bytes_with_nul(self.name)
             .ok()
@@ -182,17 +106,10 @@ impl IstStackConfig {
     }
 }
 
-// =============================================================================
-// IST Stack Metrics
-// =============================================================================
-
-/// Runtime metrics for a single IST stack.
 struct IstStackMetrics {
-    /// Peak stack usage observed (bytes from top)
+    /// Bytes below the stack top.
     peak_usage: AtomicU64,
-    /// Whether we've reported an out-of-bounds RSP (report once to avoid spam)
     out_of_bounds_reported: AtomicBool,
-    /// Number of times this stack was entered
     entry_count: AtomicU64,
 }
 
@@ -211,14 +128,14 @@ impl IstStackMetrics {
         self.entry_count.store(0, Ordering::Relaxed);
     }
 
-    /// Marks out-of-bounds as reported. Returns true if this was the first report.
+    /// True only for the first report, so the log cannot be flooded.
     fn mark_out_of_bounds_once(&self) -> bool {
         self.out_of_bounds_reported
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
             .is_ok()
     }
 
-    /// Records stack usage. Returns true if this is a new peak.
+    /// True if `usage` is a new peak.
     fn record_usage(&self, usage: u64) -> bool {
         let mut current = self.peak_usage.load(Ordering::Relaxed);
         while usage > current {
@@ -235,38 +152,23 @@ impl IstStackMetrics {
         false
     }
 
-    /// Increments entry count.
     fn record_entry(&self) {
         self.entry_count.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-// =============================================================================
-// Static Configuration
-// =============================================================================
-
-/// IRQ vector for keyboard (IRQ1 remapped to vector 33).
 const IRQ_KEYBOARD_VECTOR: u8 = IRQ_BASE_VECTOR + 1;
 
-/// IRQ vector for mouse (IRQ12 remapped to vector 44).
 const IRQ_MOUSE_VECTOR: u8 = IRQ_BASE_VECTOR + 12;
 
-/// Total number of IST stacks we configure.
 pub(crate) const IST_STACK_COUNT: usize = 6;
 
-/// Static configuration for all IST stacks.
+/// Order matters: the index determines virtual address placement.
 ///
-/// Order matters: index determines virtual address placement.
-///
-/// The NMI (vector 2) is deliberately absent, and must stay absent. On
-/// x86-64 *any* `IRET` unblocks NMI, not only the one leaving the NMI
-/// handler — and the handler's backtrace walk deliberately faults, so the
-/// page-fault handler's own `iretq` re-opens the window mid-handler. With
-/// no IST a nested NMI pushes deeper on the same stack and survives; with
-/// one it would reset RSP to the IST top and overwrite the frame the outer
-/// handler is still using.
+/// The NMI (vector 2) is deliberately absent and must stay absent: on x86-64
+/// *any* `IRET` unblocks NMI, so an IST would let a nested NMI reset RSP to the
+/// IST top and overwrite the frame the outer handler is still using.
 static IST_CONFIGS: [IstStackConfig; IST_STACK_COUNT] = [
-    // Critical exceptions - must have dedicated stacks
     IstStackConfig::new(
         0,
         b"Double Fault\0",
@@ -274,7 +176,6 @@ static IST_CONFIGS: [IstStackConfig; IST_STACK_COUNT] = [
         1,
         IstCategory::CriticalException,
     ),
-    // Stack exceptions - cannot use current stack
     IstStackConfig::new(
         1,
         b"Stack Fault\0",
@@ -282,7 +183,6 @@ static IST_CONFIGS: [IstStackConfig; IST_STACK_COUNT] = [
         2,
         IstCategory::StackException,
     ),
-    // Memory exceptions - need isolation for debugging
     IstStackConfig::new(
         2,
         b"General Protection\0",
@@ -297,7 +197,6 @@ static IST_CONFIGS: [IstStackConfig; IST_STACK_COUNT] = [
         4,
         IstCategory::MemoryException,
     ),
-    // High-frequency IRQs - prevent stack overflow from rapid input
     IstStackConfig::new(
         4,
         b"Keyboard IRQ\0",
@@ -314,7 +213,6 @@ static IST_CONFIGS: [IstStackConfig; IST_STACK_COUNT] = [
     ),
 ];
 
-/// Runtime metrics for each IST stack.
 static IST_METRICS: [IstStackMetrics; IST_STACK_COUNT] = [
     IstStackMetrics::new(),
     IstStackMetrics::new(),
@@ -324,14 +222,8 @@ static IST_METRICS: [IstStackMetrics; IST_STACK_COUNT] = [
     IstStackMetrics::new(),
 ];
 
-/// Tracks whether a given CPU already has its IST virtual stacks mapped.
 static CPU_IST_MAPPED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
-// =============================================================================
-// Private Helpers
-// =============================================================================
-
-/// Finds the IST stack index by interrupt vector.
 fn find_index_by_vector(vector: u8) -> Option<usize> {
     IST_CONFIGS.iter().position(|cfg| cfg.vector == vector)
 }
@@ -354,7 +246,6 @@ pub(crate) fn stack_bounds_for_cpu(cpu_id: usize, stack_idx: usize) -> (u64, u64
     (guard_start, guard_end, stack_base, stack_top)
 }
 
-/// Finds the IST stack index by fault address (for guard page detection).
 fn find_index_by_address(addr: u64) -> Option<(usize, usize)> {
     for cpu_id in 0..MAX_CPUS {
         if !CPU_IST_MAPPED[cpu_id].load(Ordering::Acquire) {
@@ -371,26 +262,16 @@ fn find_index_by_address(addr: u64) -> Option<(usize, usize)> {
     None
 }
 
-/// Enforces the single-writer rule every mapping site in this module obeys:
-/// only the BSP links these regions into the page tables, and it does so in
-/// [`premap_cpus`] before any AP is bootstrapped.
-///
-/// The regions are packed tightly enough that CPUs share the page-directory
-/// entries covering them — 32 stack slots to a leaf page table. Two CPUs
-/// mapping concurrently would each allocate a leaf table for a shared entry
-/// and each install it, so the last install silently discards the other's
-/// stack pages along with the table that held them. The CPU that lost then
-/// takes its first exception onto an unmapped IST stack, double-faults onto
-/// an unmapped double-fault stack, and resets.
-///
-/// A release build must catch that, because the failure it prevents is
-/// indistinguishable from a hardware fault.
+/// Only the BSP may link these regions, and only from [`premap_cpus`] before
+/// any AP is bootstrapped: 32 stack slots share one leaf page table, so two
+/// CPUs mapping concurrently each install a leaf for the same page-directory
+/// entry and the last install discards the other's stack pages. Checked in
+/// release too — the resulting reset is indistinguishable from a hardware fault.
 fn assert_bsp_is_mapping(region: &str) {
     let cpu_id = get_current_cpu();
     if cpu_id != 0 {
         // A panic message does not reach the console from an AP this early in
-        // bring-up, but klog does. State the violation here, where it will be
-        // read; the assertion below only has to stop the machine.
+        // bring-up, but klog does; the assertion only has to stop the machine.
         klog_info!(
             "IST: CPU {} is linking page tables for {}; these regions share \
              page-directory entries across CPUs, so only the BSP may map them, \
@@ -409,11 +290,9 @@ fn map_stack_pages(stack: &IstStackConfig, stack_base: u64) {
     assert_bsp_is_mapping("an IST stack");
     for page in 0..EXCEPTION_STACK_PAGES {
         let virt_addr = stack_base + page * PAGE_SIZE_4KB;
-        // Allocate a zero-initialised kernel frame and hand the handle
-        // straight to the mapper. The IST stack lives for the lifetime
-        // of the kernel, so the reference the leaf entry takes is never
-        // released — but it is held by the page table rather than by
-        // nobody, which is what `into_phys` would have left behind.
+        // The handle goes straight to the mapper: an IST stack lives as long as
+        // the kernel, so the leaf entry holds the never-released reference
+        // rather than `into_phys` leaving it held by nobody.
         let frame = Frame::<KernelMeta>::alloc_zeroed().unwrap_or_else(|| {
             panic!(
                 "ist_stacks_init: Failed to allocate zeroed page for {} stack",
@@ -452,25 +331,17 @@ fn ensure_cpu_stacks_mapped(cpu_id: usize) {
         map_stack_pages(stack, stack_base);
     }
 
-    // The data-stack analogue: one mapped, guard-paged SafeStack DATA stack
-    // for this CPU's exception/IST context, walked by instrumented handler
-    // code via `gs:[ist_unsafe_sp]`.
+    // The SafeStack DATA stack instrumented handler code reaches through
+    // `gs:[ist_unsafe_sp]`.
     map_exc_dstack_pages(cpu_id);
 
-    // Reliable Abort Core: this CPU's dedicated emergency SAFE + DATA stacks,
-    // switched to by the fatal-fault trampoline before any panic formatting.
     map_emergency_stacks_pages(cpu_id);
 
     CPU_IST_MAPPED[cpu_id].store(true, Ordering::Release);
 }
 
-// =============================================================================
-// Exception / IST SafeStack DATA stack (per-CPU)
-// =============================================================================
-
 /// `(guard_start, usable_base, top)` of CPU `cpu_id`'s exception data stack.
-/// The guard page occupies `[guard_start, usable_base)`; the usable stack
-/// `[usable_base, top)` grows down from `top` into the guard on overflow.
+/// The guard page occupies `[guard_start, usable_base)`.
 #[inline]
 pub(crate) fn exc_dstack_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
     let region_base = EXC_DSTACK_REGION_BASE + cpu_id as u64 * EXC_DSTACK_REGION_STRIDE;
@@ -479,8 +350,7 @@ pub(crate) fn exc_dstack_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
     (region_base, usable_base, top)
 }
 
-/// Map the usable pages of CPU `cpu_id`'s exception data stack, leaving the
-/// guard page at the base unmapped.  Mirrors [`map_stack_pages`].
+/// Leaves the guard page at the region base unmapped.
 fn map_exc_dstack_pages(cpu_id: usize) {
     assert_bsp_is_mapping("an exception data stack");
     let (_guard_start, usable_base, _top) = exc_dstack_bounds_for_cpu(cpu_id);
@@ -501,33 +371,27 @@ fn map_exc_dstack_pages(cpu_id: usize) {
     }
 }
 
-/// Prime the current CPU's `ist_unsafe_sp` to the top of its exception data
-/// stack.  Must run after [`ensure_cpu_stacks_mapped`] (so the pages exist)
-/// and BEFORE any IDT IST selector is installed (so no exception can run on
-/// an IST stack — and thus select this data stack — before it is primed).
+/// Must run after [`ensure_cpu_stacks_mapped`] and before any IDT IST selector
+/// is installed, since an exception on an IST stack selects this data stack.
 fn prime_exc_dstack(cpu_id: usize) {
     let (_guard_start, _usable_base, top) = exc_dstack_bounds_for_cpu(cpu_id);
     slopos_arch::pcr::set_local_ist_unsafe_sp(top);
 }
 
-/// Top (exclusive high address) of the current CPU's exception data stack.
-/// Used by `retire_faulted_cpu` to re-prime `ist_unsafe_sp` after a fatal
-/// user fault abandons the IST data stack without unwinding.
+/// Used by `retire_faulted_cpu` to re-prime `ist_unsafe_sp` after a fatal user
+/// fault abandons the IST data stack without unwinding.
 pub fn exc_dstack_top_current_cpu() -> u64 {
     let (_guard_start, _usable_base, top) = exc_dstack_bounds_for_cpu(get_current_cpu());
     top
 }
 
-/// `(guard_start, usable_base, top)` of the current CPU's exception data
-/// stack.  Exposed for the SafeStack regression tests.
+/// `(guard_start, usable_base, top)`; exposed for the SafeStack regression tests.
 pub fn exc_dstack_bounds_current_cpu() -> (u64, u64, u64) {
     exc_dstack_bounds_for_cpu(get_current_cpu())
 }
 
-/// Classify a page-fault address against the exception data-stack guard
-/// pages (sibling of [`ist_guard_fault`]).  Returns the offending CPU id on
-/// a guard-page hit, so the #PF handler can report a clean
-/// "exception data-stack overflow" instead of recursing.
+/// Returns the offending CPU id on a data-stack guard-page hit, so the #PF
+/// handler reports an overflow instead of recursing.
 pub fn exc_dstack_guard_fault(fault_addr: u64) -> Option<usize> {
     for cpu_id in 0..MAX_CPUS {
         if !CPU_IST_MAPPED[cpu_id].load(Ordering::Acquire) {
@@ -540,10 +404,6 @@ pub fn exc_dstack_guard_fault(fault_addr: u64) -> Option<usize> {
     }
     None
 }
-
-// =============================================================================
-// Reliable Abort Core — per-CPU emergency SAFE + DATA stacks
-// =============================================================================
 
 /// `(guard_start, usable_base, top)` of CPU `cpu_id`'s emergency data stack.
 #[inline]
@@ -580,8 +440,7 @@ fn map_one_stack_region(usable_base: u64, pages: u64, what: &str, cpu_id: usize)
     }
 }
 
-/// Map the usable pages of CPU `cpu_id`'s emergency SAFE and DATA stacks,
-/// leaving each guard page unmapped (overflow → guard #PF → `panic_abort_raw`).
+/// Each guard page is left unmapped: overflow → guard #PF → `panic_abort_raw`.
 fn map_emergency_stacks_pages(cpu_id: usize) {
     let (_g, safe_base, _t) = emergency_safe_bounds_for_cpu(cpu_id);
     map_one_stack_region(
@@ -599,9 +458,8 @@ fn map_emergency_stacks_pages(cpu_id: usize) {
     );
 }
 
-/// Prime the current CPU's emergency SAFE + DATA stack tops into the PCR. Must
-/// run after [`ensure_cpu_stacks_mapped`] (pages exist) and before the IDT is
-/// live, mirroring [`prime_exc_dstack`].
+/// Must run after [`ensure_cpu_stacks_mapped`] and before the IDT is live, for
+/// the same reason as [`prime_exc_dstack`].
 fn prime_emergency_stacks(cpu_id: usize) {
     let (_g, _u, safe_top) = emergency_safe_bounds_for_cpu(cpu_id);
     let (_g, _u, data_top) = emergency_dstack_bounds_for_cpu(cpu_id);
@@ -609,20 +467,18 @@ fn prime_emergency_stacks(cpu_id: usize) {
     slopos_arch::pcr::set_local_panic_unsafe_sp(data_top);
 }
 
-/// `(guard_start, usable_base, top)` of the current CPU's emergency SAFE stack.
-/// Exposed for the Reliable Abort Core regression tests.
+/// `(guard_start, usable_base, top)`; exposed for the Reliable Abort Core tests.
 pub fn emergency_safe_bounds_current_cpu() -> (u64, u64, u64) {
     emergency_safe_bounds_for_cpu(get_current_cpu())
 }
 
-/// `(guard_start, usable_base, top)` of the current CPU's emergency DATA stack.
+/// `(guard_start, usable_base, top)` of the current CPU's emergency data stack.
 pub fn emergency_dstack_bounds_current_cpu() -> (u64, u64, u64) {
     emergency_dstack_bounds_for_cpu(get_current_cpu())
 }
 
-/// Classify a page-fault address against the emergency-stack guard pages
-/// (sibling of [`exc_dstack_guard_fault`]). A hit means the fatal-fault report
-/// itself overflowed — the #PF handler must degrade to `panic_abort_raw`.
+/// A hit means the fatal-fault report itself overflowed — the #PF handler must
+/// degrade to `panic_abort_raw`.
 pub fn emergency_stack_guard_fault(fault_addr: u64) -> Option<usize> {
     for cpu_id in 0..MAX_CPUS {
         if !CPU_IST_MAPPED[cpu_id].load(Ordering::Acquire) {
@@ -640,16 +496,7 @@ pub fn emergency_stack_guard_fault(fault_addr: u64) -> Option<usize> {
     None
 }
 
-// =============================================================================
-// Public API
-// =============================================================================
-
 /// Initializes all IST stacks.
-///
-/// This function:
-/// 1. Allocates and maps physical pages for each IST stack
-/// 2. Registers the stack tops in the TSS via GDT
-/// 3. Configures the IDT entries to use the appropriate IST
 ///
 /// # Panics
 /// Panics if memory allocation or mapping fails.
@@ -666,14 +513,10 @@ pub fn ist_stacks_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermeti
     );
 
     for (i, _stack) in IST_CONFIGS.iter().enumerate() {
-        // Reset metrics for this stack
         IST_METRICS[i].reset();
     }
 
-    // BSP gets CPU-local IST mappings during early IDT setup.
     ensure_cpu_stacks_mapped(0);
-
-    // Bind IST pointers for the CPU that performed initialization (BSP).
     ist_bind_current_cpu(ctx);
 
     klog_info!(
@@ -692,45 +535,28 @@ pub fn ist_stacks_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermeti
 
 /// Maps the IST, exception and emergency stacks of CPUs `0..cpu_count`.
 ///
-/// Linking these regions into the page tables is a single-writer operation and
-/// this is the writer: it runs on the BSP before the first AP is bootstrapped.
-/// Stacks are packed 64 KiB apart, so 32 of them share one leaf page table and
-/// the CPUs that own them share the page-directory entry that links it. CPUs
-/// mapping their own stacks concurrently would each allocate a leaf table for
-/// that shared entry and each install it; the last install wins and every
-/// earlier writer's stack pages disappear along with the table that held them.
-/// A CPU left that way takes its first exception onto an unmapped IST stack,
-/// double-faults, finds the double-fault stack unmapped too, and resets.
-///
-/// Every CPU still calls [`ensure_cpu_stacks_mapped`] through
-/// [`ist_bind_current_cpu`], where it finds the work already done and maps
-/// nothing.
+/// The single writer required by [`assert_bsp_is_mapping`]: it runs on the BSP
+/// before the first AP is bootstrapped. Every CPU still calls
+/// [`ensure_cpu_stacks_mapped`] later and finds the work already done.
 pub fn premap_cpus(cpu_count: usize) {
     for cpu_id in 0..cpu_count.min(MAX_CPUS) {
         ensure_cpu_stacks_mapped(cpu_id);
     }
 }
 
-/// Bind preallocated IST stacks into the current CPU's TSS/IDT context.
-///
-/// This must run on every CPU after its per-CPU GDT/TSS is installed. The
-/// stack memory is globally allocated once by `ist_stacks_init`; this routine
-/// only updates CPU-local TSS IST pointers. `K: CpuInitKind` keeps the
-/// surface dual-callable from BSP-init, AP-init, and test scopes.
+/// Bind preallocated IST stacks into the current CPU's TSS/IDT context; must
+/// run on every CPU after its per-CPU GDT/TSS is installed. `K: CpuInitKind`
+/// keeps the surface callable from BSP-init, AP-init and test scopes.
 pub fn ist_bind_current_cpu<'b, K: slopos_hermetic::CpuInitKind>(
     ctx: &mut slopos_hermetic::BootCtx<'b, K>,
 ) {
     let cpu_id = get_current_cpu();
     ensure_cpu_stacks_mapped(cpu_id);
 
-    // Prime this CPU's exception SafeStack data-stack pointer BEFORE any IST
-    // selector is installed below — once an IST is live, an exception may run
-    // on it and `__safestack_pointer_address` will select `ist_unsafe_sp`,
-    // which must already point at the mapped data-stack top by then.
+    // Both must precede the IST selectors installed below: once an IST is live,
+    // an exception on it makes `__safestack_pointer_address` select
+    // `ist_unsafe_sp`, which must already point at a mapped top.
     prime_exc_dstack(cpu_id);
-
-    // Reliable Abort Core: prime this CPU's emergency SAFE + DATA stack tops so
-    // the fatal-fault trampoline can switch to them from the very first panic.
     prime_emergency_stacks(cpu_id);
 
     for (idx, stack) in IST_CONFIGS.iter().enumerate() {
@@ -743,16 +569,11 @@ pub fn ist_bind_current_cpu<'b, K: slopos_hermetic::CpuInitKind>(
             );
             continue;
         };
-        // `stack_top` is the high address of a kernel-virt stack mapped
-        // earlier by `ensure_cpu_stacks_mapped`. The KernelStackTop's
-        // `'static` lifetime is appropriate because the mapped pages live
-        // for the kernel image.
+        // The `'static` lifetime holds because these pages live for the kernel
+        // image.
         let stack_top_typed = slopos_hermetic::KernelStackTop::from_kernel_va(stack_top);
 
-        // Register stack top in current CPU TSS.
         crate::gdt::gdt_set_ist(ctx, slot, stack_top_typed);
-
-        // Keep IDT entry IST selectors synchronized for all CPUs.
         crate::idt::idt_set_ist(ctx, stack.vector, slot);
 
         klog_debug!(
@@ -768,17 +589,10 @@ pub fn ist_bind_current_cpu<'b, K: slopos_hermetic::CpuInitKind>(
     }
 }
 
-/// Records stack usage for a given interrupt vector.
-///
-/// Called from the common exception handler to track stack usage and detect
-/// potential overflow conditions. Only tracks vectors that have IST stacks.
-///
-/// # Arguments
-/// * `vector` - The interrupt vector number
-/// * `frame_ptr` - The current stack pointer (RSP from interrupt frame)
+/// Called from the common exception handler; `frame_ptr` is the interrupt
+/// frame's address, i.e. RSP on entry. Vectors without an IST stack are ignored.
 pub fn ist_record_usage(vector: u8, frame_ptr: u64) {
     let Some(idx) = find_index_by_vector(vector) else {
-        // Not an IST-managed vector, nothing to track
         return;
     };
 
@@ -787,13 +601,9 @@ pub fn ist_record_usage(vector: u8, frame_ptr: u64) {
     let cpu_id = get_current_cpu();
     let (_guard_start, _guard_end, stack_base, stack_top) = stack_bounds_for_cpu(cpu_id, idx);
 
-    // Record that this stack was entered
     metrics.record_entry();
 
-    // Check if RSP is within expected bounds
     if frame_ptr < stack_base || frame_ptr > stack_top {
-        // RSP is outside our managed stack - might be using kernel stack
-        // or something is very wrong. Report once to avoid log spam.
         if metrics.mark_out_of_bounds_once() {
             klog_info!(
                 "IST WARNING: CPU{} RSP 0x{:x} outside {} stack bounds (0x{:x}-0x{:x})",
@@ -807,25 +617,14 @@ pub fn ist_record_usage(vector: u8, frame_ptr: u64) {
         return;
     }
 
-    // Calculate usage (stack grows down, so top - current = used)
     let usage = stack_top - frame_ptr;
 
     metrics.record_usage(usage);
 }
 
-/// Checks if a fault address is within an IST guard page.
-///
-/// Called from the page fault handler to detect stack overflow conditions.
-/// If the fault is in a guard page, we know it's a stack overflow and can
-/// provide a meaningful error message instead of a generic page fault.
-///
-/// # Arguments
-/// * `fault_addr` - The address that caused the page fault (from CR2)
-///
-/// # Returns
-/// * `Some(name)` — guard page hit; the slice is the matching stack's
-///   NUL-terminated static name (e.g. `b"Page Fault\0"`).
-/// * `None` — the fault address is not in any IST guard page.
+/// Classifies a CR2 value: `Some` is a guard-page hit, so the #PF handler can
+/// name the overflowed stack instead of reporting a generic fault. The slice is
+/// the stack's NUL-terminated static name.
 pub fn ist_guard_fault(fault_addr: u64) -> Option<&'static [u8]> {
     let (cpu_id, idx) = find_index_by_address(fault_addr)?;
     let stack = &IST_CONFIGS[idx];
@@ -854,14 +653,7 @@ pub fn ist_is_on_ist_stack(rsp: u64) -> bool {
     false
 }
 
-/// Returns statistics for an IST stack by vector number.
-///
-/// # Arguments
-/// * `vector` - The interrupt vector number
-///
-/// # Returns
-/// * `Some((peak_usage, entry_count))` if vector has an IST stack
-/// * `None` if vector doesn't have an IST stack
+/// `(peak_usage, entry_count)`, or `None` if the vector has no IST stack.
 pub fn ist_get_stats(vector: u8) -> Option<(u64, u64)> {
     let idx = find_index_by_vector(vector)?;
     let metrics = &IST_METRICS[idx];
@@ -871,9 +663,6 @@ pub fn ist_get_stats(vector: u8) -> Option<(u64, u64)> {
     ))
 }
 
-/// Dumps IST stack statistics to the kernel log.
-///
-/// Useful for debugging and monitoring stack usage.
 pub fn ist_dump_stats() {
     klog_info!("=== IST Stack Statistics ===");
     for (i, stack) in IST_CONFIGS.iter().enumerate() {

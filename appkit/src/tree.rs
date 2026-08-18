@@ -6,13 +6,8 @@ use super::paint::PaintContext;
 use super::style::StyleSheet;
 use super::traits::{MeasureCtx, Widget, measure_widget, place_widget};
 
-/// Build a retained widget tree from a declarative `Node<M>` tree.
-///
-/// `M` is the app's message type. The function bridges from the generic `Node<M>`
-/// to type-erased widget storage (`Box<dyn Any>`, `Box<dyn Fn(...) -> Box<dyn Any>>`).
-///
-/// For v1, this is a simple rebuild-from-scratch approach.
-/// Future versions will diff old vs new and patch incrementally.
+/// Build a retained widget tree from a declarative `Node<M>` tree, bridging the
+/// app's message type `M` into the widgets' type-erased callback storage.
 pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> {
     use super::widgets;
 
@@ -327,7 +322,6 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
     }
 }
 
-/// Perform a full measure + layout pass on the widget tree.
 pub fn layout_tree(root: &mut dyn Widget, window_size: Size, style: &StyleSheet) {
     let constraints = BoxConstraints::tight(window_size);
     let mut ctx = MeasureCtx { style };
@@ -335,7 +329,6 @@ pub fn layout_tree(root: &mut dyn Widget, window_size: Size, style: &StyleSheet)
     place_widget(root, Rect::new(0, 0, window_size.width, window_size.height));
 }
 
-/// Paint the entire widget tree.
 pub fn paint_tree(root: &dyn Widget, ctx: &mut PaintContext) {
     root.paint(ctx);
 }

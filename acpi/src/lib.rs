@@ -1,19 +1,5 @@
-//! ACPI table parsing infrastructure for SlopOS.
-//!
-//! This crate provides a reusable, zero-allocation ACPI table parser. Any
-//! subsystem that needs ACPI data (IOAPIC, HPET, NUMA, PCIe MCFG, etc.)
-//! consumes this crate rather than re-implementing table walking.
-//!
-//! # Architecture
-//!
-//! - [`tables`]: RSDP validation, XSDT/RSDT traversal, table lookup by signature.
-//! - [`madt`]: MADT (Multiple APIC Description Table) entry iteration.
-//! - [`hpet`]: HPET (High Precision Event Timer) table parsing.
-//! - [`mcfg`]: MCFG (PCI Express ECAM configuration space) table parsing.
-//! - [`fadt`]: FADT power-management registers + DSDT `\_S5` decode
-//!   (shutdown / reboot).
-//!
-//! # Usage
+//! Zero-allocation ACPI table parsing: RSDP validation, XSDT/RSDT traversal
+//! and decoding of the MADT, HPET, MCFG and FADT.
 //!
 //! ```ignore
 //! use slopos_acpi::tables::AcpiTables;

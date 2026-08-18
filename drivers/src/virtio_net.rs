@@ -51,9 +51,6 @@ const DEV_CFG_MAC_OFFSET: usize = 0x00;
 const DEV_CFG_STATUS_OFFSET: usize = 0x06;
 const DEV_CFG_MTU_OFFSET: usize = 0x0A;
 
-/// Short timeout for ARP probe / scan operations (ms).  ARP replies on a
-/// local LAN arrive in < 10 ms; 150 ms is generous while keeping the scan
-/// responsive enough that it doesn't block the compositor for seconds.
 const DEFAULT_MTU: u16 = 1500;
 const PACKET_BUFFER_SIZE: usize = 2048;
 
@@ -63,9 +60,8 @@ const RX_RING_SIZE: usize = 64;
 const TX_RING_SIZE: usize = 64;
 const NAPI_BUDGET: u32 = 64;
 
-/// Max descriptors in one zero-copy SG TX chain: 1 header + up to 3 pinned
-/// payload runs. A `<= 1472`-byte datagram spans at most 2 pages (so `<= 2`
-/// coalesced runs); 4 leaves headroom. Chains needing more fall back to copy.
+/// Max descriptors in one zero-copy SG TX chain (header + payload runs): a
+/// `<= 1472`-byte datagram spans at most 2 pages, so 4 leaves headroom.
 const MAX_TX_SG_DESCS: usize = 4;
 
 /// `virtio_net_hdr.flags`: the driver pre-seeded a partial L4 checksum and the
@@ -107,25 +103,18 @@ impl VirtioNetDevice {
     }
 }
 
-/// How a zero-copy TX chain tells the ring its pinned pages are reusable.
-///
-/// `Tx` is the single-shot model (UDP/ICMP, one DMA): reclaim flips the
-/// generation counter. `Notif` is the refcounted model (TCP `MSG_ZEROCOPY`,
-/// where the same pages may be DMA'd again on a retransmit): the driver holds
-/// one reference per in-flight descriptor and releases it on reclaim, so the
-/// buffer is reported reusable only once every DMA is reclaimed **and** the send
-/// queue has retired the chunk on cumulative ACK.
+/// How a zero-copy TX chain tells the ring its pinned pages are reusable:
+/// `Tx` is single-shot (reclaim flips a generation), `Notif` is refcounted for
+/// TCP `MSG_ZEROCOPY`, where a retransmit may re-DMA the same pages.
 enum TxReclaim {
     Tx(TxReclaimToken),
     Notif(ZcNotifToken),
 }
 
 /// One submitted TX chain, keyed by its head descriptor index in `tx_chains`.
-/// A normal copy send is a 1-descriptor chain (`reclaim`/`keepalive` = `None`); a
-/// zero-copy send is `[header] -> pinned runs` and carries the reclaim signal +
-/// the page keepalive (independent owning refs on the pinned user pages). On
-/// reclaim the driver signals the token, drops the keepalive, and frees every
-/// descriptor slot in `descs[..desc_count]`.
+/// A copy send is one descriptor (`reclaim`/`keepalive` = `None`); a zero-copy
+/// send is `[header] -> pinned runs` and carries the reclaim signal plus the
+/// page keepalive.
 struct TxChain {
     hdr_page: OwnedPageFrame,
     reclaim: Option<TxReclaim>,
@@ -141,9 +130,8 @@ struct VirtioNetState {
     rx_buffers: [Option<OwnedPageFrame>; RX_RING_SIZE],
     /// Per-head TX chain bookkeeping (`used.id` indexes this on reclaim).
     tx_chains: [Option<TxChain>; TX_RING_SIZE],
-    /// Descriptor-slot occupancy. A chain marks every descriptor it uses busy;
-    /// reclaim clears them. Run descriptors have no `tx_chains` entry, so this
-    /// is the authoritative free-slot map.
+    /// Descriptor-slot occupancy: run descriptors have no `tx_chains` entry, so
+    /// this is the authoritative free-slot map.
     tx_busy: [bool; TX_RING_SIZE],
     tx_inflight: AtomicU32,
 }
@@ -167,19 +155,13 @@ static VIRTIO_NET_STATE: SpinLock<VirtioNetState> = SpinLock::new(
     VirtioNetState::new(),
     lock_class!("VIRTIO_NET_STATE", LOCK_LEVEL_RESOURCE),
 );
-/// Wake the NAPI kthread when the NIC IRQ fires. Replaces the
-/// pre-refactor `NAPI_EVENT: IrqEdgeEvent` + `sleep_current_task_ms(1)`
-/// polling loop with an IRQ-driven park-and-wake.
+/// Wake the NAPI kthread when the NIC IRQ fires.
 static NAPI_WAKER: slopos_net::napi_waker::NapiWaker = slopos_net::napi_waker::NapiWaker::new(
     "netpoll",
     lock_class!("NETPOLL_WAKER.waiters", LOCK_LEVEL_RESOURCE),
 );
-/// Wake the net-timer kthread when a sooner deadline is armed.
-/// Used by code that schedules a fresh timer wheel entry it needs
-/// fired before the next periodic 50 ms slice. Currently the
-/// production callers do not arm this signal (the 50 ms periodic
-/// cadence is enough for ARP/TCP retx latency); the signal is
-/// wired up for completeness and future optimisation.
+/// Wake the net-timer kthread when a deadline sooner than the 50 ms periodic
+/// slice is armed. No production caller arms it today.
 static TIMER_WAKER: slopos_net::napi_waker::NapiWaker = slopos_net::napi_waker::NapiWaker::new(
     "net-timer",
     lock_class!("NET_TIMER_WAKER.waiters", LOCK_LEVEL_RESOURCE),
@@ -197,17 +179,13 @@ static DEVICE_HANDLE_PTR: AtomicPtr<DeviceHandle> = AtomicPtr::new(core::ptr::nu
 /// Link state as of the last carrier poll.
 ///
 /// An atomic rather than a field of [`VIRTIO_NET_STATE`] because
-/// [`NetDevice::carrier`] must not take a lock: the device registry calls it
-/// while enumerating, and the interface layer calls it from contexts holding
-/// their own locks, so reaching for the driver lock here would create exactly
-/// the registry-to-device edge the two-phase retirement exists to prevent.
-/// `true` until the first poll, matching the trait's own default for a device
-/// that has not yet said otherwise.
+/// [`NetDevice::carrier`] must not take a lock: callers hold their own, and the
+/// driver lock here would create the registry-to-device edge two-phase
+/// retirement exists to prevent.
 static LINK_UP: AtomicBool = AtomicBool::new(true);
 
 /// Whether the device negotiated `VIRTIO_NET_F_STATUS`, i.e. whether
-/// [`LINK_UP`] is an observation or an assumption. Surfaced as
-/// `IFF_SLOP_CARRIER_ASSUMED` when it is the latter.
+/// [`LINK_UP`] is an observation or an assumption.
 static LINK_OBSERVABLE: AtomicBool = AtomicBool::new(false);
 
 pub fn get_device_handle() -> Option<&'static DeviceHandle> {
@@ -236,13 +214,9 @@ impl DnsRxBuf {
 
 /// Interface counters.
 ///
-/// Plain relaxed atomics rather than fields on `VirtioNetState`: every bump
-/// happens on a path that already holds the state lock, but `stats()` is called
-/// from a query syscall that must not take a driver lock to answer, and a
-/// counter is the one thing that is always safe to read torn-free without one.
-///
-/// Byte counts are payload only — the virtio header is driver framing and is
-/// not what an interface counter means.
+/// Relaxed atomics rather than fields on `VirtioNetState`, because `stats()`
+/// answers a query syscall that must not take the driver lock. Byte counts are
+/// payload only — the virtio header is driver framing.
 mod counters {
     use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -267,8 +241,7 @@ impl NetDevice for VirtioNetDev {
     fn tx(&self, pkt: PacketBuf) -> Result<(), NetError> {
         let mut state = VIRTIO_NET_STATE.lock();
         if !state.device.ready || !link_is_up(&state) {
-            // Refused before it reached the ring: a drop, not an error. This is
-            // the counter that moves when the cable is out.
+            // Refused before it reached the ring: a drop, not an error.
             counters::bump(&counters::TX_DROPPED, 1);
             return Err(NetError::NoBufferSpace);
         }
@@ -323,10 +296,9 @@ impl NetDevice for VirtioNetDev {
     }
 
     fn poll_tx(&self) {
-        // TX-only reclaim (drains the TX used ring, signals any zero-copy
-        // tokens). Serialized with `poll_rx`/`submit_tx` by the state lock; the
-        // SlopRing harvest calls this so a deferred F_NOTIF progresses even with
-        // no TX interrupt while the waiter is parked.
+        // Serialized with `poll_rx`/`submit_tx` by the state lock. The SlopRing
+        // harvest calls this so a deferred F_NOTIF progresses with no TX
+        // interrupt while the waiter is parked.
         let mut state = VIRTIO_NET_STATE.lock();
         if !state.device.ready {
             return;
@@ -351,7 +323,6 @@ impl NetDevice for VirtioNetDev {
 
             let idx = (used.id as usize) % RX_RING_SIZE;
             let Some(page) = state.rx_buffers[idx].take() else {
-                // The ring handed back a descriptor whose page we do not hold.
                 counters::bump(&counters::RX_ERRORS, 1);
                 continue;
             };
@@ -371,11 +342,9 @@ impl NetDevice for VirtioNetDev {
                             counters::bump(&counters::RX_BYTES, payload_len as u64);
                         }
                     }
-                    // Out of packet buffers, or a length the page cannot back.
                     None => counters::bump(&counters::RX_DROPPED, 1),
                 }
             } else {
-                // Shorter than the virtio header: nothing decodable arrived.
                 counters::bump(&counters::RX_ERRORS, 1);
             }
 
@@ -409,11 +378,9 @@ impl NetDevice for VirtioNetDev {
 
     /// Bring the device back into service after a [`set_down`](Self::set_down).
     ///
-    /// Restoring `ready` is not enough on its own: `poll_rx` consumes a
-    /// descriptor's page on every receive and only `virtnet_prepost_rx_buffers`
-    /// puts one back, so a ring drained while the device was down stays empty
-    /// and the NIC receives nothing ever again. Re-posting here is what keeps
-    /// an administrative down/up cycle reversible.
+    /// Restoring `ready` is not enough: `poll_rx` consumes a descriptor's page
+    /// on every receive and only `virtnet_prepost_rx_buffers` puts one back, so
+    /// a ring drained while down would stay empty forever.
     fn set_up(&self) {
         let mut state = VIRTIO_NET_STATE.lock();
         state.device.ready = true;
@@ -471,14 +438,9 @@ impl NetDevice for VirtioNetDev {
 
 /// Sample the link and hand any transition to the interface layer.
 ///
-/// Two phases, and the split is the whole point: reading the status register
-/// needs the driver lock, while `iface::set_carrier` takes the interface table
-/// and then posts a monitor event. Releasing before the second half is what
-/// keeps the driver lock free of out-edges into the network tables.
-///
-/// No edge state is kept here. `set_carrier` returns `Some` only on a real
-/// transition, so calling this every tick with an unchanged link records
-/// nothing and announces nothing.
+/// The driver lock is released before `iface::set_carrier`, which takes the
+/// interface table: the driver lock holds no out-edges into the network tables.
+/// No edge state is kept here — `set_carrier` reports only real transitions.
 fn poll_carrier() {
     let up = {
         let state = VIRTIO_NET_STATE.lock();
@@ -486,8 +448,8 @@ fn poll_carrier() {
     };
     LINK_UP.store(up, Ordering::Release);
 
-    // Before the device is registered there is no interface to carry the
-    // transition; the state attach reads is this atomic, so nothing is lost.
+    // Before registration there is no interface to carry the transition; the
+    // state attach reads is this atomic, so nothing is lost.
     let Some(handle) = get_device_handle() else {
         return;
     };
@@ -502,10 +464,6 @@ pub fn dns_intercept_response(payload: &[u8]) {
     drop(dns_buf);
     DNS_RX_EVENT.signal();
 }
-
-// =============================================================================
-// Device configuration helpers
-// =============================================================================
 
 fn read_mac(caps: &VirtioMmioCaps, negotiated_features: u64) -> [u8; 6] {
     if (negotiated_features & VIRTIO_NET_F_MAC) == 0
@@ -534,8 +492,8 @@ fn read_mtu(caps: &VirtioMmioCaps, negotiated_features: u64) -> u16 {
 
 /// This device's IPv4 address, read from the interface table.
 ///
-/// The table is the authority. A driver-side copy has no way to learn about a
-/// renewal, a static reconfiguration or a second address.
+/// The table is the authority: a driver-side copy cannot learn about a renewal,
+/// a static reconfiguration or a second address.
 fn our_ipv4(_state: &VirtioNetState) -> [u8; 4] {
     get_device_handle()
         .and_then(|h| slopos_net::iface::our_ip(h.index()))
@@ -546,15 +504,9 @@ fn our_ipv4(_state: &VirtioNetState) -> [u8; 4] {
 /// The link state the device reports, independent of whether the driver is in
 /// service.
 ///
-/// Kept apart from [`link_is_up`] because carrier is a statement about the
-/// cable and `ready` is a statement about us: folding them together would make
-/// an administrative down look like somebody had unplugged the machine, and the
-/// interface layer renders those two conditions differently
-/// (`IFF_SLOP_NO_CARRIER` against a cleared `IFF_UP`).
-///
-/// A device that did not negotiate `VIRTIO_NET_F_STATUS` reports up, because it
-/// has nothing better to say; `carrier_detect` is what tells a UI that answer
-/// was a guess.
+/// Kept apart from [`link_is_up`] so an administrative down does not look like
+/// an unplugged cable; the interface layer renders those differently. A device
+/// without `VIRTIO_NET_F_STATUS` reports up, and `carrier_detect` says so.
 fn link_status_up(state: &VirtioNetState) -> bool {
     if (state.device.negotiated_features & VIRTIO_NET_F_STATUS) == 0
         || !state.caps.has_device_cfg()
@@ -570,16 +522,10 @@ fn link_is_up(state: &VirtioNetState) -> bool {
     state.device.ready && link_status_up(state)
 }
 
-// =============================================================================
-// Virtqueue I/O helpers
-// =============================================================================
-
 /// Shared body of the zero-copy TX submit, parameterised by the reclaim signal.
-/// Builds the header DMA page (with optional csum offload), allocates an SG
-/// descriptor chain (`[header] -> pinned runs`), records the chain + keepalive +
-/// reclaim signal, and kicks the queue. For the refcounted `Notif` signal a
-/// reference is taken at commit — paired with the `release` `virtnet_clean_tx`
-/// does on reclaim — so an in-flight DMA always holds the pages reusable.
+/// The `Notif` signal takes a reference at commit — paired with the `release`
+/// `virtnet_clean_tx` does on reclaim — so an in-flight DMA always holds the
+/// pinned pages reusable.
 fn submit_tx_zerocopy(
     net_hdr: &[u8],
     runs: &[(u64, u32)],
@@ -592,9 +538,8 @@ fn submit_tx_zerocopy(
         return Err(NetError::NoBufferSpace);
     }
     let vhdr_len = size_of::<VirtioNetHdrV1>();
-    // `InvalidArgument` (vs `NoBufferSpace`) means "permanent reject" — the
-    // net leaf maps it to fall-back-to-copy, not retry. A full ring below
-    // returns `NoBufferSpace` so the ring defers + re-attempts.
+    // `InvalidArgument` is a permanent reject (the net leaf falls back to
+    // copy); a full ring returns `NoBufferSpace` so the ring defers and retries.
     if net_hdr.len() + vhdr_len > PACKET_BUFFER_SIZE {
         return Err(NetError::InvalidArgument);
     }
@@ -602,9 +547,6 @@ fn submit_tx_zerocopy(
         return Err(NetError::InvalidArgument);
     }
 
-    // Header DMA page: virtio_net_hdr (with optional csum offload) at 0,
-    // then the kernel-built L2/L3/L4 headers; the payload stays in the
-    // pinned pages the SG runs point at.
     let Some(hdr_page) = alloc_tx_page() else {
         return Err(NetError::NoBufferSpace);
     };
@@ -638,8 +580,8 @@ fn submit_tx_zerocopy(
     }
     let mut descs = [0u16; MAX_TX_SG_DESCS];
     descs[..n].copy_from_slice(&slots[..n]);
-    // Commit point: for the refcounted TCP token, this in-flight DMA now holds a
-    // reference on the pinned pages (balanced by `release` on reclaim below).
+    // Commit point: this in-flight DMA now holds a reference on the pinned
+    // pages, balanced by `release` on reclaim below.
     if let TxReclaim::Notif(token) = &reclaim {
         token.acquire();
     }
@@ -682,11 +624,8 @@ fn virtnet_clean_tx(state: &mut VirtioNetState) -> usize {
                 descs,
                 desc_count,
             } = chain;
-            // The NIC is done with the pinned pages: signal the ring (so it can
-            // post SLOPRING_CQE_F_NOTIF) before releasing the keepalive refs.
-            // UDP/ICMP flip a single-shot generation; TCP releases one of the
-            // refcounted token's references (the buffer is reusable only once the
-            // count — chunk + all in-flight DMAs — reaches zero).
+            // Signal the ring before releasing the keepalive refs, so it can
+            // post SLOPRING_CQE_F_NOTIF while the pages are still pinned.
             match &reclaim {
                 Some(TxReclaim::Tx(token)) => token.signal_reclaimed(),
                 Some(TxReclaim::Notif(token)) => token.release(),
@@ -695,11 +634,11 @@ fn virtnet_clean_tx(state: &mut VirtioNetState) -> usize {
             for &d in descs.iter().take(desc_count as usize) {
                 state.tx_busy[(d as usize) % TX_RING_SIZE] = false;
             }
-            drop(hdr_page); // free the header DMA page
-            drop(keepalive); // release the independent pinned-page refs (NIC done)
+            drop(hdr_page);
+            drop(keepalive);
         } else {
-            // Defensive: a used entry with no recorded chain — clear the head
-            // bit so the slot isn't leaked.
+            // Used entry with no recorded chain: clear the head bit so the slot
+            // is not leaked.
             state.tx_busy[head] = false;
         }
         state.tx_inflight.fetch_sub(1, Ordering::Relaxed);
@@ -727,28 +666,21 @@ fn alloc_tx_slots(state: &VirtioNetState, n: usize, out: &mut [u16; MAX_TX_SG_DE
     false
 }
 
-/// Build a scatter-gather TX descriptor chain for a zero-copy send: a header
-/// descriptor (`hdr_pa`/`hdr_len`, device-readable) followed by one descriptor
-/// per coalesced pinned-payload run, linked via `VIRTQ_DESC_F_NEXT`. So the NIC
-/// DMAs the payload straight from the pinned user pages — no kernel copy.
-///
-/// `slots` supplies the descriptor-table indices to occupy; its length must be
-/// `1 + runs.len()` (head + one per run). Returns `(slot, desc)` pairs the
-/// caller writes via `write_desc`; the head is `slots[0]`. Pure (no device
-/// state), so it is unit-testable without a NIC (SLOPRING § 13).
+/// Build the scatter-gather TX chain for a zero-copy send: header descriptor
+/// then one descriptor per coalesced pinned-payload run, linked via
+/// `VIRTQ_DESC_F_NEXT`, so the NIC DMAs the payload straight from user pages.
+/// `slots` must be `1 + runs.len()` long; the head is `slots[0]`. Pure, so it
+/// is unit-testable without a NIC (SLOPRING § 13).
 fn build_tx_chain(
     slots: &[u16],
     hdr_pa: u64,
     hdr_len: u32,
     runs: &[(u64, u32)],
 ) -> Option<KVec<(u16, VirtqDesc)>> {
-    // Need exactly one slot for the header plus one per payload run, and at
-    // least one payload run (an empty datagram uses the inline copy path).
     if runs.is_empty() || slots.len() != runs.len() + 1 {
         return None;
     }
     let mut out = KVec::with_capacity(slots.len()).ok()?;
-    // Header descriptor → first payload run.
     out.push((
         slots[0],
         VirtqDesc {
@@ -759,7 +691,6 @@ fn build_tx_chain(
         },
     ))
     .ok()?;
-    // One descriptor per coalesced pinned run; the last terminates the chain.
     for (i, &(pa, len)) in runs.iter().enumerate() {
         let is_last = i + 1 == runs.len();
         out.push((
@@ -776,10 +707,8 @@ fn build_tx_chain(
     Some(out)
 }
 
-/// Test-only view into [`build_tx_chain`] for the SG-chain stest (no NIC): runs
-/// the pure builder and flattens each descriptor to
-/// `(slot, addr, len, flags, next)` so the harness can assert the link
-/// structure without touching `VirtqDesc` internals.
+/// Test-only view into [`build_tx_chain`]: flattens each descriptor to
+/// `(slot, addr, len, flags, next)` so the harness can assert link structure.
 #[cfg(feature = "test-hooks")]
 pub fn build_tx_chain_for_test(
     slots: &[u16],
@@ -835,16 +764,11 @@ fn submit_tx(state: &mut VirtioNetState, page: OwnedPageFrame, total_len: u32) -
     true
 }
 
-/// Allocate a page and write the virtio-net header at the start.
-/// Returns `(page, buffer_start)` where `buffer_start` points just past the header.
 fn alloc_tx_page() -> Option<OwnedPageFrame> {
     let page = OwnedPageFrame::alloc_zeroed()?;
     page.write_at::<VirtioNetHdrV1>(0, &VirtioNetHdrV1::default());
     Some(page)
 }
-// =============================================================================
-// Receive path
-// =============================================================================
 
 fn virtnet_prepost_rx_buffers(state: &mut VirtioNetState) {
     let mut posted = 0usize;
@@ -954,22 +878,9 @@ pub fn transmit_udp_packet(
     transmit_udp_packet_locked(&mut state, src_ip, dst_ip, src_port, dst_port, payload)
 }
 
-// =============================================================================
-// DHCP client
-// =============================================================================
-
-// =============================================================================
-// PCI probe
-// =============================================================================
-
-/// Drain one NAPI burst: poll the NIC RX ring up to `NAPI_BUDGET`,
-/// run each packet through ingress, then drain the loopback queue.
-///
-/// Returns the number of packets the NIC produced this call so the
-/// kthread can re-arm the waker when budget was exhausted (more work
-/// likely pending). Re-entrancy is structurally impossible — a single
-/// `NapiWaker` -> single-kthread shape means only `napi_thread_entry`
-/// ever calls this from outside a `#[cfg(test)]` site.
+/// Drain one NAPI burst: poll the NIC RX ring up to `NAPI_BUDGET`, run each
+/// packet through ingress, then drain the loopback queue. Returns the NIC
+/// packet count so the caller can re-arm the waker when budget was exhausted.
 fn run_napi_burst() -> u32 {
     let Some(handle) = get_device_handle() else {
         return 0;
@@ -989,37 +900,28 @@ fn run_napi_burst() -> u32 {
     }
     NAPI_CONTEXT.add_processed(processed);
 
-    // Loopback packets are queued internally by `LoopbackDev::tx` and
-    // need to be drained back through the ingress pipeline.
     poll_loopback();
 
     processed
 }
 
-/// Poll the loopback device and feed packets through ingress.
-///
-/// Called from the NAPI loop and idle wakeup.  The loopback device (DevIndex 0)
-/// stores TX'd packets internally; this function drains them back through
-/// `net_rx()` so they appear as received local traffic.
+/// Drain the loopback device (DevIndex 0), which stores TX'd packets
+/// internally, back through ingress so they appear as received local traffic.
 fn poll_loopback() {
     use slopos_net::netdev::DEVICE_REGISTRY;
     use slopos_net::types::DevIndex;
 
-    // The loopback device is at DevIndex(0).  Use the registry to poll it.
     let lo_packets = DEVICE_REGISTRY.poll_rx_by_index(DevIndex(0), 32, &PACKET_POOL);
 
     for pkt in lo_packets {
-        // Loopback packets bypass MAC filtering — they go straight
-        // to IPv4/ARP dispatch.  We call ipv4::handle_rx directly.
+        // Loopback bypasses MAC filtering; dispatch straight to IPv4/ARP.
         let checksum_rx = true; // Loopback doesn't need checksum verification.
         let data = pkt.payload();
         if data.len() >= slopos_net::ETH_HEADER_LEN {
             let ethertype_raw = u16::from_be_bytes([data[12], data[13]]);
             let mut pkt = pkt;
-            // Set layer offsets.
             pkt.set_l2(pkt.head());
             pkt.set_l3(pkt.head() + slopos_net::ETH_HEADER_LEN as u16);
-            // Pull Ethernet header.
             if pkt.pull_header(slopos_net::ETH_HEADER_LEN).is_ok() {
                 match slopos_net::EtherType::from_u16(ethertype_raw) {
                     Some(slopos_net::EtherType::Ipv4) => {
@@ -1034,67 +936,39 @@ fn poll_loopback() {
     }
 }
 
-/// Force a NAPI poll cycle from a non-IRQ context.
-///
-/// Production callers were retired in Phase 2: the IRQ-driven netpoll
-/// kthread is the sole RX path. This entry remains for test fixtures
-/// (`net/src/tests/tcp_live_tests.rs`, ICMP/NAPI scheduling tests) and
-/// for the host wrapper that needs deterministic synchronous drain.
-/// Wakes the kthread so it sees one more burst when scheduled and
-/// runs a direct burst here for the caller that cannot wait.
+/// Force a synchronous NAPI poll cycle from a non-IRQ context, for test
+/// fixtures and the host wrapper; production RX runs on the netpoll kthread.
 pub fn virtnet_force_napi_poll() {
     NAPI_WAKER.arm_and_wake();
     let _ = run_napi_burst();
     slopos_net::socket::socket_process_timers();
 }
 
-/// Wake-only counterpart to [`virtnet_force_napi_poll`]. Registered
-/// with `slopos_net::napi::register_wake_napi` so loopback tx (and
-/// any future intra-kernel producer) can wake the netpoll kthread
-/// without re-entering the synchronous poll loop. Required because
-/// the loopback `tx` runs under `LoopbackDev::inner` lock — a
-/// synchronous `virtnet_napi_poll_loop` here would re-enter
-/// `VIRTIO_NET_STATE` and risk lock recursion in tightly-coupled
-/// configurations.
+/// Wake-only counterpart to [`virtnet_force_napi_poll`], registered with
+/// `slopos_net::napi::register_wake_napi`. Loopback tx calls it under the
+/// `LoopbackDev::inner` lock, where a synchronous poll would re-enter
+/// `VIRTIO_NET_STATE`.
 pub fn virtnet_wake_napi() {
     NAPI_WAKER.arm_and_wake();
 }
 
-/// Long-lived netpoll worker (threaded NAPI).
-///
-/// Spawned once per virtio-net probe via [`slopos_ostd::spawn_kernel_io!`]
-/// at [`TaskPriority::KernelIo`] (strictly above any user task). The
-/// kthread parks on [`NAPI_WAKER`]; the per-queue IRQ handler
-/// (`virtio_net_irq_handler`) calls `arm_and_wake` to wake the
-/// kthread on each completion.
-///
-/// Post-burst recheck (Phase 2): after each burst returns we peek the
-/// virtio used-ring index without taking the state lock. If the IRQ
-/// arrived between the last `try_pop_used` and `wait` re-park, the
-/// peek catches it and we re-arm the waker so the next `wait` returns
-/// immediately. Mirrors Linux NAPI's `napi_complete_done` pending
-/// recheck and closes the lost-wakeup window structurally.
-///
-/// Budget exhaustion: when `processed >= NAPI_BUDGET` more work is
-/// likely pending; we re-arm and `yield_with_deadline(Immediate)` so
-/// any equal-or-higher-priority task gets a chance to run before the
-/// next burst.
+/// Long-lived netpoll worker (threaded NAPI), spawned once per probe at
+/// [`TaskPriority::KernelIo`]. Parks on [`NAPI_WAKER`], which the per-queue IRQ
+/// handler arms. After each burst it peeks the used ring and re-arms if the IRQ
+/// landed inside the drain-to-park window, closing the lost-wakeup race.
 fn napi_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'static>) {
     use slopos_ostd::sync::kernel_io_task::{Deadline, KthreadWait, yield_with_deadline};
     loop {
         let waited = NAPI_WAKER.wait(&token);
         if waited == KthreadWait::Stop {
-            // One last drain: packets the IRQ already committed are in the
-            // used ring, and nothing else will collect them.
+            // Packets the IRQ already committed are in the used ring and
+            // nothing else will collect them.
             let _ = run_napi_burst();
             break;
         }
         let processed = run_napi_burst();
         slopos_net::socket::socket_process_timers();
 
-        // Post-burst recheck: catch packets the IRQ committed between
-        // the last `poll_rx` drain and now. `has_pending_rx` reads
-        // the used-ring atomically with no driver-state lock.
         if has_pending_rx() {
             NAPI_WAKER.rearm();
         }
@@ -1107,69 +981,40 @@ fn napi_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'st
     NAPI_WAKER.stop().note_exited();
 }
 
-/// Lock-free pending-RX peek. Reads the virtio used-ring `idx` and
-/// compares against the driver-cached `last_used_idx` — the same
-/// comparison `try_pop_used` performs, but without acquiring the
-/// `VIRTIO_NET_STATE` spinlock. Safe to call concurrently with the
-/// kthread because virtio used.idx is producer-monotonic (modulo
-/// 16-bit wrap) and the only way `last_used_idx` advances is via the
-/// kthread itself.
+/// Pending-RX peek: does the used ring hold an entry the kthread has not
+/// popped? Compares used `idx` against the driver-cached `last_used_idx`, which
+/// only the kthread advances.
 fn has_pending_rx() -> bool {
-    // We take the lock briefly here because `Virtqueue::has_pending`
-    // requires `&Virtqueue` and `state.device.rx_queue` is behind
-    // `VIRTIO_NET_STATE`. A future refactor can expose the queue's
-    // used-ring base independently so this becomes a pure atomic
-    // read — for now the lock is held for ~5 ns over a single
-    // `read_volatile`.
+    // TODO(tech-debt): takes `VIRTIO_NET_STATE` for a single volatile read
+    // because `has_pending` needs `&Virtqueue` — expose the used-ring base so
+    // this becomes a pure atomic load.
     let state = VIRTIO_NET_STATE.lock();
     state.device.rx_queue.has_pending()
 }
 
-/// Net-timer kthread (Phase-1).
-///
-/// Separated from `napi_thread_entry` so the RX hot path is not
-/// charged for `net_timer_process` cost. Sleeps `NET_TIMER_PERIOD_MS`
-/// (50 ms) between ticks; can be woken sooner by code that arms a
-/// soon-firing wheel entry via `TIMER_WAKER.arm_and_wake()`.
-///
-/// The kthread runs at [`TaskPriority::KernelIo`] (strictly above
-/// user tasks) so ARP aging, TCP retransmit, IP-reassembly expire,
-/// and delayed-ACK fire on time even when user-space is busy.
+/// Net-timer kthread, separated from `napi_thread_entry` so the RX hot path is
+/// not charged for `net_timer_process`. Runs at [`TaskPriority::KernelIo`] so
+/// ARP aging, TCP retransmit and delayed-ACK fire on time under user load.
 fn net_timer_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'static>) {
     use slopos_ostd::sync::kernel_io_task::{Deadline, KthreadWait, yield_with_deadline};
     const NET_TIMER_PERIOD_MS: u32 = 50;
     loop {
-        // Wait either for the period to expire or for an explicit
-        // wake from `TIMER_WAKER.arm_and_wake()`. Either way, run
-        // one round of timer processing.
         if TIMER_WAKER.wait_timeout_ms(&token, NET_TIMER_PERIOD_MS) == KthreadWait::Stop {
             break;
         }
         slopos_net::timer::net_timer_process();
         slopos_net::socket::socket_process_timers();
-        // Carrier is polled from here rather than driven from the virtio
-        // config-change interrupt because reading the status register needs the
-        // driver lock and acting on a transition needs four more plus an
-        // allocation — none of which a hard IRQ may do. 50 ms is well inside
-        // what a person perceives as immediate for a cable event.
+        // Polled here rather than from the config-change interrupt: reading the
+        // status register needs the driver lock and acting on a transition
+        // needs four more plus an allocation, none of which a hard IRQ may do.
         poll_carrier();
-        // Yield with deadline so any equal-priority task gets a
-        // chance to run between ticks. The next iteration's
-        // `wait_timeout_ms` parks again.
         yield_with_deadline(&token, Deadline::Immediate);
     }
     TIMER_WAKER.stop().note_exited();
 }
 
-/// Per-queue interrupt handler for virtio-net.
-///
-/// `queue_idx` is 0 for RX, 1 for TX (matching the queue setup order
-/// in `virtio_net_probe`). On either queue the handler wakes the
-/// netpoll kthread via the IRQ-safe [`NapiWaker::arm_and_wake`]; on
-/// queue 0 it additionally pulses the DHCP edge so the boot-time
-/// DHCP loop unblocks. Hard-IRQ path is intentionally tiny — no
-/// scheduler interaction, no protocol work — to keep IRQ-disabled
-/// time minimal.
+/// Per-queue interrupt handler: `queue_idx` 0 is RX, 1 is TX. Deliberately tiny
+/// — wake the netpoll kthread and do no protocol or scheduler work in hard IRQ.
 fn virtio_net_irq_handler(queue_idx: u8) {
     match queue_idx {
         0 => {
@@ -1185,17 +1030,14 @@ fn virtio_net_irq_handler(queue_idx: u8) {
 /// Prepost RX buffers and seed the lock-free link state, with
 /// `VIRTIO_NET_STATE` held.
 ///
-/// **Non-blocking**: nothing here waits for a network round trip. That lock
-/// disables interrupts and preemption, so anything that allocates, takes
-/// another subsystem's lock or deschedules belongs in
-/// [`virtio_net_publish_device`] instead — address configuration included.
+/// Nothing here may block, allocate, take another subsystem's lock or
+/// deschedule — that belongs in [`virtio_net_publish_device`] instead.
 #[inline(never)]
 fn virtio_net_register_device(state: &mut VirtioNetState) -> bool {
     virtnet_prepost_rx_buffers(state);
 
-    // Seed the lock-free link state before the device is visible to anything
-    // that reads it. `carrier()` is answerable from the moment `register`
-    // returns, and the registry enumerates devices without asking us first.
+    // Seed before the device is visible: `carrier()` is answerable the moment
+    // `register` returns, and the registry enumerates without asking us first.
     LINK_OBSERVABLE.store(
         (state.device.negotiated_features & VIRTIO_NET_F_STATUS) != 0,
         Ordering::Release,
@@ -1207,20 +1049,10 @@ fn virtio_net_register_device(state: &mut VirtioNetState) -> bool {
 /// Publish the device: initialise the packet pool, register it, attach its
 /// interface, and start acquiring an address.
 ///
-/// **Runs with `VIRTIO_NET_STATE` released.** Every step here either allocates
-/// or can re-enter this driver, and neither is permissible under a lock that
-/// disables interrupts and preemption:
-///
-/// * `PACKET_POOL.init()` and `KArc::try_new` reach the allocator, which is
-///   where every subsystem meets — hence the tree's rule never to allocate
-///   under a cli-lock.
-/// * `iface::attach` takes the interface table. Nesting it under the driver
-///   lock is an ordering edge pointing the wrong way against `iface_ctl`'s
-///   one-lock-at-a-time discipline, which takes the interface table *then* the
-///   registry.
-/// * `dhcp::start` transmits, and a transmit lands back in this driver's own
-///   `tx()`: under the lock that is a re-entrant acquire, and it hangs the
-///   machine before userland.
+/// **Runs with `VIRTIO_NET_STATE` released.** Every step either allocates
+/// (`PACKET_POOL.init`, `KArc::try_new`), takes another subsystem's lock
+/// (`iface::attach`), or re-enters this driver's own `tx()` (`dhcp::start`) —
+/// none permissible under a lock that disables interrupts and preemption.
 ///
 /// Returns `false` only on allocation failure.
 fn virtio_net_publish_device(mac: [u8; 6], mtu: u16) -> bool {
@@ -1252,12 +1084,7 @@ fn virtio_net_publish_device(mac: [u8; 6], mtu: u16) -> bool {
         slopos_net::iface::IfaceKind::Ethernet,
         slopos_net::types::MacAddr(mac),
         mtu,
-        // The same value `carrier()` will report, so the row and the driver
-        // agree from the first instant and the first poll finds no transition
-        // to invent.
         LINK_UP.load(Ordering::Acquire),
-        // The device negotiated VIRTIO_NET_F_STATUS, so its link state is
-        // observed rather than assumed.
         LINK_OBSERVABLE.load(Ordering::Acquire),
     ) {
         Ok(ifindex) => klog_info!("virtio-net: attached interface {}", ifindex),
@@ -1266,10 +1093,9 @@ fn virtio_net_publish_device(mac: [u8; 6], mtu: u16) -> bool {
 
     set_device_handle(handle);
 
-    // Only queues a DISCOVER and arms a timer; the conversation runs on the
-    // network timer thread, so probe returns whether or not a server ever
-    // answers, and a late or absent server is retried forever instead of
-    // leaving the machine unaddressed until the next reboot.
+    // Only queues a DISCOVER and arms a timer, so probe returns whether or not
+    // a server answers and a late one is retried instead of leaving the machine
+    // unaddressed until reboot.
     if !slopos_net::dhcp::start(actual_idx) {
         klog_info!("virtio-net: could not start the DHCP client");
     }
@@ -1327,11 +1153,7 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         return Err(PciProbeError::DeviceFault);
     }
 
-    // --- MSI-X / MSI interrupt setup ---
-    // Request 2 vectors: one for RX (queue 0), one for TX (queue 1).
-    // setup_interrupts allocates the IDT vectors via OSTD's IrqAllocator,
-    // registers per-queue closures that call virtio_net_irq_handler, and
-    // programs the device's MSI-X/MSI capability.
+    // Two vectors: one for RX (queue 0), one for TX (queue 1).
     let (irq_mode, msix_state) = setup_interrupts(bound, &caps, 2, virtio_net_irq_handler)
         .unwrap_or_else(|msg| {
             panic!(
@@ -1351,10 +1173,9 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
     let mtu = read_mtu(&caps, negotiated_features);
 
     {
-        // Queues are set up in place inside the heap-resident state so the
-        // ~200-byte `Virtqueue`s never land on this probe's stack frame
-        // (2 KiB frame gate). Both must be enabled before DRIVER_OK
-        // (VirtIO spec §3.1.1).
+        // Set up in place inside the heap-resident state so the ~200-byte
+        // `Virtqueue`s never land on this probe's stack frame (2 KiB gate).
+        // Both queues must be enabled before DRIVER_OK (VirtIO spec §3.1.1).
         let mut state = VIRTIO_NET_STATE.lock();
         if !queue::setup_queue_into(
             &caps.common_cfg,
@@ -1394,20 +1215,11 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         }
     }
 
-    // Everything that allocates, takes another subsystem's lock, or can
-    // re-enter this driver happens here — with `VIRTIO_NET_STATE` released.
-    // `mac` and `mtu` were read from the device configuration above, so this
-    // needs nothing back out of the locked block.
     if !virtio_net_publish_device(mac, mtu) {
         return Err(PciProbeError::OutOfMemory);
     }
 
-    // Sync-kick: user-task syscall paths call `napi::kick` to drain
-    // the RX ring inline on the caller's CPU, ensuring the wake
-    // observes the most recent committed used-ring state.
     slopos_net::napi::register_kick(virtnet_force_napi_poll);
-    // Async-wake: non-IRQ producers (loopback tx) signal the netpoll
-    // kthread without re-entering the synchronous poll machinery.
     slopos_net::napi::register_wake_napi(virtnet_wake_napi);
     static NET_DRIVER_SVC: NetDriverServices = NetDriverServices {
         virtio_net_ipv4_addr,
@@ -1425,16 +1237,6 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
     };
     register_net_driver_services(&NET_DRIVER_SVC);
 
-    // Phase-1 threaded NAPI: the netpoll kthread runs at
-    // TaskPriority::KernelIo (strictly above any user task) and
-    // parks indefinitely on NAPI_WAKER. The IRQ handler
-    // (`virtio_net_irq_handler`) calls `NAPI_WAKER.arm_and_wake()`
-    // to wake the kthread on each NIC RX/TX completion. The
-    // `spawn_kernel_io!` macro emits a hidden trampoline that
-    // constructs a `KernelIoToken` and hands it to the entry —
-    // every yield in the kthread must name a `Deadline` so the
-    // pre-refactor "sleep_current_task_ms(1) in a tight loop"
-    // starvation pattern is structurally unreachable.
     slopos_ostd::sync::kernel_io_task::register_kernel_io_stop(NAPI_WAKER.stop());
     if let Err(err) = slopos_ostd::spawn_kernel_io!("netpoll", napi_thread_entry) {
         klog_info!(
@@ -1444,11 +1246,6 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         DEVICE_CLAIMED.reset();
         return Err(PciProbeError::OutOfMemory);
     }
-    // Phase-1.7 net-timer split: timer-wheel processing runs in a
-    // dedicated `KernelIo` kthread so the RX hot path is not charged
-    // for `net_timer_process` cost and timer-driven work (ARP aging,
-    // TCP retransmit, delayed-ACK, IP-reassembly expire) fires on its
-    // own cadence regardless of NIC activity.
     slopos_ostd::sync::kernel_io_task::register_kernel_io_stop(TIMER_WAKER.stop());
     if let Err(err) = slopos_ostd::spawn_kernel_io!("net-timer", net_timer_thread_entry) {
         klog_info!(
@@ -1473,9 +1270,6 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
 
     Ok(ProbeOutcome::Bound)
 }
-// =============================================================================
-// Driver registration & public API
-// =============================================================================
 
 crate::pci_driver! {
     pub static VIRTIO_NET_DRIVER = {
@@ -1554,10 +1348,6 @@ pub fn virtio_net_transmit(packet: &[u8]) -> bool {
     submit_tx(&mut state, tx_page, (hdr_len + packet.len()) as u32)
 }
 
-// =============================================================================
-// DNS resolver accessors
-// =============================================================================
-
 /// Return the DHCP-provided DNS server address, or `None` if not configured.
 pub fn virtio_net_dns() -> Option<[u8; 4]> {
     let state = VIRTIO_NET_STATE.lock();
@@ -1567,7 +1357,6 @@ pub fn virtio_net_dns() -> Option<[u8; 4]> {
     slopos_net::resolver::primary().map(|ip| ip.0)
 }
 
-/// Clear any stale DNS response buffer.
 pub fn dns_rx_clear() {
     DNS_RX_EVENT.try_consume();
     let mut buf = DNS_RX_BUF.lock();
@@ -1575,14 +1364,9 @@ pub fn dns_rx_clear() {
 }
 
 /// Wait for a DNS response with timeout. Returns `true` if signaled.
-///
-/// The IRQ handler signals `NAPI_EVENT` (not `DNS_RX_EVENT`), so we must
-/// poll NAPI inline after each wakeup to process RX frames; NAPI's
-/// `dispatch_rx_frame` intercepts DNS replies and signals `DNS_RX_EVENT`.
 pub fn dns_rx_wait(timeout_ms: u32) -> bool {
     let start = slopos_kernel_services::clock::uptime_ms();
     loop {
-        // Already arrived?
         if DNS_RX_EVENT.try_consume() {
             return true;
         }
@@ -1591,17 +1375,10 @@ pub fn dns_rx_wait(timeout_ms: u32) -> bool {
             return false;
         }
         let remaining = (timeout_ms as u64 - elapsed) as u32;
-        // The NAPI kthread (TaskPriority::KernelIo) processes
-        // incoming frames inline on each RX IRQ via `NAPI_WAKER`.
-        // DNS replies route through `dispatch_rx_frame` →
-        // `dns_intercept_response`, which sets `DNS_RX_EVENT`.
-        // Sleep for a bounded slice, then re-check.
         slopos_kernel_services::driver_runtime::sleep_current_task_ms(remaining.min(20));
     }
 }
 
-/// Read the most recent DNS response into the provided buffer.
-/// Returns the number of bytes copied.
 pub fn dns_rx_read(out: &mut [u8]) -> usize {
     let buf = DNS_RX_BUF.lock();
     let copy_len = buf.len.min(out.len());
@@ -1609,14 +1386,8 @@ pub fn dns_rx_read(out: &mut [u8]) -> usize {
     copy_len
 }
 
-// =============================================================================
-// Test-only accessors
-// =============================================================================
-
-/// Return a snapshot of the MSI-X state for the claimed VirtIO-net device.
-///
-/// Only available in test builds (`test-hooks` feature).  Returns `None` if the
-/// device was not probed or MSI-X was not configured (i.e. MSI fallback).
+/// Snapshot of the MSI-X state, or `None` if the device was not probed or fell
+/// back to MSI.
 #[cfg(feature = "test-hooks")]
 pub fn virtio_net_msix_state() -> Option<VirtioMsixState> {
     VIRTIO_NET_STATE.lock().msix_state.clone()

@@ -10,23 +10,11 @@ use slopos_ostd::{kdiag_dump_interrupt_frame, kdiag_stack_word_at, klog_info};
 use crate::ist_stacks;
 use crate::user_fault::*;
 
-/// Per-CPU slot for why the last unresolvable user page fault could not be
-/// serviced.
-///
-/// Written by the resolver and consumed by the handler two frames above it, on
-/// the same CPU, with interrupts off and no blocking call between — an
-/// exception handler cannot be re-entered by another fault on this CPU before
-/// it reads the value back. Indexed by CPU anyway rather than shared, so a
-/// concurrent fault on a *peer* cannot claim this one's reason.
-///
-/// Exists because the distinction is otherwise invisible: a task killed by a
-/// wild pointer and one killed because the machine ran out of memory produce
-/// the same `waitpid` status without it, and only one of them is the program's
-/// fault.
+/// Per-CPU reason the last user page fault could not be serviced. Without it a
+/// wild-pointer kill and an out-of-memory kill share one `waitpid` status.
 static PENDING_FAULT_REASON: [core::sync::atomic::AtomicU16; slopos_arch::pcr::MAX_CPUS] =
     [const { core::sync::atomic::AtomicU16::new(0) }; slopos_arch::pcr::MAX_CPUS];
 
-/// Record why a fault could not be serviced. Called from the resolver.
 pub(crate) fn record_fault_reason(reason: TaskFaultReason) {
     let cpu = slopos_arch::pcr::get_current_cpu();
     if let Some(slot) = PENDING_FAULT_REASON.get(cpu) {
@@ -34,8 +22,6 @@ pub(crate) fn record_fault_reason(reason: TaskFaultReason) {
     }
 }
 
-/// Take this CPU's recorded reason, leaving `None` behind.
-///
 /// Consuming rather than peeking: a stale reason would attribute the *next*
 /// wild pointer on this CPU to an out-of-memory condition.
 fn take_fault_reason() -> TaskFaultReason {
@@ -66,8 +52,8 @@ pub(crate) fn exception_nonfatal(frame: *mut InterruptFrame) {
 }
 
 pub(crate) fn frame_exception_name(frame: *mut InterruptFrame) -> &'static str {
-    // The frame lives for exactly this handler invocation, so a frame-local
-    // is the honest anchor for a borrow of it.
+    // The frame lives for exactly this handler invocation, so a frame-local is
+    // the honest lifetime anchor for a borrow of it.
     let frame_anchor = ();
     let vector = match InterruptFrame::from_ptr(&frame_anchor, frame) {
         Some(f) => (f.vector & 0xFF) as u8,
@@ -77,8 +63,6 @@ pub(crate) fn frame_exception_name(frame: *mut InterruptFrame) -> &'static str {
 }
 
 pub(crate) fn exception_invalid_opcode(frame: *mut InterruptFrame) {
-    // The frame lives for exactly this handler invocation, so a frame-local
-    // is the honest anchor for a borrow of it.
     let frame_anchor = ();
     if let Some(f) = InterruptFrame::from_ptr(&frame_anchor, frame) {
         if in_user(f) {
@@ -94,8 +78,6 @@ pub(crate) fn exception_invalid_opcode(frame: *mut InterruptFrame) {
 }
 
 pub(crate) fn exception_device_not_available(frame: *mut InterruptFrame) {
-    // The frame lives for exactly this handler invocation, so a frame-local
-    // is the honest anchor for a borrow of it.
     let frame_anchor = ();
     if let Some(f) = InterruptFrame::from_ptr(&frame_anchor, frame) {
         if in_user(f) {
@@ -111,8 +93,6 @@ pub(crate) fn exception_device_not_available(frame: *mut InterruptFrame) {
 }
 
 pub(crate) fn exception_general_protection(frame: *mut InterruptFrame) {
-    // The frame lives for exactly this handler invocation, so a frame-local
-    // is the honest anchor for a borrow of it.
     let frame_anchor = ();
     if let Some(f) = InterruptFrame::from_ptr(&frame_anchor, frame) {
         if in_user(f) {
@@ -128,8 +108,6 @@ pub(crate) fn exception_general_protection(frame: *mut InterruptFrame) {
 }
 
 pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
-    // The frame lives for exactly this handler invocation, so a frame-local
-    // is the honest anchor for a borrow of it.
     let frame_anchor = ();
     let fault_addr = cpu::read_cr2();
     let Some(frame_ref) = InterruptFrame::from_ptr(&frame_anchor, frame) else {
@@ -146,22 +124,16 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
         return;
     }
 
-    // Exception SafeStack DATA-stack overflow: a per-CPU exception data stack
-    // grew past its guard page. This is the one fault we MUST report without
-    // `format_args!` — the normal diagnostic/panic path builds its Argument
-    // array on the exception data stack, i.e. the very stack that just
-    // overflowed, so it would re-fault. Route to the format-free abort.
+    // Must be reported without `format_args!`: the normal diagnostic path builds
+    // its Argument array on the exception data stack that just overflowed.
     if ist_stacks::exc_dstack_guard_fault(fault_addr).is_some() {
         crate::panic::panic_abort_raw(
             "exception data-stack overflow: a CPU exhausted its per-CPU IST/exception SafeStack data stack",
         );
     }
 
-    // Reliable Abort Core emergency-stack overflow: the fatal-fault reporter
-    // itself exhausted its emergency SAFE or DATA stack. The #PF lands here on
-    // a fresh IST page-fault stack (RSP in the IST region → `ist_unsafe_sp`),
-    // so the format-free abort has a usable data stack. Degrade to it rather
-    // than recursing through the (overflowed) reporter.
+    // The fatal-fault reporter exhausted its own emergency stack. This #PF lands
+    // on a fresh IST stack, so the format-free abort still has a usable one.
     if ist_stacks::emergency_stack_guard_fault(fault_addr).is_some() {
         crate::panic::panic_abort_raw(
             "emergency stack overflow: the fatal-fault reporter exhausted its per-CPU emergency stack",
@@ -211,18 +183,13 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
         return;
     }
 
-    // Supervisor instruction-fetch fault — dump stack words around RSP
-    // to help diagnose which return address was corrupted.
+    // Error-code bit 4: supervisor instruction fetch, so a return address was
+    // likely corrupted — dump the stack words around RSP.
     if (frame_ref.error_code & 0x10) != 0 {
         klog_info!("=== STACK DUMP at RSP 0x{:x} ===", frame_ref.rsp);
 
-        // One racy snapshot, reused for the probe bounds and the task line
-        // below. This is a fault path: it must take no lock (every registry
-        // lookup holds the global cli-spinlock, and a fault arriving while a
-        // CPU holds it would hang the dump) and must upgrade no `KArc` (the
-        // matching drop could run the allocator-heavy destructor from a fault
-        // handler on an IST stack). `current_task_diag` does neither — see its
-        // module docs for the residual hazard it accepts and why.
+        // Fault path: take no lock (registry lookups hold the global
+        // cli-spinlock) and upgrade no `KArc` (its drop runs the allocator).
         let diag = slopos_sched::task_struct::current_task_diag();
         let (stack_lo, stack_hi) =
             TaskDiag::probe_range(diag.as_ref(), frame_ref.rsp as usize, 128);
@@ -243,7 +210,6 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
         }
         klog_info!("=== END STACK DUMP ===");
 
-        // Also dump the current task context and CR3
         let current_cr3 = cpu::read_cr3();
         klog_info!("Active CR3: 0x{:x}", current_cr3);
 
@@ -265,7 +231,6 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
             }
         }
 
-        // Dump the kernel PML4 physical address for comparison
         if let Some(slot) = slopos_kernel_services::kernel_vm_space::try_kernel_vm_space() {
             let kd_phys = slot.lock().pml4_paddr().as_u64();
             klog_info!("Kernel CR3 (expected for kernel tasks): 0x{:x}", kd_phys);
@@ -286,15 +251,12 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
     let mut ctx_rsp = 0u64;
 
     let task_ref = resolve_user_fault_task();
-    // Not the panic path: a user page fault is recoverable, and
-    // `resolve_user_fault_task` deliberately keeps its registry lookup. The
-    // guard derefs to `&Task`, so the fields come off it directly rather than
-    // through a raw projection.
+    // Not the panic path: a user page fault is recoverable, so the registry
+    // lookup in `resolve_user_fault_task` is allowed here.
     if let Some(task_ref) = task_ref {
         let task_pid = task_ref.process_id;
-        // The faulting task's own process, not a lookup by its id: this is a
-        // diagnostic path, and reporting another process's physical addresses
-        // because the number was reissued would be worse than reporting none.
+        // The task's own process, never a lookup by pid: ids recycle, and
+        // reporting a stranger's physical addresses is worse than reporting none.
         let faulting = task_ref
             .process()
             .as_deref()
@@ -325,9 +287,7 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
     if !rsp_phys.is_null() {
         if let Some(base_addr) = rsp_phys.to_virt_checked() {
             let base_u64 = base_addr.as_u64();
-            // Read three words at the top of the user stack via the
-            // HHDM-translated kernel virtual; bounds the read window
-            // to a single page so a slot at the end of a page won't
+            // Bound the window to one page so a slot near a page end cannot
             // wander into an unrelated mapping.
             let lo = base_u64 as usize;
             let hi = lo + 4096;

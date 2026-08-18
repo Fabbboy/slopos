@@ -9,7 +9,6 @@ use crate::traits::{
     FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
 };
 
-/// Scrollable container with a single child widget.
 pub struct ScrollViewWidget {
     core: WidgetCore,
     child: Box<dyn Widget>,
@@ -145,15 +144,13 @@ impl ScrollViewWidget {
         (track, thumb)
     }
 
-    /// Check if a point (in window coords) is within the vertical scrollbar thumb.
+    /// Whether a window-space point lies within the vertical thumb.
     fn point_in_v_thumb(&self, px: i32, py: i32, sb_width: i32, thumb_min: i32) -> bool {
         let (_, thumb) = self.vertical_scrollbar_rects(sb_width, thumb_min);
         thumb.contains(px, py)
     }
 
-    /// Position the child at the current scroll offset, at its measured size.
-    ///
-    /// Every offset change routes through here so the child's rect and the
+    /// Every offset change routes through here, so the child's rect and the
     /// offset can never disagree.
     fn place_child(&mut self) {
         let rect = self.layout_rect();
@@ -178,7 +175,6 @@ impl Widget for ScrollViewWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        // Measure child with unbounded constraints on the scroll axis.
         let child_constraints = match self.direction {
             ScrollDirection::Vertical => BoxConstraints {
                 min_width: constraints.min_width,
@@ -197,7 +193,6 @@ impl Widget for ScrollViewWidget {
 
         self.content_size = measure_widget(self.child.as_mut(), child_constraints, ctx);
 
-        // Own size fills available space from parent.
         constraints.constrain(constraints.max_size())
     }
 
@@ -210,7 +205,6 @@ impl Widget for ScrollViewWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let viewport = self.layout_rect();
 
-        // Clip child painting to the viewport.
         ctx.with_clip(viewport, |ctx| {
             self.child.paint(ctx);
         });
@@ -218,11 +212,9 @@ impl Widget for ScrollViewWidget {
         let sb_width = ctx.style.scrollbar_width;
         let thumb_min = ctx.style.scrollbar_thumb_min;
 
-        // Paint vertical scrollbar.
         if self.needs_vertical_scrollbar() {
             let (track, thumb) = self.vertical_scrollbar_rects(sb_width, thumb_min);
 
-            // Track background.
             ctx.fill_rect(
                 track.x,
                 track.y,
@@ -231,7 +223,6 @@ impl Widget for ScrollViewWidget {
                 ctx.style.bg_secondary,
             );
 
-            // Thumb.
             let thumb_color = if self.thumb_hovered || self.thumb_dragging {
                 ctx.style.border_default
             } else {
@@ -240,7 +231,6 @@ impl Widget for ScrollViewWidget {
             ctx.fill_rect(thumb.x, thumb.y, thumb.width, thumb.height, thumb_color);
         }
 
-        // Paint horizontal scrollbar (similar pattern).
         if self.needs_horizontal_scrollbar() {
             let track_x = viewport.x;
             let track_y = viewport.y + viewport.height - sb_width;
@@ -273,7 +263,6 @@ impl Widget for ScrollViewWidget {
             );
         }
 
-        // Focus ring.
         if self.focused {
             ctx.draw_focus_ring(viewport);
         }
@@ -289,11 +278,11 @@ impl Widget for ScrollViewWidget {
             return EventResponse::Ignored;
         }
 
-        let line_height = 20; // Default line height for scroll calculations.
+        let line_height = 20;
 
         match event {
             WidgetEvent::Scroll { delta_x, delta_y } => {
-                // delta_x/delta_y are already in pixels (converted by input.rs from v120).
+                // Deltas arrive in pixels; input.rs has already converted from v120.
                 let can_scroll_v = matches!(
                     self.direction,
                     ScrollDirection::Vertical | ScrollDirection::Both
@@ -325,7 +314,6 @@ impl Widget for ScrollViewWidget {
             }
 
             WidgetEvent::PointerDown { x, y, .. } => {
-                // Check if click is on the scrollbar thumb.
                 if self.needs_vertical_scrollbar() {
                     let sb_width = 8;
                     let thumb_min = 20;
@@ -366,7 +354,6 @@ impl Widget for ScrollViewWidget {
                     return EventResponse::Consumed;
                 }
 
-                // Update thumb hover state.
                 if self.needs_vertical_scrollbar() {
                     let sb_width = 8;
                     let thumb_min = 20;

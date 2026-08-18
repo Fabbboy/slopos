@@ -1,17 +1,8 @@
 //! Kernel-side tests for the diagnostic console.
 //!
-//! The properties worth holding are the ones a reader of the registry cannot
-//! check by eye: that two crates did not claim the same key, that the policy
-//! mask is actually consulted, that the line budget really stops a command,
-//! and that a request made from a trigger reaches a command through the real
-//! bottom-half path rather than through a witness a test forged.
-//!
-//! These assert on *state a probe command recorded* rather than on log text,
-//! because swapping the klog backend to capture output is process-global and
-//! would pull in every other CPU's logging. The one exception reads the log
-//! ring directly and searches it, which tolerates that interleaving — it has
-//! to, because "the command ran" and "the command's output reached a backend"
-//! are different claims and only one of them is what an operator sees.
+//! These assert on state a probe command recorded rather than on log text,
+//! because swapping the klog backend is process-global. The one exception
+//! searches the log ring directly, which tolerates other CPUs interleaving.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -21,15 +12,12 @@ use slopos_ostd::sync::bh;
 use slopos_testing::TestResult;
 use slopos_testing::fail;
 
-/// Times the informational probe has run.
 static PROBE_RUNS: AtomicU32 = AtomicU32::new(0);
-/// Times the destructive probe has run.
 static DESTRUCTIVE_RUNS: AtomicU32 = AtomicU32::new(0);
 /// Lines the probe should try to emit on its next run.
 static PROBE_EMIT: AtomicU32 = AtomicU32::new(0);
 /// Lines the probe actually got to emit.
 static PROBE_EMITTED: AtomicU32 = AtomicU32::new(0);
-/// Whether the console told the probe it had been truncated.
 static PROBE_TRUNCATED: AtomicU32 = AtomicU32::new(0);
 
 slopos_ostd::kcommand! {
@@ -64,12 +52,8 @@ fn run_probe_destructive(_kc: &mut KConsole<'_>) {
     DESTRUCTIVE_RUNS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Run whatever is queued, through the real bottom-half point.
-///
-/// `bh::raise` then `run_pending_if_due` is the same pair the producer and the
-/// consumer use in production; nothing here constructs a `BhContext`, because
-/// a test that forged one would stop testing the thing that makes the drain
-/// safe.
+/// Run whatever is queued through the real bottom-half point — the same pair
+/// production uses. Nothing here forges a `BhContext`.
 fn pump() {
     bh::raise();
     bh::run_pending_if_due();
@@ -85,10 +69,6 @@ fn with_policy<R>(cfg: KConfig, f: impl FnOnce() -> R) -> R {
 }
 
 /// Every registered command is reachable and described.
-///
-/// The registry is built by the linker out of statics in six crates, so
-/// "does the section actually hold what the readers assume" is not a question
-/// any one crate can answer.
 pub fn test_kcon_registry_is_populated() -> TestResult {
     let cmds = kconsole::commands();
     if cmds.is_empty() {
@@ -106,17 +86,14 @@ pub fn test_kcon_registry_is_populated() -> TestResult {
             );
         }
     }
-    // The help command is what makes the rest discoverable.
     if !cmds.iter().any(|c| c.key == b'h') {
         return fail!("no help command is registered");
     }
     TestResult::Pass
 }
 
-/// No two commands claim the same key.
-///
-/// A collision is invisible at build time — the linker concatenates both
-/// entries happily — and at runtime it makes one key produce two dumps.
+/// No two commands claim the same key — the linker concatenates colliding
+/// entries happily, and at runtime one key then produces two dumps.
 pub fn test_kcon_keys_are_unique() -> TestResult {
     let cmds = kconsole::commands();
     for (i, a) in cmds.iter().enumerate() {
@@ -134,11 +111,9 @@ pub fn test_kcon_keys_are_unique() -> TestResult {
     TestResult::Pass
 }
 
-/// Every command declares exactly one class.
-///
-/// This is the whole no-accidentally-destructive-command guarantee: the policy
-/// mask is a bitwise test, so an entry with no class bit can never run and one
-/// with both would run under the informational-only default.
+/// Every command declares exactly one class: the mask is a bitwise test, so an
+/// entry with no class bit never runs and one with both runs under the
+/// informational-only default.
 pub fn test_kcon_flags_are_exclusive() -> TestResult {
     for cmd in kconsole::commands() {
         let class = cmd.flags & (KCMD_INFORMATIONAL | KCMD_DESTRUCTIVE);
@@ -171,9 +146,6 @@ pub fn test_kcon_end_to_end_via_bottom_half() -> TestResult {
 }
 
 /// Queuing the same command twice before a drain runs it once.
-///
-/// The pending set is a bitmap precisely so that holding a key down, or a
-/// trigger that fires twice, does not multiply the work.
 pub fn test_kcon_request_is_idempotent() -> TestResult {
     with_policy(KConfig::defaults(), || {
         let before = PROBE_RUNS.load(Ordering::Relaxed);
@@ -184,7 +156,6 @@ pub fn test_kcon_request_is_idempotent() -> TestResult {
         if PROBE_RUNS.load(Ordering::Relaxed) != before + 1 {
             return fail!("three requests before one drain ran the command more than once");
         }
-        // And a drain with nothing queued reports that it did nothing.
         if kconsole::drain() {
             return fail!("an empty drain claimed it did work");
         }
@@ -213,10 +184,8 @@ pub fn test_kcon_budget_truncates() -> TestResult {
     })
 }
 
-/// A disabled console queues nothing.
-///
-/// The mask is checked at `request`, so a console turned off at the cmdline
-/// costs a trigger one relaxed load and never reaches the registry at all.
+/// A disabled console queues nothing — the mask is checked at `request`, so a
+/// trigger never reaches the registry at all.
 pub fn test_kcon_disabled_drops_requests() -> TestResult {
     let off = KConfig {
         mask: 0,
@@ -231,7 +200,6 @@ pub fn test_kcon_disabled_drops_requests() -> TestResult {
     if ran {
         return fail!("a command ran while the console was disabled");
     }
-    // Nothing may be left queued for the next drain to find, either.
     if kconsole::drain() {
         return fail!("a request made while disabled was queued anyway");
     }
@@ -240,7 +208,6 @@ pub fn test_kcon_disabled_drops_requests() -> TestResult {
 
 /// A destructive command is refused unless the mask names its class.
 pub fn test_kcon_destructive_needs_the_mask_bit() -> TestResult {
-    // Default policy: informational only.
     let refused = with_policy(KConfig::defaults(), || {
         let before = DESTRUCTIVE_RUNS.load(Ordering::Relaxed);
         kconsole::request(b'y');
@@ -268,13 +235,9 @@ pub fn test_kcon_destructive_needs_the_mask_bit() -> TestResult {
 }
 
 /// An unrecognised key is handled rather than dropped.
-///
-/// An operator who mistypes should learn that they did, not watch nothing
-/// happen and conclude the console is broken.
 pub fn test_kcon_unknown_key_is_consumed() -> TestResult {
     with_policy(KConfig::defaults(), || {
         let before = PROBE_RUNS.load(Ordering::Relaxed);
-        // No command claims '0'.
         if kconsole::commands().iter().any(|c| c.key == b'0') {
             return fail!("this test needs a key no command claims");
         }
@@ -289,11 +252,8 @@ pub fn test_kcon_unknown_key_is_consumed() -> TestResult {
     })
 }
 
-/// The console's addresses come back symbolized.
-///
-/// `KConsole::sym` is only worth having if the symbol table actually resolves
-/// kernel text, which depends on a build-time generation step that can fail
-/// open into an empty table.
+/// The console's addresses come back symbolized — the build-time symbol table
+/// can fail open into an empty one.
 pub fn test_kcon_kernel_text_symbolizes() -> TestResult {
     let probe: fn() -> TestResult = test_kcon_kernel_text_symbolizes;
     let addr = probe as usize as u64;
@@ -304,13 +264,8 @@ pub fn test_kcon_kernel_text_symbolizes() -> TestResult {
     }
 }
 
-/// A command's output actually reaches the log ring.
-///
-/// Everything else here asserts on state a probe recorded, which proves the
-/// dispatch worked but says nothing about whether `log_forced` reaches a
-/// backend. A console whose commands run and emit nothing is the failure this
-/// catches — and `log_forced` deliberately bypasses the level filter, so it
-/// has to be checked rather than assumed.
+/// A command's output actually reaches the log ring. Everything else here only
+/// proves dispatch worked, and `log_forced` bypasses the level filter.
 pub fn test_kcon_output_reaches_the_log_ring() -> TestResult {
     const MARKER: &[u8] = b"kconsole probe line 0";
     const WINDOW: usize = 8192;
@@ -342,22 +297,16 @@ pub fn test_kcon_output_reaches_the_log_ring() -> TestResult {
     })
 }
 
-/// The probe's slot protocol, exercised without sending an NMI.
-///
-/// Two properties matter and neither is visible from the command's output: a
-/// CPU already being probed is left alone, and a slot the watchdog has since
-/// re-armed is never cleared by our reaper. The second is the one that would
-/// kill the machine if it were wrong — a stale probe NMI arriving at a slot
-/// armed `Fatal` takes it down.
+/// The probe's slot protocol, exercised without sending an NMI: a CPU already
+/// being probed is left alone, and the reaper never clears a slot the watchdog
+/// has re-armed — a stale probe NMI at a `Fatal` slot takes the machine down.
 pub fn test_kcon_probe_slot_protocol() -> TestResult {
     use slopos_ostd::watchdog::{self, NmiDisposition};
 
-    // A CPU index no CPU occupies has no slot at all.
     let cpus = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     let Some(victim) = (0..cpus).find(|c| *c != slopos_ostd::cpu::x86_64::pcr::get_current_cpu())
     else {
-        // Uniprocessor: the fan-out has nothing to probe, which is itself the
-        // property worth holding.
+        // Uniprocessor: the fan-out has nothing to probe.
         return TestResult::Pass;
     };
 
@@ -368,14 +317,13 @@ pub fn test_kcon_probe_slot_protocol() -> TestResult {
     if !watchdog::arm_probe(victim, NmiDisposition::Probe) {
         return fail!("arming a free probe slot failed");
     }
-    // A second claim must fail, or a per-tick check would storm a CPU that is
-    // still emitting its dump.
+    // A second claim must fail, or a per-tick check would storm a CPU still
+    // emitting its dump.
     if watchdog::arm_probe(victim, NmiDisposition::Probe) {
         watchdog::release_probe(victim);
         return fail!("a busy probe slot was claimed twice");
     }
 
-    // The reaper only takes back what it left.
     if watchdog::release_probe_if(victim, NmiDisposition::Fatal) {
         return fail!("the conditional release cleared a slot it did not own");
     }

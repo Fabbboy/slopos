@@ -3,23 +3,16 @@
 use crate::fs::UserFsStat;
 use crate::io::{IoBufRead, IoBufWrite};
 
-/// Result of a fused poll operation: readiness bits + registration status.
-///
-/// Returned by [`FileOps::poll_fused`].  The fused poll pattern (modeled on
-/// Linux's `->poll()` callback) combines wait-queue registration and readiness
-/// checking in a single call, eliminating the race window between separate
-/// `poll_wait` and `poll_events` calls.
+/// Result of [`FileOps::poll_fused`]: readiness bits plus registration status.
+/// Doing both in one call closes the race between separate register and check.
 #[derive(Debug, Clone, Copy)]
 pub struct FusedPollResult {
     /// POLL* bitmask of currently ready events.
     pub revents: u16,
     /// `true` if the caller was registered on a wait queue for wakeup.
     pub registered: bool,
-    /// Opaque token identifying the open file at the time of registration,
-    /// set by the file layer. Used by cleanup to target the correct open
-    /// file even if the FD was closed and reassigned between registration
-    /// and cleanup — the token carries a generation so a recycled slot is
-    /// detected rather than silently re-targeted.
+    /// Opaque token identifying the open file at registration time. It carries a
+    /// generation, so cleanup detects a recycled fd slot instead of retargeting.
     pub open_file_token: u64,
 }
 
@@ -35,77 +28,45 @@ pub enum FileKind {
     /// SlopRing submission/completion ring (SLOPRING § 3). The fd's
     /// `handle` resolves a ring object in the per-process ring registry.
     Ring = 6,
-    /// Process-exit fd (pidfd). The fd's `handle` is a target task id; the
-    /// fd becomes `POLLIN`-ready once that task exits. Created by
-    /// `pidfd_open(2)`; pollable via `poll(2)` / `OP_POLL_ADD`, then reaped
-    /// with `waitpid`. Read/write are meaningless (`-EINVAL`).
+    /// Process-exit fd (`pidfd_open(2)`). The fd's `handle` is a target task id;
+    /// it becomes `POLLIN`-ready once that task exits. Read/write give `-EINVAL`.
     Pidfd = 7,
-    /// Signal fd. Becomes `POLLIN`-ready when a signal in its subscribed mask
-    /// is pending for the owner task; `read` drains one `SignalfdSiginfo`.
-    /// Created by `signalfd(2)`. Lets a reactor block its signals and harvest
-    /// them as in-band ring/poll events instead of out-of-band interrupts.
+    /// Signal fd (`signalfd(2)`). `POLLIN`-ready when a signal in its subscribed
+    /// mask is pending; `read` drains one `SignalfdSiginfo`.
     Signalfd = 8,
-    /// Network-state monitor. Becomes `POLLIN`-ready when the stack's
-    /// configuration changes; `read` drains whole `NetEvent` records. Created
-    /// by `net_monitor`. Lets a status indicator react to a lease, a carrier
-    /// transition or an admin change instead of polling for one.
+    /// Network-state monitor (`net_monitor`). `POLLIN`-ready when the stack's
+    /// configuration changes; `read` drains whole `NetEvent` records.
     Netmon = 9,
 }
 
-// `trait FileBacking` lives in `slopos_ostd::process::quota`, not here.
-//
-// It gained a `Charged` supertrait, so a backing cannot be written without an
-// object charge — which makes coverage a compile error rather than something a
-// scanner has to look for. The charge token is the accounting mechanism and
-// the mechanism lives in OSTD, where the framekernel gates can see it; this
-// crate carries no `#![feature(...)]` and is depended on by userland-side
-// crates, so it may not name one.
+// `trait FileBacking` lives in `slopos_ostd::process::quota`: its `Charged`
+// supertrait needs a feature gate this userland-visible crate may not name.
 
 /// Per-resource-type operations for open file descriptions.
 ///
-/// Subsystems provide **static** (zero-sized) implementations. Per-open
-/// state is identified by the opaque `handle` passed to every method.
-/// Lifetime is NOT managed here: the open-file layer owns a
-/// `FileBacking` whose `Drop` is the teardown.
+/// Implementations are zero-sized; per-open state is named by the opaque
+/// `handle`. Lifetime is not managed here — `FileBacking`'s `Drop` is teardown.
 pub trait FileOps: Send + Sync {
     fn kind(&self) -> FileKind;
 
-    /// Distinguishes an `AF_UNIX` socket from an `AF_INET` socket.
-    ///
-    /// Both report [`FileKind::Socket`], so callers that must route to the
-    /// right socket subsystem use this instead of comparing the (zero-sized,
-    /// address-unstable) ops singletons by pointer — the compiler is free to
-    /// place distinct ZST statics at the same address, so a pointer compare
-    /// is unsound and silently misroutes depending on codegen layout.
+    /// Distinguishes an `AF_UNIX` socket from an `AF_INET` one; both report
+    /// [`FileKind::Socket`]. Comparing the ops singletons by pointer instead is
+    /// unsound: distinct ZST statics may share an address.
     fn is_unix_socket(&self) -> bool {
         false
     }
 
-    /// Read data from this file into `buf`.
-    ///
     /// Returns bytes read on success, or a negative errno.
     fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, offset: u64, flags: u32) -> isize;
 
-    /// Write data from `buf` into this file.
-    ///
     /// Returns bytes written on success, or a negative errno.
     fn write(&self, handle: usize, buf: &dyn IoBufRead, offset: u64, flags: u32) -> isize;
 
-    /// Poll: register waiter then check readiness (Linux pattern).
-    ///
-    /// Modeled on Linux's `->poll()` file operation.  Implementations
-    /// MUST register the current task on the wait queue BEFORE checking
-    /// readiness so that any wakeup arriving after registration is
-    /// guaranteed to find the task.  The readiness check after
-    /// registration acts as its own "triggered" verification.
-    ///
-    /// The default delegates to `poll_wait` (register) then
-    /// `poll_events` (check) for backward compatibility.
+    /// Implementations MUST register the current task on the wait queue BEFORE
+    /// checking readiness, so a wakeup arriving after registration finds it.
     fn poll_fused(&self, handle: usize, events: u16) -> FusedPollResult {
-        // Always register, even when events==0.  Linux does the same:
-        // poll_wait() is unconditional; the events mask only filters
-        // wakeups on the wake side (pollwake key check).  Callers with
-        // events==0 still need wakeup on POLLHUP/POLLERR.
+        // Register unconditionally: an `events == 0` caller still needs POLLHUP
+        // and POLLERR wakeups, and the mask only filters on the wake side.
         let registered = self.poll_wait(handle);
         let revents = self.poll_events(handle, events);
         FusedPollResult {
@@ -115,8 +76,6 @@ pub trait FileOps: Send + Sync {
         }
     }
 
-    /// Returns POLL* bitmask of ready events.
-    ///
     /// **Legacy** — prefer `poll_fused` for new code.
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         let _ = (handle, events);

@@ -1,12 +1,6 @@
-//! GDT/TSS/Segment Selector Tests - Finding Real Bugs in Ring Transitions
-//!
-//! These tests target the most dangerous untested areas in the kernel:
-//! - GDT descriptor validation (malformed descriptors = immediate crash)
-//! - TSS RSP0 consistency (wrong value = kernel stack corruption on syscall)
-//! - Segment selector validation (wrong selector = #GP or privilege escalation)
-//! - SYSCALL/SYSRET MSR configuration (wrong values = unpredictable behavior)
-//!
-//! MANY OF THESE TESTS ARE EXPECTED TO FIND BUGS - that's the point.
+//! GDT, TSS and SYSCALL-MSR configuration checks. A malformed descriptor, a
+//! wrong TSS RSP0 or a bad STAR/LSTAR value costs a crash or a ring transition,
+//! and none of it shows up in an otherwise healthy boot.
 
 use slopos_arch::arch::gdt::IstSlot;
 use slopos_arch::cpu;
@@ -20,32 +14,21 @@ use slopos_testing::TestResult;
 use crate::gdt::{gdt_init, gdt_set_ist, gdt_set_kernel_rsp0, syscall_msr_init};
 use crate::idt::{IdtEntry, idt_get_gate};
 
-/// 64-byte dummy stack region for IST tests. Provides a real
-/// `&[u8]` reference whose `KernelStackTop::from_slice` we can borrow.
-/// The bytes are never used as an actual stack — these tests only
-/// verify that the API accepts a typed stack-top without crashing.
+/// Never used as a stack: it exists only so `KernelStackTop::from_slice` has a
+/// real `&[u8]` to borrow.
 #[repr(align(16))]
 struct DummyStack([u8; 64]);
 static DUMMY_TEST_STACK: DummyStack = DummyStack([0u8; 64]);
 
-// =============================================================================
-// GDT DESCRIPTOR FIELD TESTS
-// These verify the actual GDT entries have correct values
-// =============================================================================
-
-/// Read the current GDT limit and base from the CPU
 fn read_gdtr() -> (u16, u64) {
     let g = ts_arch::read_gdtr();
     (g.limit, g.base)
 }
 
-/// Test: GDT is loaded and has valid limit
-/// BUG FINDER: If limit is 0 or too small, GDT wasn't properly initialized
 pub fn test_gdt_loaded_valid_limit() -> TestResult {
     let (limit, base) = read_gdtr();
 
-    // GDT needs at least: null + code + data + user_data + user_code + TSS (16 bytes)
-    // Minimum: 5 * 8 + 16 = 56 bytes, so limit >= 55
+    // null + 4 segments + a double-wide TSS descriptor = 56 bytes.
     if limit < 55 {
         klog_info!(
             "GDT_TEST: BUG - GDT limit too small: {} (expected >= 55)",
@@ -59,7 +42,6 @@ pub fn test_gdt_loaded_valid_limit() -> TestResult {
         return TestResult::Fail;
     }
 
-    // GDT should be in kernel space
     if base < 0xFFFF_8000_0000_0000 {
         klog_info!("GDT_TEST: BUG - GDT base 0x{:x} not in kernel space", base);
         return TestResult::Fail;
@@ -68,18 +50,15 @@ pub fn test_gdt_loaded_valid_limit() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Read current CS and verify it's the kernel code selector
-/// BUG FINDER: Wrong CS means we're running in wrong privilege level
 pub fn test_current_cs_is_kernel() -> TestResult {
     let cs = ts_arch::read_cs();
 
-    // Expected kernel CS is 0x08 (index 1, TI=0, RPL=0)
+    // Kernel CS 0x08 = index 1, TI=0, RPL=0.
     if cs != 0x08 {
         klog_info!("GDT_TEST: BUG - Current CS is 0x{:x}, expected 0x08", cs);
         return TestResult::Fail;
     }
 
-    // Verify RPL is 0 (kernel)
     let rpl = cs & 0x3;
     if rpl != 0 {
         klog_info!("GDT_TEST: BUG - CS RPL is {}, expected 0 (kernel)", rpl);
@@ -89,11 +68,10 @@ pub fn test_current_cs_is_kernel() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Read current SS and verify it's the kernel data selector
 pub fn test_current_ss_is_kernel() -> TestResult {
     let ss = ts_arch::read_ss();
 
-    // Expected kernel SS is 0x10 (index 2, TI=0, RPL=0)
+    // Kernel SS 0x10 = index 2, TI=0, RPL=0.
     if ss != 0x10 {
         klog_info!("GDT_TEST: BUG - Current SS is 0x{:x}, expected 0x10", ss);
         return TestResult::Fail;
@@ -102,47 +80,36 @@ pub fn test_current_ss_is_kernel() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Verify DS/ES/FS/GS are valid data selectors
 pub fn test_data_segment_selectors() -> TestResult {
     let ds = ts_arch::read_ds();
     let es = ts_arch::read_es();
     let fs = ts_arch::read_fs();
     let gs = ts_arch::read_gs();
 
-    // In 64-bit mode, DS/ES/FS/GS can be 0 (null) or a valid data selector
-    // They should NOT be code selectors or have user RPL
+    // In 64-bit mode these may legitimately be null or a data selector; what
+    // they must never be is a code selector or carry user RPL.
     for (name, sel) in [("DS", ds), ("ES", es)] {
         if sel != 0 && sel != 0x10 {
-            // Could be valid but unusual
             klog_info!("GDT_TEST: WARNING - {} is 0x{:x}, not 0 or 0x10", name, sel);
         }
     }
 
-    // FS/GS are often used for thread-local storage, can have various values
-    // Just verify they don't have user RPL in kernel mode
+    // FS/GS carry TLS bases, so only the RPL is worth checking.
     if (fs & 0x3) == 3 || (gs & 0x3) == 3 {
         klog_info!(
             "GDT_TEST: WARNING - FS=0x{:x} GS=0x{:x} have user RPL in kernel",
             fs,
             gs
         );
-        // This might be intentional for TLS, so just warn
     }
 
     TestResult::Pass
 }
 
-// =============================================================================
-// TSS TESTS
-// =============================================================================
-
-/// Read the Task Register to get the TSS selector
 fn read_tr() -> u16 {
     ts_arch::read_tr()
 }
 
-/// Test: TSS is loaded
-/// BUG FINDER: If TSS not loaded, interrupts/syscalls will crash
 pub fn test_tss_loaded() -> TestResult {
     let tr = read_tr();
 
@@ -151,27 +118,19 @@ pub fn test_tss_loaded() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Expected TSS selector is 0x28 (index 5, TI=0, RPL=0)
+    // TSS selector 0x28 = index 5, TI=0, RPL=0.
     if tr != 0x28 {
         klog_info!(
             "GDT_TEST: WARNING - TSS selector is 0x{:x}, expected 0x28",
             tr
         );
-        // Not necessarily a bug, could be different layout
     }
 
     TestResult::Pass
 }
 
-/// Test: gdt_set_kernel_rsp0 doesn't crash and accepts valid values.
-///
-/// `gdt_set_kernel_rsp0` is the runtime API (called by
-/// `prepare_switch_to`); it takes a raw `u64` because runtime
-/// callers compute the stack top at dispatch time. The hermetic
-/// `TssRsp0Shadow` impl restores the value on scope drop, so the
-/// transient corruption from this test no longer survives past the
-/// fixture's drop. Without that restore, `0xFFFF_FFFF_8010_0000`
-/// would persist into a runtime address inside `.text`.
+/// The value written is an address inside `.text`; only the fixture's
+/// `TssRsp0Shadow` restore on scope drop keeps it from surviving the test.
 pub fn test_gdt_set_kernel_rsp0_valid() -> TestResult {
     let _scope = KernelTestScope::enter();
     let test_rsp0: u64 = 0xFFFF_FFFF_8010_0000;
@@ -179,9 +138,8 @@ pub fn test_gdt_set_kernel_rsp0_valid() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: gdt_set_kernel_rsp0 with null - documents the lack of
-/// validation. The fixture restores the original RSP0 on drop so
-/// this can't smash live kernel state.
+/// Despite the name, null is never written: the runtime API has no validator,
+/// so passing one would smash live kernel state.
 pub fn test_gdt_set_kernel_rsp0_null() -> TestResult {
     let _scope = KernelTestScope::enter();
     let safe_rsp0: u64 = 0xFFFF_FFFF_8010_0000;
@@ -189,9 +147,8 @@ pub fn test_gdt_set_kernel_rsp0_null() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: gdt_set_kernel_rsp0 with user-space address. We *don't*
-/// call the function with a user-space pointer (the runtime API
-/// has no validator), but document the gap.
+/// `user_rsp0` is never passed in — the unvalidated runtime API would take it.
+/// It stays here to name the gap.
 pub fn test_gdt_set_kernel_rsp0_user_address() -> TestResult {
     let _scope = KernelTestScope::enter();
     let user_rsp0: u64 = 0x0000_7FFF_FFFF_0000;
@@ -201,21 +158,7 @@ pub fn test_gdt_set_kernel_rsp0_user_address() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// IST (Interrupt Stack Table) TESTS
-// =============================================================================
-//
-// Post-Phase 5 the IST API takes `IstSlot` (named enum, no zero / overflow)
-// and `KernelStackTop<'_>` (lifetime-tied newtype, no fake u64). The two
-// previous runtime tests (`test_gdt_set_ist_index_zero`,
-// `test_gdt_set_ist_index_overflow`) become compile_fail doctests on
-// `slopos_arch::arch::gdt::IstSlot` itself — strictly stronger than the
-// runtime check they replaced.
-
-/// Test: gdt_set_ist with each valid slot. The `KernelStackTop` is
-/// borrowed from a real static `&[u8]` to satisfy the safe
-/// constructor; the fixture's `TssIstShadow` restores the original
-/// IST entries on scope drop.
+/// The fixture's `TssIstShadow` restores the original IST entries on drop.
 pub fn test_gdt_set_ist_valid_indices() -> TestResult {
     let mut scope = KernelTestScope::enter();
     let top = KernelStackTop::from_slice(&DUMMY_TEST_STACK.0);
@@ -233,30 +176,19 @@ pub fn test_gdt_set_ist_valid_indices() -> TestResult {
     TestResult::Pass
 }
 
-/// Compile-fail proxy for the legacy `gdt_set_ist(0, ...)` runtime
-/// check. The `IstSlot` enum has no `S0` variant, so this case is
-/// non-representable at the type level. Test exists to keep the test
-/// count stable; it always passes.
+/// Empty by design: `IstSlot` has no zero variant, so the rejection this once
+/// checked is now a compile_fail doctest on the enum. Kept for the test count.
 pub fn test_gdt_set_ist_index_zero() -> TestResult {
     let _scope = KernelTestScope::enter();
-    // IstSlot::S0 does not exist; the equivalent runtime call no
-    // longer compiles. Nothing to verify at runtime.
     TestResult::Pass
 }
 
-/// Compile-fail proxy for the legacy `gdt_set_ist(8, ...)` runtime
-/// check. The `IstSlot` enum tops out at `Reserved7`.
+/// Empty for the same reason: `IstSlot` tops out at `Reserved7`.
 pub fn test_gdt_set_ist_index_overflow() -> TestResult {
     let _scope = KernelTestScope::enter();
     TestResult::Pass
 }
 
-// =============================================================================
-// SYSCALL MSR TESTS
-// =============================================================================
-
-/// Test: EFER.SCE bit is set (enables SYSCALL/SYSRET)
-/// BUG FINDER: If not set, SYSCALL instruction will #UD
 pub fn test_efer_sce_enabled() -> TestResult {
     let efer = cpu::read_msr(Msr::EFER);
 
@@ -268,20 +200,13 @@ pub fn test_efer_sce_enabled() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: STAR MSR has valid selectors
-/// BUG FINDER: Wrong selectors = crash or privilege issues on syscall
 pub fn test_star_msr_valid() -> TestResult {
     let star = cpu::read_msr(Msr::STAR);
 
-    // STAR layout:
-    // [31:0]   - Reserved (should be 0, but some systems use it)
-    // [47:32]  - SYSCALL CS/SS (kernel code selector)
-    // [63:48]  - SYSRET CS/SS (user code selector base - 8)
-
+    // STAR[47:32] is the SYSCALL CS/SS pair, STAR[63:48] the SYSRET base.
     let syscall_cs = ((star >> 32) & 0xFFFF) as u16;
     let sysret_base = ((star >> 48) & 0xFFFF) as u16;
 
-    // SYSCALL CS should be 0x08 (kernel code)
     if syscall_cs != 0x08 {
         klog_info!(
             "GDT_TEST: BUG - STAR SYSCALL CS is 0x{:x}, expected 0x08",
@@ -290,22 +215,19 @@ pub fn test_star_msr_valid() -> TestResult {
         return TestResult::Fail;
     }
 
-    // SYSRET base: on return, CPU uses base+16 for CS and base+8 for SS
-    // Expected: 0x1B - 8 = 0x13 (so CS becomes 0x23, SS becomes 0x1B)
-    // OR could be 0x10 depending on GDT layout
+    // SYSRET builds CS from base+16 and SS from base+8, so this layout's base
+    // is 0x13; 0x10 belongs to a GDT that orders user code and data the other way.
     if sysret_base != 0x13 && sysret_base != 0x10 {
         klog_info!(
             "GDT_TEST: WARNING - STAR SYSRET base is 0x{:x}, expected 0x13 or 0x10",
             sysret_base
         );
-        // Not necessarily a bug, depends on GDT layout
     }
 
     TestResult::Pass
 }
 
-/// Test: LSTAR MSR points to kernel space
-/// BUG FINDER: LSTAR in user space = code execution vulnerability
+/// An LSTAR in the user half would be an arbitrary-code-execution primitive.
 pub fn test_lstar_msr_valid() -> TestResult {
     let lstar = cpu::read_msr(Msr::LSTAR);
 
@@ -314,7 +236,6 @@ pub fn test_lstar_msr_valid() -> TestResult {
         return TestResult::Fail;
     }
 
-    // LSTAR should be in kernel space
     if lstar < 0xFFFF_8000_0000_0000 {
         klog_info!(
             "GDT_TEST: BUG - LSTAR 0x{:x} is not in kernel space!",
@@ -323,7 +244,6 @@ pub fn test_lstar_msr_valid() -> TestResult {
         return TestResult::Fail;
     }
 
-    // LSTAR should be at a reasonable code address (not in weird regions)
     if lstar > 0xFFFF_FFFF_FFFF_0000 {
         klog_info!("GDT_TEST: WARNING - LSTAR 0x{:x} is unusually high", lstar);
     }
@@ -331,16 +251,10 @@ pub fn test_lstar_msr_valid() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: SFMASK MSR clears appropriate flags
-/// BUG FINDER: If TF or IF not masked, syscall handler may execute weirdly
 pub fn test_sfmask_msr_valid() -> TestResult {
     let sfmask = cpu::read_msr(Msr::SFMASK);
 
-    // SFMASK should at minimum clear:
-    // - IF (bit 9) - disable interrupts during syscall entry
-    // - TF (bit 8) - disable single-stepping
-    // Common value is 0x47700 which clears IF, TF, DF, and some others
-
+    // RFLAGS.IF is bit 9 and RFLAGS.TF is bit 8; syscall entry must mask both.
     let if_masked = (sfmask & (1 << 9)) != 0;
     let tf_masked = (sfmask & (1 << 8)) != 0;
 
@@ -355,12 +269,6 @@ pub fn test_sfmask_msr_valid() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// IDT/IST CONSISTENCY TESTS
-// =============================================================================
-
-/// Test: Double fault handler uses IST
-/// BUG FINDER: Double fault without IST = triple fault on stack overflow
 pub fn test_double_fault_uses_ist() -> TestResult {
     let mut entry = IdtEntry {
         offset_low: 0,
@@ -377,7 +285,6 @@ pub fn test_double_fault_uses_ist() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Double fault (vector 8) MUST use IST to handle stack overflow scenarios
     if entry.ist == 0 {
         klog_info!("GDT_TEST: BUG - Double fault handler doesn't use IST!");
         klog_info!("GDT_TEST: This means stack overflow -> triple fault");
@@ -387,7 +294,6 @@ pub fn test_double_fault_uses_ist() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Page fault handler has valid handler
 pub fn test_page_fault_handler_valid() -> TestResult {
     let mut entry = IdtEntry {
         offset_low: 0,
@@ -404,7 +310,6 @@ pub fn test_page_fault_handler_valid() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Reconstruct handler address
     let handler = (entry.offset_low as u64)
         | ((entry.offset_mid as u64) << 16)
         | ((entry.offset_high as u64) << 32);
@@ -414,7 +319,6 @@ pub fn test_page_fault_handler_valid() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Handler should be in kernel space
     if handler < 0xFFFF_8000_0000_0000 {
         klog_info!(
             "GDT_TEST: BUG - Page fault handler 0x{:x} not in kernel space",
@@ -423,7 +327,7 @@ pub fn test_page_fault_handler_valid() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Verify it uses kernel code selector - copy from packed struct first
+    // Copied out of the packed struct before it can be borrowed.
     let selector = { entry.selector };
     if selector != 0x08 {
         klog_info!(
@@ -436,7 +340,6 @@ pub fn test_page_fault_handler_valid() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: GP fault handler exists and is properly configured
 pub fn test_gp_fault_handler_valid() -> TestResult {
     let mut entry = IdtEntry {
         offset_low: 0,
@@ -473,7 +376,6 @@ pub fn test_gp_fault_handler_valid() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Syscall vector (0x80) is properly configured
 pub fn test_syscall_idt_entry() -> TestResult {
     let mut entry = IdtEntry {
         offset_low: 0,
@@ -499,7 +401,7 @@ pub fn test_syscall_idt_entry() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Check DPL allows user mode (DPL should be 3)
+    // DPL is type_attr[6:5]; a user-reachable gate needs 3.
     let dpl = (entry.type_attr >> 5) & 0x3;
     if dpl != 3 {
         klog_info!(
@@ -512,25 +414,17 @@ pub fn test_syscall_idt_entry() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// GDT REINITIALIZATION TESTS
-// =============================================================================
-
-/// Test: Calling gdt_init twice doesn't corrupt state
-/// BUG FINDER: Double init could corrupt selectors mid-execution
 pub fn test_gdt_double_init() -> TestResult {
     let (limit_before, _base_before) = read_gdtr();
     let cs_before = ts_arch::read_cs();
     let ss_before = ts_arch::read_ss();
 
-    // Reinitialize GDT
     gdt_init();
 
     let (limit_after, _base_after) = read_gdtr();
     let cs_after = ts_arch::read_cs();
     let ss_after = ts_arch::read_ss();
 
-    // CS and SS should be the same
     if cs_before != cs_after {
         klog_info!(
             "GDT_TEST: BUG - CS changed after gdt_init: 0x{:x} -> 0x{:x}",
@@ -549,7 +443,6 @@ pub fn test_gdt_double_init() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Limit should be the same (GDT size unchanged)
     if limit_before != limit_after {
         klog_info!(
             "GDT_TEST: WARNING - GDT limit changed: {} -> {}",
@@ -561,7 +454,6 @@ pub fn test_gdt_double_init() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Calling syscall_msr_init twice doesn't corrupt state
 pub fn test_syscall_msr_double_init() -> TestResult {
     let efer_before = cpu::read_msr(Msr::EFER);
     let star_before = cpu::read_msr(Msr::STAR);

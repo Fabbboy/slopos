@@ -1,4 +1,4 @@
-//! exec() ELF loader tests - targeting untested code paths likely to have bugs.
+//! exec() ELF loader tests.
 
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::INVALID_PROCESS_ID;
@@ -23,7 +23,6 @@ fn read_user_u8(process_id: u32, addr: u64) -> Option<u8> {
     process_vm::process_vm_read_user_u8(&vm_space, addr)
 }
 
-/// Read a null-terminated C string from user memory, up to `max_len` bytes.
 fn read_user_cstr(process_id: u32, addr: u64, max_len: usize) -> Option<slopos_ostd::KVec<u8>> {
     let mut buf = slopos_ostd::KVec::<u8>::new();
     for i in 0..max_len {
@@ -83,7 +82,6 @@ fn create_elf_with_load_segment(vaddr: u64, memsz: u64, filesz: u64, offset: u64
     elf[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
     elf[56..58].copy_from_slice(&1u16.to_le_bytes()); // e_phnum: 1 segment
 
-    // PT_LOAD = 1 at offset 64
     elf[64..68].copy_from_slice(&1u32.to_le_bytes()); // p_type: PT_LOAD
     elf[68..72].copy_from_slice(&5u32.to_le_bytes()); // p_flags: PF_R | PF_X
     elf[72..80].copy_from_slice(&offset.to_le_bytes()); // p_offset
@@ -96,14 +94,14 @@ fn create_elf_with_load_segment(vaddr: u64, memsz: u64, filesz: u64, offset: u64
     elf
 }
 
-/// Resolve a pid this test just created into the designator `mm` now takes.
+/// Resolve a pid this test just created into the designator `mm` takes.
 fn resolve_pid(pid: u32) -> slopos_ostd::process::ProcessId {
     slopos_ostd::process::ProcessId::resolve(pid).expect("a pid this test just created")
 }
 
 pub fn test_elf_invalid_magic() -> TestResult {
     let mut elf = create_minimal_elf_header();
-    elf[0] = 0x00; // Corrupt magic
+    elf[0] = 0x00;
 
     let result = ElfValidator::new(&elf);
     if result.is_ok() {
@@ -150,7 +148,7 @@ pub fn test_elf_wrong_machine() -> TestResult {
 }
 
 pub fn test_elf_truncated_header() -> TestResult {
-    let elf = [0x7F, b'E', b'L', b'F', 2, 1, 1, 0]; // Only 8 bytes
+    let elf = [0x7F, b'E', b'L', b'F', 2, 1, 1, 0];
 
     let result = ElfValidator::new(&elf);
     if result.is_ok() {
@@ -176,7 +174,7 @@ pub fn test_elf_no_load_segments() -> TestResult {
 
     let validator = match ElfValidator::new(&elf) {
         Ok(v) => v,
-        Err(_) => return TestResult::Pass, // Expected to fail without segments
+        Err(_) => return TestResult::Pass,
     };
 
     let (_, count) = match validator.validate_load_segments() {
@@ -252,9 +250,6 @@ pub fn test_elf_segment_offset_overflow() -> TestResult {
 }
 
 pub fn test_elf_kernel_address_entry() -> TestResult {
-    // Create an ELF with a kernel-space entry point AND a matching kernel-space
-    // PT_LOAD segment.  The validator must reject the segment because it falls
-    // in kernel address space.
     let kernel_addr: u64 = 0xFFFF_FFFF_8000_0000;
     let elf = create_elf_with_load_segment(
         kernel_addr, // vaddr in kernel space
@@ -334,13 +329,9 @@ pub fn test_translate_address_user_passthrough() -> TestResult {
     TestResult::Pass
 }
 
-/// No address space is handed out for a process that does not exist.
-///
-/// This used to pass the literal 9999 — a number naming nothing. That is no
-/// longer expressible: the argument is a designator only a live process mints,
-/// so `ProcessId::resolve(9999)` answers `None` and the call cannot be made at
-/// all. The reachable form of the same failure is a designator that *outlived*
-/// its process, which is what this drives.
+/// No address space is handed out for a process that does not exist. The
+/// reachable form is a designator that *outlived* its process: a pid naming
+/// nothing cannot be resolved into one at all.
 pub fn test_process_vm_root_absent_for_a_reaped_process() -> TestResult {
     if slopos_ostd::process::ProcessId::resolve(9999).is_some() {
         klog_info!("EXEC_TEST: BUG - a pid naming no process resolved");
@@ -582,10 +573,8 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
     TestResult::Pass
 }
 
-/// Verify that setup_user_stack writes the correct argc, argv pointers, and
-/// argv *string content* for a multi-argument command (e.g. `nc -u -l 12345`).
-/// This catches the class of bug where the stack structure looks correct but
-/// the string data is missing, truncated, or at the wrong address.
+/// The stack's argv *string content*, not just its pointers: the layout can
+/// look correct while the strings are missing, truncated or at a wrong address.
 pub fn test_setup_user_stack_argv_string_content() -> TestResult {
     process_vm::init_process_vm();
     let pid = process_vm::create_process_vm();
@@ -619,7 +608,6 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         }
     };
 
-    // Locate argc on the stack
     let base = match find_argc_slot(pid, sp, args.len() as u64) {
         Some(v) => v,
         None => {
@@ -629,7 +617,6 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         }
     };
 
-    // Verify each argv[i] points to the correct null-terminated string
     for (i, expected) in args.iter().enumerate() {
         let ptr = match read_user_u64(pid, base + 8 * (1 + i as u64)) {
             Some(p) if p != 0 => p,
@@ -663,7 +650,6 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         }
     }
 
-    // Verify argv NULL terminator
     let argv_null = read_user_u64(pid, base + 8 * (1 + args.len() as u64)).unwrap_or(u64::MAX);
     if argv_null != 0 {
         klog_info!(
@@ -674,7 +660,6 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Verify envp[0] points to the correct string
     let envp0_slot = base + 8 * (1 + args.len() as u64 + 1);
     let envp0_ptr = match read_user_u64(pid, envp0_slot) {
         Some(p) if p != 0 => p,
@@ -705,7 +690,7 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Verify sp is 16-byte aligned (SysV ABI requirement)
+    // SysV ABI: sp must be 16-byte aligned at entry.
     if sp % 16 != 0 {
         klog_info!("EXEC_TEST: sp={:#x} not 16-byte aligned", sp);
         process_vm::destroy_process_vm(resolve_pid(pid));
@@ -753,15 +738,10 @@ slopos_testing::stest!(
     suite = exec
 );
 
-/// The kernel confers privilege by program identity, and only for the two
-/// programs that need it.
-///
-/// The syscall boundary is purely subtractive — it strips every privileged bit
-/// a caller asks for — so this table is the sole source of `COMPOSITOR`,
-/// `DISPLAY_EXCLUSIVE` and the compositor's `High` tier for a user-initiated
-/// spawn. `/sbin/init` is the load-bearing negative case: `SYSTEM` comes from
-/// `launch_init`, a kernel caller, and naming init here would let any task
-/// re-spawn it and inherit console administration.
+/// The kernel confers privilege by program identity, and the grant table is the
+/// sole source of those bits for a user-initiated spawn. `/sbin/init` is the
+/// load-bearing negative case: naming it here would let any task re-spawn it
+/// and inherit console administration.
 pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
     use slopos_abi::task::{TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TaskPriority};
     use slopos_testing::assert_test;

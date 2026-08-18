@@ -1,9 +1,7 @@
 use slopos_abi::draw::Color32;
 
-/// Central style sheet holding all visual parameters.
-/// Widgets reference this instead of hardcoding colors/sizes.
+/// Central style sheet; widgets reference this instead of hardcoding colors and sizes.
 pub struct StyleSheet {
-    // --- Colors ---
     pub bg_primary: Color32,
     pub bg_secondary: Color32,
     pub bg_tertiary: Color32,
@@ -22,7 +20,6 @@ pub struct StyleSheet {
     pub shadow_color: Color32,
     pub focus_ring_color: Color32,
 
-    // --- Sizing ---
     pub font_size: i32,
     pub font_size_small: i32,
     pub font_size_heading: i32,
@@ -59,7 +56,6 @@ pub struct StyleSheet {
 }
 
 impl StyleSheet {
-    /// Default dark theme derived from existing theme.rs values.
     pub fn dark() -> Self {
         Self {
             bg_primary: Color32::rgb(30, 30, 30),
