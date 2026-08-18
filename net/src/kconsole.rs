@@ -1,19 +1,12 @@
 //! The network subsystem's diagnostic-console command.
 //!
-//! `n` prints what the stack currently believes about itself: interfaces and
-//! their three-part state, addresses, routes, neighbours, connectivity and its
-//! evidence, and what the monitor registry is holding.
-//!
 //! Registration lives here rather than in OSTD because OSTD is linked into
 //! userland binaries too, and their linker script brackets no
-//! `.kconsole_registry` section — the crate that owns a subsystem's data owns
-//! the command that prints it.
+//! `.kconsole_registry` section.
 //!
-//! Everything is read through the ordinary snapshot accessors, one table at a
-//! time, so the command holds no two network locks at once and holds none
-//! across the console's own output. Every loop is bounded by
-//! [`KConsole::budget_left`], so a long answer is truncated where the command
-//! chooses rather than wherever the console's line budget happens to run out.
+//! Each table is read through its snapshot accessor, so the command holds no
+//! two network locks at once and holds none across the console's own output.
+//! Every loop is bounded by [`KConsole::budget_left`].
 
 use slopos_abi::net::{
     IFF_SLOP_CARRIER_ASSUMED, IFF_SLOP_DHCP, IFF_SLOP_DISABLED, IFF_SLOP_NO_CARRIER,
@@ -38,8 +31,8 @@ slopos_ostd::kcommand! {
     run = run_net,
 }
 
-/// Neighbours printed at most. The cache holds 256; a console dump of all of
-/// them would be the whole line budget and none of the rest of the answer.
+/// Neighbours printed at most; dumping all 256 the cache holds would spend the
+/// whole line budget.
 const MAX_NEIGH_SHOWN: usize = 16;
 
 fn run_net(kc: &mut KConsole<'_>) {
@@ -50,11 +43,8 @@ fn run_net(kc: &mut KConsole<'_>) {
     print_monitors(kc);
 }
 
-/// What the machine can reach, and what the classifier is deciding it from.
-///
-/// The evidence is printed next to the verdict on purpose: "limited" on its own
-/// invites a guess, while "limited, gateway not reachable" names the thing to
-/// go and look at.
+/// The classifier's evidence is printed next to its verdict: "limited" on its
+/// own invites a guess.
 fn print_connectivity(kc: &mut KConsole<'_>) {
     let state = connectivity::state();
     let evidence = connectivity::gather_evidence();
@@ -139,8 +129,6 @@ fn print_iface(kc: &mut KConsole<'_>, i: &Iface, enabled: bool) {
         }
     );
 
-    // Snapshot the addresses rather than borrowing through the row, so the
-    // table lock is gone before the console writes anything.
     let mut addrs = [const {
         (
             0u32,
@@ -229,11 +217,8 @@ const fn neigh_state_name(state: u8) -> &'static str {
     }
 }
 
-/// What the monitor registry is holding.
-///
-/// `dropped` is the number worth printing: it is the only place a subscriber
-/// that has stopped draining becomes visible, and a stuck status indicator
-/// looks identical to a quiet network from every other angle.
+/// `dropped` is the only place a subscriber that has stopped draining becomes
+/// visible.
 fn print_monitors(kc: &mut KConsole<'_>) {
     let stats = NETMON_TABLE.stats();
     kline!(

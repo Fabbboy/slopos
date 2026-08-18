@@ -1,8 +1,4 @@
 //! Tests for network type-safe primitives.
-//!
-//! Covers: Ipv4Addr methods, Port byte-order conversions, MacAddr properties,
-//! DevIndex identity, NetError errno mapping, SockAddr user conversion,
-//! EtherType/IpProtocol parsing.
 
 use slopos_abi::KernelErrno;
 use slopos_abi::net::{AF_INET, SockAddrIn};

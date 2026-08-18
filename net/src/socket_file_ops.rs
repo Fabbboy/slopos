@@ -13,7 +13,7 @@ pub struct SocketFileOps;
 
 pub static SOCKET_FILE_OPS: SocketFileOps = SocketFileOps;
 
-/// Sole owner of one AF_INET socket; dropping it closes the socket.
+/// Sole owner of one AF_INET socket.
 #[derive(slopos_ostd::Charged)]
 struct SocketBacking {
     idx: u32,
@@ -64,7 +64,7 @@ impl FileOps for SocketFileOps {
         if n <= 0 {
             return n as isize;
         }
-        // Defensive clamp: a driver over-report must not overrun the slice.
+        // A driver over-report must not overrun the slice.
         let n = (n as usize).min(read_len);
         // Following the documented Linux TCP behaviour, data is consumed from
         // the receive queue before the copy out, so a faulting user buffer

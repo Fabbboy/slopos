@@ -1,22 +1,9 @@
 //! [`FileKind::Netmon`] file operations.
 //!
 //! A monitor fd is a pollable view of one [`NetMonTable`](crate::netmon::NetMonTable)
-//! ring. Its
-//! `handle: usize` is the packed registry handle; resolution validates the
-//! slot's generation, so a stale handle is a typed `EBADF` rather than a read
+//! ring. Its `handle: usize` is the packed registry handle; resolution validates
+//! the slot's generation, so a stale handle is a typed `EBADF` rather than a read
 //! of whoever recycled the slot.
-//!
-//! - `poll_fused` registers the caller on the ring's wait queue **before**
-//!   testing readiness, which is what closes the window in which a post
-//!   between the test and the block would be missed.
-//! - `read` drains whole [`NetEvent`] records: a buffer shorter than one record
-//!   is `EINVAL`, an empty ring is `EAGAIN`, and anything longer takes as many
-//!   whole records as fit. There is no partial record and no framing to parse.
-//! - `write` is meaningless (`EINVAL`): the stream runs one way, and
-//!   configuration is changed through the `net_*_ctl` syscalls.
-//!
-//! Each record is peeked, copied out, and only then consumed, so a user buffer
-//! that faults mid-drain costs the reader nothing it has not already received.
 
 use slopos_abi::Errno;
 use slopos_abi::event::KernelEvent;
@@ -153,9 +140,8 @@ pub fn netmon_create(table: FdTable, mask: u32) -> i32 {
         Ok(handle) => handle,
         Err(e) => return e.raw(),
     };
-    // The backing owns the registry entry: dropping the last fd alias runs its
-    // `Drop`, which releases the ring. If the allocation itself fails there is
-    // no backing to hand off, so release the orphaned entry here.
+    // If the allocation fails there is no backing to hand the entry off to, so
+    // release it here.
     let backing: KArc<dyn FileBacking> = match KArc::try_new(NetmonBacking {
         handle: raw_handle,
         object_charge: Charge::commit(reservation),

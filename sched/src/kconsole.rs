@@ -1,7 +1,5 @@
-//! Diagnostic-console commands over the task table.
-//!
-//! These are the two the console exists for: what every task is doing, and —
-//! for the ones that are not doing anything — where they stopped.
+//! Diagnostic-console commands over the task table: what every task is doing,
+//! and where the parked ones stopped.
 
 use slopos_ostd::kconsole::{KCMD_INFORMATIONAL, KConsole};
 use slopos_ostd::string::bytes_as_str;
@@ -9,8 +7,6 @@ use slopos_ostd::{kline, ksymline};
 
 use crate::task::{Task, TaskStatus, task_for_each_active, task_slot_census};
 
-/// Frames walked per parked task.
-///
 /// Deep enough to name the blocking primitive and its caller, shallow enough
 /// that a machine with many blocked tasks still fits the line budget.
 const PARK_FRAMES: usize = 12;
@@ -47,11 +43,9 @@ slopos_ostd::kcommand! {
     run = run_zombies,
 }
 
-/// Exited tasks are absent from `process_list` — they cannot run code, so they
-/// are exit-status receipts rather than tasks. That makes "which corpses are
-/// still held, and who owes the `waitpid`" a question only the console can
-/// answer, which is the split Windows draws between `EnumProcesses` and the
-/// kernel debugger's `!process`.
+/// Exited tasks are exit-status receipts rather than tasks, so they are absent
+/// from `process_list`: which corpses are still held, and who owes each
+/// `waitpid`, is a question only the console can answer.
 fn run_zombies(kc: &mut KConsole<'_>) {
     let mut zombies = 0u32;
     let mut terminated = 0u32;
@@ -147,9 +141,8 @@ fn dump(kc: &mut KConsole<'_>, blocked_only: bool) {
         if blocked_only && task.status() != TaskStatus::Blocked {
             return;
         }
-        // The walk is unbounded in the number of tasks, so it checks the
-        // budget rather than trusting `line` to absorb the overflow: stopping
-        // between records beats stopping mid-record.
+        // The walk is unbounded in the number of tasks, and stopping between
+        // records beats letting `line` truncate mid-record.
         if kc.budget_left() == 0 {
             return;
         }
@@ -185,7 +178,7 @@ fn dump_one(kc: &mut KConsole<'_>, t: &Task) {
     }
 
     // The task is parked, so its saved frame pointer is stable for the walk.
-    // Each read goes through the fault-recoverable probe, because a canonical
+    // Each read still goes through the fault-recoverable probe: a canonical
     // kernel address is not proof of a mapped one.
     let mut entries = [slopos_ostd::stacktrace::StacktraceEntry {
         frame_pointer: 0,

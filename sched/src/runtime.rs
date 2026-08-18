@@ -90,20 +90,16 @@ pub(crate) extern "C" fn kernel_thread_trampoline(arg: *mut c_void) {
     }
 }
 
-/// Build a NUL-terminated `&str -> [u8; N]` copy for the scheduler's
-/// legacy C-string name input. Truncates at `TASK_NAME_MAX_LEN - 1`.
+/// NUL-terminated copy of `name` for the scheduler's C-string name input;
+/// truncates at `TASK_NAME_MAX_LEN - 1`.
 fn name_to_task_buffer(name: &str) -> [u8; super::task::TASK_NAME_MAX_LEN] {
     let mut buf = [0u8; super::task::TASK_NAME_MAX_LEN];
     let bytes = name.as_bytes();
     let take = core::cmp::min(bytes.len(), super::task::TASK_NAME_MAX_LEN - 1);
     buf[..take].copy_from_slice(&bytes[..take]);
-    // tail already zero from initialisation
     buf
 }
 
-/// Concrete spawner impl. Routes through the existing
-/// `task_create` + `publish_new_task` pair, but uses typed errors
-/// instead of the legacy `INVALID_TASK_ID` sentinel.
 pub struct KernelThreadSpawnerImpl;
 
 impl KernelThreadSpawner for KernelThreadSpawnerImpl {
@@ -113,11 +109,6 @@ impl KernelThreadSpawner for KernelThreadSpawnerImpl {
         entry: KernelThreadEntry,
         priority: u8,
     ) -> Result<SpawnedTaskId, SpawnError> {
-        // Pack the `fn()` into the scheduler's legacy `*mut c_void`
-        // payload slot; `kernel_thread_trampoline` unpacks at task
-        // entry. `fn as usize as *mut c_void` is safe Rust on every
-        // supported target — function pointers and data pointers have
-        // the same layout.
         let payload = (entry as usize) as *mut c_void;
         let name_buf = name_to_task_buffer(name);
         let task_id = task_create(
@@ -130,8 +121,8 @@ impl KernelThreadSpawner for KernelThreadSpawnerImpl {
         if task_id == INVALID_TASK_ID {
             return Err(SpawnError::OutOfTaskIds);
         }
-        // Hold the registry guard across publication so the raw projection
-        // cannot be invalidated by a concurrent terminate.
+        // The registry guard is held across publication so a concurrent
+        // terminate cannot invalidate the projection.
         let Some(task) = crate::task::task_find_by_id(task_id) else {
             let _ = task_terminate(task_id);
             return Err(SpawnError::OutOfTaskIds);
@@ -144,54 +135,33 @@ impl KernelThreadSpawner for KernelThreadSpawnerImpl {
     }
 }
 
-/// Stable BSS singleton; address is exported via
-/// [`kernel_thread_spawner_handle`] for the boot wiring.
 static KERNEL_THREAD_SPAWNER: KernelThreadSpawnerImpl = KernelThreadSpawnerImpl;
 
-/// Doubly-indirect reference for
-/// [`slopos_ostd::task::register_kernel_thread_spawner`]; the setter
-/// requires a `&'static &'static dyn KernelThreadSpawner` so the inner
-/// reference must live in a `static`. Mirrors the
-/// `BUDDY_ALLOCATOR_DYN` shape in `mm/src/page_alloc/mod.rs`.
+/// [`slopos_ostd::task::register_kernel_thread_spawner`] takes a
+/// `&'static &'static dyn KernelThreadSpawner`, so the inner reference must
+/// itself live in a `static`.
 static KERNEL_THREAD_SPAWNER_DYN: &dyn KernelThreadSpawner = &KERNEL_THREAD_SPAWNER;
 
-/// Hand boot the static reference it needs to pass to OSTD's
-/// `register_kernel_thread_spawner`. Stable address; safe to call any
-/// time after link.
+/// The static reference boot passes to OSTD's
+/// `register_kernel_thread_spawner`; stable any time after link.
 #[inline]
 pub fn kernel_thread_spawner_handle() -> &'static &'static dyn KernelThreadSpawner {
     &KERNEL_THREAD_SPAWNER_DYN
 }
 
-// ---------------------------------------------------------------------------
-// KernelIoToken yield backend
-// ---------------------------------------------------------------------------
-//
-// `slopos_ostd::sync::kernel_io_task::yield_with_deadline` defers to a
-// boot-registered backend so the trusted core does not pull in the
-// scheduler crate. Here we install the production implementation
-// mapping the deadline cases to the existing sched primitives.
-
-/// Map a [`Deadline`] onto the scheduler's existing yield / block
-/// primitives.
+/// Production backend for `kernel_io_task::yield_with_deadline`, which defers
+/// to a boot-registered impl so the trusted core does not link the scheduler.
 fn kernel_io_yield_impl(deadline: slopos_ostd::sync::kernel_io_task::Deadline) {
     use slopos_ostd::sync::kernel_io_task::Deadline;
     match deadline {
         Deadline::Immediate => r#yield(),
         Deadline::AtMs(ms) => {
-            // `block_current_task_with_timeout` parks the current task
-            // (state -> Blocked) and arms a sleep-queue deadline; the
-            // task wakes when `ms` ms elapse or some `unblock_task`
-            // wakes us first. This is the right primitive for
-            // "yield until at most `ms` ms from now".
             super::sleep::block_current_task_with_timeout(ms);
         }
         Deadline::Indefinite => {
-            // Conventionally the caller drives `Indefinite` through a
-            // `WaitQueue::wait_event*` predicate. The fallback here
-            // parks for a long time so a forgotten wake doesn't
-            // permanently wedge the task; the scheduler will see a
-            // sleep deadline far in the future.
+            // A far-future deadline rather than none: `Indefinite` is normally
+            // driven by a `wait_event` predicate, and a forgotten wake must not
+            // wedge the task permanently.
             super::sleep::block_current_task_with_timeout(u32::MAX);
         }
     }
@@ -201,45 +171,29 @@ fn kernel_io_yield_impl(deadline: slopos_ostd::sync::kernel_io_task::Deadline) {
 static KERNEL_IO_YIELD_BACKEND: slopos_ostd::sync::kernel_io_task::YieldBackend =
     kernel_io_yield_impl;
 
-/// Returns the `YieldBackend` fn pointer for boot to install via
-/// `register_yield_backend(token, ...)`. Mirrors the spawner-handle
-/// shape so the boot wire path stays uniform.
+/// The `YieldBackend` fn pointer boot installs via `register_yield_backend`.
 #[inline]
 pub fn kernel_io_yield_backend() -> slopos_ostd::sync::kernel_io_task::YieldBackend {
     KERNEL_IO_YIELD_BACKEND
 }
 
-/// The idle task's entry point.
-///
-/// A CPU normally reaches [`scheduler_loop`] through the stack switch in
-/// [`enter_scheduler`] rather than through this trampoline. Both routes land in
-/// the same loop on the same stack, so a switch that resumes the idle task from
-/// its seeded context runs the CPU's real idle loop rather than a second one.
+/// The idle task's entry point. A CPU normally reaches [`scheduler_loop`]
+/// through [`enter_scheduler`]'s stack switch instead; both routes land in the
+/// same loop on the same stack, so resuming a seeded idle context does not
+/// start a second one.
 extern "C" fn idle_task_entry(_: *mut c_void) {
     scheduler_loop(slopos_arch::pcr::get_current_cpu())
 }
 
-/// Deferred work an idle CPU is the cheapest place to run.
-///
-/// Every callee here takes a lock, frees to the allocator, or both, so the
-/// interrupt window is not optional: the idle loop's tail runs with interrupts
-/// disabled because `sti_hlt_cli_atomic` ends in `cli`.
-///
-/// Returns whether it did anything, so the caller can re-run the loop rather
-/// than halt.
 /// The relaxed half of the bottom half: what needs preemption *enabled*.
 ///
-/// Registered with OSTD's bottom-half point, which runs it after releasing its
-/// own preemption guard — the graveyard's push-side predicate refuses to
-/// destroy a task while preemption is disabled, so running it inside would park
-/// corpses in a context their pusher already declined.
-///
-/// Returns whether it left more to do.
+/// OSTD's bottom-half point runs this after releasing its own preemption guard,
+/// which the graveyard requires — its push-side predicate refuses to destroy a
+/// task while preemption is disabled.
 fn relaxed_bottom_half() -> bool {
     crate::scheduler::drain_deferred_task_reclaim();
-    // Here rather than inside the guarded phase: a console dump can run for
-    // seconds against a 115200-baud UART, and this is the one part of the
-    // bottom half that runs with preemption enabled.
+    // Here rather than in the guarded phase: a console dump can run for seconds
+    // against a 115200-baud UART.
     let console = slopos_ostd::kconsole::drain();
     run_idle_callbacks() || console
 }

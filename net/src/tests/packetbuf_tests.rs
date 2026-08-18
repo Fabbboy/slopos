@@ -1,8 +1,4 @@
 //! Tests for PacketBuf and PacketPool.
-//!
-//! Covers: pool alloc/release lifecycle, PacketBuf constructors, push/pull
-//! header operations, from_raw_copy, drop-returns-to-pool, layer offset
-//! helpers, and checksum computation.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
@@ -11,15 +7,9 @@ use crate::packetbuf::{HEADROOM, PacketBuf};
 use crate::pool::{PACKET_POOL, POOL_SIZE};
 use crate::types::{Ipv4Addr, NetError};
 
-/// Ensure the global pool is initialized before each test.
-/// Idempotent — safe to call multiple times.
 fn ensure_pool_init() {
     PACKET_POOL.init();
 }
-
-// =============================================================================
-// 1.T1 — PacketPool::alloc + release
-// =============================================================================
 
 pub fn test_pool_alloc_and_release() -> TestResult {
     ensure_pool_init();
@@ -27,7 +17,6 @@ pub fn test_pool_alloc_and_release() -> TestResult {
     let initial = PACKET_POOL.available();
     assert_test!(initial > 0, "pool should have free slots after init");
 
-    // Allocate one slot.
     let slot = match PACKET_POOL.alloc() {
         Some(s) => s,
         None => return slopos_testing::fail!("alloc should succeed"),
@@ -38,7 +27,6 @@ pub fn test_pool_alloc_and_release() -> TestResult {
         "available decreases by 1 after alloc"
     );
 
-    // Release it.
     PACKET_POOL.release(slot);
     assert_eq_test!(
         PACKET_POOL.available(),
@@ -46,7 +34,6 @@ pub fn test_pool_alloc_and_release() -> TestResult {
         "available restored after release"
     );
 
-    // Alloc again — should still succeed.
     let slot2 = match PACKET_POOL.alloc() {
         Some(s) => s,
         None => return slopos_testing::fail!("alloc should succeed after release"),
@@ -59,7 +46,6 @@ pub fn test_pool_alloc_and_release() -> TestResult {
 pub fn test_pool_exhaust_and_recover() -> TestResult {
     ensure_pool_init();
 
-    // Drain the pool completely.
     let mut slots = [0u16; POOL_SIZE];
     let mut allocated = 0usize;
 
@@ -76,13 +62,11 @@ pub fn test_pool_exhaust_and_recover() -> TestResult {
     assert_test!(allocated > 0, "should allocate at least one slot");
     assert_eq_test!(PACKET_POOL.available(), 0, "pool should be exhausted");
 
-    // Next alloc must fail.
     assert_test!(
         PACKET_POOL.alloc().is_none(),
         "alloc on exhausted pool returns None"
     );
 
-    // Release all — pool recovers.
     for i in 0..allocated {
         PACKET_POOL.release(slots[i]);
     }
@@ -94,10 +78,6 @@ pub fn test_pool_exhaust_and_recover() -> TestResult {
 
     pass!()
 }
-
-// =============================================================================
-// 1.T2 — PacketBuf::alloc
-// =============================================================================
 
 pub fn test_packetbuf_alloc_empty() -> TestResult {
     ensure_pool_init();
@@ -116,7 +96,6 @@ pub fn test_packetbuf_alloc_empty() -> TestResult {
         "head starts at HEADROOM for TX buffers"
     );
 
-    // Headroom is accessible: we can push at least HEADROOM bytes of headers.
     assert_test!(
         pkt.head() >= HEADROOM,
         "at least HEADROOM bytes of headroom available"
@@ -124,10 +103,6 @@ pub fn test_packetbuf_alloc_empty() -> TestResult {
 
     pass!()
 }
-
-// =============================================================================
-// 1.T3 — push_header / pull_header
-// =============================================================================
 
 pub fn test_push_header() -> TestResult {
     ensure_pool_init();
@@ -137,11 +112,9 @@ pub fn test_push_header() -> TestResult {
         None => return slopos_testing::fail!("alloc failed"),
     };
 
-    // Push a 14-byte Ethernet header.
     let eth = match pkt.push_header(14) {
         Ok(slice) => {
             assert_eq_test!(slice.len(), 14, "push_header returns 14 bytes");
-            // Fill with a pattern.
             for (i, byte) in slice.iter_mut().enumerate() {
                 *byte = i as u8;
             }
@@ -154,7 +127,6 @@ pub fn test_push_header() -> TestResult {
     assert_eq_test!(pkt.len(), 14, "len is 14 after pushing 14-byte header");
     assert_eq_test!(pkt.head(), HEADROOM - 14, "head moved backward by 14");
 
-    // Verify the pushed data is in the payload.
     let data = pkt.payload();
     assert_eq_test!(data.len(), 14, "payload length matches");
     assert_eq_test!(data[0], 0, "first byte correct");
@@ -166,7 +138,6 @@ pub fn test_push_header() -> TestResult {
 pub fn test_pull_header() -> TestResult {
     ensure_pool_init();
 
-    // Build a packet with some data via from_raw_copy.
     let raw = [0xAAu8, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44];
     let mut pkt = match PacketBuf::from_raw_copy(&raw) {
         Some(p) => p,
@@ -175,7 +146,6 @@ pub fn test_pull_header() -> TestResult {
 
     assert_eq_test!(pkt.len(), 10, "initial len is 10");
 
-    // Pull first 4 bytes.
     {
         let hdr = match pkt.pull_header(4) {
             Ok(h) => h,
@@ -193,7 +163,6 @@ pub fn test_pull_header() -> TestResult {
         "payload starts at 5th original byte"
     );
 
-    // Pull too many bytes — should fail.
     assert_test!(
         pkt.pull_header(100).is_err(),
         "pull_header beyond len should fail"
@@ -210,13 +179,11 @@ pub fn test_push_header_exhausts_headroom() -> TestResult {
         None => return slopos_testing::fail!("alloc failed"),
     };
 
-    // Push exactly HEADROOM bytes — should succeed.
     assert_test!(
         pkt.push_header(HEADROOM as usize).is_ok(),
         "push_header(HEADROOM) should succeed"
     );
 
-    // Push 1 more byte — should fail (no headroom left).
     match pkt.push_header(1) {
         Err(NetError::NoBufferSpace) => {}
         _ => {
@@ -228,10 +195,6 @@ pub fn test_push_header_exhausts_headroom() -> TestResult {
 
     pass!()
 }
-
-// =============================================================================
-// 1.T4 — PacketBuf::from_raw_copy
-// =============================================================================
 
 pub fn test_from_raw_copy() -> TestResult {
     ensure_pool_init();
@@ -251,7 +214,6 @@ pub fn test_from_raw_copy() -> TestResult {
         assert_eq_test!(payload[i], (i + 1) as u8, "byte content matches");
     }
 
-    // Layer offsets are initially zero.
     assert_eq_test!(pkt.l2_offset(), 0, "l2_offset starts at 0");
     assert_eq_test!(pkt.l3_offset(), 0, "l3_offset starts at 0");
     assert_eq_test!(pkt.l4_offset(), 0, "l4_offset starts at 0");
@@ -272,16 +234,11 @@ pub fn test_from_raw_copy_empty() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 1.T5 — PacketBuf drop returns slot to pool
-// =============================================================================
-
 pub fn test_drop_returns_to_pool() -> TestResult {
     ensure_pool_init();
 
     let before = PACKET_POOL.available();
 
-    // Allocate inside a block so it drops at block end.
     {
         let _pkt = match PacketBuf::alloc() {
             Some(p) => p,
@@ -293,7 +250,6 @@ pub fn test_drop_returns_to_pool() -> TestResult {
             "available decreased while PacketBuf alive"
         );
     }
-    // _pkt dropped here.
 
     assert_eq_test!(
         PACKET_POOL.available(),
@@ -325,17 +281,11 @@ pub fn test_drop_multiple() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Layer offset helpers
-// =============================================================================
-
 pub fn test_layer_offsets() -> TestResult {
     ensure_pool_init();
 
-    // Simulate an RX Ethernet+IP+UDP packet.
     // Ethernet: 14 bytes, IP: 20 bytes, UDP: 8+payload
     let mut raw = [0u8; 50];
-    // Fill with recognizable pattern per layer.
     for i in 0..14 {
         raw[i] = 0xE0 | (i as u8); // "Ethernet" marker
     }
@@ -379,7 +329,6 @@ pub fn test_layer_offsets_unset() -> TestResult {
         None => return slopos_testing::fail!("from_raw_copy failed"),
     };
 
-    // No offsets set — all layer accessors return empty.
     assert_test!(
         pkt.l2_header().is_empty(),
         "l2_header empty when l3 not set"
@@ -395,10 +344,6 @@ pub fn test_layer_offsets_unset() -> TestResult {
 
     pass!()
 }
-
-// =============================================================================
-// Append
-// =============================================================================
 
 pub fn test_append() -> TestResult {
     ensure_pool_init();
@@ -420,16 +365,9 @@ pub fn test_append() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Checksum helpers
-// =============================================================================
-
 pub fn test_ipv4_checksum() -> TestResult {
     ensure_pool_init();
 
-    // Build a minimal IPv4 header (20 bytes) inside a PacketBuf.
-    // Version=4, IHL=5, Total Length=20, TTL=64, Protocol=UDP(17)
-    // Src=10.0.2.15, Dst=10.0.2.1, Checksum=0 (to be computed)
     #[rustfmt::skip]
     let ip_header: [u8; 20] = [
         0x45, 0x00, 0x00, 0x14,  // ver/ihl, dscp/ecn, total_len
@@ -439,7 +377,6 @@ pub fn test_ipv4_checksum() -> TestResult {
         0x0A, 0x00, 0x02, 0x01,  // dst=10.0.2.1
     ];
 
-    // Build frame: 14-byte eth stub + 20-byte IP header
     let mut frame = [0u8; 34];
     frame[14..34].copy_from_slice(&ip_header);
     let mut pkt = match PacketBuf::from_raw_copy(&frame) {
@@ -453,14 +390,10 @@ pub fn test_ipv4_checksum() -> TestResult {
     let csum = pkt.compute_ipv4_checksum();
     assert_test!(csum != 0, "checksum should be non-zero");
 
-    // Verify: setting the computed checksum and recomputing should give 0.
-    // Patch the checksum into the header.
     let l3_off = pkt.l3_offset() as usize;
     pkt.payload_mut()[l3_off + 10] = (csum >> 8) as u8;
     pkt.payload_mut()[l3_off + 11] = (csum & 0xFF) as u8;
 
-    // Recompute over the whole header (including the checksum field).
-    // Use the standalone ipv4_header_checksum from mod.rs for verification.
     let hdr = &pkt.payload()[l3_off..l3_off + 20];
     let verify = crate::checksum::internet_checksum(hdr);
     assert_eq_test!(verify, 0, "checksum verifies to 0");
@@ -474,7 +407,6 @@ pub fn test_udp_checksum() -> TestResult {
     let src = Ipv4Addr([10, 0, 2, 15]);
     let dst = Ipv4Addr([10, 0, 2, 1]);
 
-    // Build a UDP datagram: 8-byte header + 5-byte payload "Hello"
     #[rustfmt::skip]
     let udp_header: [u8; 8] = [
         0x04, 0xD2, // src_port = 1234
@@ -484,7 +416,6 @@ pub fn test_udp_checksum() -> TestResult {
     ];
     let payload = b"Hello";
 
-    // Build frame: 14-byte eth stub + 20-byte IP stub + 8 UDP header + 5 payload
     let mut frame = [0u8; 47];
     frame[34..42].copy_from_slice(&udp_header);
     frame[42..47].copy_from_slice(payload);
@@ -500,7 +431,6 @@ pub fn test_udp_checksum() -> TestResult {
     let csum = pkt.compute_udp_checksum(src, dst);
     assert_test!(csum != 0, "UDP checksum should be non-zero");
 
-    // Cross-check with the existing udp_checksum function from mod.rs.
     let expected = crate::checksum::udp_checksum(src.0, dst.0, 1234, 53, payload);
     assert_eq_test!(csum, expected, "matches existing udp_checksum function");
 
@@ -513,7 +443,6 @@ pub fn test_tcp_checksum() -> TestResult {
     let src = Ipv4Addr([192, 168, 1, 100]);
     let dst = Ipv4Addr([93, 184, 216, 34]);
 
-    // Build a minimal TCP SYN segment (20 bytes, no options, no payload).
     #[rustfmt::skip]
     let tcp_header: [u8; 20] = [
         0xC0, 0x00, // src_port = 49152
@@ -526,7 +455,6 @@ pub fn test_tcp_checksum() -> TestResult {
         0x00, 0x00, // urgent_ptr = 0
     ];
 
-    // Build frame: 14 eth + 20 IP + 20 TCP
     let mut frame = [0u8; 54];
     frame[34..54].copy_from_slice(&tcp_header);
 
@@ -541,38 +469,25 @@ pub fn test_tcp_checksum() -> TestResult {
     let csum = pkt.compute_tcp_checksum(src, dst);
     assert_test!(csum != 0, "TCP checksum should be non-zero");
 
-    // Cross-check with the existing tcp_checksum function.
     let expected = crate::tcp::tcp_checksum(src.0, dst.0, &tcp_header);
     assert_eq_test!(csum, expected, "matches existing tcp_checksum function");
 
     pass!()
 }
 
-// =============================================================================
-// Test suite registration
-// =============================================================================
-
-// 1.T1 — Pool alloc + release
 slopos_testing::stest!(name = test_pool_alloc_and_release, suite = packetbuf);
 slopos_testing::stest!(name = test_pool_exhaust_and_recover, suite = packetbuf);
-// 1.T2 — PacketBuf::alloc
 slopos_testing::stest!(name = test_packetbuf_alloc_empty, suite = packetbuf);
-// 1.T3 — push_header / pull_header
 slopos_testing::stest!(name = test_push_header, suite = packetbuf);
 slopos_testing::stest!(name = test_pull_header, suite = packetbuf);
 slopos_testing::stest!(name = test_push_header_exhausts_headroom, suite = packetbuf);
-// 1.T4 — from_raw_copy
 slopos_testing::stest!(name = test_from_raw_copy, suite = packetbuf);
 slopos_testing::stest!(name = test_from_raw_copy_empty, suite = packetbuf);
-// 1.T5 — Drop returns to pool
 slopos_testing::stest!(name = test_drop_returns_to_pool, suite = packetbuf);
 slopos_testing::stest!(name = test_drop_multiple, suite = packetbuf);
-// Layer offset helpers
 slopos_testing::stest!(name = test_layer_offsets, suite = packetbuf);
 slopos_testing::stest!(name = test_layer_offsets_unset, suite = packetbuf);
-// Append
 slopos_testing::stest!(name = test_append, suite = packetbuf);
-// Checksum helpers
 slopos_testing::stest!(name = test_ipv4_checksum, suite = packetbuf);
 slopos_testing::stest!(name = test_udp_checksum, suite = packetbuf);
 slopos_testing::stest!(name = test_tcp_checksum, suite = packetbuf);

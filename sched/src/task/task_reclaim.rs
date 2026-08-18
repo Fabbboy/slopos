@@ -1,52 +1,19 @@
 //! Universal task-reference release, and the graveyard that makes it safe from
 //! any context.
 //!
-//! # Why a graveyard
+//! `Task`'s destructor takes allocator locks, so running it with interrupts
+//! disabled, under a lock, or on the dying task's own stack deadlocks — yet the
+//! final reference legitimately drops in exactly those contexts. [`task_put`]
+//! always decrements immediately, destroys inline only when the context allows,
+//! and otherwise parks the allocation here and arms the bottom half so the
+//! corpse is collected at the next outermost unlock rather than when a CPU next
+//! runs out of work.
 //!
-//! `Task`'s destructor is allocator-heavy: it returns the FPU area, the address
-//! space and the stack slots to the allocator, and takes its locks to do it.
-//! (The stack's *frames* stay mapped — `TaskStack::drop` deliberately unmaps
-//! nothing, so the slot can be reused without a broadcast shootdown.) Running
-//! that with interrupts disabled, under a lock, or on the dying task's own
-//! stack is the known slab/buddy deadlock — not a latency blip.
-//!
-//! But the *last* reference to a task can legitimately be released from exactly
-//! those contexts: a registry lookup guard dropped inside the registry
-//! cli-spinlock, a batch of guards dropped on the timer tick, a ready-queue
-//! entry released under the queue lock, or the outgoing dispatch reference in
-//! the interrupts-off switch tail.
-//!
-//! So [`task_put`] splits the two halves. The decrement always happens
-//! immediately; the destruction happens inline only when the context provably
-//! allows it, and otherwise the (now uniquely owned) allocation is parked here.
-//! A push arms the bottom-half point, so the corpse is collected at the next
-//! outermost unlock or syscall return rather than waiting for a CPU to run out
-//! of work — which under sustained fork/exit load it never does.
-//!
-//! This is `put_task_struct` with PREEMPT_RT's `call_rcu` escape hatch, and the
-//! two properties copied from it matter: finality is decided by the decrement
-//! rather than by reading the count first, and the deferral decision is made on
-//! *context*, never on a count.
-//!
-//! # Why the stack is safe without a lock
-//!
-//! A pusher reaches [`graveyard_push`] only by winning the one-to-zero strong
-//! transition, and exactly one thread can win it per allocation. So the pusher
-//! owns the node outright: no other thread holds a reference, and the
-//! `reclaim_link` slot has no contention at all. That is what lets the stack be
-//! a bare CAS with no lock — which in turn is what lets a push happen under the
-//! registry lock, where taking any further lock would risk the very deadlock
-//! this module exists to avoid.
-//!
-//! # The reclaim token
-//!
-//! "The pusher won the final release" is carried by a value rather than by this
-//! comment. `task_release_strong` hands back a `ParkedTask` only to the winner;
-//! every operation here takes it by value, so the allocation has exactly one
-//! owner at each point and a double-destroy does not typecheck. The stack
-//! itself is threaded through the task bodies and can only hold a pointer, so
-//! the token is surrendered on push and reconstituted on drain — one place,
-//! marked as such below.
+//! The stack needs no lock: only the winner of the one-to-zero strong
+//! transition pushes, so the pusher owns the node outright and can push from
+//! under the registry lock. That uniqueness is carried by the `ParkedTask`
+//! token, which every operation here takes by value, so a double-destroy does
+//! not typecheck.
 
 use core::ptr;
 use core::ptr::NonNull;
@@ -61,42 +28,31 @@ use slopos_ostd::task::{
 use super::{Task, TaskRef};
 use crate::task_stack::{KernelStack, UnsafeStack};
 
-/// The reclaim token for this crate's concrete `Task`.
 type ParkedTaskRef = ParkedTask<KernelStack, UnsafeStack>;
 
 /// Tasks whose final reference was released where the destructor could not run.
 ///
 /// Global rather than per-CPU: a per-CPU stack strands its contents when that
-/// CPU stops idling or is paused for teardown, and this is a genuinely cold
-/// path — one push per task *death*, not per reference release — so the single
-/// CAS point costs nothing.
+/// CPU stops idling or is paused for teardown.
 static TASK_GRAVEYARD: AtomicPtr<Task> = AtomicPtr::new(ptr::null_mut());
 
 /// Release one strong task reference from **any** context.
 ///
-/// This is SlopOS's `put_task_struct`, and the sole sanctioned way to drop a
-/// `KArc<Task>`. A non-final release is one atomic decrement. A final release
-/// destroys inline when the context allows and otherwise parks the allocation
-/// for [`task_graveyard_drain`].
+/// The sole sanctioned way to drop a `KArc<Task>`. A final release destroys
+/// inline when the context allows and otherwise parks the allocation for
+/// [`task_graveyard_drain`].
 #[inline]
 pub fn task_put(task: TaskRef) {
     release_arc(task.into_arc());
 }
 
-/// The release itself, on the handle the guard wraps.
-///
-/// Private, and reached only from [`task_put`] and [`TaskRef`]'s `Drop`, so
-/// there is one release sequence and it cannot be spelled with a handle that
-/// came from anywhere else.
+/// The single release sequence, reached only from [`task_put`] and
+/// [`TaskRef`]'s `Drop`.
 #[inline]
 pub(super) fn release_arc(arc: KArc<Task>) {
     let Some(parked) = task_release_strong(arc) else {
-        // Other references remain: a bare decrement, safe anywhere.
         return;
     };
-    // The token is the proof that we won the one-to-zero transition, so the
-    // allocation is ours alone. Both arms consume it, so exactly one of them
-    // can run and neither can run twice.
     if destroy_context_is_safe(&parked) {
         task_destroy_parked(parked);
     } else {

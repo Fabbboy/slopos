@@ -408,15 +408,13 @@ pub fn process_sqe_for_test(table: FdTable, ring: &mut Ring, sqe: &Sqe) {
 }
 
 /// Test hook: drive one `harvest_step` pass against a fabricated ring.
-/// Returns whether `min_complete` CQEs are now available.
 #[cfg(feature = "test-hooks")]
 pub fn harvest_step_for_test(table: FdTable, ring: &mut Ring, min_complete: u32) -> bool {
     harvest_step(table, ring, min_complete)
 }
 
-/// `OP_CANCEL`: walk the in-flight table for the target `user_data`
-/// (`Sqe.addr`); remove matches and post `-ECANCELED`, then post the
-/// cancel SQE's own result (SLOPRING § 10).
+/// `OP_CANCEL`: remove the in-flight rows matching `Sqe.addr`, posting
+/// `-ECANCELED` for each, then the cancel SQE's own result (SLOPRING § 10).
 fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
     let target = sqe.addr;
     let cancel_all = sqe.op_flags & SLOPRING_ASYNC_CANCEL_ALL != 0;
@@ -426,8 +424,8 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
             break;
         };
         if let Some(row) = ring.inflight.remove_at(i) {
-            // Multishot rows cancel identically: one terminal -ECANCELED
-            // with F_MORE clear (SLOPRING §1.3 trigger 4).
+            // Multishot rows cancel identically: one terminal -ECANCELED with
+            // F_MORE clear (SLOPRING §1.3 trigger 4).
             let _ = ring.post_cqe(row.user_data, eno(Errno::ECANCELED), 0);
             release_fixed_row(ring, &row);
             reap_row(ring, row);
@@ -442,15 +440,12 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
 }
 
 /// Complete phase: block the calling task on the in-flight set until
-/// `min_complete` CQEs are available, a signal arrives, or a deadline
-/// elapses (SLOPRING § 7.1, § 8.3). Returns 0 on progress, or
-/// `-EINTR` on signal.
+/// `min_complete` CQEs are available, a signal arrives, or a deadline elapses
+/// (SLOPRING § 7.1, § 8.3). Returns 0 on progress, `-EINTR` on signal.
 fn harvest(table: FdTable, raw_handle: usize, min_complete: u32) -> i32 {
     loop {
-        // Step 1: snapshot the distinct in-flight files (by reference
-        // identity) + the nearest OP_TIMEOUT deadline under the lock (quick,
-        // no blocking). The returned aliases keep the backings alive across
-        // the unlocked registration below.
+        // The returned aliases keep the backings alive across the unlocked
+        // registration below.
         let pre = registry::with_ring(raw_handle, |ring| {
             (distinct_inflight_files(ring), nearest_deadline_ms(ring))
         });
@@ -459,15 +454,11 @@ fn harvest(table: FdTable, raw_handle: usize, min_complete: u32) -> i32 {
             Err(_) => return eno(Errno::EBADF),
         };
 
-        // Step 2: REGISTER the calling task on each file's resource queue
-        // *before* the re-probe (SLOPRING § 7.1 — register-then-recheck
-        // closes the lost-wakeup window: a producer that publishes after
-        // this point has already enqueued our wait node).
+        // Register before the re-probe (SLOPRING § 7.1): register-then-recheck
+        // closes the lost-wakeup window, since a producer publishing after this
+        // point has already enqueued our wait node.
         let tokens = register_files(&files);
 
-        // Step 3: re-probe every in-flight row, post ready CQEs, and
-        // check whether we now have enough. Retired rows are moved out to
-        // drop after the ring lock is released.
         let step = registry::with_ring(raw_handle, |ring| {
             let enough = harvest_step(table, ring, min_complete);
             (enough, core::mem::take(&mut ring.pending_reap))
@@ -485,15 +476,9 @@ fn harvest(table: FdTable, raw_handle: usize, min_complete: u32) -> i32 {
             return 0;
         }
 
-        // Step 4: block until a wake, the re-poll cap, or a timeout
-        // deadline — whichever is soonest.
         let sleep_ms = sleep_budget(deadline);
         block_current_task_with_timeout(sleep_ms);
 
-        // Step 5: unregister symmetrically, then re-check the signal /
-        // loop. (A timeout deadline elapsing is handled by the next
-        // harvest_step posting -ETIME, which may then satisfy
-        // min_complete.)
         unregister(&tokens);
         if current_task_wait_aborted() {
             return eno(Errno::EINTR);
@@ -501,19 +486,15 @@ fn harvest(table: FdTable, raw_handle: usize, min_complete: u32) -> i32 {
     }
 }
 
-/// Unregister the calling task from every queue it registered on.
 fn unregister(tokens: &KVec<u64>) {
     for &tok in tokens.iter() {
         file_poll_unfused_by_token(tok);
     }
 }
 
-/// Distinct in-flight files (by open-file identity, not fd number) across
-/// all non-timeout rows, aliased so the returned set outlives the ring
-/// lock for the unlocked registration step. Keying on identity is what
-/// closes the close+reuse aliasing window: two rows on the same reused fd
-/// number are distinct files here, and a single file backing two rows
-/// registers once.
+/// Distinct in-flight files by open-file identity, not fd number: that is what
+/// closes the close+reuse aliasing window, and one file backing two rows
+/// registers once. Aliased so the set outlives the ring lock.
 fn distinct_inflight_files(ring: &Ring) -> KVec<FileRef> {
     let mut files: KVec<FileRef> = KVec::new();
     for row in ring.inflight.iter() {
@@ -541,8 +522,7 @@ fn nearest_deadline_ms(ring: &Ring) -> Option<u64> {
     best
 }
 
-/// Compute the block timeout: the re-poll cap, clamped down to a pending
-/// OP_TIMEOUT deadline if one is sooner.
+/// Block timeout: the re-poll cap, clamped down to a sooner OP_TIMEOUT deadline.
 fn sleep_budget(deadline: Option<u64>) -> u32 {
     match deadline {
         None => MAX_SLEEP_MS,
@@ -557,17 +537,15 @@ fn sleep_budget(deadline: Option<u64>) -> u32 {
     }
 }
 
-/// One harvest iteration under the ring lock: re-probe every in-flight
-/// row, post ready CQEs (removing the row), honour timeout deadlines,
-/// and report whether `min_complete` CQEs are now available.
+/// One harvest iteration: re-probe every in-flight row, post ready CQEs,
+/// honour timeout deadlines, and report whether `min_complete` CQEs are
+/// available.
 ///
-/// Runs under the per-ring lock (held by `registry::with_ring`): the
-/// `inflight.snapshot()` below and every reprobe + CQE post observe one
-/// atomic instant, with no concurrent submit/cancel mutating the table
-/// or the indices mid-pass.
+/// Runs under the per-ring lock, so the snapshot below and every reprobe and
+/// CQE post observe one atomic instant, with no concurrent submit/cancel
+/// mutating the table or the indices mid-pass.
 fn harvest_step(table: FdTable, ring: &mut Ring, min_complete: u32) -> bool {
     let now = get_time_ms();
-    // Re-probe each row; collect indices to remove + CQEs to post.
     let snapshot = ring.inflight.snapshot();
     // Walk by user_data so removals don't invalidate indices.
     for row in snapshot.iter() {
@@ -587,11 +565,8 @@ fn harvest_step(table: FdTable, ring: &mut Ring, min_complete: u32) -> bool {
             continue;
         }
 
-        // Ownership ops (OP_ACCEPT / consuming reads) must reserve a CQE
-        // slot *before* the side effect even on the deferred path — a
-        // reprobe that installs an fd into a full CQ would orphan it
-        // (SLOPRING § 11). If the CQ is full, leave the row in flight
-        // and try again on the next harvest (after userspace drains).
+        // A reprobe that installs an fd into a full CQ would orphan it
+        // (SLOPRING § 11); leave the row in flight until userspace drains.
         if opcode::is_ownership_op(row.opcode) {
             let cq_head = ring.read_cq_head().unwrap_or(0);
             if ring.cq_full(cq_head) {

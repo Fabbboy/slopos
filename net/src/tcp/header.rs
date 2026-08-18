@@ -19,10 +19,6 @@ pub const TCP_FLAG_PSH: u8 = 0x08;
 pub const TCP_FLAG_ACK: u8 = 0x10;
 pub const TCP_FLAG_URG: u8 = 0x20;
 
-// ---------------------------------------------------------------------------
-// TCP option kinds
-// ---------------------------------------------------------------------------
-
 pub const TCP_OPT_END: u8 = 0;
 pub const TCP_OPT_NOP: u8 = 1;
 pub const TCP_OPT_MSS: u8 = 2;
@@ -35,12 +31,6 @@ pub const TCP_OPT_SACK: u8 = 5;
 pub const TCP_OPT_TIMESTAMP: u8 = 8;
 pub const TCP_OPT_TIMESTAMP_LEN: u8 = 10;
 
-// =============================================================================
-// TCP Header
-// =============================================================================
-
-/// Parsed TCP header.
-///
 /// All multi-byte fields are stored in **host** byte order after parsing.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TcpHeader {
@@ -68,8 +58,6 @@ impl TcpHeader {
     pub const fn options_len(&self) -> usize {
         self.header_len().saturating_sub(TCP_HEADER_LEN)
     }
-
-    // --- Flag helpers -------------------------------------------------------
 
     #[inline]
     pub const fn is_syn(&self) -> bool {
@@ -112,12 +100,6 @@ impl TcpHeader {
     }
 }
 
-// =============================================================================
-// Parsing
-// =============================================================================
-
-/// Parse a TCP header from a byte slice.
-///
 /// Returns `None` if the slice is too short or the data offset is invalid.
 pub fn parse_header(data: &[u8]) -> Option<TcpHeader> {
     if data.len() < TCP_HEADER_LEN {
@@ -136,7 +118,6 @@ pub fn parse_header(data: &[u8]) -> Option<TcpHeader> {
     let checksum = u16::from_be_bytes([data[16], data[17]]);
     let urgent_ptr = u16::from_be_bytes([data[18], data[19]]);
 
-    // Data offset must be at least 5 (20 bytes) and at most 15 (60 bytes).
     if data_offset < 5 || data_offset > 15 {
         return None;
     }
@@ -292,12 +273,6 @@ pub fn write_window_scale_option(shift: u8, out: &mut [u8]) -> Option<usize> {
     Some(3)
 }
 
-// =============================================================================
-// Construction
-// =============================================================================
-
-/// Write a TCP header into `out[..header_len]`.
-///
 /// Returns the header length on success, `None` if `out` is too short.
 /// The checksum field is written as 0 — the caller must compute and patch it
 /// afterwards using [`super::checksum::tcp_checksum`].
@@ -314,10 +289,9 @@ pub fn write_header(hdr: &TcpHeader, out: &mut [u8]) -> Option<usize> {
     out[12] = (hdr.data_offset << 4) & 0xF0;
     out[13] = hdr.flags & 0x3F;
     out[14..16].copy_from_slice(&hdr.window_size.to_be_bytes());
-    out[16..18].copy_from_slice(&0u16.to_be_bytes()); // checksum placeholder
+    out[16..18].copy_from_slice(&0u16.to_be_bytes());
     out[18..20].copy_from_slice(&hdr.urgent_ptr.to_be_bytes());
 
-    // Zero any options area beyond the minimum header.
     if header_len > TCP_HEADER_LEN {
         out[TCP_HEADER_LEN..header_len].fill(0);
     }
@@ -325,7 +299,6 @@ pub fn write_header(hdr: &TcpHeader, out: &mut [u8]) -> Option<usize> {
     Some(header_len)
 }
 
-/// Build a minimal TCP header with the given parameters.
 pub fn build_header(
     src_port: u16,
     dst_port: u16,
@@ -348,7 +321,6 @@ pub fn build_header(
     }
 }
 
-/// Write MSS option into `out` buffer.  Returns bytes written (4) or `None`.
 pub fn write_mss_option(mss: u16, out: &mut [u8]) -> Option<usize> {
     if out.len() < 4 {
         return None;
