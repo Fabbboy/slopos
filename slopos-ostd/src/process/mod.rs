@@ -165,7 +165,6 @@ impl Process {
         self.handle.load(Ordering::Acquire)
     }
 
-    /// This process's resource account.
     #[inline]
     pub fn account(&self) -> AccountId {
         self.account
@@ -177,10 +176,8 @@ impl Process {
         self.account_parent
     }
 
-    /// The parent process, if it is still resolvable.
-    ///
-    /// `None` covers both "never had one" and "the parent has been reaped",
-    /// which are the same thing to every caller: the process is an orphan.
+    /// The parent process, if it is still resolvable. `None` covers both
+    /// "never had one" and "reaped": to every caller, an orphan.
     #[inline]
     pub fn parent(&self) -> Option<Handle<Process>> {
         unpack_process_handle(self.parent.load(Ordering::Acquire))
@@ -193,7 +190,6 @@ impl Process {
         self.parent.store(packed, Ordering::Release);
     }
 
-    /// Live task count.
     #[inline]
     pub fn task_count(&self) -> u32 {
         self.task_count.load(Ordering::Acquire)
@@ -201,8 +197,7 @@ impl Process {
 
     /// Join this process. Returns the count after the join.
     ///
-    /// Allocation-free and lock-free: one atomic, so it is legal from the
-    /// fork path under a preempt guard.
+    /// One atomic, so it is legal from the fork path under a preempt guard.
     #[inline]
     pub fn task_join(&self) -> u32 {
         self.task_count.fetch_add(1, Ordering::AcqRel) + 1
@@ -210,9 +205,8 @@ impl Process {
 
     /// Leave this process. Returns `true` if this was the last task.
     ///
-    /// Saturating rather than wrapping: a double-leave is a bookkeeping bug,
-    /// and the failure it must not produce is a count that wraps to `u32::MAX`
-    /// and pins the address space forever.
+    /// Saturating rather than wrapping: a double-leave must not produce a
+    /// count that wraps to `u32::MAX` and pins the address space forever.
     #[inline]
     pub fn task_leave(&self) -> bool {
         let mut current = self.task_count.load(Ordering::Acquire);
@@ -261,34 +255,25 @@ impl core::fmt::Debug for Process {
 impl Drop for Process {
     /// Return the id to the allocator. Nothing else.
     ///
-    /// Panic-free and lock-free by construction: the id allocator is an atomic
-    /// bitmap, so this is one `fetch_and`. That is what makes the destructor
-    /// legal wherever a last release can happen — under the registry lock, on
-    /// the exit path with interrupts off, or on a dying task's own unwind.
-    ///
-    /// The registry slot is *not* released here: releasing it is what caused
-    /// this drop.
+    /// Panic-free and lock-free by construction, which is what makes the
+    /// destructor legal wherever a last release can happen — under the
+    /// registry lock, on the exit path with interrupts off, or on a dying
+    /// task's own unwind. The registry slot is *not* released here: releasing
+    /// it is what caused this drop.
     ///
     /// The account row goes dark here rather than at the reap, so a charge
-    /// that outlives its process — an in-flight `SCM_RIGHTS` reference, a
-    /// keepalive pin — refunds against a released row and is a defined no-op
-    /// instead of a debit against whoever holds the slot next.
+    /// that outlives its process refunds against a released row and is a
+    /// defined no-op instead of a debit against whoever holds the slot next.
     fn drop(&mut self) {
-        // This releases *this process's* account row. It does not touch
-        // `proc_charge`, which is billed to the **spawner's** row and is
-        // refunded by its own field destructor after this body returns — a
-        // different row, on a chain this process is not on, so the two do not
-        // interact.
+        // Releases *this* process's row; `proc_charge` bills the spawner's and
+        // is refunded by its own field destructor after this body returns.
         quota::account_release(self.account);
         registry::release_process_id(self.id);
     }
 }
 
-/// Resolve a handle to the process it names.
-///
-/// The failure modes are the point: a rebound slot answers
-/// [`HandleError::Stale`] rather than handing back whichever process occupies
-/// it now.
+/// Resolve a handle to the process it names. A rebound slot answers
+/// [`HandleError::Stale`] rather than whichever process occupies it now.
 #[inline]
 pub fn process_lookup(handle: Handle<Process>) -> Result<crate::KArc<Process>, HandleError> {
     process_resolve(handle)
@@ -297,27 +282,16 @@ pub fn process_lookup(handle: Handle<Process>) -> Result<crate::KArc<Process>, H
 /// A process named by both halves of its identity: the generation-checked
 /// handle that every table keys on, and the numeric id the ABI shows userland.
 ///
-/// This is the type kernel entry points should take instead of a bare `u32`.
-/// A `u32` is a *number* — it says nothing about whether the process it named
-/// still exists, and ids recycle, so a stale one silently designates whichever
-/// process holds that number now. Every such parameter is a confused-deputy
-/// surface waiting for a caller to hold one a moment too long.
+/// What kernel entry points take instead of a bare `u32`: ids recycle, so a
+/// stale number silently designates whichever process holds it now.
 ///
 /// The two fields cannot disagree, because the only way to build one outside
 /// this module is [`resolve`](Self::resolve), which reads both from the same
-/// live process under one lookup. `id` is therefore safe to hand to a log line
-/// or a syscall return without a second thought, and `handle` is what every
-/// lookup actually uses.
+/// live process under one lookup.
 ///
-/// # Size
-///
-/// Two `u64`s, and deliberately so. The obvious layout — a [`Handle`] plus a
-/// `u32` — is 24 bytes, and this type replaces a `u32` in the argument list of
-/// most of the syscall surface. Three frames crossed the 2 KiB stack gate at
-/// 24 bytes; the packed form keeps every one of them under it. Storing the
-/// handle in its packed encoding rather than as a struct is what buys that,
-/// and costs one shift-and-mask per access on paths that are already doing a
-/// table lookup.
+/// The handle is stored packed rather than as a [`Handle`] struct — the
+/// 24-byte layout put three frames over the 2 KiB stack gate, since this type
+/// replaces a `u32` across most of the syscall surface.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ProcessId {
     /// The handle in its [`pack_process_handle`] encoding. Never zero: a
@@ -327,10 +301,8 @@ pub struct ProcessId {
 }
 
 impl ProcessId {
-    /// The identity of a live process.
-    ///
-    /// The only constructor that consults the registry, and the reason the two
-    /// halves are always consistent.
+    /// The identity of a live process. `None` for one that was never
+    /// registered.
     #[inline]
     pub fn of(process: &Process) -> Option<Self> {
         let packed = process.handle_raw();
@@ -345,10 +317,9 @@ impl ProcessId {
 
     /// Resolve a numeric id to a live process identity.
     ///
-    /// The bridge for the ABI boundary, where userland hands over a number and
-    /// nothing else. `None` for an id naming no live process — which is the
-    /// whole point: the failure is at the boundary, once, instead of being
-    /// carried inward as a `u32` that later resolves to a stranger.
+    /// The bridge at the ABI boundary: an id naming no live process fails
+    /// here, once, instead of being carried inward as a `u32` that later
+    /// resolves to a stranger.
     #[inline]
     pub fn resolve(id: u32) -> Option<Self> {
         let process = process_find_by_id(id)?;
@@ -357,10 +328,9 @@ impl ProcessId {
 
     /// The generation-checked handle. What every table lookup keys on.
     ///
-    /// Total: `packed` is non-zero by construction and only
-    /// [`pack_process_handle`] ever wrote it, so the unpack always succeeds.
-    /// The `unwrap_or` is unreachable and resolves to nothing — slot `u32::MAX`
-    /// is outside every table.
+    /// `packed` is non-zero by construction and only [`pack_process_handle`]
+    /// ever wrote it, so the `unwrap_or` is unreachable — and slot `u32::MAX`
+    /// is outside every table, so it resolves to nothing if it is ever hit.
     #[inline]
     pub fn handle(self) -> Handle<Process> {
         unpack_process_handle(self.packed).unwrap_or(Handle::from_parts(u32::MAX, u64::MAX))
@@ -372,19 +342,14 @@ impl ProcessId {
         self.id
     }
 
-    /// The process itself, if it is still live.
-    ///
-    /// Returns `None` once the process has been reaped, even though `self`
-    /// still names it: holding a `ProcessId` does not keep a process alive, by
-    /// design. It is a designator, not a reference — an owning one would make
-    /// every syscall argument a lifetime-extending edge on the process it
-    /// mentions.
+    /// The process itself, if it is still live. `None` once it has been
+    /// reaped: a `ProcessId` is a designator, not a reference, so it does not
+    /// keep the process alive.
     #[inline]
     pub fn get(self) -> Option<crate::KArc<Process>> {
         process_for_handle(self.handle())
     }
 
-    /// Whether the process is still live.
     #[inline]
     pub fn is_live(self) -> bool {
         self.get().is_some()
@@ -392,10 +357,9 @@ impl ProcessId {
 
     /// The account this process's resources are charged to.
     ///
-    /// [`AccountId::NONE`] once the process has been reaped, which every arena
-    /// operation treats as a vacuous success — never the root's, which would
-    /// bill the kernel for a user process's resources the moment that process
-    /// went away.
+    /// [`AccountId::NONE`] once the process has been reaped — every arena
+    /// operation treats that as a vacuous success — never the root's, which
+    /// would bill the kernel for a departed user process's resources.
     #[inline]
     pub fn account(self) -> AccountId {
         self.get()
@@ -416,8 +380,6 @@ impl core::fmt::Debug for ProcessId {
 }
 
 impl core::fmt::Display for ProcessId {
-    /// The numeric id alone, so a `{}` in a log line reads the way the old
-    /// `u32` did.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.id)
     }
@@ -427,9 +389,6 @@ impl core::fmt::Display for ProcessId {
 mod tests {
     use super::*;
 
-    /// A charge against no account. Every arena operation on `AccountId::NONE`
-    /// is a vacuous success, so this debits nothing and refunds nothing — the
-    /// right shape for a process that was never registered.
     fn no_charge() -> quota::Reservation<slopos_abi::quota::ProcCount> {
         quota::try_charge::<slopos_abi::quota::ProcCount>(AccountId::NONE, 1)
             .expect("a charge against no account is vacuous")
@@ -454,7 +413,7 @@ mod tests {
         assert!(!p.task_leave());
         assert!(p.task_leave(), "the second leave is the last task");
         assert_eq!(p.task_count(), 0);
-        // Suppress the id-release path: this process was never registered.
+        // Never registered, so skip the id-release path.
         core::mem::forget(p);
     }
 
@@ -481,8 +440,6 @@ mod tests {
         let new_parent = Handle::<Process>::from_parts(7, 11);
         p.set_parent(Some(new_parent));
         assert_eq!(p.parent(), Some(new_parent));
-        // The accounting edge has no setter at all — this is the compile-time
-        // half of "charge migration is unrepresentable".
         assert_eq!(p.account_parent(), AccountId::from_parts(1, 2));
         assert_eq!(p.account(), AccountId::from_parts(4, 9));
         core::mem::forget(p);
@@ -498,7 +455,6 @@ mod tests {
     }
 
     /// The first process a fresh table binds lands on slot 0 generation 0.
-    /// Unbiased, that packs to zero and reads back as "no process".
     #[test]
     fn the_first_slot_at_generation_zero_is_not_none() {
         let first = Handle::<Process>::from_parts(0, 0);
@@ -509,11 +465,9 @@ mod tests {
         );
     }
 
-    /// A word whose slot field is zero cannot have come from the packer.
     #[test]
     fn an_unbiased_word_is_refused_rather_than_wrapping() {
-        // Slot field 0, generation 5: the shape a caller would produce by
-        // packing without the bias.
+        // Slot field 0, generation 5: what packing without the bias produces.
         let forged = (5u64) << PROCESS_SLOT_BITS;
         assert!(unpack_process_handle(forged).is_none());
     }

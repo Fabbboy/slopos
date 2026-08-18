@@ -553,13 +553,11 @@ fn cqe_notif_bit_pack() -> TestResult {
     {
         return slopos_testing::fail!("F_NOTIF must be a distinct bit 3");
     }
-    // Result CQE: F_MORE set, F_NOTIF clear.
     let result = Cqe {
         user_data: 0xC0DE,
         res: 42,
         flags: SLOPRING_CQE_F_MORE,
     };
-    // Terminal notification CQE: F_NOTIF set, F_MORE clear.
     let notif = Cqe {
         user_data: 0xC0DE,
         res: 0,
@@ -581,17 +579,9 @@ fn cqe_notif_bit_pack() -> TestResult {
 }
 stest!(name = cqe_notif_bit_pack, suite = slopring);
 
-// ---------------------------------------------------------------------------
-// Registered / provided buffer registry (ABI v2). These exercise the
-// buffer-selection bookkeeping headless — fabricated pins over kernel frames,
-// no live process VM — covering the check-out reservation lifecycle, the
-// volatile stage/publish round-trip, and the provided-ring peek/commit cursor.
-// ---------------------------------------------------------------------------
-
-/// Fixed-buffer reservation lifecycle: in-range checkout succeeds, a second
-/// checkout of the same index is `-EBUSY`, an out-of-range index is `-EINVAL`,
-/// unregister while a buffer is held is `-EBUSY`, and after check-in the index
-/// is reusable and the set unregisters.
+/// Fixed-buffer reservation lifecycle over fabricated pins: checkout,
+/// double-checkout, out-of-range, unregister-while-held, and reuse after
+/// check-in.
 fn bufpool_fixed_checkout_lifecycle() -> TestResult {
     let mut reg = BufferRegistry::new();
     let mut pins: KVec<PinnedUserBuffer> = KVec::new();
@@ -632,11 +622,10 @@ fn bufpool_fixed_checkout_lifecycle() -> TestResult {
 }
 stest!(name = bufpool_fixed_checkout_lifecycle, suite = slopring);
 
-/// Zero-copy deferred-notification lifecycle (`OP_SEND_ZC`): a deferred
-/// row keeps the fixed buffer checked out until the driver reclaims the NIC TX
+/// Zero-copy deferred-notification lifecycle (`OP_SEND_ZC`): a deferred row
+/// keeps the fixed buffer checked out until the driver reclaims the NIC TX
 /// descriptor; only then does the harvest post the terminal `F_NOTIF` and check
-/// the buffer back in. Deterministic — drives the reclaim token directly (the
-/// `signal_reclaimed` the driver's `virtnet_clean_tx` calls), no NIC.
+/// the buffer back in. Drives the reclaim token directly, so no NIC is needed.
 fn send_zc_deferred_notif_lifecycle() -> TestResult {
     let mut ring = make_ring(8);
     let mut pins: KVec<PinnedUserBuffer> = KVec::new();
@@ -648,8 +637,7 @@ fn send_zc_deferred_notif_lifecycle() -> TestResult {
     }
     ring.buffers.register_fixed_for_test(pins);
 
-    // Mirror the submit path: reserve the buffer, then record the deferred row
-    // (as `send_zc_fixed` does after a successful NIC submit).
+    // Mirrors `send_zc_fixed`: reserve, then record the deferred row.
     if ring.buffers.check_out_fixed(0).is_err() {
         return slopos_testing::fail!("checkout failed");
     }
@@ -659,7 +647,6 @@ fn send_zc_deferred_notif_lifecycle() -> TestResult {
     let snap = token.snapshot();
     ring.buffers.push_deferred(0xDEF, token.clone(), snap, 0);
 
-    // Before reclaim: the harvest posts nothing and the buffer stays held.
     let _ = crate::enter::harvest_step_for_test(FdTable::Kernel, &mut ring, 1);
     if ring.cq_tail != 0 {
         return slopos_testing::fail!(
@@ -671,7 +658,6 @@ fn send_zc_deferred_notif_lifecycle() -> TestResult {
         return slopos_testing::fail!("buffer must stay checked out pre-reclaim");
     }
 
-    // Driver reclaims (NIC done): the next harvest posts F_NOTIF and checks in.
     token.signal_reclaimed();
     let _ = crate::enter::harvest_step_for_test(FdTable::Kernel, &mut ring, 1);
     if ring.cq_tail != 1 {
@@ -697,11 +683,9 @@ stest!(name = send_zc_deferred_notif_lifecycle, suite = slopring);
 
 /// TCP `MSG_ZEROCOPY` deferred-notification lifecycle: a refcounted
 /// [`ZcNotifToken`] keeps the fixed buffer checked out across **retransmits**
-/// (each an extra in-flight DMA reference) and is reusable only once the bytes
-/// are cumulatively ACKed **and** every DMA is reclaimed (the count reaches
-/// zero). Deterministic — drives the token's refcount directly (the
-/// `acquire`/`release` the driver does on submit/reclaim, and the
-/// `mark_acked_and_release` the send-queue does on cumulative ACK), no NIC.
+/// (each an extra in-flight DMA reference), reusable only once the bytes are
+/// cumulatively ACKed **and** every DMA is reclaimed. Drives the token's
+/// refcount directly, so no NIC is needed.
 fn tcp_zc_pin_held_across_retransmit_and_ack() -> TestResult {
     let mut ring = make_ring(8);
     let mut pins: KVec<PinnedUserBuffer> = KVec::new();
@@ -713,8 +697,8 @@ fn tcp_zc_pin_held_across_retransmit_and_ack() -> TestResult {
     }
     ring.buffers.register_fixed_for_test(pins);
 
-    // Submit: reserve the buffer, the send-queue chunk owns one token reference,
-    // and the first transmit hands the driver an in-flight DMA reference.
+    // The send-queue chunk owns one token reference; the first transmit adds an
+    // in-flight DMA reference.
     if ring.buffers.check_out_fixed(0).is_err() {
         return slopos_testing::fail!("checkout failed");
     }
@@ -724,7 +708,6 @@ fn tcp_zc_pin_held_across_retransmit_and_ack() -> TestResult {
     token.acquire(); // first transmit DMA in flight (refs = chunk + 1)
     ring.buffers.push_deferred_notif(0x7C90, token.clone(), 0);
 
-    // Before any reclaim/ACK: nothing posts, the buffer stays held.
     let _ = crate::enter::harvest_step_for_test(FdTable::Kernel, &mut ring, 1);
     if ring.cq_tail != 0 {
         return slopos_testing::fail!("no CQE before reclaim (cq_tail={})", ring.cq_tail);
@@ -733,8 +716,6 @@ fn tcp_zc_pin_held_across_retransmit_and_ack() -> TestResult {
         return slopos_testing::fail!("buffer must stay checked out pre-reclaim");
     }
 
-    // Retransmit: a second DMA goes in flight, then the first is reclaimed. The
-    // pin survives the whole retransmit window.
     token.acquire(); // retransmit DMA (refs = chunk + 2)
     token.release(); // first DMA reclaimed (refs = chunk + 1)
     let _ = crate::enter::harvest_step_for_test(FdTable::Kernel, &mut ring, 1);
@@ -745,8 +726,7 @@ fn tcp_zc_pin_held_across_retransmit_and_ack() -> TestResult {
         return slopos_testing::fail!("buffer must stay held across the retransmit");
     }
 
-    // Second DMA reclaimed, but the bytes are not yet ACKed: the chunk reference
-    // still holds the buffer.
+    // Not yet ACKed: the chunk reference still holds the buffer.
     token.release(); // refs = chunk (1)
     let _ = crate::enter::harvest_step_for_test(FdTable::Kernel, &mut ring, 1);
     if ring.cq_tail != 0 {
@@ -780,14 +760,11 @@ stest!(
     suite = slopring
 );
 
-/// `OP_CONNECT` dispatch + re-probe idempotency. Drives the opcode through the
-/// submit path without a process fd table (the live handshake — `Established` /
-/// `ECONNREFUSED` — is a userland test, since it needs a mapped ring + a real
-/// socket): a negative fd posts inline `-EBADF`; a buffer selection (fixed or
-/// provided) is rejected `-EINVAL` (connect names no bulk buffer); and re-running
-/// the same SQE yields a byte-stable result (no state drift / panic across the
-/// harvest re-probe). Proves the opcode is wired into `probe()`, the EBADF guard
-/// fires, buffer selections are rejected, and the dispatch is re-entrant.
+/// `OP_CONNECT` dispatch + re-probe idempotency, driven through the submit path
+/// without a process fd table: a negative fd posts inline `-EBADF`, a fixed or
+/// provided buffer selection is rejected `-EINVAL`, and re-running the same SQE
+/// yields a byte-stable result. The live handshake is a userland test — it needs
+/// a mapped ring and a real socket.
 fn connect_probe_dispatch_idempotent() -> TestResult {
     let mut ring = make_ring(8);
 
@@ -799,7 +776,6 @@ fn connect_probe_dispatch_idempotent() -> TestResult {
         Cqe::from_bytes(&bytes)
     };
 
-    // Negative fd: inline -EBADF, posted before any fd resolution.
     let mut bad_fd = Sqe::ZERO;
     bad_fd.opcode = OP_CONNECT;
     bad_fd.fd = -1;
@@ -813,7 +789,6 @@ fn connect_probe_dispatch_idempotent() -> TestResult {
         return slopos_testing::fail!("fd<0 must post inline -EBADF, no flags: {:?}", c0);
     }
 
-    // Re-probe idempotency: the same SQE yields the same stable result.
     crate::enter::process_sqe_for_test(FdTable::Kernel, &mut ring, &bad_fd);
     if ring.cq_tail != 2 {
         return slopos_testing::fail!("re-run must post a second CQE (cq_tail={})", ring.cq_tail);
@@ -823,8 +798,7 @@ fn connect_probe_dispatch_idempotent() -> TestResult {
         return slopos_testing::fail!("re-probe result drifted: {:?} vs {:?}", c1, c0);
     }
 
-    // A provided-buffer selection on OP_CONNECT is -EINVAL (connect names no
-    // bulk buffer — addr is its immutable SockAddrIn input).
+    // `addr` is connect's immutable SockAddrIn input, not a bulk buffer.
     let mut prov = Sqe::ZERO;
     prov.opcode = OP_CONNECT;
     prov.fd = 3;
@@ -835,7 +809,6 @@ fn connect_probe_dispatch_idempotent() -> TestResult {
         return slopos_testing::fail!("provided-buffer OP_CONNECT must be -EINVAL");
     }
 
-    // A fixed-buffer selection on OP_CONNECT is likewise -EINVAL.
     let mut fixed = Sqe::ZERO;
     fixed.opcode = OP_CONNECT;
     fixed.fd = 3;
@@ -850,11 +823,10 @@ fn connect_probe_dispatch_idempotent() -> TestResult {
 }
 stest!(name = connect_probe_dispatch_idempotent, suite = slopring);
 
-/// Single-direct-copy cursor round-trip: a pattern seeded into a fixed pin
-/// reads back through a `VmReader` (`fixed_reader`, the send source), and a
-/// fresh pattern written through a `VmWriter` (`fixed_writer`, the recv sink)
-/// lands in the pin and reads back. Exercises the scratch-free path the net
-/// leaves use, without a live socket.
+/// Single-direct-copy cursor round-trip: a pattern seeded into a fixed pin reads
+/// back through `fixed_reader` (the send source), and one written through
+/// `fixed_writer` (the recv sink) lands in the pin — the scratch-free path the
+/// net leaves use, without a live socket.
 fn bufpool_fixed_cursor_roundtrip() -> TestResult {
     let mut reg = BufferRegistry::new();
     let mut pins: KVec<PinnedUserBuffer> = KVec::new();
@@ -870,7 +842,6 @@ fn bufpool_fixed_cursor_roundtrip() -> TestResult {
     }
     reg.register_fixed_for_test(pins);
 
-    // Read the seeded pattern out through a VmReader (the send source).
     {
         let mut reader = match reg.fixed_reader(0, 16) {
             Ok(r) => r,
@@ -888,7 +859,6 @@ fn bufpool_fixed_cursor_roundtrip() -> TestResult {
         }
     }
 
-    // Write a fresh pattern into the pin through a VmWriter (the recv sink).
     {
         let mut writer = match reg.fixed_writer(0) {
             Ok(w) => w,
@@ -900,7 +870,6 @@ fn bufpool_fixed_cursor_roundtrip() -> TestResult {
         }
     }
 
-    // Read it back through a fresh reader.
     {
         let mut reader = match reg.fixed_reader(0, 16) {
             Ok(r) => r,
@@ -913,7 +882,6 @@ fn bufpool_fixed_cursor_roundtrip() -> TestResult {
         }
     }
 
-    // Out-of-range / no-set error paths.
     if reg.fixed_reader(7, 16).is_ok() {
         return slopos_testing::fail!("fixed_reader OOB should err");
     }
@@ -968,13 +936,6 @@ fn bufpool_provided_peek_commit() -> TestResult {
 }
 stest!(name = bufpool_provided_peek_commit, suite = slopring);
 
-// ---------------------------------------------------------------------------
-// The ring holds a real file reference (Stage C / D5). These drive a real fd
-// through an op using a pipe (its read end blocks empty, so an OP_POLL_ADD
-// defers) and a real per-test process fd table. Readiness is produced by
-// closing the pipe's *write* end (→ POLLHUP), so no user buffer is needed.
-// ---------------------------------------------------------------------------
-
 fn read_cqe_at(ring: &Ring, idx: u32) -> Cqe {
     let mut bytes = [0u8; 16];
     ring.region
@@ -983,20 +944,14 @@ fn read_cqe_at(ring: &Ring, idx: u32) -> Cqe {
     Cqe::from_bytes(&bytes)
 }
 
-/// Run `body` against a private descriptor table for `pid`, torn down
-/// afterwards however `body` exits.
-///
-/// A pid with no table of its own is refused a descriptor, so a test that
-/// opens files has to mint one the same way process creation does.
+/// Run `body` against a private descriptor table, torn down afterwards however
+/// `body` exits. A pid with no table of its own is refused a descriptor, so a
+/// test that opens files has to mint one the way process creation does.
 fn with_fd_table(body: fn(FdTable) -> TestResult) -> TestResult {
     use slopos_fs::fileio::{
         fileio_create_empty_table_for_process, fileio_destroy_table_for_process,
     };
 
-    // A real registration, not a made-up number. A descriptor table lives in
-    // its process's own registry slot, so there is no table to be had without
-    // a process — which is the point: a synthetic pid used to get one, and
-    // that is exactly how a table ends up bound to an id nothing owns.
     let Ok(process) = slopos_ostd::process::process_spawn_root() else {
         return slopos_testing::fail!("could not register a scratch process");
     };
@@ -1035,7 +990,7 @@ fn op_survives_fd_close_body(table: FdTable) -> TestResult {
         return slopos_testing::fail!("pipe create failed");
     }
 
-    // Our own alias to the read end, to observe the ring's reference count.
+    // An alias of our own, to observe the ring's reference count.
     let probe_ref = match fileio_clone_file_ref(table, rfd) {
         Some(f) => f,
         None => return slopos_testing::fail!("clone read-end ref failed"),
@@ -1043,8 +998,8 @@ fn op_survives_fd_close_body(table: FdTable) -> TestResult {
     // fd-table entry + probe_ref.
     let baseline = probe_ref.description_strong_count();
 
-    // OP_POLL_ADD(POLLIN) on an empty pipe defers, recording an in-flight row
-    // that holds a strong reference to the read end.
+    // POLL_ADD on an empty pipe defers, holding a strong reference to the read
+    // end.
     let mut sqe = Sqe::ZERO;
     sqe.opcode = OP_POLL_ADD;
     sqe.fd = rfd;
@@ -1061,11 +1016,11 @@ fn op_survives_fd_close_body(table: FdTable) -> TestResult {
         );
     }
 
-    // Close the read fd. The held reference keeps the read end alive.
+    // The held reference keeps the read end alive past the close.
     let _ = file_close_fd(table, rfd);
 
-    // Still no readiness (peer write end open) → op stays in flight against the
-    // held backing rather than resolving to a closed-fd error.
+    // Peer write end still open → no readiness; the op stays in flight against
+    // the held backing rather than resolving to a closed-fd error.
     let done = crate::enter::harvest_step_for_test(table, &mut ring, 1);
     drop(core::mem::take(&mut ring.pending_reap));
     if done || ring.inflight.len() != 1 {
@@ -1078,7 +1033,7 @@ fn op_survives_fd_close_body(table: FdTable) -> TestResult {
     // Close the write end → the read end reports POLLHUP → the op completes.
     let _ = file_close_fd(table, wfd);
     let _ = crate::enter::harvest_step_for_test(table, &mut ring, 1);
-    // Drop the retired row's reference exactly as ring_enter would, off-lock.
+    // Drops the retired row's reference off-lock, as `ring_enter` would.
     drop(core::mem::take(&mut ring.pending_reap));
 
     if ring.inflight.len() != 0 {
@@ -1100,7 +1055,7 @@ fn op_survives_fd_close_body(table: FdTable) -> TestResult {
 stest!(name = op_survives_fd_close, suite = slopring);
 
 /// Closing an in-flight op's fd and reusing its number for a different file
-/// does not retarget the op: it stays bound to the original open file (D5).
+/// does not retarget the op: it stays bound to the original open file.
 fn no_reuse_aliasing() -> TestResult {
     with_fd_table(no_reuse_aliasing_body)
 }
@@ -1112,13 +1067,12 @@ fn no_reuse_aliasing_body(table: FdTable) -> TestResult {
     let mut ring = make_ring(8);
     ring.owner = table;
 
-    // Pipe A.
     let (mut rfd_a, mut wfd_a) = (-1i32, -1i32);
     if file_pipe_create(table, 0, &mut rfd_a, &mut wfd_a) != 0 {
         return slopos_testing::fail!("pipe A create failed");
     }
 
-    // OP_POLL_ADD on A's read end defers, holding a reference to A.
+    // POLL_ADD on A's read end defers, holding a reference to A.
     let mut sqe = Sqe::ZERO;
     sqe.opcode = OP_POLL_ADD;
     sqe.fd = rfd_a;
@@ -1129,7 +1083,7 @@ fn no_reuse_aliasing_body(table: FdTable) -> TestResult {
         return slopos_testing::fail!("poll A should defer");
     }
 
-    // Close A's read fd, then open pipe B — B's read end reuses A's fd number.
+    // B's read end reuses A's fd number.
     let _ = file_close_fd(table, rfd_a);
     let (mut rfd_b, mut wfd_b) = (-1i32, -1i32);
     if file_pipe_create(table, 0, &mut rfd_b, &mut wfd_b) != 0 {
@@ -1143,11 +1097,10 @@ fn no_reuse_aliasing_body(table: FdTable) -> TestResult {
         );
     }
 
-    // Make the HELD file (A) ready via POLLHUP while the reused number (B)
-    // stays not-ready (B's write end open, buffer empty).
+    // Make the held file A ready via POLLHUP while the reused number B stays
+    // not-ready (B's write end open, buffer empty).
     let _ = file_close_fd(table, wfd_a);
 
-    // The op must complete: it polls the held A, not the reused number → B.
     let _ = crate::enter::harvest_step_for_test(table, &mut ring, 1);
     drop(core::mem::take(&mut ring.pending_reap));
     if ring.inflight.len() != 0 {

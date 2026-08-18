@@ -1,20 +1,11 @@
 //! Socket connection with length-prefixed framing.
 //!
-//! Design principles (Wayland-inspired):
-//! - Socket is ALWAYS non-blocking (`O_NONBLOCK` set once at creation).
-//! - All blocking is done via `poll(fd, POLLIN, timeout)`, never via
-//!   blocking `recv()` or sleep-spin loops.
-//! - `send()` writes directly to the socket — no write buffer, no
-//!   forgotten-flush bugs.
-//! - `recv()` is non-blocking (returns `Ok(None)` if no data).
-//! - `wait_recv()` uses `poll()` for efficient blocking with timeout.
+//! The socket is always non-blocking (`O_NONBLOCK` set once at creation); all
+//! blocking goes through `poll()`.
 //!
-//! fd passing (SCM_RIGHTS) uses recvmsg for ALL socket reads. Received
-//! fds are queued in a pending FIFO and consumed inline by the Decode
-//! trait implementation for message types that carry fds (e.g.
-//! SurfaceAttach). This matches libwayland's design and avoids the
-//! message-framing race where multiple protocol messages arrive in a
-//! single socket read.
+//! Every read is a `recvmsg`, so SCM_RIGHTS fds are queued in a pending FIFO
+//! and consumed inline by `Decode`: a single socket read carrying several
+//! messages cannot mis-assign an fd.
 
 use crate::codec::{Decode, Encode, FdFifo};
 use crate::types::ProtocolError;
@@ -49,9 +40,7 @@ pub struct Connection {
 
 impl Connection {
     /// Create a connection from an already-connected socket FD.
-    /// Sets the socket to non-blocking mode immediately.
     pub fn new(fd: i32) -> Self {
-        // Set non-blocking ONCE. Never changed again.
         set_nonblock(fd);
         Self {
             fd,
@@ -67,9 +56,8 @@ impl Connection {
         self.fd
     }
 
-    /// Enqueue a raw fd into the pending FIFO. If the FIFO is full, the fd
-    /// is closed immediately to prevent leaking. This is the ONLY place
-    /// that adds fds to the FIFO — all receive paths go through here.
+    /// The only place that adds fds to the pending FIFO. If the FIFO is full
+    /// the fd is closed immediately rather than leaked.
     fn enqueue_fd(&mut self, fd: i32) {
         if (self.pending_fd_count as usize) < MAX_PENDING_FDS {
             self.pending_fds[self.pending_fd_count as usize] = fd;
@@ -78,8 +66,6 @@ impl Connection {
             let _ = Sys::close(fd);
         }
     }
-
-    // ── Send ────────────────────────────────────────────────────────────
 
     /// Send a message immediately to the socket. No write buffer.
     pub fn send<T: Encode>(&self, msg: &T) -> Result<(), ProtocolError> {
@@ -120,7 +106,6 @@ impl Connection {
         buf[0..4].copy_from_slice(&len_bytes);
         let total = 4 + payload_len;
 
-        // Build ancillary data: CmsgHdr + one i32 fd
         let hdr_size = core::mem::size_of::<CmsgHdr>();
         let mut cmsg_buf = [0u8; 32];
         let cmsg = CmsgHdr {
@@ -141,14 +126,9 @@ impl Connection {
             control_len: (hdr_size + 4) as u64,
         };
 
-        // The fd attaches to the FIRST byte of this message via SCM_RIGHTS, so
-        // it rides exactly one sendmsg. But the kernel may accept only part of
-        // the data (a short write), so this first sendmsg can return n < total
-        // — it commits the fd plus n bytes. We MUST then drain the unsent tail
-        // with plain send() (no fd) below; the original code treated any Ok as
-        // complete and dropped the tail, desyncing the receiver's length-
-        // prefixed framing and leaving the fd orphaned in its FdFifo for a
-        // later message to mis-pop (the clipboard cross-process fault).
+        // The fd attaches to the first byte via SCM_RIGHTS, so it rides exactly
+        // one sendmsg; a short write here commits the fd plus `n` bytes and the
+        // tail must still be drained below, or the receiver's framing desyncs.
         let mut sent = loop {
             match Sys::sendmsg(self.fd, &msg_hdr, 0) {
                 Ok(n) if n > 0 => break n,
@@ -160,8 +140,6 @@ impl Connection {
             }
         };
 
-        // Drain any unsent tail with plain send() — the fd is already delivered
-        // with the first chunk, so the remainder is just bytes (mirrors `send`).
         while sent < total {
             let ptr = unsafe { buf.as_ptr().add(sent) };
             let remaining = total - sent;
@@ -177,26 +155,18 @@ impl Connection {
         Ok(())
     }
 
-    // ── Receive ─────────────────────────────────────────────────────────
-
     /// Try to receive one complete message (non-blocking).
     /// Returns `Ok(None)` if no complete message is available.
-    /// File descriptors received via SCM_RIGHTS are consumed inline by the
-    /// decoder for message types that carry fds (e.g. `SurfaceAttach`).
     pub fn recv<T: Decode>(&mut self) -> Result<Option<T>, ProtocolError> {
-        // First check if we already have a complete frame in the buffer.
         if let Some(msg) = self.try_decode::<T>()? {
             return Ok(Some(msg));
         }
-        // Try to read more data from the socket (captures any fds too).
         self.try_fill_buf()?;
-        // Check again after filling.
         self.try_decode::<T>()
     }
 
     /// Block via poll() until a complete message arrives or timeout expires.
     pub fn wait_recv<T: Decode>(&mut self, timeout_ms: i32) -> Result<T, ProtocolError> {
-        // Check buffer first — message might already be there.
         if let Some(msg) = self.recv::<T>()? {
             return Ok(msg);
         }
@@ -221,11 +191,6 @@ impl Connection {
         }
     }
 
-    // ── Internal ────────────────────────────────────────────────────────
-
-    /// Block via poll() until the socket has data to read.
-    /// Retries automatically if interrupted by a signal (EINTR),
-    /// correctly maintaining the real-time deadline.
     fn poll_readable(&self, timeout_ms: i32) -> Result<(), ProtocolError> {
         let mut pfd = UserPollFd {
             fd: self.fd,
@@ -251,7 +216,6 @@ impl Connection {
         }
     }
 
-    /// Block via poll() until the socket is writable.
     fn poll_writable(&self, timeout_ms: i32) -> Result<(), ProtocolError> {
         let mut pfd = UserPollFd {
             fd: self.fd,
@@ -270,10 +234,6 @@ impl Connection {
     }
 
     /// Decode one length-prefixed frame from the read buffer.
-    ///
-    /// Constructs an [`FdFifo`] from the pending fd state and passes it to
-    /// `T::decode`, so message types that carry fds (e.g. `SurfaceAttach`)
-    /// can pop them inline during decoding.
     fn try_decode<T: Decode>(&mut self) -> Result<Option<T>, ProtocolError> {
         let available = self.read_len - self.read_pos;
         if available < 4 {
@@ -288,7 +248,7 @@ impl Connection {
             return Err(ProtocolError::MalformedMessage);
         }
         if available < 4 + payload_len {
-            return Ok(None); // Incomplete frame — need more data.
+            return Ok(None);
         }
 
         let payload_start = self.read_pos + 4;
@@ -300,7 +260,6 @@ impl Connection {
     }
 
     /// Fill the read buffer using recvmsg (captures SCM_RIGHTS fds too).
-    /// This replaces the old try_fill_buf that used plain recv().
     fn try_fill_buf(&mut self) -> Result<(), ProtocolError> {
         if self.read_len >= READ_BUF_SIZE {
             self.compact_buf();
@@ -332,7 +291,6 @@ impl Connection {
             Ok(_) => return Ok(()),
         }
 
-        // Queue any fds received via SCM_RIGHTS into the pending FIFO.
         if msg_hdr.control_len as usize >= hdr_size + 4 {
             let cmsg: CmsgHdr = unsafe { core::ptr::read(cmsg_buf.as_ptr() as *const CmsgHdr) };
             if cmsg.cmsg_type == SCM_RIGHTS && cmsg.cmsg_len as usize >= hdr_size + 4 {
@@ -351,7 +309,6 @@ impl Connection {
         Ok(())
     }
 
-    /// Compact read buffer: move unconsumed data to the front.
     fn compact_buf(&mut self) {
         if self.read_pos == 0 {
             return;
@@ -380,7 +337,6 @@ impl Drop for Connection {
         if self.fd >= 0 {
             let _ = Sys::close(self.fd);
         }
-        // Close any unclaimed pending fds to prevent leaks.
         for i in 0..self.pending_fd_count as usize {
             if self.pending_fds[i] >= 0 {
                 let _ = Sys::close(self.pending_fds[i]);

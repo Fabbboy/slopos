@@ -1,18 +1,9 @@
 //! Ticket-lock spinning mutex / rwlock primitives.
 //!
-//! [`SpinLock<T>`] disables both interrupts and preemption while held — the
-//! workhorse mutex for kernel data accessed from both task and interrupt
-//! contexts. Internally it is a **ticket lock**: each acquirer takes a
-//! monotonically-increasing ticket and spins until `now_serving` matches,
-//! guaranteeing FIFO acquisition order even under heavy SMP contention.
-//!
-//! [`PreemptMutex<T>`] is the same shape but only disables preemption (does
-//! not save/restore RFLAGS). Use it when the lock is never taken from an
-//! IRQ handler.
-//!
-//! [`IrqRwLock<T>`] is a writer-preferring reader-writer lock that disables
-//! interrupts while held. New readers yield to a queued writer to prevent
-//! writer starvation.
+//! [`SpinLock<T>`] masks interrupts and preemption while held;
+//! [`PreemptMutex<T>`] is the same shape but masks only preemption (no
+//! save/restore of RFLAGS), for locks never taken from an IRQ handler;
+//! [`IrqRwLock<T>`] is the reader-writer form.
 
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
@@ -29,55 +20,41 @@ use crate::mm::init::{Init, init_from_closure};
 use crate::sync::lock_tracking;
 use crate::sync::lock_tracking::LockClassKey;
 
-// =============================================================================
-// Contended-spin relax hook
-// =============================================================================
-//
-// A `SpinLock` waiter spins with interrupts disabled, so it cannot service
-// a TLB-shootdown IPI while it waits. If the lock holder is itself waiting
-// for this CPU's shootdown ack (e.g. a munmap/COW path flushing remote TLBs
-// while holding a per-process VM lock), the two CPUs deadlock: the holder
-// waits for an ack the spinner can never deliver. The relax hook closes
-// this class structurally — the TLB subsystem registers a callback that
-// polls and services this CPU's pending shootdown queue, and every
-// IRQs-off contended spin invokes it between PAUSE rounds. A waiter can
-// therefore always ack, regardless of which lock it is spinning on.
-// (The paravirt-Linux analogue: make lock waits productive instead of
-// demanding the holder release first.)
+// A `SpinLock` waiter spins with interrupts disabled, so it cannot service a
+// TLB-shootdown IPI. If the holder is itself waiting for this CPU's shootdown
+// ack, the two deadlock. The registered relax hook drains this CPU's pending
+// shootdown queue between PAUSE rounds, so a waiter can always ack whatever
+// lock it is spinning on.
 
 /// Registered relax callback, encoded as a `fn()` address. 0 = none.
 static SPIN_RELAX_HOOK: AtomicUsize = AtomicUsize::new(0);
 
-/// Per-CPU re-entrancy latch: the hook itself takes a (TLB queue) SpinLock;
-/// a contended acquire inside the hook must spin plainly rather than
-/// recurse into the hook without bound.
+/// Per-CPU re-entrancy latch: the hook takes a (TLB queue) SpinLock itself, so
+/// a contended acquire inside it must spin plainly rather than recurse.
 static SPIN_RELAX_IN_HOOK: [AtomicBool; crate::cpu::x86_64::pcr::MAX_CPUS] = {
     const FALSE: AtomicBool = AtomicBool::new(false);
     [FALSE; crate::cpu::x86_64::pcr::MAX_CPUS]
 };
 
-/// Register the contended-spin relax callback. One-shot at boot (the TLB
-/// subsystem's init); later calls overwrite, which is harmless — the slot
-/// is only ever set to the same function.
+/// Register the contended-spin relax callback. Overwriting is harmless: the
+/// slot is only ever set to the same function.
 pub fn register_spin_relax_hook(hook: fn()) {
     SPIN_RELAX_HOOK.store(hook as usize, Ordering::Release);
 }
 
 /// Service pending cross-CPU work once from a hand-rolled interrupts-off spin.
 ///
-/// The lock primitives call this for you. Anything that spins waiting on
-/// another CPU *without* going through a lock — a handover flag, a state
-/// machine's ready bit — has to call it explicitly, or it becomes a CPU that
-/// waits for a peer while refusing to acknowledge the peer's shootdown.
+/// The lock primitives call this for you. Any other spin waiting on a peer — a
+/// handover flag, a state machine's ready bit — has to call it explicitly, or
+/// it becomes a CPU that waits for a peer while refusing to ack that peer's
+/// shootdown.
 #[inline]
 pub fn spin_relax() {
     spin_relax_fire();
 }
 
-/// Fire the relax hook once, with per-CPU re-entrancy suppression. Called
-/// from IRQs-off contended spin loops; the hook must be safe in that
-/// context (the TLB service path only takes its own per-CPU queue lock and
-/// issues local INVLPG/CR3 flushes).
+/// Fire the relax hook once, with per-CPU re-entrancy suppression. Runs from
+/// IRQs-off contended spin loops, so the hook must be safe in that context.
 #[inline]
 fn spin_relax_fire() {
     let raw = SPIN_RELAX_HOOK.load(Ordering::Acquire);
@@ -89,7 +66,7 @@ fn spin_relax_fire() {
         return;
     }
     if SPIN_RELAX_IN_HOOK[cpu_id].swap(true, Ordering::Relaxed) {
-        return; // already servicing on this CPU — plain spin
+        return;
     }
     if let Some(hook) = crate::util::fn_ptr::fn_ptr_decode_opt::<fn()>(raw as *mut ()) {
         hook();
@@ -97,48 +74,35 @@ fn spin_relax_fire() {
     SPIN_RELAX_IN_HOOK[cpu_id].store(false, Ordering::Relaxed);
 }
 
-/// Ticket-lock mutex that disables interrupts AND preemption while held.
-/// Essential for kernel data accessed from both normal and interrupt contexts.
+/// Ticket-lock mutex that disables interrupts AND preemption while held, for
+/// kernel data accessed from both normal and interrupt contexts. Acquisition is
+/// FIFO: each acquirer takes a monotonically-increasing ticket and spins until
+/// `now_serving` matches.
 ///
-/// Uses a **ticket lock** internally for FIFO fairness: each acquirer takes a
-/// monotonically-increasing ticket and spins until `now_serving` matches. This
-/// guarantees that CPUs acquire the lock in the order they requested it,
-/// eliminating starvation under SMP contention.
-///
-/// Supports poisoning semantics for panic recovery: after a panic-time
-/// force-unlock via `poison_unlock()`, the mutex is marked poisoned.
-/// Callers can check `is_poisoned()` to determine if the protected data
-/// may be in an inconsistent state and needs reinitialization.
+/// After a panic-time force-unlock via `poison_unlock()` the mutex is marked
+/// poisoned; `is_poisoned()` tells a caller whether the protected data may be
+/// inconsistent and need reinitialization.
 #[repr(C)]
 pub struct SpinLock<T> {
     core: LockCore,
     data: UnsafeCell<T>,
 }
 
-/// The ticket machinery, split out from the payload so it has one layout
-/// for every `T`.
-///
-/// `#[repr(C)]` and offset zero: [`lock_tracking::push_lock`] and the
-/// watchdog's wait-for graph both name a lock by address, and this makes
-/// `&SpinLock<T>` and `&LockCore` the same address, so the two agree. It
-/// also lets the poison callback be one function rather than one
-/// monomorphisation per `T` — 93 of them in the dev kernel.
+/// The ticket machinery, split out from the payload so it has one layout for
+/// every `T`. `#[repr(C)]` at offset zero makes `&SpinLock<T>` and `&LockCore`
+/// the same address, which [`lock_tracking::push_lock`] and the watchdog's
+/// wait-for graph both depend on, and lets the poison callback be one function
+/// rather than one monomorphisation per `T`.
 #[repr(C)]
 pub struct LockCore {
-    /// Monotonically-increasing ticket counter. Each `lock()` call takes the
-    /// next ticket via `fetch_add(1)`. Wraps at `u16::MAX` — equality checks
-    /// handle wrap-around correctly.
+    /// Ticket counter. Wraps at `u16::MAX`; the equality checks are wrap-safe.
     next_ticket: AtomicU16,
-    /// The ticket currently being served. Incremented by `fetch_add(1)` on
-    /// unlock. A waiter spins until `now_serving == my_ticket`.
+    /// The ticket currently being served; a waiter spins until it matches.
     now_serving: AtomicU16,
-    /// `(cpu << 16) | ticket` of the acquirer, or [`NO_HOLDER`].
-    ///
-    /// Written once on acquisition and never cleared. Clearing it on
-    /// release would need to be ordered against the `now_serving` bump,
-    /// and either order has a window in which the field lies. Validating
-    /// it against `now_serving` instead — see [`LockCore::holder_cpu`] —
-    /// has no window to get wrong.
+    /// `(cpu << 16) | ticket` of the acquirer, or [`NO_HOLDER`]. Written on
+    /// acquisition and never cleared: either order against the `now_serving`
+    /// bump leaves a window in which the field lies, so readers validate it
+    /// against `now_serving` instead — see [`LockCore::holder_cpu`].
     holder: AtomicU32,
     poisoned: AtomicBool,
     /// Declaration-site class. Carries the advisory level too, so two
@@ -146,17 +110,14 @@ pub struct LockCore {
     class: &'static LockClassKey,
 }
 
-/// `holder` for a lock nobody has taken. Not zero: zero decodes as "CPU 0
-/// holds it with ticket 0", which every freshly-constructed lock would
-/// claim.
+/// `holder` for a lock nobody has taken. Not zero: zero decodes as "CPU 0 holds
+/// it with ticket 0", which every freshly-constructed lock would claim.
 const NO_HOLDER: u32 = u32::MAX;
 
 /// Spin iterations with `now_serving` unchanged before the spinner reports
-/// itself.
-///
-/// The bound is on *progress*, not on time: a queue that is draining is
-/// contention, however slow, and only a `now_serving` that has stopped
-/// moving means the holder itself is stuck.
+/// itself. The bound is on *progress*, not time: a draining queue is
+/// contention however slow, and only a frozen `now_serving` means the holder
+/// itself is stuck.
 const SPIN_STALL_ROUNDS: u32 = 1_000_000;
 
 impl LockCore {
@@ -175,15 +136,12 @@ impl LockCore {
     /// it to be served, publish the holder, and register with the
     /// lock-order validator.
     ///
-    /// One out-of-line non-generic call, deliberately covering the
-    /// uncontended path too. `SpinLock::lock` is inlined at ~850 call
-    /// sites, and at `-O3` everything it keeps inline lands in each
-    /// caller's frame — `check_stack_sizes.sh --variant release` exists to
-    /// catch exactly that fusion, and has no allowlist to absorb it.
-    /// Splitting the wait from the publish left `my_ticket` live across two
-    /// calls and cost `virtio_blk_probe` 656 bytes; folding them leaves the
-    /// inlined part a preempt guard, a `cli` and one `fetch_add`, with
-    /// nothing live across the call but `&self`.
+    /// One out-of-line non-generic call, deliberately covering the uncontended
+    /// path too: `SpinLock::lock` is inlined at ~850 call sites and everything
+    /// it keeps inline lands in each caller's frame, which
+    /// `check_stack_sizes.sh --variant release` has no allowlist to absorb.
+    /// Splitting the wait from the publish would leave `my_ticket` live across
+    /// two calls; folded, nothing but `&self` is live across the call.
     #[inline(never)]
     fn acquire(&self, my_ticket: u16) {
         self.acquire_nested(my_ticket, 0)
@@ -214,12 +172,11 @@ impl LockCore {
 
     /// The CPU holding this lock, if the recorded holder can be believed.
     ///
-    /// Both conjuncts are load-bearing. `next_ticket != now_serving` says
-    /// the lock is held at all — a lock that was released still carries its
-    /// last holder. `holder`'s ticket matching `now_serving` says the
-    /// recorded winner is the one being served — without it a reader sees
-    /// the *previous* holder in the window between a releaser's
-    /// `fetch_add` and the next winner's store.
+    /// Both conjuncts are load-bearing. `next_ticket != now_serving` says the
+    /// lock is held at all — a released lock still carries its last holder.
+    /// `holder`'s ticket matching `now_serving` rejects the window between a
+    /// releaser's `fetch_add` and the next winner's store, in which a reader
+    /// would otherwise see the *previous* holder.
     #[inline]
     fn holder_cpu(&self) -> Option<usize> {
         let serving = self.now_serving.load(Ordering::Acquire);
@@ -233,21 +190,10 @@ impl LockCore {
         Some((holder >> 16) as usize)
     }
 
-    /// Spin until `my_ticket` is served.
-    ///
-    /// Out of line and non-generic. `SpinLock::lock` is inlined at every
-    /// one of its ~850 call sites, and at `-O3` the whole body lands in
-    /// each caller's frame — `check_stack_sizes.sh --variant release`
-    /// exists to catch exactly that fusion. Keeping the contended path
-    /// here leaves the inlined part to the uncontended fast path.
-    ///
-    /// A spinner is the sharpest detector of its own wedge: it is
-    /// executing, it knows which lock it wants, and a ticket lock
-    /// distinguishes the two cases a test-and-set lock cannot —
-    /// `now_serving` advancing is contention, however slow, and
-    /// `now_serving` frozen means the holder itself is stuck. The peer
-    /// watchdog can make neither distinction and arrives seconds later
-    /// naming only the victim.
+    /// Spin until `my_ticket` is served. Out of line and non-generic so the
+    /// contended path stays out of `SpinLock::lock`'s inlined frame, and so a
+    /// wedge is reported by the spinner — which knows which lock it wants —
+    /// rather than by the peer watchdog seconds later naming only the victim.
     #[cold]
     #[inline(never)]
     fn await_ticket(&self, my_ticket: u16) {
@@ -275,12 +221,7 @@ impl LockCore {
             if published {
                 crate::watchdog::publish_wait_holder(self.holder_cpu());
             }
-            // We spin with IRQs masked; service any pending TLB shootdown
-            // so a lock holder waiting for this CPU's ack can make progress
-            // (see the relax-hook block comment above).
             spin_relax_fire();
-            // Proportional backoff: the further away our ticket is from
-            // now_serving, the more PAUSE iterations we issue per check.
             let distance = my_ticket.wrapping_sub(serving) as u32;
             for _ in 0..distance.min(64) {
                 spin_loop();
@@ -291,12 +232,9 @@ impl LockCore {
         }
     }
 
-    /// Release one holder, as a guard's `Drop` would.
-    ///
-    /// Storing `next_ticket` instead would jump `now_serving` past every
-    /// queued waiter, and none of their tickets would ever be served —
-    /// turning an abandoned lock into a permanently wedged one, which is
-    /// the very failure the watchdog exists to report.
+    /// Release one holder, as a guard's `Drop` would. Storing `next_ticket`
+    /// instead would jump `now_serving` past every queued waiter, so none of
+    /// their tickets would ever be served and the lock would wedge for good.
     fn release_one(&self) {
         let mut serving = self.now_serving.load(Ordering::Relaxed);
         loop {
@@ -353,11 +291,9 @@ impl<T> SpinLock<T> {
         }
     }
 
-    /// In-place [`Init`] recipe: build the lock fields directly into
-    /// the heap slot, threading the caller's `data_init` recipe through
-    /// to the inner `UnsafeCell<T>`. Lets large `T` (e.g. a 256-slot
-    /// timer wheel) avoid materialising on the caller's stack between
-    /// allocation and the `SpinLock::new(data, class)` call. Used via
+    /// In-place [`Init`] recipe: builds the lock fields directly into the heap
+    /// slot so a large `T` (e.g. a 256-slot timer wheel) never materialises on
+    /// the caller's stack. Used via
     /// `KBox::try_init(SpinLock::init_with(class, T::init_default()))`.
     pub fn init_with<E>(
         class: &'static LockClassKey,
@@ -382,7 +318,6 @@ impl<T> SpinLock<T> {
         }
     }
 
-    /// Returns the lock ordering level.
     #[inline]
     pub const fn level(&self) -> u8 {
         self.core.class.level()
@@ -435,20 +370,18 @@ impl<T> SpinLock<T> {
         self.core.holder_cpu()
     }
 
-    /// Take a ticket without building a guard, leaving the lock held by
-    /// nobody — the state a panic leaves behind.
-    ///
-    /// Test-only. Leaking a real guard would work too, but it would also
-    /// leak the interrupt flags and preempt count the guard restores, which
-    /// silently stops the CPU this test runs on from ever ticking again.
+    /// Take a ticket without building a guard, leaving the lock held by nobody
+    /// — the state a panic leaves behind. Leaking a real guard would also leak
+    /// the interrupt flags and preempt count it restores, silently stopping
+    /// this CPU from ever ticking again.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn abandon_for_test(&self) {
         self.core.next_ticket.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Release one holder of a lock whose guard was lost, as the
-    /// panic-recovery path does. Test-only, and safe because
-    /// [`LockCore::release_one`] is a no-op on a lock that is already free.
+    /// Release one holder of a lock whose guard was lost, as the panic-recovery
+    /// path does. Safe because [`LockCore::release_one`] is a no-op on a lock
+    /// that is already free.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn release_leaked_guard_for_test(&self) {
         self.core.release_one();
@@ -465,18 +398,11 @@ impl<T> SpinLock<T> {
         self.data.get() as *const T
     }
 
-    /// Read a naturally-aligned field of the protected data without
-    /// taking the lock. The closure `f` is restricted to receiving a
-    /// shared reference to the inner `T`; correctness relies on the
-    /// caller's discipline that every field accessed through `f` is a
-    /// naturally-aligned scalar (u32 / pointer / atomic) which is only
-    /// written under the lock, so a plain load is tear-free on x86-64.
-    /// Composite (multi-word) fields MUST re-acquire the lock via
-    /// [`Self::lock`] instead.
-    ///
-    /// Folds the one `unsafe { &*self.as_ptr() }` reborrow interior to
-    /// OSTD so consumer crates' lock-free field-peek helpers stay in
-    /// safe Rust.
+    /// Read a naturally-aligned field of the protected data without taking the
+    /// lock. Every field `f` touches must be a naturally-aligned scalar
+    /// (u32 / pointer / atomic) written only under the lock, so a plain load is
+    /// tear-free on x86-64; composite (multi-word) fields MUST re-acquire the
+    /// lock via [`Self::lock`] instead.
     #[inline]
     pub fn read_atomic_field<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         // SAFETY: the closure contract above restricts `f` to tear-free
@@ -492,8 +418,6 @@ impl<T> SpinLock<T> {
         let preempt = PreemptGuard::new();
         let saved_flags = cpu::save_flags_cli();
 
-        // Take a ticket. fetch_add wraps at u16::MAX → 0; equality checks are
-        // wrap-safe so this is correct for any number of acquisitions.
         let my_ticket = self.core.next_ticket.fetch_add(1, Ordering::Relaxed);
         self.core.acquire(my_ticket);
 
@@ -504,13 +428,10 @@ impl<T> SpinLock<T> {
         }
     }
 
-    /// Acquire under `subclass`, splitting this declaration site into
-    /// distinct lockdep classes.
-    ///
-    /// For a site that legitimately holds two of its own instances at once
-    /// in a fixed order: giving the inner acquisition a different subclass
-    /// keeps that order *checked*, where `LO_DUPOK` would discard the check
-    /// for the whole class.
+    /// Acquire under `subclass`, splitting this declaration site into distinct
+    /// lockdep classes. For a site that legitimately holds two of its own
+    /// instances at once in a fixed order, this keeps that order *checked*
+    /// where `LO_DUPOK` would discard the check for the whole class.
     #[inline]
     pub fn lock_nested(&self, subclass: u8) -> SpinLockGuard<'_, T> {
         let preempt = PreemptGuard::new();

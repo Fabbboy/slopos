@@ -62,21 +62,17 @@ pub fn umask(mask: u32) -> u32 {
 }
 
 pub fn access_cstr(path: &[u8], mode: i32) -> i32 {
-    // SAFETY: caller provides a NUL-terminated byte slice; `access`
-    // reads bytes until the NUL and never beyond. The slice owns the
-    // bytes for the duration of the call.
+    // SAFETY: caller provides a NUL-terminated byte slice; `access` reads
+    // bytes until the NUL and never beyond.
     unsafe { misc::access(path.as_ptr(), mode) }
 }
 
 pub fn chmod_cstr(path: &[u8], mode: u32) -> i32 {
-    // SAFETY: caller provides a NUL-terminated byte slice; `chmod`
-    // reads bytes until the NUL and never beyond.
+    // SAFETY: caller provides a NUL-terminated byte slice; `chmod` reads bytes
+    // until the NUL and never beyond.
     unsafe { misc::chmod(path.as_ptr(), mode) }
 }
 
-/// Safe wrapper around the libc-style `close` that lives in
-/// `crate::ffi::close`. The underlying export is already a safe
-/// `pub extern "C" fn`; this re-export keeps test imports tidy.
 pub fn close(fd: i32) -> i32 {
     crate::ffi::close(fd)
 }

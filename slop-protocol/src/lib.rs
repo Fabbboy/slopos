@@ -1,11 +1,6 @@
-//! SlopOS display protocol v2 — typed enum wire format.
+//! SlopOS display protocol — typed enum wire format.
 //!
-//! Protocol features:
-//! - Version handshake with capability discovery
-//! - Configure/ack semantics for resize synchronization
-//! - Explicit frame callbacks for render pacing
-//! - Input serials for interactive move/resize authorization
-//! - Length-prefixed binary codec, all little-endian
+//! Length-prefixed binary codec, all little-endian.
 
 #![no_std]
 
@@ -23,9 +18,7 @@ pub use connection::Connection;
 pub use server::Server;
 pub use types::*;
 
-/// Poll a single FD via the poll syscall.
-///
-/// Monotonic timestamp in milliseconds since boot (for deadline tracking).
+/// Monotonic timestamp in milliseconds since boot.
 pub(crate) fn timestamp_ms() -> u64 {
     let mut ts = slopos_abi::syscall::types::Timespec {
         tv_sec: 0,

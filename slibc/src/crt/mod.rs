@@ -65,9 +65,6 @@ pub unsafe fn init_from_stack() {
     }
 }
 
-/// Two-stage C runtime startup: parses the stack, initializes environ
-/// and stdio, calls main, then performs a clean exit.
-///
 /// # Safety
 /// `main`, `argc`, and `argv` must be valid. `envp` is derived from
 /// `argv[argc+1]` per the System V ABI.
@@ -91,11 +88,8 @@ pub unsafe extern "C" fn __libc_start_main(
     crate::process::exit(ret)
 }
 
-/// Canonical stack-based C-runtime entry. A naked `_start` passes the raw
-/// initial stack pointer (`&argc`); this parses argc/argv/envp, captures the
-/// program's `PT_TLS` template (via `AT_PHDR`), sets up the main thread's TLS,
-/// initializes stdio, then calls `main` and exits. This is the standard
-/// `_start -> __libc_start_main` shape; TLS is fully live before `main` runs.
+/// Canonical stack-based C-runtime entry, called by a naked `_start` with the
+/// raw initial stack pointer. TLS is fully live before `main` runs.
 ///
 /// # Safety
 /// `stack_base` must point at the kernel-prepared entry stack (`argc` at
@@ -120,9 +114,8 @@ pub unsafe extern "C" fn __slibc_start(stack_base: *const usize) -> ! {
     (*ENVP.get()).0 = envp;
     crate::env::environ = envp as *mut *mut u8;
 
-    // TLS before anything that touches a thread-local: capture the template
-    // from AT_PHDR, then build + install the main thread's TLS block. `errno`
-    // uses its static fallback until this completes.
+    // Must precede anything that touches a thread-local; `errno` uses its
+    // static fallback until this completes.
     crate::thread::tls::capture_tls_template_from_stack(stack_base);
     crate::thread::tls::tls_init_main_thread();
     crate::stdio::streams::stdio_init();

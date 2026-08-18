@@ -1,18 +1,6 @@
-//! Work Stealing for SMP Load Balancing
-//!
-//! Implements Linux-inspired anti-ping-pong mechanisms:
-//!
-//! - **Imbalance threshold**: only steal when victim has ≥ `IMBALANCE_THRESHOLD`
-//!   more queued tasks than the thief.  Matches Linux's `imbalance_pct` concept
-//!   (a single-task difference should NOT trigger migration).
-//!
-//! - **Cache-hot protection**: refuse to steal a task that ran within the last
-//!   `MIGRATION_COST_CYCLES` TSC cycles on its current CPU.  Matches Linux's
-//!   `sysctl_sched_migration_cost` (default 500 µs).
-//!
-//! - **Cooldown interval**: the idle loop limits steal attempts to once per
-//!   `STEAL_COOLDOWN_TICKS` timer ticks, preventing constant scanning when
-//!   the system is mostly idle.
+//! Work stealing for SMP load balancing, with three anti-ping-pong guards:
+//! an imbalance threshold, cache-hot protection, and a per-CPU cooldown
+//! between scans. Each is tuned by a constant below.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -25,37 +13,26 @@ use super::task_struct::Task;
 use slopos_arch::{get_cpu_count, get_current_cpu};
 use slopos_ostd::{kdiag_timestamp, klog_debug};
 
-// ---------------------------------------------------------------------------
-// Tuning constants
-// ---------------------------------------------------------------------------
-
-/// Minimum load difference (in queued tasks) between victim and thief
-/// before a steal is considered.  With only a 1-task difference the
-/// steal would immediately create a reverse imbalance → ping-pong.
+/// Minimum load difference (in queued tasks) between victim and thief before a
+/// steal is considered. At a 1-task difference the steal would immediately
+/// create a reverse imbalance → ping-pong.
 const IMBALANCE_THRESHOLD: u32 = 2;
 
-/// TSC cycles a task must have been off-CPU before it is eligible for
-/// stealing.  Set to 0 to disable cache-hot protection (useful in QEMU
-/// where TSC speed varies).  A production value would be ~1 500 000
-/// cycles (~500 µs at 3 GHz), matching Linux's default.
+/// TSC cycles a task must have been off-CPU before it is eligible for stealing.
+/// 0 disables cache-hot protection, since TSC speed varies under QEMU; a
+/// production value would be ~1 500 000 cycles (~500 µs at 3 GHz), matching
+/// Linux's documented default.
 const MIGRATION_COST_CYCLES: u64 = 0;
 
-/// Minimum timer ticks between work-steal scans on a given CPU.
-/// With a 10 ms tick period, 3 ticks ≈ 30 ms — similar to Linux's
-/// `balance_interval` of 4 ms base × `busy_factor` 16 = 64 ms when busy.
+/// Minimum timer ticks between work-steal scans on a given CPU: with a 10 ms
+/// tick period, 3 ticks ≈ 30 ms.
 const STEAL_COOLDOWN_TICKS: u64 = 3;
 
-/// Per-CPU tick counter at the last steal attempt.
 static LAST_STEAL_TICK: [AtomicU64; slopos_arch::MAX_CPUS] =
     [const { AtomicU64::new(0) }; slopos_arch::MAX_CPUS];
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Attempt to steal a task from another CPU's ready queue.
-///
-/// Returns `true` if a task was successfully stolen and enqueued locally.
+/// Attempt to steal a task from another CPU's ready queue; `true` when one was
+/// stolen and enqueued locally.
 pub fn try_work_steal() -> bool {
     let cpu_id = get_current_cpu();
     let cpu_count = get_cpu_count();
@@ -64,7 +41,6 @@ pub fn try_work_steal() -> bool {
         return false;
     }
 
-    // Cooldown: don't scan every idle-loop iteration.
     if !steal_cooldown_elapsed(cpu_id) {
         return false;
     }
@@ -78,7 +54,6 @@ pub fn try_work_steal() -> bool {
             continue;
         }
 
-        // Imbalance check: only steal if victim is meaningfully busier.
         let victim_load = get_cpu_load(victim);
         if victim_load < thief_load + IMBALANCE_THRESHOLD {
             continue;
@@ -86,8 +61,7 @@ pub fn try_work_steal() -> bool {
 
         if let Some(task) = try_steal_from_cpu(victim, cpu_id) {
             // The stolen handle is the task's owning reference for the whole
-            // migration window; hand it to the thief's queue, and give it back
-            // to the victim if that queue refuses it.
+            // migration window.
             match with_local_scheduler(|sched| sched.enqueue_migrated(task)) {
                 Ok(()) => {
                     klog_debug!("WORK_STEAL: CPU {} stole task from CPU {}", cpu_id, victim);
@@ -101,11 +75,6 @@ pub fn try_work_steal() -> bool {
     false
 }
 
-// ---------------------------------------------------------------------------
-// Internals
-// ---------------------------------------------------------------------------
-
-/// Returns `true` if enough ticks have elapsed since the last steal scan.
 fn steal_cooldown_elapsed(cpu_id: usize) -> bool {
     if STEAL_COOLDOWN_TICKS == 0 {
         return true;
@@ -119,23 +88,18 @@ fn steal_cooldown_elapsed(cpu_id: usize) -> bool {
     true
 }
 
-/// Try to steal one task from `victim`, respecting affinity and cache-hot.
 fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<TaskRef> {
     let stolen = try_steal_task_from_cpu(victim)?;
     let task: &Task = &stolen;
 
-    // Affinity: can the task run on the thief CPU?
     let affinity = task.cpu_affinity();
     if !affinity_allows_cpu(affinity, thief) {
         return_to_victim(victim, stolen);
         return None;
     }
 
-    // Cache-hot: don't migrate a task that ran very recently on victim.
-    // NOTE: This comparison assumes an invariant TSC across CPUs so that
-    // timestamps from different cores are directly comparable.  On systems
-    // without invariant TSC this check may be inaccurate and should be
-    // disabled or replaced with a CPU-synchronized timestamp method.
+    // Assumes an invariant TSC: timestamps taken on different cores are
+    // compared directly, which is inaccurate on a CPU without one.
     if MIGRATION_COST_CYCLES > 0 {
         let last_run = task.last_run_timestamp();
         if last_run != 0 {
@@ -147,24 +111,19 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<TaskRef> {
         }
     }
 
-    // `task` is the borrow bound at the top of this function; the counter is
-    // atomic precisely because this CPU is the thief, not the runner.
+    // Atomic because this CPU is the thief, not the runner.
     task.inc_migration_count();
     Some(stolen)
 }
 
 /// Hand a stolen task back to the CPU it came from, releasing the carried
-/// reference once that queue has parked its own. If the victim refuses it the
-/// reference is still released rather than leaked; the task keeps its other
-/// owners and the rescue sweep will re-publish it.
+/// reference once that queue has parked its own. A victim that refuses it still
+/// releases the reference; the task keeps its other owners and the rescue sweep
+/// re-publishes it.
 fn return_to_victim(victim: usize, task: TaskRef) {
     let _ = enqueue_task_on_cpu(victim, &task);
     crate::task::task_put(task);
 }
-
-// ---------------------------------------------------------------------------
-// Load query helpers
-// ---------------------------------------------------------------------------
 
 pub fn get_cpu_load(cpu_id: usize) -> u32 {
     get_cpu_ready_count(cpu_id)

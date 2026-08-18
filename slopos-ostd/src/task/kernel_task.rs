@@ -1,12 +1,6 @@
-//! Kernel-internal task control block, parameterised over the stack
-//! handle types so the kernel side can plug in its own
-//! `KernelStack` / `UnsafeStack` aliases without forcing OSTD to grow
-//! a dependency on the kernel-side stack-region machinery.
-//!
-//! `TaskInner<K, U>` is the structural body. The kernel side defines
-//! `pub type Task = TaskInner<KernelStack, UnsafeStack>` in
-//! `core/src/scheduler/task_struct.rs` so existing callers continue to
-//! spell the type as `Task`.
+//! Kernel-internal task control block, parameterised over the stack handle
+//! types so OSTD need not depend on the kernel-side stack-region machinery.
+//! The kernel side aliases `TaskInner<K, U>` as `Task`.
 
 use core::ffi::c_void;
 use core::ptr;
@@ -44,12 +38,7 @@ use crate::task::test_reports::TestReportRing;
 use crate::user::context::UserContext;
 use crate::{AllocError, Init, KBox, init_from_closure};
 
-// =============================================================================
-// TaskContext — full CPU register state for interrupt-driven context switches
-// =============================================================================
-
 /// CPU register state saved during context switches.
-/// Size: 200 bytes (0xC8) — 25 × 8-byte registers.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct TaskContext {
@@ -112,26 +101,16 @@ impl TaskContext {
     }
 }
 
-// =============================================================================
-// SwitchContext — alias to the OSTD-owned callee-saved snapshot
-// =============================================================================
-
 /// Callee-saved snapshot consumed by the OSTD context-switch primitives in
-/// [`crate::task::switch`]. The layout (and the matching naked-asm
-/// offsets) are defined by [`crate::task::TaskContext`]; aliased here so
-/// that kernel call sites continue to spell the type as `SwitchContext`.
+/// [`crate::task::switch`]; its layout and the matching naked-asm offsets are
+/// [`crate::task::TaskContext`]'s.
 pub type SwitchContext = crate::task::TaskContext;
-
-// =============================================================================
-// fpu_reset_in_place — initialise an FpuState directly at `ptr`
-// =============================================================================
 
 /// Capacity of a task's working-directory buffer, NUL terminator included.
 pub const CWD_MAX: usize = 256;
 
-/// Initialise an [`FpuState`] directly at `ptr` without materialising the
-/// 2.6 KiB rvalue on the caller's stack.  Equivalent to writing the result
-/// of [`FpuState::new`] but with no temp.
+/// Initialise an [`FpuState`] directly at `ptr`, avoiding the 2.6 KiB rvalue
+/// on the caller's stack that [`FpuState::new`] would materialise.
 ///
 /// # Safety
 /// `ptr` must be a valid, properly-aligned, writable pointer to an
@@ -151,12 +130,7 @@ pub unsafe fn fpu_reset_in_place(ptr: *mut FpuState) {
     }
 }
 
-// =============================================================================
-// SignalAction — kernel-internal per-signal disposition
-// =============================================================================
-
-/// Kernel-internal signal action. Mirrors the relevant fields of UserSigaction
-/// but stored per-task for fast dispatch.
+/// Kernel-internal signal action: the per-task subset of `UserSigaction`.
 #[derive(Copy, Clone)]
 pub struct SignalAction {
     /// Handler address: SIG_DFL (0), SIG_IGN (1), or a user function pointer.
@@ -183,16 +157,13 @@ impl SignalAction {
 /// One task's disposition for one signal, stored as four atomics.
 ///
 /// Atomic because `task_signal_post` reads `handler` from whichever CPU is
-/// sending — every `kill`, every process-group and session fanout — while the
-/// owner rewrites the whole entry in `rt_sigaction`, on exec, and through the
-/// spawn `sigdefault` mask. A plain struct made that a data race the pointer
-/// accessors happened to hide behind a `*mut` reborrow.
+/// sending while the owner rewrites the whole entry in `rt_sigaction`, on exec,
+/// and through the spawn `sigdefault` mask.
 ///
-/// Four independent atomics rather than a lock: the fields are never read as a
-/// group from another CPU (senders want only `handler`), and the owner reads
-/// them in its own program order, so there is no group to keep consistent. The
-/// layout matches the plain struct, so `[SignalActionCell; NSIG]` leaves
-/// `Task`'s size unchanged.
+/// Four independent atomics rather than a lock: senders want only `handler` and
+/// the owner reads the fields in its own program order, so there is no group to
+/// keep consistent. The layout matches the plain struct, so `Task`'s size is
+/// unchanged.
 #[repr(C)]
 pub struct SignalActionCell {
     handler: AtomicU64,
@@ -222,17 +193,13 @@ impl SignalActionCell {
         self.handler.load(Ordering::Acquire)
     }
 
-    /// Read the whole disposition.
+    /// Read the whole disposition. Only the owning task may: it is the sole
+    /// writer and so cannot observe a half-written entry, while a remote CPU
+    /// reading the group can pair an old handler with a new mask and must use
+    /// [`handler`](Self::handler) instead.
     ///
-    /// Not atomic as a group, and named for the only caller that may rely on
-    /// it: the owning task, which is the sole writer and so cannot observe a
-    /// half-written entry. A remote CPU must use [`handler`](Self::handler) —
-    /// reading the group from another CPU can pair an old handler with a new
-    /// mask.
-    ///
-    /// `handler` is loaded **first**, and must stay first: its Acquire pairs
-    /// with the Release in [`store`](Self::store), which writes it last, so
-    /// observing a handler guarantees the three fields written before it.
+    /// `handler` must stay the **first** load: its Acquire pairs with the
+    /// Release in [`store`](Self::store), which writes it last.
     #[inline]
     pub fn load_owner_only(&self) -> SignalAction {
         SignalAction {
@@ -244,8 +211,7 @@ impl SignalActionCell {
     }
 
     /// Publish a whole disposition. `handler` is written last so a remote
-    /// reader that observes a new handler also observes the mask, flags and
-    /// restorer that belong with it.
+    /// reader that observes a new handler also observes the rest of the entry.
     #[inline]
     pub fn store(&self, action: SignalAction) {
         self.mask.store(action.mask, Ordering::Release);
@@ -254,23 +220,16 @@ impl SignalActionCell {
         self.handler.store(action.handler, Ordering::Release);
     }
 
-    /// Reset to the default disposition.
     #[inline]
     pub fn reset(&self) {
         self.store(SignalAction::default());
     }
 }
 
-// =============================================================================
-// Scheduler placement — runnable ownership separate from TaskStatus
-// =============================================================================
-
 /// Scheduler-owned placement for a runnable or physically running task.
 ///
 /// `TaskStatus::Ready` is not enough to prove schedulability on SMP: a task
-/// also needs exactly one scheduler owner. This byte is SlopOS's explicit
-/// equivalent of Linux's `on_rq`/`on_cpu` pair, FreeBSD's `TD_ON_RUNQ`, and
-/// seL4's queued-bit discipline.
+/// also needs exactly one scheduler owner.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedPlacement {
@@ -287,28 +246,22 @@ pub enum SchedPlacement {
     OnCpu = 3,
     /// Temporarily owned by the load balancer while moving between runqueues.
     Migrating = 4,
-    /// A wake/new-task publisher has reserved scheduler ownership but has not
-    /// linked the task into its final queue/inbox yet. This closes the
-    /// Ready-with-no-owner publication window without blocking producers.
+    /// A publisher has reserved scheduler ownership but has not linked the task
+    /// into its final queue/inbox yet, closing the Ready-with-no-owner
+    /// publication window.
     Waking = 5,
-    /// Allocated, possibly registered, never published. No publisher has ever
-    /// made this task schedulable.
+    /// Allocated, possibly registered, never published.
     ///
-    /// Distinct from `None` because `None` is also the placement of a blocked
-    /// task and of a terminated one — and that coincidence was exploitable.
-    /// A task is registry-visible from `register_task`, with status `Blocked`
-    /// and placement `None`, until its creator calls `publish_new_task`; those
-    /// two facts together are indistinguishable from a legitimate wake target,
-    /// so a process-group signal arriving in that window drove a half-built
-    /// task onto a runqueue. `task_create` publishes `pgid = task_id` before it
-    /// registers, which is exactly how such a signal finds one.
+    /// Distinct from `None`, which is also a blocked and a terminated task's
+    /// placement: between `register_task` and `publish_new_task` a task is
+    /// registry-visible with status `Blocked`, and without this state a
+    /// process-group signal arriving in that window cannot be told from a
+    /// legitimate wake target.
     ///
-    /// Entered once, at allocation. Left by exactly four paths: the two
-    /// publication entry points (`publish_new_task` and the `schedule_task` /
-    /// `schedule_new_task` reservation, both → `Waking`, both rolling back to
-    /// `Nascent` if the publication fails), the per-CPU idle installer (which
-    /// stores `OnCpu` directly — an idle task is dispatched, never published),
-    /// and teardown (→ `None`). Never a durable owner: it holds no reference.
+    /// Entered once, at allocation; left only by the two publication entry
+    /// points (→ `Waking`, rolling back here if publication fails), the per-CPU
+    /// idle installer (→ `OnCpu`, since an idle task is dispatched rather than
+    /// published), and teardown (→ `None`). Holds no reference.
     Nascent = 6,
 }
 
@@ -332,39 +285,24 @@ impl SchedPlacement {
     }
 }
 
-// =============================================================================
-// TaskInner — the generic kernel task control block
-// =============================================================================
-//
-// Layout sanity checks (`offset_of!(Task, fpu_state) - offset_of!(Task,
-// context)`, `size_of::<Task>() <= 8192`, `offset_of!(Task, abi) == 0`)
-// live in the kernel-side shim where the concrete `Task = TaskInner<
-// KernelStack, UnsafeStack>` alias is in scope so `offset_of!` resolves.
+// The `offset_of!`-based layout razors live in the kernel-side shim, where the
+// concrete `Task` alias is in scope so `offset_of!` resolves.
 
 /// Generic kernel task control block.
 ///
-/// Parameterised over:
-/// - `K`: kernel-mode stack handle (kernel side passes
-///   `slopos_sched::task_stack::KernelStack`).
-/// - `U`: SafeStack data ("unsafe") stack handle (kernel side passes
-///   `slopos_sched::task_stack::UnsafeStack`).
-///
-/// The `test_reports` ring is concrete because `TestReportRing` now
-/// lives in OSTD alongside the rest of the task plumbing.
+/// `K` is the kernel-mode stack handle and `U` the SafeStack data ("unsafe")
+/// stack handle; the kernel side passes `slopos_sched::task_stack::KernelStack`
+/// and `UnsafeStack`.
 #[repr(C)]
 pub struct TaskInner<K, U> {
-    /// OSTD-owned ABI sub-struct holding every field that naked asm
-    /// reads via a compile-time `const` offset operand. Must remain
-    /// at offset 0; enforced by the `offset_of!(Task, abi) == 0`
-    /// razor in the kernel-side shim.
+    /// ABI sub-struct holding every field naked asm reads via a compile-time
+    /// `const` offset operand. Must remain at offset 0; the kernel-side shim's
+    /// `offset_of!(Task, abi) == 0` razor enforces it.
     pub abi: TaskAbi,
     pub task_id: u32,
     pub name: [u8; TASK_NAME_MAX_LEN],
-    /// Fused (status, reason, epoch) atomic word. Replaces the
-    /// pre-Phase-5 `state_atomic: AtomicU8` + `block_reason: AtomicU8`
-    /// pair, which exposed an observation window in which a stale
-    /// reason could outlive its status (or vice versa). See
-    /// `crate::task::state` for the bit layout.
+    /// Fused (status, reason, epoch) atomic word, so a stale reason can never be
+    /// observed outliving its status. Bit layout in `crate::task::state`.
     state: TaskState,
     pub priority: TaskPriority,
     pub flags: u16,
@@ -379,28 +317,21 @@ pub struct TaskInner<K, U> {
     pub entry_arg: *mut c_void,
     pub context: TaskOwnCell<TaskContext>,
     pub fpu_state: TaskOwnCell<FpuState>,
-    // --- Fields below are NOT accessed by assembly and can be freely reordered ---
-    /// Owning handle to the kernel-mode stack.
-    ///
-    /// `Some` for every live task; `None` only on `invalid()` slots and
-    /// freed tasks (after `free_task_stacks`).  Dropping the kernel-stack
-    /// handle unmaps the stack pages, returns the physical frames to the
-    /// page allocator, and releases the VA slot — so freeing a task is
-    /// just `task.kernel_stack = None`.
+    // Nothing below here is accessed by assembly; these fields may be reordered.
+    /// Owning handle to the kernel-mode stack; `None` only on `invalid()` slots
+    /// and after `free_task_stacks`. Dropping it unmaps the stack pages, returns
+    /// their frames to the page allocator and releases the VA slot.
     pub kernel_stack: Option<K>,
     /// Owning handle to the SafeStack-sanitizer unsafe (data) stack.
     pub unsafe_stack: Option<U>,
-    /// Packed handle to this task's address space; 0 means it has none.
+    /// Packed handle to this task's address space; 0 means it has none. Low
+    /// [`PROCESS_VM_SLOT_BITS`] bits are the slot index, the rest a generation
+    /// stamped when the slot was bound.
     ///
-    /// The address space lives in a table this crate cannot name, so the
-    /// handle travels packed: [`PROCESS_VM_SLOT_BITS`] low bits of slot
-    /// index, the rest a generation stamped when the slot was bound.
-    ///
-    /// `process_id` cannot do this job. Ids are recycled, so a task
-    /// holding only an id can be handed the address space of whichever
-    /// process holds that id *now* — which on a page fault means
-    /// servicing the fault in a stranger's page tables. Resolving the
-    /// handle instead fails on a rebound slot.
+    /// Not `process_id`: ids are recycled, so a task holding only an id can be
+    /// handed the address space of whichever process holds that id *now* —
+    /// which on a page fault means servicing it in a stranger's page tables.
+    /// Resolving the handle fails on a rebound slot instead.
     ///
     /// [`PROCESS_VM_SLOT_BITS`]: crate::handle::PROCESS_VM_SLOT_BITS
     process_vm_handle: AtomicU64,
@@ -409,15 +340,12 @@ pub struct TaskInner<K, U> {
     /// Beside `process_vm_handle` rather than replacing it, because they name
     /// different objects: several tasks share one `Process`, and a `CLONE_VM`
     /// thread shares its parent's address space *and* its process, while a
-    /// forked child shares neither. Both are generation-checked designators,
-    /// and both are packed for the same reason — the tables they index live in
-    /// crates this one sits below.
+    /// forked child shares neither.
     ///
-    /// This is what makes `process_id` demotable to display: every question
-    /// that used to be answered by scanning for a matching id (whose address
-    /// space is this, whose descriptor table, is this the last task of its
-    /// process) is answered from here instead, and answers *stale* rather than
-    /// answering about whichever process holds that id now.
+    /// Every question once answered by scanning for a matching `process_id` —
+    /// whose address space is this, whose descriptor table, is this the last
+    /// task of its process — is answered from here instead, and answers *stale*
+    /// rather than answering about whichever process holds that id now.
     ///
     /// [`Process`]: crate::process::Process
     process_handle: AtomicU64,
@@ -428,52 +356,38 @@ pub struct TaskInner<K, U> {
     /// Published through an RCU slot because the writer is not the owner:
     /// `setpgid(pid, …)` re-homes a *different* task, so the store lands on a
     /// field a reader on another CPU may be cloning from at that instant. The
-    /// slot is what keeps the two apart. A reader clones its own handle inside
-    /// a read-side section — one acquire load, one increment — and the
     /// displaced reference is released only once a grace period has elapsed, so
-    /// the writer can never drive to zero a count a reader is still raising,
-    /// and no destructor runs on the writer's stack.
+    /// the writer cannot drive to zero a count a reader is still raising, and no
+    /// destructor runs on the writer's stack.
     pub process_group: RcuArcSlot<ProcessGroup>,
-    /// Per-task ring of `SYSCALL_TEST_REPORT` payloads.
-    ///
-    /// `None` for non-test tasks (the syscall is never invoked). The first
-    /// `SYSCALL_TEST_REPORT` from a task lazily allocates a fresh ring; the
-    /// kernel-side userland-test runner takes ownership once the task exits.
-    /// Per-task ring of `SYSCALL_TEST_REPORT` payloads.
+    /// Per-task ring of `SYSCALL_TEST_REPORT` payloads, `None` until the task's
+    /// first report allocates one; the userland-test runner takes ownership once
+    /// the task exits.
     ///
     /// Behind a `SpinLock` rather than an atomic: it owns a `KBox`, which no
-    /// atomic can hold. The owner lazily allocates it on its first report while
-    /// a *foreign* task drains it after exit (`task_drain_test_reports`), so a
-    /// shared borrow has to be enough for both — which is exactly what the lock
-    /// buys. `LOCK_LEVEL_RESOURCE`: neither side is on the switch path or runs
-    /// with interrupts off, and the allocation happens before the store so the
-    /// lock never covers one.
+    /// atomic can hold, and the owner allocates it while a *foreign* task drains
+    /// it after exit (`task_drain_test_reports`), so a shared borrow has to be
+    /// enough for both. `LOCK_LEVEL_RESOURCE`: neither side is on the switch path
+    /// or runs with interrupts off, and the allocation happens before the store
+    /// so the lock never covers one.
     pub test_reports: SpinLock<Option<KBox<TestReportRing>>>,
-    /// Id of this task's parent, or `INVALID_TASK_ID` once reparented.
-    ///
-    /// Atomic because the write is cross-task: a dying parent stamps
-    /// `INVALID_TASK_ID` into each of its live children while `getppid`, the
-    /// task-list syscall and the pidfd layer read it from elsewhere.
+    /// Id of this task's parent, or `INVALID_TASK_ID` once reparented. Atomic
+    /// because a dying parent stamps it into each of its live children while
+    /// `getppid`, the task-list syscall and the pidfd layer read it elsewhere.
     pub parent_task_id: AtomicU32,
-    /// FS segment base address (TLS pointer). Written to MSR FS_BASE before
-    /// switching to user mode, and read back on context save.
-    /// FS segment base (TLS pointer).
+    /// FS segment base (TLS pointer), loaded into MSR FS_BASE before switching
+    /// to user mode.
     ///
     /// Atomic because the owner writes it via `arch_prctl` while
     /// `prepare_switch_to` reads the *incoming* task's copy from whichever CPU
-    /// is performing the switch — a cross-task read, which a plain field cannot
-    /// express without a data race. Release/Acquire rather than Relaxed: the
-    /// value must be visible to the next switch on any CPU.
+    /// is performing the switch. Release/Acquire rather than Relaxed: the value
+    /// must be visible to the next switch on any CPU.
     pub fs_base: AtomicU64,
-    /// Thread-group ID.
     pub tgid: u32,
-    /// Process-group and session ids.
-    ///
-    /// Atomic because `setpgid`/`setsid` retarget a task from its own CPU while
-    /// job control scans every other task from elsewhere — the process-group
-    /// signal walk, the orphaned-group test, and the TTY hangup sweep all read
-    /// these from a CPU that does not own the task. A plain field cannot
-    /// express that without a data race.
+    /// Process-group and session ids. Atomic because `setpgid`/`setsid` retarget
+    /// a task from its own CPU while the process-group signal walk, the
+    /// orphaned-group test and the TTY hangup sweep read them from CPUs that do
+    /// not own it.
     ///
     /// Relaxed: they are identity scalars, not a publication protocol. Where
     /// one has to be seen together with the [`process_group`](Self::process_group)
@@ -482,66 +396,47 @@ pub struct TaskInner<K, U> {
     pub pgid: AtomicU32,
     pub sid: AtomicU32,
     /// Controlling terminal of this task's session, encoded per
-    /// [`TTY_INDEX_NONE`]. Read and written through
-    /// [`controlling_tty`](TaskInner::controlling_tty) and
-    /// [`set_controlling_tty`](TaskInner::set_controlling_tty).
-    ///
-    /// Atomic because the session-hangup path clears it through a *shared*
-    /// snapshot of the task table: the leader's exit walks every task in the
-    /// session and clears the field on each, concurrently with those tasks
-    /// reading it. A plain field made that a data race that the pointer
-    /// accessors happened to hide behind a `*mut` reborrow.
+    /// [`TTY_INDEX_NONE`]. Atomic because the session leader's exit walks every
+    /// task in the session through a *shared* snapshot of the task table and
+    /// clears the field on each, concurrently with those tasks reading it.
     pub controlling_tty: AtomicU16,
-    /// Current working directory path (null-terminated, max 256 bytes).
-    /// Only the owning task reads or writes it (chdir/getcwd), so the cell's
-    /// witness is always a `CurrentTask`.
+    /// Working-directory path, NUL-terminated. Only the owning task reads or
+    /// writes it, so the cell's witness is always a `CurrentTask`.
     pub cwd: TaskOwnCell<[u8; CWD_MAX]>,
     /// Length of `cwd` up to but not including the NUL. Atomic so it can be
     /// published after the bytes.
     pub cwd_len: AtomicU16,
-    /// User-space address to clear (and futex-wake) on thread exit.
-    ///
-    /// Atomic because the exit path reads and clears it, and that path runs on
-    /// whichever task called `task_terminate` — not necessarily this one.
+    /// User-space address to clear (and futex-wake) on thread exit. Atomic
+    /// because the exit path runs on whichever task called `task_terminate` —
+    /// not necessarily this one.
     pub clear_child_tid: AtomicU64,
-    /// The task's full scheduling quantum, in timer ticks.
-    ///
-    /// Atomic because its writer and its reader are on different CPUs:
-    /// `reset_task_quantum` runs from `schedule_task_from_placement` on the
-    /// *waking* CPU against a task that may still be `on_cpu` elsewhere, while
-    /// the timer ISR on that other CPU is decrementing
-    /// [`time_slice_remaining`](Self::time_slice_remaining) below.
+    /// The task's full scheduling quantum, in timer ticks. Atomic because
+    /// `reset_task_quantum` runs on the *waking* CPU against a task that may
+    /// still be `on_cpu` elsewhere, while the timer ISR on that other CPU is
+    /// decrementing [`time_slice_remaining`](Self::time_slice_remaining) below.
     pub time_slice: AtomicU64,
     /// Ticks left in the current quantum. Decremented by the timer ISR on the
     /// CPU running the task; reset cross-CPU with `time_slice` above.
     pub time_slice_remaining: AtomicU64,
-    /// Accumulated on-CPU time.
-    ///
-    /// Atomic because it has three writers on different CPUs: the switch-out
-    /// tail bumps the *outgoing* task's tally, the exit path adds the final
-    /// slice, and the task-list syscall reads it from a registry walk while
-    /// both are running. A plain field made that a data race.
+    /// Accumulated on-CPU time. Atomic because the switch-out tail and the exit
+    /// path both add to it from different CPUs while the task-list syscall reads
+    /// it from a registry walk.
     pub total_runtime: AtomicU64,
     pub creation_time: u64,
-    /// Voluntary-yield count.
-    ///
-    /// Atomic for the same reason as `migration_count` below, and Relaxed for
-    /// the same reason: a diagnostic tally with no publication relationship.
+    /// Voluntary-yield count. Atomic and Relaxed for the same reasons as
+    /// `migration_count` below: a diagnostic tally with no publication
+    /// relationship.
     pub yield_count: AtomicU32,
-    /// Timestamp of this task's last dispatch.
-    ///
-    /// Atomic because the context-switch path writes it on the owning CPU
-    /// while the stranded-task rescue sweep reads it from another. The old
-    /// plain field needed a hand-rolled `read_volatile` accessor to paper over
-    /// exactly that.
+    /// Timestamp of this task's last dispatch. Atomic because the
+    /// context-switch path writes it on the owning CPU while the stranded-task
+    /// rescue sweep reads it from another.
     pub last_run_timestamp: AtomicU64,
     /// Whether this task has ever entered user mode, and whether its saved
     /// context came from a user-mode trap frame rather than a kernel switch.
     ///
     /// Atomic so the trap-save path can stamp them through the same witness
-    /// that authorises the register write, rather than needing an exclusive
-    /// borrow of the whole task. Relaxed: each is a standalone flag whose
-    /// writer is the task's own CPU, ordered by the trap frame it accompanies.
+    /// that authorises the register write. Relaxed: each is a standalone flag
+    /// written by the task's own CPU, ordered by the trap frame it accompanies.
     pub user_started: AtomicU8,
     pub context_from_user: AtomicU8,
     /// Why the task exited, as [`TaskExitReason::as_u16`].
@@ -549,33 +444,28 @@ pub struct TaskInner<K, U> {
     /// This trio is atomic because `stamp_exit_state` runs from
     /// `task_terminate(other_tid)` — *any* CPU terminating *any* task — so the
     /// writer is generally not the owner and no exclusivity witness is
-    /// obtainable. Release on store / Acquire on load, not Relaxed: the three
-    /// are read back into `ExitInfo` before the status store publishes them, so
-    /// they carry a publication relationship rather than being counters.
+    /// obtainable. Release/Acquire rather than Relaxed: the three are read back
+    /// into `ExitInfo` before the status store publishes them.
     pub exit_reason: AtomicU16,
     /// The specific fault, as [`TaskFaultReason::as_u16`]. See `exit_reason`.
     pub fault_reason: AtomicU16,
     /// Exit code. See `exit_reason`.
     pub exit_code: AtomicU32,
-    /// Pending Wheel-of-Fate outcome, published by the `fate` syscall on
-    /// whatever task issued it and cleared by whoever consumes it or by the
-    /// exit path. None of those three is guaranteed to be this task, so the
-    /// trio is atomic; `fate_pending` is the flag that publishes the pair, so
-    /// it is Release on store and Acquire on load while the values are Relaxed.
+    /// Pending Wheel-of-Fate outcome. Atomic because none of the publisher, the
+    /// consumer and the exit path that clears it is guaranteed to be this task;
+    /// `fate_pending` publishes the pair, so it is Release/Acquire while the
+    /// values are Relaxed.
     pub fate_token: AtomicU32,
     pub fate_value: AtomicU32,
     pub fate_pending: AtomicU8,
-    /// Bitmask of CPUs this task may run on.
-    ///
-    /// Atomic because it is written across tasks and read across CPUs:
-    /// `sched_setaffinity` stamps another task's mask while the work-stealer
-    /// and the switch-out repatriation check read it on whichever CPU that task
+    /// Bitmask of CPUs this task may run on. Atomic because
+    /// `sched_setaffinity` stamps another task's mask while the work-stealer and
+    /// the switch-out repatriation check read it on whichever CPU that task
     /// happens to be on.
     pub cpu_affinity: AtomicU32,
-    /// CPU this task last ran on, a placement hint.
-    ///
-    /// Atomic because the enqueue paths stamp it on whichever CPU is
-    /// publishing the task while `select_target_cpu` reads it from another.
+    /// CPU this task last ran on, a placement hint. Atomic because the enqueue
+    /// paths stamp it on whichever CPU is publishing the task while
+    /// `select_target_cpu` reads it from another.
     pub last_cpu: AtomicU8,
     /// The CPU whose register file last held this task's FPU/vector state, or
     /// [`FPU_CPU_NONE`] for none — the per-task half of the FPU owner tag.

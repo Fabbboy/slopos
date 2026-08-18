@@ -1,8 +1,4 @@
 //! Owning heap buffer with safe byte-indexed access.
-//!
-//! Wraps a `slibc::mem::malloc::alloc`'d region. All raw-pointer
-//! arithmetic lives inside this module; consumers see only safe
-//! `write_byte` / `read_byte` / `fill_with` / `verify` / `realloc`.
 
 use core::ffi::c_void;
 use core::mem;
@@ -11,17 +7,14 @@ use crate::mem::malloc;
 
 /// Heap allocation owning a single `malloc::alloc`'d region.
 ///
-/// `Drop` releases the region via `malloc::dealloc`. The buffer is
-/// allocated from slibc's dlmalloc; size requests of 0 still allocate
-/// (matching libc behaviour) so `len()` always reflects the requested
-/// size.
+/// A size request of 0 still allocates, matching libc, so `len()` always
+/// reflects the requested size.
 pub struct RawBuffer {
     ptr: *mut u8,
     len: usize,
 }
 
 impl RawBuffer {
-    /// Allocate `len` bytes. Returns `None` on allocation failure.
     pub fn new(len: usize) -> Option<Self> {
         let ptr = malloc::alloc(len).cast::<u8>();
         if ptr.is_null() {
@@ -41,10 +34,9 @@ impl RawBuffer {
         }
     }
 
-    /// Resize to `new_len` bytes. Preserves the prefix common to both
-    /// sizes. Returns `None` on allocation failure (the original buffer
-    /// is freed by `realloc` per libc semantics, so `self` becomes
-    /// invalid either way — `mem::forget` suppresses the double-free).
+    /// Resize to `new_len`, preserving the common prefix; `None` on allocation
+    /// failure. `realloc` frees the original per libc semantics, so `self` is
+    /// invalid either way and `mem::forget` suppresses the double-free.
     pub fn realloc(self, new_len: usize) -> Option<Self> {
         let old_ptr = self.ptr;
         mem::forget(self);

@@ -1,47 +1,10 @@
 //! `IoMem`: typed safe wrapper for memory-mapped I/O regions.
 //!
-//! Closes the `&T`-over-MMIO bug class by exposing device registers
-//! exclusively through `Pod`-typed volatile read/write methods. There
-//! is no path that yields a Rust reference into MMIO storage; the
-//! `compile_fail` doctests on [`IoMem`] lock that discipline in.
-//!
-//! # Construction
-//!
-//! `IoMem` is built through one of two sanctioned paths:
-//!
-//! 1. [`IoMemRegistry::reserve`] — the gated path. Checks containment
-//!    against a `&'static [PhysRange]` of architecturally-fixed
-//!    insensitive ranges (Inv. 7), plus the heap-free secondary
-//!    [dynamic registry](register_io_mem_range) for ranges discovered
-//!    at boot (HPET / IOAPIC / PCI ECAM / device BARs / framebuffer),
-//!    and delegates virt-allocation + page-table mapping to a
-//!    registered [`IoMemMapper`]. The mapper and static-range
-//!    registrations are one-shot, mirroring the pattern in
-//!    [`crate::mm::frame_alloc`] and [`crate::mm::phys`]. The dynamic
-//!    registry is append-only single-writer; in SlopOS this is
-//!    automatic because driver init runs serially on the BSP.
-//!
-//! 2. [`IoMem::empty`] — a const placeholder constructor producing a
-//!    zero-sized handle (`virt_base = 0`, `phys_base = NULL`,
-//!    `size = 0`). Reads / writes against an empty handle OOB-panic;
-//!    the placeholder exists so callers can park an `IoMem` in a
-//!    `const fn` constructor or a `[T; N]` array slot before the real
-//!    region is reserved.
-//!
-//! # Cache policy
-//!
-//! [`IoMemCachePolicy`] selects between Uncacheable (the safe default
-//! for device registers), Write-Combining (framebuffers, video
-//! memory), Write-Through, and Write-Back. The mapping translates
-//! these to platform-specific PAT bits inside the [`IoMemMapper`].
-//!
-//! # Lifetime
-//!
-//! `IoMem` is `Clone` but neither `Copy` nor `Drop`. Cloning produces
-//! a second handle pointing into the same mapping; the kernel virtual
-//! window stays mapped for the kernel's lifetime. Real unmap on Drop
-//! is a Phase-2 concern and ships when the kernel virtual allocator
-//! grows recyclable ranges.
+//! Handles come from [`IoMemRegistry::reserve`], which checks the request
+//! against the insensitive-range registries (Inv. 7) before delegating the
+//! mapping to a registered [`IoMemMapper`], or from [`IoMem::empty`] for a
+//! zero-sized placeholder. Mappings are never torn down: cloning aliases the
+//! same window, which stays mapped for the kernel's lifetime.
 
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
@@ -53,15 +16,7 @@ use slopos_abi::addr::PhysAddr;
 use crate::mm::pod::Pod;
 use crate::sync::BspToken;
 
-// ---------------------------------------------------------------------------
-// PhysRange.
-// ---------------------------------------------------------------------------
-
 /// Half-open physical address range `[base, base + len)`.
-///
-/// Used by [`IoMemRegistry`] to describe the set of MMIO ranges the
-/// firmware has certified as insensitive (free for OSTD clients to
-/// access).
 #[derive(Clone, Copy, Debug)]
 pub struct PhysRange {
     pub base: PhysAddr,
@@ -69,9 +24,8 @@ pub struct PhysRange {
 }
 
 impl PhysRange {
-    /// True if `[base, base + len)` is entirely contained within
-    /// `self`. Overflow-safe: `base + len` is computed via
-    /// `checked_add`; any overflow returns false.
+    /// True if `[base, base + len)` is entirely contained within `self`.
+    /// Overflow in either endpoint returns false.
     #[inline]
     pub fn contains_range(&self, base: PhysAddr, len: usize) -> bool {
         let req_start = base.as_u64();
@@ -86,27 +40,19 @@ impl PhysRange {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Cache policy.
-// ---------------------------------------------------------------------------
-
 /// Per-region caching attribute. Maps to platform-specific PAT bits
 /// inside the [`IoMemMapper`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IoMemCachePolicy {
-    /// Strongly uncacheable. Safe default for device registers.
+    /// Safe default for device registers.
     Uncacheable,
-    /// Write-combining. Framebuffers, video memory, large bulk MMIO.
+    /// Framebuffers, video memory, large bulk MMIO.
     WriteCombining,
-    /// Write-through. Reads cached, writes propagate.
+    /// Reads cached, writes propagate.
     WriteThrough,
-    /// Write-back. Used by RAM-backed I/O windows (rare).
+    /// RAM-backed I/O windows (rare).
     WriteBack,
 }
-
-// ---------------------------------------------------------------------------
-// Errors.
-// ---------------------------------------------------------------------------
 
 /// Failure modes for `IoMem` operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,26 +70,19 @@ pub enum IoMemError {
     Uninitialised,
 }
 
-// ---------------------------------------------------------------------------
-// IoMemMapper trait + registration.
-// ---------------------------------------------------------------------------
-
-/// Pluggable mapper that owns kernel virtual address allocation and
-/// page-table installation for `IoMem`. `slopos-ostd` cannot call the
-/// kernel's paging layer directly (the dependency arrow points the
-/// other way), so the legacy / production mapper lives outside this
-/// crate and registers itself here at boot.
+/// Pluggable mapper owning kernel virtual address allocation and page-table
+/// installation for `IoMem`. A trait because `slopos-ostd` cannot call the
+/// kernel's paging layer directly — the dependency arrow points the other way —
+/// so the real mapper registers itself here at boot.
 pub trait IoMemMapper: Send + Sync + 'static {
-    /// Allocate a kernel virtual window covering `[phys, phys + size)`
-    /// and install page-table entries with the requested cache policy.
-    /// Returns the starting virtual address.
+    /// Map `[phys, phys + size)` into kernel virtual space with the requested
+    /// cache policy; returns the window's base virtual address.
     fn map(&self, phys: PhysAddr, size: usize, policy: IoMemCachePolicy)
     -> Result<u64, IoMemError>;
 
-    /// Tear down a mapping previously returned by [`Self::map`]. Not
-    /// invoked by the current `IoMem` (mappings are leaked); declared
-    /// so a future recyclable-virt allocator does not have to widen
-    /// the trait surface.
+    /// Tear down a mapping from [`Self::map`]. Unused today — `IoMem` leaks
+    /// its mappings — but declared so a recyclable-virt allocator need not
+    /// widen the trait later.
     fn unmap(&self, virt: u64, size: usize);
 }
 
@@ -183,10 +122,6 @@ fn current_io_mem_mapper() -> Option<&'static dyn IoMemMapper> {
     Some(*slot)
 }
 
-// ---------------------------------------------------------------------------
-// IoMemRegistry: insensitive-range list + registration.
-// ---------------------------------------------------------------------------
-
 struct RegistrySlot {
     base: AtomicPtr<PhysRange>,
     len: AtomicUsize,
@@ -197,15 +132,11 @@ static IO_MEM_REGISTRY: RegistrySlot = RegistrySlot {
     len: AtomicUsize::new(0),
 };
 
-/// One-shot wiring point for the insensitive-range list. Boot
-/// constructs the slice from ACPI MCFG (PCIe ECAM), MADT (LAPIC,
-/// IOAPIC), HPET, and the Limine framebuffer response, then installs
-/// it via this hook. The `&BspToken<'brand>` witnesses BSP-only init;
-/// the slice is immutable for the kernel's lifetime — hot-plug is not
-/// supported. Every entry must describe a region the firmware /
-/// platform has marked as insensitive (Inv. 7) — that's a caller
-/// invariant the type system cannot express, but cross-checked at the
-/// reservation path through [`IoMemRegistry::reserve`].
+/// One-shot wiring point for the insensitive-range list. The
+/// `&BspToken<'brand>` witnesses BSP-only init; the slice is immutable for the
+/// kernel's lifetime — hot-plug is not supported. Every entry must describe a
+/// region the firmware / platform has marked as insensitive (Inv. 7), a caller
+/// invariant the type system cannot express.
 pub fn register_io_mem_registry<'brand>(_token: &BspToken<'brand>, ranges: &'static [PhysRange]) {
     let raw = ranges.as_ptr() as *mut PhysRange;
     let prev = IO_MEM_REGISTRY.base.swap(raw, Ordering::AcqRel);
@@ -228,31 +159,6 @@ fn current_io_mem_registry() -> Option<&'static [PhysRange]> {
     Some(unsafe { core::slice::from_raw_parts(base, len) })
 }
 
-// ---------------------------------------------------------------------------
-// Dynamic-range secondary registry.
-//
-// The static slice registered above carries architecturally-fixed
-// MMIO (the LAPIC at 0xFEE0_0000 on x86_64). HPET, IOAPIC, PCI ECAM,
-// device BARs, and the framebuffer have firmware-discovered phys
-// addresses that aren't known until boot is well underway — far too
-// late to compose into a `&'static [PhysRange]` for the one-shot
-// hook above.
-//
-// This append-only fixed-size table backs [`register_io_mem_range`].
-// It is single-writer-multi-reader: the writer (`register_…_range`)
-// stores the new entry first and publishes the count via a release
-// store; readers (`IoMemRegistry::reserve`) acquire-load the count
-// and then read up to that many `PhysRange` slots. PhysRange is
-// `Copy`, so torn reads are impossible — each slot is written before
-// the count increment that makes it visible.
-//
-// **Single-writer precondition.** Two CPUs concurrently calling
-// `register_io_mem_range` would race on slot allocation. SlopOS boot
-// runs all driver init serially on the BSP before SMP fully settles,
-// so the contract is satisfied automatically. Late callers (post-boot
-// hot-plug) would have to serialise externally.
-// ---------------------------------------------------------------------------
-
 const MAX_DYNAMIC_RANGES: usize = 64;
 
 #[repr(transparent)]
@@ -271,31 +177,21 @@ static DYNAMIC_RANGES: [DynamicSlot; MAX_DYNAMIC_RANGES] =
     [const { EMPTY_SLOT }; MAX_DYNAMIC_RANGES];
 static DYNAMIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// Append a runtime-discovered insensitive range to the dynamic
-/// secondary registry. Used by drivers that map MMIO from
-/// firmware-discovered phys addresses (HPET, IOAPIC, PCI ECAM,
-/// device BARs, framebuffer): the kernel-side
-/// `slopos_mm::mmio::MmioRegionExt::map` calls this implicitly before
-/// reaching [`IoMemRegistry::reserve`] so drivers don't need to know
-/// the registry exists.
-///
-/// Append-only: there is no deregistration path (matches the static
-/// registry's "no hot-plug" stance). Idempotent at the caller's
-/// discretion — re-registering the same range is harmless because
+/// Append a runtime-discovered insensitive range to the dynamic secondary
+/// registry, for MMIO whose physical address firmware only reveals during boot
+/// (HPET, IOAPIC, PCI ECAM, device BARs, framebuffer). Append-only, with no
+/// deregistration path; re-registering the same range is harmless because
 /// `reserve` only checks containment, not exact match.
 ///
 /// Returns:
 /// - `Err(OutOfBounds)` for a zero-length range.
-/// - `Err(MappingFailed)` once the table is full
-///   (`MAX_DYNAMIC_RANGES = 64` ranges; raise the constant if a
-///   platform genuinely needs more).
+/// - `Err(MappingFailed)` once the table is full (`MAX_DYNAMIC_RANGES`).
 ///
 /// # Single-writer precondition
 ///
-/// Callers must serialise with respect to one another. SlopOS driver
-/// init satisfies this automatically (all calls run on the BSP during
-/// the boot phase priority sequence). Concurrent callers would race
-/// on slot allocation and one of the writes would be lost.
+/// Callers must serialise with respect to one another; concurrent callers race
+/// on slot allocation and one write is lost. SlopOS driver init satisfies this
+/// automatically by running on the BSP.
 pub fn register_io_mem_range(range: PhysRange) -> Result<(), IoMemError> {
     if range.len == 0 {
         return Err(IoMemError::OutOfBounds);
@@ -328,9 +224,8 @@ fn dynamic_ranges_view() -> &'static [PhysRange] {
     unsafe { core::slice::from_raw_parts(DYNAMIC_RANGES.as_ptr() as *const PhysRange, count) }
 }
 
-/// Test-only reset hook. Clears the mapper, both registries, and the
-/// dynamic-range table so host integration tests can install a fresh
-/// wiring per binary.
+/// Test-only reset hook: clears the mapper and both registries so a host
+/// integration-test binary can install fresh wiring.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_test() {
     IO_MEM_MAPPER
@@ -343,8 +238,7 @@ pub fn reset_for_test() {
     DYNAMIC_COUNT.store(0, Ordering::Release);
 }
 
-/// Insensitive-range gate over [`IoMem`] construction. Stateless;
-/// every method is associated.
+/// Insensitive-range gate over [`IoMem`] construction.
 pub struct IoMemRegistry;
 
 impl IoMemRegistry {
@@ -386,10 +280,6 @@ impl IoMemRegistry {
     }
 }
 
-// ---------------------------------------------------------------------------
-// IoMem.
-// ---------------------------------------------------------------------------
-
 /// Typed handle to a memory-mapped I/O region.
 ///
 /// All access goes through volatile [`Pod`] reads/writes; there is no
@@ -428,9 +318,8 @@ pub struct IoMem {
     virt_base: u64,
     phys_base: PhysAddr,
     size: usize,
-    /// `PhantomData<()>` placeholder. Reserved so Phase-2 can attach a
-    /// lifetime / ref-count without breaking the `IoMem` constructor
-    /// shape.
+    /// Placeholder so a lifetime or ref-count can be attached later without
+    /// changing the `IoMem` constructor shape.
     _not_send_pinned: PhantomData<()>,
 }
 
@@ -455,13 +344,9 @@ impl Clone for IoMem {
 }
 
 impl IoMem {
-    /// Const placeholder constructor. Returns a zero-sized handle
-    /// (`virt_base = 0`, `phys_base = NULL`, `size = 0`) suitable for
-    /// `static`/`const fn` initialisers and `[T; N]` array slots that
-    /// will be overwritten with a real reservation later. Reads /
-    /// writes against the result OOB-panic; `is_mapped()` returns
-    /// `false`. See module docs for the two sanctioned construction
-    /// paths.
+    /// Const placeholder: a zero-sized handle for `static` / `const fn`
+    /// initialisers and array slots a real reservation will overwrite. Reads
+    /// and writes against it OOB-panic and `is_mapped()` returns `false`.
     #[inline]
     pub const fn empty() -> Self {
         Self {
@@ -472,18 +357,14 @@ impl IoMem {
         }
     }
 
-    /// Physical base address of the region.
     #[inline]
     pub fn phys_base(&self) -> PhysAddr {
         self.phys_base
     }
 
-    /// Kernel virtual base address the mapper installed for this
-    /// region. Mostly useful for legacy MMIO call-sites that store the
-    /// address in an `AtomicU64` for lock-free hot-path reads;
-    /// dereferencing via raw pointer is `unsafe` and bypasses the
-    /// `read` / `write` bounds + alignment checks. Prefer the volatile
-    /// accessors for normal driver code.
+    /// Kernel virtual base the mapper installed. Dereferencing it by raw
+    /// pointer bypasses the `read` / `write` bounds and alignment checks;
+    /// prefer the volatile accessors.
     #[inline]
     pub fn virt_base(&self) -> u64 {
         self.virt_base
@@ -495,9 +376,7 @@ impl IoMem {
         self.size
     }
 
-    /// True for handles produced by [`IoMemRegistry::reserve`]; false
-    /// for handles produced by [`Self::empty`] or any other zero-sized
-    /// placeholder.
+    /// False for [`Self::empty`] and any other zero-sized placeholder.
     #[inline]
     pub fn is_mapped(&self) -> bool {
         self.size != 0
@@ -511,9 +390,8 @@ impl IoMem {
             .is_some_and(|end| end <= self.size)
     }
 
-    /// Read a `Pod` value at `offset`. Panics on out-of-bounds or
-    /// misaligned access — driver-side miscoding is unrecoverable. Use
-    /// [`Self::try_read`] for a fallible variant.
+    /// Read a `Pod` value at `offset`. Panics on out-of-bounds or misaligned
+    /// access; see [`Self::try_read`] for the fallible variant.
     #[inline]
     pub fn read<T: Pod>(&self, offset: usize) -> T {
         let size = size_of::<T>();
@@ -543,9 +421,8 @@ impl IoMem {
         unsafe { core::ptr::read_volatile(core::ptr::with_exposed_provenance::<T>(addr as usize)) }
     }
 
-    /// Write a `Pod` value at `offset`. Panics on out-of-bounds or
-    /// misaligned access. Use [`Self::try_write`] for a fallible
-    /// variant.
+    /// Write a `Pod` value at `offset`. Panics on out-of-bounds or misaligned
+    /// access; see [`Self::try_write`] for the fallible variant.
     #[inline]
     pub fn write<T: Pod>(&self, offset: usize, value: T) {
         let size = size_of::<T>();
@@ -577,8 +454,8 @@ impl IoMem {
         }
     }
 
-    /// Fallible variant of [`Self::read`]. Returns
-    /// `Err(OutOfBounds)` / `Err(Misaligned)` instead of panicking.
+    /// Fallible variant of [`Self::read`]: `Err(OutOfBounds)` /
+    /// `Err(Misaligned)` instead of a panic.
     #[inline]
     pub fn try_read<T: Pod>(&self, offset: usize) -> Result<T, IoMemError> {
         let size = size_of::<T>();
@@ -620,16 +497,10 @@ impl IoMem {
         Ok(())
     }
 
-    /// Borrow the region's first `size_of::<T>()` bytes as `&T`.
-    /// Returns `None` if `T` doesn't fit or the region's `virt_base`
-    /// is not aligned for `T`.
-    ///
-    /// Used by drivers that hold an `IoMem` covering a single typed
-    /// hardware register set (e.g. IOAPIC's `IoapicRegisterSet`).
-    /// `T: Pod` ensures any byte pattern is valid for `T`; the
-    /// returned reference is volatile-safe to use *only* through
-    /// `read_volatile` / `write_volatile` — for general access prefer
-    /// `read::<T>(0)` / `write::<T>(0, …)`.
+    /// Borrow the region's first `size_of::<T>()` bytes as `&T`, or `None` if
+    /// `T` does not fit or `virt_base` is not aligned for it. The reference is
+    /// sound to use *only* through `read_volatile` / `write_volatile`; for
+    /// general access prefer `read::<T>(0)` / `write::<T>(0, …)`.
     #[inline]
     pub fn as_struct_ref<'a, T: Pod>(&'a self) -> Option<&'a T> {
         let size = size_of::<T>();
@@ -644,9 +515,7 @@ impl IoMem {
         Some(unsafe { &*core::ptr::with_exposed_provenance::<T>(self.virt_base as usize) })
     }
 
-    /// Carve a sub-region out of this region. The returned handle
-    /// shares the parent's mapping; `phys_base` is offset by `offset`
-    /// and `size` shrinks accordingly. Returns `None` on overrun.
+    /// Carve a sub-region sharing this region's mapping; `None` on overrun.
     pub fn sub_region(&self, offset: usize, size: usize) -> Option<IoMem> {
         let end = offset.checked_add(size)?;
         if end > self.size {
@@ -662,10 +531,6 @@ impl IoMem {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests (host-side, pure logic).
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -689,7 +554,6 @@ mod tests {
             base: PhysAddr::new(0),
             len: usize::MAX,
         };
-        // PhysAddr::MAX + len(=usize::MAX) overflows -> false.
         assert!(!r.contains_range(PhysAddr::MAX, usize::MAX));
     }
 
@@ -710,8 +574,6 @@ mod tests {
 
     #[test]
     fn io_mem_is_clone() {
-        // Construct via the crate-private path: reach in from the
-        // module's own test mod (allowed because we're inside it).
         let m = IoMem {
             virt_base: 0xffff_8000_dead_0000,
             phys_base: PhysAddr::new(0xfee0_0000),

@@ -1,12 +1,9 @@
 //! Binary codec: Encode/Decode traits and implementations for Request/Event.
 //!
 //! Wire format per message (framing handled by Connection):
-//! `[tag: u8][field1][field2]...[fieldN]`
-//!
-//! All fields are little-endian. No padding, no alignment.
+//! `[tag: u8][field1][field2]...[fieldN]`, little-endian, no padding.
 //! Strings: `[u8 len][utf8 bytes]` (max 128 bytes).
-//! Clipboard: `[u32 len]` with the bytes passed out-of-band in a memfd via
-//! SCM_RIGHTS (unbounded; no inline cap).
+//! Clipboard: `[u32 len]`, bytes out-of-band in a memfd via SCM_RIGHTS.
 
 use crate::types::{Event, MAX_STRING_LEN, OwnedFd, ProtocolError, Request, SurfaceId, ToplevelId};
 
@@ -16,17 +13,14 @@ pub trait Encode {
 }
 
 /// FIFO view over pending file descriptors received via SCM_RIGHTS.
-///
-/// The decoder pops fds from the front for message types that carry
-/// ancillary fds (e.g. `SurfaceAttach`). All other messages ignore it.
 pub struct FdFifo<'a> {
     fds: &'a mut [i32; super::connection::MAX_PENDING_FDS],
     count: &'a mut u8,
 }
 
 impl FdFifo<'_> {
-    /// Pop the first fd from the FIFO, wrapping it in an `OwnedFd`.
-    /// Returns `None` if the FIFO is empty or the fd is negative.
+    /// Pop the first fd from the FIFO. Returns `None` if the FIFO is empty or
+    /// the fd is negative.
     pub fn take(&mut self) -> Option<OwnedFd> {
         if *self.count == 0 {
             return None;
@@ -44,9 +38,8 @@ impl FdFifo<'_> {
         }
     }
 
-    /// Construct an `FdFifo` from a pending fd array and count. Public so a
-    /// decoder outside `Connection` (e.g. a wire-format test) can drive
-    /// `Decode` directly.
+    /// Public so a decoder outside `Connection` (e.g. a wire-format test) can
+    /// drive `Decode` directly.
     pub fn new<'a>(
         fds: &'a mut [i32; super::connection::MAX_PENDING_FDS],
         count: &'a mut u8,
@@ -56,15 +49,9 @@ impl FdFifo<'_> {
 }
 
 /// Deserialize from a byte buffer. Returns (value, bytes_consumed).
-///
-/// The `fds` parameter provides access to file descriptors received via
-/// SCM_RIGHTS ancillary data. Message types that carry fds (like
-/// `SurfaceAttach`) pop them from the FIFO during decode.
 pub trait Decode: Sized {
     fn decode(buf: &[u8], fds: &mut FdFifo<'_>) -> Result<(Self, usize), ProtocolError>;
 }
-
-// -- Primitive helpers ----------------------------------------------------
 
 fn put_u8(buf: &mut [u8], pos: usize, v: u8) -> Result<usize, ProtocolError> {
     if pos + 1 > buf.len() {
@@ -148,8 +135,6 @@ fn get_bool(buf: &[u8], pos: usize) -> Result<(bool, usize), ProtocolError> {
     Ok((v != 0, p))
 }
 
-// -- Request tag constants ------------------------------------------------
-
 const REQ_HELLO: u8 = 0;
 const REQ_CREATE_SURFACE: u8 = 1;
 const REQ_SURFACE_ATTACH: u8 = 2;
@@ -168,8 +153,6 @@ const REQ_CLIPBOARD_PASTE: u8 = 14;
 const REQ_INTERACTIVE_MOVE: u8 = 15;
 const REQ_INTERACTIVE_RESIZE: u8 = 16;
 const REQ_CLIPBOARD_READ: u8 = 17;
-
-// -- Event tag constants --------------------------------------------------
 
 const EVT_HELLO: u8 = 0;
 const EVT_OBJECT_DESTROYED: u8 = 1;
@@ -190,8 +173,6 @@ const EVT_PASTE_RESULT: u8 = 15;
 const EVT_ERROR: u8 = 16;
 const EVT_PASTE_READY: u8 = 17;
 const EVT_BUFFER_RELEASE: u8 = 18;
-
-// -- Encode for Request ---------------------------------------------------
 
 impl Encode for Request {
     fn encode(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
@@ -291,8 +272,6 @@ impl Encode for Request {
                 put_u8(buf, p, *shape)
             }
             Request::ClipboardCopy { len, .. } => {
-                // The fd travels out-of-band via SCM_RIGHTS; only `len` is on
-                // the wire.
                 let p = put_u8(buf, 0, REQ_CLIPBOARD_COPY)?;
                 put_u32(buf, p, *len)
             }
@@ -320,8 +299,6 @@ impl Encode for Request {
     }
 }
 
-// -- Decode for Request ---------------------------------------------------
-
 impl Decode for Request {
     fn decode(buf: &[u8], fds: &mut FdFifo<'_>) -> Result<(Self, usize), ProtocolError> {
         let (tag, p) = get_u8(buf, 0)?;
@@ -345,8 +322,6 @@ impl Decode for Request {
                 let (width, p) = get_u32(buf, p)?;
                 let (height, p) = get_u32(buf, p)?;
                 let (has_fd, p) = get_bool(buf, p)?;
-                // Pop the ancillary fd ONLY for an fd-bearing attach, so a no-fd
-                // re-select cannot steal a later message's SCM_RIGHTS fd.
                 let buffer_fd = if has_fd { fds.take() } else { None };
                 Ok((
                     Request::SurfaceAttach {
@@ -517,8 +492,6 @@ impl Decode for Request {
     }
 }
 
-// -- Encode for Event -----------------------------------------------------
-
 impl Encode for Event {
     fn encode(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
         match self {
@@ -667,8 +640,6 @@ impl Encode for Event {
         }
     }
 }
-
-// -- Decode for Event -----------------------------------------------------
 
 impl Decode for Event {
     fn decode(buf: &[u8], _fds: &mut FdFifo<'_>) -> Result<(Self, usize), ProtocolError> {

@@ -1,55 +1,24 @@
-//! Safe wrappers around the FPU / SSE / AVX / XSAVE inline-asm
-//! sequences used by `ktesting/src/{fpu_tests, xsave_tests}.rs` and by the
-//! per-task FPU slot tests in `sched/src/context_tests.rs`.
+//! Safe wrappers around the FPU / SSE / AVX / XSAVE inline-asm sequences the
+//! kernel's register-state tests drive.
 //!
-//! Each `unsafe { core::arch::asm!(...) }` block in those tests is folded into
-//! one safe `pub fn` here.
+//! A caller may sequence `xmm_load_4` … kernel code … `xmm_read_4` and expect
+//! the register file to survive in between: the kernel is built `+soft-float`
+//! and never touches it (`check_kernel_softfloat.sh` enforces that), and plain
+//! `asm!` is volatile so the blocks cannot be reordered or elided. Callers must
+//! keep interrupts disabled across such a sequence — a context switch would
+//! legitimately save and restore the whole register file underneath them.
 //!
-//! # Primitives, not just round-trips
-//!
-//! The original surface offered only whole round-trips — load a pattern,
-//! `xsave` into a caller buffer, zero, `xrstor`, read back — which is enough to
-//! test the *instructions* but not the *plumbing*. A test that wants to prove
-//! task A's save area does not bleed into task B's has to drive the halves
-//! separately: load a pattern, hand the register file to the kernel's own
-//! `TaskInner::fpu_save_*`, load a different pattern, and read back after a
-//! `TaskInner::fpu_restore_*`. So the load / read / zero steps are exposed
-//! individually and the round-trips are composed from them.
-//!
-//! # Why separate `asm!` blocks are safe here
-//!
-//! A caller sequences `xmm_load_4` … some kernel code … `xmm_read_4` and
-//! expects the register file to survive in between. That holds because the
-//! kernel is built `+soft-float` and never touches the vector register file
-//! itself (`check_kernel_softfloat.sh` enforces exactly this on every build),
-//! so nothing between the two blocks can clobber XMM/YMM. Plain `asm!` is
-//! volatile, so the blocks also cannot be reordered or elided relative to each
-//! other. Callers must still keep interrupts disabled across the sequence: a
-//! context switch would legitimately save and restore the whole register file
-//! underneath them.
-//!
-//! The `+soft-float` build is also why the `xmm_reg` operand class is
-//! unavailable — every routine below routes payloads through memory with
-//! explicitly named registers, whose instruction text the assembler accepts
-//! without the feature.
+//! `+soft-float` also makes the `xmm_reg` operand class unavailable, so every
+//! routine below routes payloads through memory with explicitly named
+//! registers, whose instruction text the assembler accepts without the feature.
 
-/// 128-bit XMM register payload.
 pub type Xmm128 = [u64; 2];
 
-/// Load `pattern` into XMM0 via an intermediate XMM register, then
-/// read XMM0 back. Round-trip verifies that the XMM register file
-/// preserves a 128-bit value across two `movdqa` hops.
-///
-/// The kernel is built `+soft-float` (no `sse` target feature), so the
-/// `xmm_reg` operand class is unavailable here; this routes the payload
-/// through memory with explicitly named registers, whose instruction
-/// text the assembler accepts without the feature.
 #[inline]
 pub fn xmm0_roundtrip(pattern: Xmm128) -> Xmm128 {
     let mut readback: Xmm128 = [0; 2];
-    // SAFETY: load 16 bytes from `pattern` into xmm1, hop to xmm0 and
-    // back through xmm1, then store 16 bytes to `readback`. Both buffers
-    // are owned, 16 bytes, and the named XMM registers are clobbered.
+    // SAFETY: both buffers are owned and 16 bytes; the named XMM registers are
+    // declared clobbered.
     unsafe {
         core::arch::asm!(
             "movdqu xmm1, [{src}]",
@@ -65,8 +34,6 @@ pub fn xmm0_roundtrip(pattern: Xmm128) -> Xmm128 {
     readback
 }
 
-/// Direct XMM1 round-trip: load `pattern` into XMM1, copy back into
-/// `dst`, and store the result as `[u64; 2]`.
 #[inline]
 pub fn xmm1_roundtrip(pattern: Xmm128) -> Xmm128 {
     let mut readback: Xmm128 = [0; 2];
@@ -82,10 +49,6 @@ pub fn xmm1_roundtrip(pattern: Xmm128) -> Xmm128 {
     }
     readback
 }
-
-// ---------------------------------------------------------------------------
-// Primitives: load / read / zero, each half of a round-trip on its own.
-// ---------------------------------------------------------------------------
 
 /// Load four 128-bit patterns into XMM0..XMM3.
 #[inline]
@@ -126,8 +89,7 @@ pub fn xmm_read_4() -> [Xmm128; 4] {
     readback
 }
 
-/// Zero XMM0..XMM3, so a later read proves a restore actually happened rather
-/// than the pattern merely never having left the register file.
+/// Zero XMM0..XMM3, so a later read proves a restore actually happened.
 #[inline]
 pub fn xmm_zero_4() {
     // SAFETY: writes four named XMM registers and nothing else.
@@ -221,13 +183,9 @@ pub fn xmm_zero_8() {
     }
 }
 
-/// Load two 256-bit patterns into YMM0..YMM1.
-///
-/// `patterns` is YMM0-lower, YMM0-upper, YMM1-lower, YMM1-upper. The upper
-/// halves are the ones `fxsave` cannot represent, which is what makes them the
-/// interesting half of any save/restore regression.
-///
-/// Requires AVX to be enabled in XCR0; the caller checks.
+/// Load two 256-bit patterns into YMM0..YMM1, laid out as YMM0-lower,
+/// YMM0-upper, YMM1-lower, YMM1-upper. The upper halves are the ones `fxsave`
+/// cannot represent. Requires AVX enabled in XCR0; the caller checks.
 #[inline]
 pub fn ymm_load_2(patterns: &[Xmm128; 4]) {
     let pat = patterns.as_ptr().cast::<u8>();
@@ -327,12 +285,6 @@ pub fn xrstor_from(buf: &[u8], xcr0: u64) {
     }
 }
 
-/// Load four 128-bit patterns into XMM0..XMM3, `xsave64` into `buf`, zero
-/// those registers, `xrstor64`, and return what comes back.
-///
-/// Composed from the primitives above rather than being its own asm block, so
-/// the two share one definition of what "load" and "read" mean. `buf` must be
-/// a 64-byte-aligned XSAVE area sized for the active components.
 #[inline]
 pub fn sse_xsave_xrstor_roundtrip_4(
     patterns: &[Xmm128; 4],
@@ -346,11 +298,8 @@ pub fn sse_xsave_xrstor_roundtrip_4(
     xmm_read_4()
 }
 
-/// AVX YMM upper-half round-trip. `patterns` is YMM0-lower, YMM0-upper,
-/// YMM1-lower, YMM1-upper, and the result uses the same layout.
-///
-/// THE regression shape: a save path that fell back to `fxsave` would return
-/// correct lower halves and zeroed upper ones.
+/// AVX YMM upper-half round-trip; `patterns` and the result use
+/// [`ymm_load_2`]'s layout.
 #[inline]
 pub fn avx_xsave_xrstor_roundtrip_2ymm(
     patterns: &[Xmm128; 4],

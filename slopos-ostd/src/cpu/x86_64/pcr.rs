@@ -1,19 +1,6 @@
-//! Unified per-CPU data infrastructure for SMP support.
-//!
-//! This module provides:
-//! - The `ProcessorControlRegion` (PCR): the single per-CPU data structure,
-//!   accessed via GS_BASE.
-//! - APIC ID ↔ CPU index mapping.
-//! - CPU lifecycle management (online/offline, counting).
-//! - Per-CPU data accessors (current task, preemption, statistics).
-//! - IPI callback registration.
-//!
-//! # Assembly Offsets (CRITICAL)
-//!
-//! Fields at offsets 0-24 in `ProcessorControlRegion` are accessed by assembly
-//! code via `gs:[offset]`. DO NOT CHANGE these field positions without updating:
-//! - `slopos-ostd/src/user/asm/user_return.s` (`__ostd_user_return`)
-//! - `core/context_switch.s` (context_switch_user)
+//! Unified per-CPU data infrastructure for SMP: the `ProcessorControlRegion`
+//! (PCR) reached via GS_BASE, APIC ID ↔ CPU index mapping, CPU lifecycle,
+//! per-CPU data accessors and IPI callback registration.
 
 use core::arch::naked_asm;
 use core::cell::SyncUnsafeCell;
@@ -27,86 +14,57 @@ use crate::sync::BspToken;
 use crate::sync::init_flag::InitFlag;
 use crate::user::context::UserContext;
 
-// ==================== CONSTANTS ====================
-
-/// Maximum number of CPUs supported.
 pub const MAX_CPUS: usize = 256;
 
-/// Per-CPU kernel stack size (64 KiB).
 pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
 
-/// Maximum number of statically-allocated AP PCRs.
 const MAX_STATIC_APS: usize = 16;
 
-// ==================== PCR STRUCT ====================
-
-/// Processor Control Region — the single per-CPU data structure.
+/// Processor Control Region — the single per-CPU data structure; GS_BASE points
+/// here in kernel mode.
 ///
-/// Memory layout designed for optimal SYSCALL performance.
-/// GS_BASE points to this structure in kernel mode.
-///
-/// CRITICAL: Offsets 0-24 are used by assembly — DO NOT CHANGE without updating:
-///   - slopos-ostd/src/user/asm/user_return.s (`__ostd_user_return`)
-///   - core/context_switch.s (context_switch_user)
+/// Offsets 0-24 are hard-coded in assembly: changing them requires updating
+/// `slopos-ostd/src/user/asm/user_return.s` and `core/context_switch.s`.
 #[repr(C, align(4096))]
 pub struct ProcessorControlRegion {
-    // ==================== SYSCALL CRITICAL (fixed offsets) ====================
-    // These fields are accessed by assembly via gs:[offset]
     /// Self-reference pointer for GS-based PCR access.
-    /// Assembly: `mov rax, gs:[0]` to get PCR pointer.
     pub self_ref: *mut ProcessorControlRegion, // offset 0
 
     /// Temporary storage for user RSP during SYSCALL entry.
-    /// Assembly: `mov gs:[8], rsp` saves user stack.
     pub user_rsp_tmp: u64, // offset 8
 
     /// Kernel RSP loaded during SYSCALL entry (mirrors TSS.rsp0).
-    /// Assembly: `mov rsp, gs:[16]` loads kernel stack.
     pub kernel_rsp: u64, // offset 16
 
-    // ==================== GENERAL PER-CPU DATA ====================
     /// CPU index (0..n-1), NOT the hardware APIC ID.
-    /// Assembly: `mov eax, gs:[24]` for fast current_cpu_id().
     pub cpu_id: u32, // offset 24
 
-    /// Hardware Local APIC ID.
     pub apic_id: u32, // offset 28
 
-    /// Preemption disable nesting counter.
-    /// >0 means preemption is disabled.
+    /// Preemption disable nesting counter; >0 means preemption is disabled.
     pub preempt_count: AtomicU32, // offset 32
 
-    /// Currently executing in interrupt/exception context.
     pub in_interrupt: AtomicBool, // offset 36
 
-    /// This CPU has bottom-half work waiting for a legal place to run it.
-    ///
-    /// Set by `sync::bh::raise` — one `gs`-relative byte store, so it is legal
+    /// This CPU has bottom-half work waiting for a legal place to run it. Set
+    /// by `sync::bh::raise` as one `gs`-relative byte store, so it is legal
     /// from a hard IRQ handler and from under a cli-spinlock.
     pub bh_pending: AtomicBool, // offset 37
 
-    /// A bottom-half drain is in progress on this CPU.
     pub bh_active: AtomicBool, // offset 38
 
     _pad1: [u8; 1], // offset 39
 
     /// Pointer to currently running task (opaque).
     ///
-    /// Written by the scheduler's `dispatch()` helper every context
-    /// switch.  Read by the SafeStack sanitizer's naked
-    /// `__safestack_pointer_address()` on every instrumented function
-    /// prologue via `gs:[CURRENT_TASK]`.  Must always point at a valid
-    /// Task (or bootstrap stub) with a primed `unsafe_stack_sp`
-    /// whenever instrumented code may run; nulling it crashes the next
-    /// instrumented prologue.
+    /// Read by the SafeStack sanitizer's `__safestack_pointer_address` on every
+    /// instrumented function prologue, so it must always name a valid Task (or
+    /// bootstrap stub) with a primed `unsafe_stack_sp` whenever instrumented
+    /// code may run; nulling it crashes the next prologue.
     pub current_task: AtomicPtr<()>, // offset 40
 
-    /// Pointer to this CPU's idle task (opaque).
-    ///
-    /// Written once per CPU by `install_idle_task()` during
-    /// `create_idle_task_for_cpu()`; read by the scheduler's
-    /// idle-stack resolve and `run_ready_task_from_idle` dispatch
-    /// paths.
+    /// Pointer to this CPU's idle task (opaque). Written once per CPU, during
+    /// `create_idle_task_for_cpu()`.
     pub idle_task: AtomicPtr<()>, // offset 48
 
     /// CPU is online and accepting scheduled work.
@@ -118,14 +76,10 @@ pub struct ProcessorControlRegion {
     /// when re-enabled).
     pub reschedule_pending: AtomicU32, // offset 60
 
-    // ==================== STATISTICS (cache-line aligned) ====================
-    /// Total context switches on this CPU.
     pub context_switches: AtomicU64, // offset 64
 
-    /// Total interrupts handled on this CPU.
     pub interrupt_count: AtomicU64, // offset 72
 
-    /// Total syscalls handled on this CPU.
     pub syscall_count: AtomicU64, // offset 80
 
     /// PID of task currently in syscall (for user pointer validation).
@@ -133,9 +87,6 @@ pub struct ProcessorControlRegion {
 
     _pad3: [u8; 4], // offset 92-95
 
-    // ==================== USER-MODE ROUND-TRIP SLOTS ====================
-    // Read+written by the `__ostd_user_return` trampoline asm via
-    // `gs:[…]`.  Their offsets are pinned by the const-asserts below.
     /// Per-CPU active `UserContext` pointer.  Set by
     /// `PcrUserModeBackend::execute_round_trip` before iretq into user
     /// mode; consumed by `__ostd_user_return` to write user state back.
@@ -146,61 +97,44 @@ pub struct ProcessorControlRegion {
     pub kernel_return_ctx: SyncUnsafeCell<KernelReturnContext>, // offset 104
 
     /// Per-CPU scratch slot for the user RAX value during the
-    /// `__ostd_user_return` trampoline.  Spilling RAX onto the kernel
-    /// stack at `kernel_rsp - 8` would collide with the next CPU-pushed
-    /// IRET frame's SS slot at TSS.RSP0; this per-CPU slot is the same
-    /// fix Asterinas / Linux apply to their SYSCALL fast paths.
+    /// `__ostd_user_return` trampoline.  Spilling RAX onto the kernel stack at
+    /// `kernel_rsp - 8` would collide with the next CPU-pushed IRET frame's SS
+    /// slot at TSS.RSP0.
     pub user_rax_tmp: SyncUnsafeCell<u64>, // offset 168
 
-    // ==================== EMBEDDED GDT ====================
-    /// Per-CPU Global Descriptor Table.
-    /// Contains kernel/user code/data segments + TSS descriptor.
     pub gdt: GdtLayout, // offset 192
 
     // Padding to align TSS to 16 bytes.
     _tss_align: [u8; 8],
 
-    // ==================== EMBEDDED TSS ====================
-    /// Per-CPU Task State Segment.
     /// TSS.rsp0 = kernel_rsp (kept in sync).
     pub tss: Tss64,
 
-    // ==================== KERNEL STACK ====================
     /// Guard page to catch stack overflow (unmapped or read-only).
     _stack_guard: [u8; 4096],
 
-    /// Per-CPU kernel stack (64KB).
     /// Stack grows down, so kernel_rsp points to end of this array.
     pub kernel_stack: [u8; KERNEL_STACK_SIZE],
 
     /// Per-CPU SafeStack **data**-stack pointer for IST/exception context.
     ///
-    /// `__safestack_pointer_address` returns the address of THIS slot
-    /// (instead of `current_task->unsafe_stack_sp`) whenever the running
-    /// `RSP` is inside `EXCEPTION_STACK_REGION`, so instrumented code in
-    /// an exception handler (`klog!`/`panic!`/`core::fmt`) walks a
-    /// dedicated, mapped, guard-paged per-CPU exception data stack rather
-    /// than the interrupted task's small data stack.  Primed to the
-    /// exception data-stack top by `ist_stacks` before interrupts are
-    /// enabled, self-balancing across nested faults, and re-primed by
-    /// `retire_faulted_cpu` (the one exception path that abandons without
-    /// unwinding).  Appended last so every asm-critical PCR offset
-    /// (`<= 184`) and the embedded GDT/TSS layout stay byte-identical.
-    ///
-    /// `SyncUnsafeCell` (like `user_rax_tmp`) gives interior mutability so
-    /// `__safestack_pointer_address` can hand its raw `u64` address to the
-    /// LLVM SafeStack prologue while Rust primes/re-primes it through the
-    /// owning CPU.  The inner `u64` sits at offset 0 of the cell, so
+    /// `__safestack_pointer_address` returns the address of THIS slot (instead
+    /// of `current_task->unsafe_stack_sp`) whenever the running `RSP` is inside
+    /// `EXCEPTION_STACK_REGION`, so instrumented code in an exception handler
+    /// walks a dedicated guard-paged per-CPU stack rather than the interrupted
+    /// task's small data stack. Primed by `ist_stacks` before interrupts are
+    /// enabled and re-primed by `retire_faulted_cpu`, the one exception path
+    /// that abandons without unwinding. Appended after the embedded kernel
+    /// stack so every asm-critical PCR offset (`<= 184`) and the GDT/TSS layout
+    /// stay byte-identical. The cell's inner `u64` sits at its offset 0, so
     /// `offset_of!(PCR, ist_unsafe_sp)` is the address the asm returns.
     pub ist_unsafe_sp: SyncUnsafeCell<u64>,
 
     /// Reliable Abort Core — per-CPU emergency SAFE-stack top (RSP).
     ///
     /// The fatal-fault trampoline switches `RSP` here before any panic
-    /// formatting, so a panic from a deep/near-full safe stack still has
-    /// headroom. Primed by `ist_stacks` alongside `ist_unsafe_sp`. Appended
-    /// after `ist_unsafe_sp` so every asm-critical offset (`<= 184`) stays
-    /// byte-identical.
+    /// formatting, so a panic from a near-full safe stack still has headroom.
+    /// Primed by `ist_stacks` alongside `ist_unsafe_sp`.
     pub panic_safe_sp: SyncUnsafeCell<u64>,
 
     /// Reliable Abort Core — per-CPU emergency DATA-stack top (SafeStack).
@@ -216,8 +150,7 @@ pub struct ProcessorControlRegion {
     /// Bumped on each fatal-panic entry; a value `>= 1` on entry means the
     /// fatal path itself faulted, so the orchestration degrades to the
     /// format-free `panic_abort_raw` rather than recursing through the same
-    /// (now-suspect) report. Mirrors Linux `die_nest_count` / Asterinas
-    /// `IN_PANIC`.
+    /// (now-suspect) report.
     pub panic_depth: AtomicU32,
 
     /// Panic-core entry counter for this CPU.
@@ -237,8 +170,7 @@ pub struct ProcessorControlRegion {
     ///
     /// The context-switch tail installs the outgoing reference while running
     /// on the idle stack. The dispatcher takes and releases it exactly once
-    /// after leaving the IRQ-off switch window. Kept opaque here because the
-    /// concrete task type belongs to the scheduler crate.
+    /// after leaving the IRQ-off switch window.
     pub previous_task: AtomicPtr<()>,
 
     /// Panic-recovery nesting depth for this CPU: nested catch scopes unwind
@@ -250,31 +182,21 @@ pub struct ProcessorControlRegion {
     /// `dispatch()` that writes the pointer.
     ///
     /// Exists so the many callers that want only "who am I" never dereference
-    /// the task at all. Reading the id out of the pointer costs a load through
-    /// a pointer that may name a pre-heap bootstrap stub, and it is the one
-    /// question that does not need a borrow. `INVALID_TASK_ID` until this CPU
-    /// dispatches for the first time.
-    ///
-    /// Appended at the tail: every asm-critical offset (`<= 184`) stays
-    /// byte-identical, and a 4-byte tail field cannot perturb the 4096-byte
-    /// alignment the razors pin.
+    /// the task, whose pointer may name a pre-heap bootstrap stub.
+    /// `INVALID_TASK_ID` until this CPU dispatches for the first time.
     pub current_task_id: AtomicU32,
 
     /// Scheduling priority of the task `current_task` names, republished by the
     /// same [`set_current_task`] that writes the pointer and the id.
     ///
     /// Exists so a wake publisher can ask "would the newcomer preempt what is
-    /// running over there?" without dereferencing a *foreign* CPU's task. That
-    /// dereference raced the target CPU's switch tail, which reclaims and
-    /// releases the outgoing dispatch reference and can run the allocator-heavy
-    /// destructor — so the read could land in freed memory.
+    /// running over there?" without dereferencing a *foreign* CPU's task: that
+    /// dereference races the target CPU's switch tail, which releases the
+    /// outgoing dispatch reference and can run its destructor.
     ///
-    /// [`PRIORITY_NONE`] until this CPU dispatches for the first time. After
-    /// that it always names a real task: a CPU with nothing to run parks on its
-    /// idle task, which publishes `TaskPriority::Idle` rather than the
-    /// sentinel. Both lose to every other priority, which is what the
-    /// comparison needs — the sentinel is for "this CPU has never dispatched",
-    /// not for "this CPU is idle".
+    /// [`PRIORITY_NONE`] until this CPU dispatches for the first time; after
+    /// that it always names a real task, since an idle CPU parks on its idle
+    /// task and publishes `TaskPriority::Idle` rather than the sentinel.
     pub current_task_priority: AtomicU8,
 
     /// Monotonic progress counter for the lockup detector.
@@ -284,19 +206,14 @@ pub struct ProcessorControlRegion {
     /// long enough to outlast a tick. A watcher compares it against its own
     /// previous reading, so the detector does no clock arithmetic and
     /// cannot be fooled by emulation or host steal time.
-    ///
-    /// Appended at the tail with the rest: every asm-critical offset
-    /// (`<= 184`) stays byte-identical and the 4096-byte alignment the
-    /// razors pin is untouched.
     pub heartbeat: AtomicU64,
 
     /// Whether this CPU's LAPIC timer is running periodically.
     ///
-    /// A CPU is marked online before it starts its timer — APs boot ahead
-    /// of calibration and start theirs from the scheduler loop — so
-    /// `online` alone would have the detector watch a CPU that cannot yet
-    /// tick. A zero heartbeat cannot stand in for this: [`crate::watchdog::touch`]
-    /// makes it non-zero without a timer ever having fired.
+    /// A CPU is marked online before it starts its timer, so `online` alone
+    /// would have the detector watch a CPU that cannot yet tick. A zero
+    /// heartbeat cannot stand in for this: [`crate::watchdog::touch`] makes it
+    /// non-zero without a timer ever having fired.
     pub timer_armed: AtomicBool,
 
     /// Set while this CPU is deliberately running without timer ticks, by
@@ -307,11 +224,9 @@ pub struct ProcessorControlRegion {
 /// `current_task_priority` for a CPU that is running nothing schedulable.
 ///
 /// Numerically worst, because `TaskPriority` orders `High = 0` upward: any real
-/// task outranks it, which reproduces the old "current pointer was null, so the
-/// newcomer wins" branch without a pointer.
+/// task outranks it.
 pub const PRIORITY_NONE: u8 = u8::MAX;
 
-// Compile-time offset verification.
 const _: () = {
     assert!(core::mem::offset_of!(ProcessorControlRegion, self_ref) == 0);
     assert!(core::mem::offset_of!(ProcessorControlRegion, user_rsp_tmp) == 8);
@@ -336,9 +251,6 @@ const _: () = {
 
 /// Saved kernel callee-save snapshot used by `__ostd_user_return` to
 /// unwind back to the caller of `PcrUserModeBackend::execute_round_trip`.
-///
-/// Layout pinned by the offset razors in
-/// [`offsets::KERNEL_RETURN_CTX`] and the per-field razors below.
 #[repr(C)]
 #[derive(Default)]
 pub struct KernelReturnContext {
@@ -375,7 +287,6 @@ unsafe impl Send for ProcessorControlRegion {}
 unsafe impl Sync for ProcessorControlRegion {}
 
 impl ProcessorControlRegion {
-    /// Create a new zeroed PCR.
     pub const fn new() -> Self {
         Self {
             self_ref: ptr::null_mut(),
@@ -431,7 +342,6 @@ impl ProcessorControlRegion {
         }
     }
 
-    /// Get the top of the kernel stack (stack grows down).
     #[inline]
     pub fn kernel_stack_top(&self) -> u64 {
         let stack_base = self.kernel_stack.as_ptr() as u64;
@@ -469,12 +379,10 @@ impl ProcessorControlRegion {
 
     /// Safe `init_gdt()` + `install()` pair for the BSP-init scope.
     ///
-    /// `&BspToken<'brand>` discharges both contracts: `init_gdt` says
-    /// "must be called before install" (this fn pairs them in order)
-    /// and `install` says "init_gdt must be called first" (likewise
-    /// satisfied). The BSP-init scope guarantees this is the BSP and
-    /// the PCR was just minted, so the `&mut self` borrow is the
-    /// unique-owner reborrow that boot performs once per CPU.
+    /// `&BspToken<'brand>` discharges both contracts: this fn pairs the two
+    /// calls in the required order, and the BSP-init scope guarantees the PCR
+    /// was just minted, so the `&mut self` borrow is the unique-owner reborrow
+    /// boot performs once per CPU.
     pub fn bsp_init_gdt_and_install<'brand>(&mut self, _token: &crate::sync::BspToken<'brand>) {
         // SAFETY: `init_gdt` then `install` pairs the two halves; the
         // `&BspToken` witnesses BSP-init scope (pre-SMP, BSP only).
@@ -484,7 +392,6 @@ impl ProcessorControlRegion {
         }
     }
 
-    /// Set an IST entry.
     pub fn set_ist(&mut self, index: u8, stack_top: u64) {
         if index >= 1 && index <= 7 {
             self.tss.ist[(index - 1) as usize] = stack_top;
@@ -494,78 +401,34 @@ impl ProcessorControlRegion {
 
 /// PCR offset constants for assembly code.
 pub mod offsets {
-    /// Offset of self_ref field (pointer to PCR itself).
     pub const SELF_REF: usize = 0;
-    /// Offset of user_rsp_tmp field (user RSP scratch during SYSCALL).
     pub const USER_RSP_TMP: usize = 8;
-    /// Offset of kernel_rsp field (kernel RSP for SYSCALL entry).
     pub const KERNEL_RSP: usize = 16;
-    /// Offset of cpu_id field (CPU index, not APIC ID).
     pub const CPU_ID: usize = 24;
-    /// Offset of apic_id field (hardware APIC ID).
     pub const APIC_ID: usize = 28;
-    /// Offset of the `preempt_count` field (`AtomicU32`). Consumed as a
-    /// `const` operand by the single-instruction per-CPU ops below
-    /// (`preempt_count_inc` and friends) so the count is always
-    /// manipulated on the CPU executing the instruction.
     pub const PREEMPT_COUNT: usize = 32;
-    /// Offset of the `bh_pending` field (`AtomicBool`). Read on every
-    /// outermost unlock, so it is consumed as a `const` operand by a
-    /// single-instruction load rather than reached through the PCR table.
     pub const BH_PENDING: usize = 37;
-    /// Offset of the `reschedule_pending` field (`AtomicU32`). Consumed
-    /// as a `const` operand by the single-instruction per-CPU ops.
     pub const RESCHEDULE_PENDING: usize = 60;
-    /// Offset of the `current_task` field (`AtomicPtr<()>`).
-    /// Consumed by `__safestack_pointer_address` as a `const` operand
-    /// to locate the running task's `unsafe_stack_sp` via
-    /// `gs:[CURRENT_TASK]`.
     pub const CURRENT_TASK: usize = 40;
-    /// Offset of the `idle_task` field (`AtomicPtr<()>`).  Read by
-    /// the scheduler's idle-resolve paths.
     pub const IDLE_TASK: usize = 48;
-    /// Offset of the `syscall_pid` field (`AtomicU32`). Consumed as a
-    /// `const` operand by the single-instruction accessors so user
-    /// pointer validation always reads the executing CPU's value.
     pub const SYSCALL_PID: usize = 88;
-    /// Offset of the `user_ctx_ptr` field (`AtomicPtr<UserContext>`).
-    /// Read by `__ostd_user_return` to write user state back into the
-    /// active `UserContext`.
     pub const USER_CTX_PTR: usize = 96;
-    /// Offset of the `kernel_return_ctx` field
-    /// (`SyncUnsafeCell<KernelReturnContext>`).  Written by
-    /// `execute_round_trip` and consumed by `__ostd_user_return`.
     pub const KERNEL_RETURN_CTX: usize = 104;
-    /// Offset of the `user_rax_tmp` PCR scratch slot used by
-    /// `__ostd_user_return` to spill user RAX without touching the
-    /// kernel stack at `kernel_rsp - 8`.
     pub const USER_RAX_TMP: usize = 168;
-    /// Offset of the `ist_unsafe_sp` field — the per-CPU SafeStack
-    /// data-stack pointer used while running on an IST/exception stack.
-    /// Consumed by `__safestack_pointer_address` as a `const` operand.
-    /// Computed (not a literal) because the field is appended after the
-    /// 64 KiB embedded kernel stack to keep the asm-critical offsets
-    /// (`<= 184`) byte-identical.
+    /// Computed rather than a literal: the field is appended after the 64 KiB
+    /// embedded kernel stack to keep the asm-critical offsets (`<= 184`)
+    /// byte-identical.
     pub const IST_UNSAFE_SP: usize =
         core::mem::offset_of!(super::ProcessorControlRegion, ist_unsafe_sp);
-    /// Offset of the `panic_safe_sp` field — the emergency SAFE-stack top the
-    /// fatal-fault trampoline loads into `RSP`. Computed, consumed as a `const`
-    /// operand by the emergency trampoline asm.
     pub const PANIC_SAFE_SP: usize =
         core::mem::offset_of!(super::ProcessorControlRegion, panic_safe_sp);
-    /// Offset of the `panic_unsafe_sp` field — the emergency DATA-stack top the
-    /// trampoline writes into the running data-SP slot. Computed.
     pub const PANIC_UNSAFE_SP: usize =
         core::mem::offset_of!(super::ProcessorControlRegion, panic_unsafe_sp);
-    /// Offset of the `current_task_id` field (`AtomicU32`). Consumed as a
-    /// `const` operand by the single-instruction accessors so the id always
-    /// comes from the CPU executing the instruction. Computed, not pinned: no
-    /// asm outside this module reads it, so it may move as the tail grows.
+    /// Computed, not pinned: no asm outside this module reads it, so it may
+    /// move as the tail grows.
     pub const CURRENT_TASK_ID: usize =
         core::mem::offset_of!(super::ProcessorControlRegion, current_task_id);
-    /// Offset of the `current_task_priority` field (`AtomicU8`). Same rules as
-    /// [`CURRENT_TASK_ID`]: computed, not pinned, and read only through the
-    /// single-instruction accessor in this module.
+    /// Computed, not pinned — same rules as [`CURRENT_TASK_ID`].
     pub const CURRENT_TASK_PRIORITY: usize =
         core::mem::offset_of!(super::ProcessorControlRegion, current_task_priority);
 }
@@ -573,43 +436,33 @@ pub mod offsets {
 /// IST/exception safe-stack region bounds used by
 /// [`super::super::super::arch::x86_64::naked::__safestack_pointer_address`]
 /// to decide, purely from the running `RSP`, whether instrumented code is
-/// executing on an IST/exception stack (select the per-CPU `ist_unsafe_sp`
-/// data stack) or in task/kernel/boot context (select the per-task data
-/// stack).
+/// executing on an IST/exception stack or in task/kernel/boot context.
 ///
-/// The canonical layout lives in `slopos_mm::memory_layout_defs`
-/// (`EXCEPTION_STACK_REGION_BASE` / `EXCEPTION_STACK_REGION_END`); these are
-/// duplicated here because the SafeStack resolver is in OSTD — below `mm`
-/// in the crate graph — and must supply them as naked-asm `const` operands.
-/// A compile-time razor in `memory_layout_defs.rs` asserts they match, so
-/// the two can never drift.
+/// The canonical layout lives in `slopos_mm::memory_layout_defs`; it is
+/// duplicated here because the SafeStack resolver is in OSTD — below `mm` in
+/// the crate graph — and must supply it as a naked-asm `const` operand. A
+/// compile-time razor in `memory_layout_defs.rs` asserts the two match.
 pub const SAFESTACK_IST_REGION_BASE: u64 = 0xFFFF_FFFF_C000_0000;
 
 /// Span of [`SAFESTACK_IST_REGION_BASE`] (256 MiB: `C000_0000..D000_0000`).
 pub const SAFESTACK_IST_REGION_SPAN: u64 = 0x1000_0000;
 
-// ==================== STATIC STORAGE ====================
-
-/// BSP's PCR (statically allocated).
+/// BSP's PCR.
 ///
-/// Exported with a stable symbol name so the `_start` assembly
-/// trampoline in `boot/limine_entry.s` can reference it via
-/// `[rip + BSP_PCR]` to initialise `self_ref`, `unsafe_sp`, and
-/// `GS_BASE` *before* the first instrumented Rust function runs.
-/// (Every function compiled with `-Zsanitizer=safestack` calls
-/// `__safestack_pointer_address()` in its prologue — which reads
-/// `gs:[0]` expecting a valid PCR pointer.)
+/// Exported with a stable symbol name so the `_start` trampoline in
+/// `boot/limine_entry.s` can initialise `self_ref`, `unsafe_sp` and `GS_BASE`
+/// *before* the first instrumented Rust function runs: every function compiled
+/// with `-Zsanitizer=safestack` reads `gs:[0]` in its prologue.
 #[unsafe(no_mangle)]
 pub static BSP_PCR: SyncUnsafeCell<ProcessorControlRegion> =
     SyncUnsafeCell::new(ProcessorControlRegion::new());
 
 /// Statically-allocated AP PCRs.
 ///
-/// Exported with a stable symbol so the AP naked bootstrap trampoline
-/// in `boot/src/smp.rs` can reference individual entries as
-/// `[rip + AP_PCRS] + slot * sizeof(PCR)` — though in practice the
-/// trampoline goes through the [`AP_PCR_PTRS`] lookup table below
-/// because the PCR is ~72 KiB and not a power of two.
+/// Exported with a stable symbol so the AP bootstrap trampoline in
+/// `boot/src/smp.rs` can reach individual entries — though in practice it goes
+/// through the [`AP_PCR_PTRS`] lookup table below, because the PCR is ~72 KiB
+/// and not a power of two.
 #[unsafe(no_mangle)]
 pub static AP_PCRS: SyncUnsafeCell<[ProcessorControlRegion; MAX_STATIC_APS]> =
     SyncUnsafeCell::new({
@@ -617,15 +470,14 @@ pub static AP_PCRS: SyncUnsafeCell<[ProcessorControlRegion; MAX_STATIC_APS]> =
         [INIT; MAX_STATIC_APS]
     });
 
-/// Lookup table mapping AP slot index (0..MAX_STATIC_APS) to the
-/// corresponding AP_PCRS entry pointer.  Populated once on the BSP in
-/// [`init_ap_pcr_lookup`] before any AP is started.  The AP bootstrap
-/// trampoline (which has to install GS_BASE *before* any instrumented
-/// Rust can run — see `crate::task::bootstrap`) uses this table rather
-/// than reimplementing "multiply by sizeof(PCR)" in hand-rolled asm.
+/// Lookup table mapping AP slot index to the corresponding `AP_PCRS` entry
+/// pointer, populated on the BSP by [`init_ap_pcr_lookup`] before any AP is
+/// started. The AP bootstrap trampoline must install GS_BASE before any
+/// instrumented Rust can run, and uses this table rather than reimplementing
+/// "multiply by sizeof(PCR)" in hand-rolled asm.
 ///
-/// Raw pointers are not `Sync`; wrapped in [`PcrPtrLookup`] for a
-/// single-writer-during-boot discipline.
+/// Raw pointers are not `Sync`; the wrapper carries a single-writer-during-boot
+/// discipline instead.
 #[repr(transparent)]
 pub struct PcrPtrLookup(pub [*mut ProcessorControlRegion; MAX_STATIC_APS]);
 unsafe impl Sync for PcrPtrLookup {}
@@ -640,22 +492,17 @@ pub static AP_PCR_PTRS: SyncUnsafeCell<PcrPtrLookup> =
 /// bootstrap task on the very first instrumented call of `ap_entry`.
 ///
 /// `cpu_id` is primed here rather than left to [`init_ap_pcr`] because the
-/// trampoline installs GS_BASE before any of that runs, and
-/// [`current_cpu_id`] reads the field straight out of the installed PCR. A
-/// slot still holding its static zero answers "CPU 0" — the BSP — for every
-/// per-CPU lookup the AP makes between the trampoline and `init_ap_pcr`,
-/// which is a window that logs. The AP then attributes its work to the BSP's
-/// per-CPU state; lockdep sees the BSP's held-lock stack gain the AP's klog
-/// acquire and reports a recursive acquisition that never happened.
+/// trampoline installs GS_BASE before that runs, and [`current_cpu_id`] reads
+/// the field straight out of the installed PCR: a slot still holding its static
+/// zero answers "CPU 0" — the BSP — for every per-CPU lookup the AP makes in
+/// between, which is a window that logs.
 ///
-/// Must run on the BSP *before* any AP is started.  Indexed by
-/// 0-based AP slot (AP slot i ↔ PCR at `AP_PCRS[i]`).
-/// `bootstrap_tasks[i]` is a pointer to the AP's bootstrap Task stub
-/// whose `unsafe_stack_sp` has already been primed — see
-/// `crate::task::bootstrap::init_bootstrap_tasks`.
+/// Indexed by 0-based AP slot (AP slot i ↔ PCR at `AP_PCRS[i]`);
+/// `bootstrap_tasks[i]` names the AP's bootstrap Task stub whose
+/// `unsafe_stack_sp` has already been primed.
 ///
-/// The `&BspToken<'brand>` witnesses BSP-only init; single-writer
-/// (BSP in a sequential pre-SMP phase), must be called exactly once.
+/// The `&BspToken<'brand>` witnesses BSP-only init; must run on the BSP,
+/// exactly once, before any AP is started.
 pub fn init_ap_pcr_lookup<'brand>(_token: &BspToken<'brand>, bootstrap_tasks: &[*mut ()]) {
     debug_assert!(bootstrap_tasks.len() <= MAX_STATIC_APS);
     // SAFETY: BSP-only init pre-SMP per the token witness; we are the
@@ -666,8 +513,8 @@ pub fn init_ap_pcr_lookup<'brand>(_token: &BspToken<'brand>, bootstrap_tasks: &[
         for (i, task) in bootstrap_tasks.iter().enumerate() {
             let pcr = &raw mut (*pcrs)[i];
             (*pcr).self_ref = pcr;
-            // AP slot `i` is CPU `i + 1`; `init_ap_pcr` writes the same value
-            // later from the AP itself, so this only moves it earlier.
+            // AP slot `i` is CPU `i + 1`; `init_ap_pcr` later writes the same
+            // value from the AP itself.
             (*pcr).cpu_id = (i + 1) as u32;
             (*pcr)
                 .current_task
@@ -677,9 +524,8 @@ pub fn init_ap_pcr_lookup<'brand>(_token: &BspToken<'brand>, bootstrap_tasks: &[
     }
 }
 
-/// Wrapper to allow `[*mut ProcessorControlRegion; N]` in a static.
-/// Raw pointers are not `Sync`; this is safe because all access is
-/// already guarded by single-writer semantics during boot init.
+/// Raw pointers are not `Sync`; the wrapper is sound because all access is
+/// guarded by single-writer semantics during boot init.
 #[repr(transparent)]
 struct PcrPtrArray([*mut ProcessorControlRegion; MAX_CPUS]);
 unsafe impl Sync for PcrPtrArray {}
@@ -687,33 +533,26 @@ unsafe impl Sync for PcrPtrArray {}
 static ALL_PCRS: SyncUnsafeCell<PcrPtrArray> =
     SyncUnsafeCell::new(PcrPtrArray([ptr::null_mut(); MAX_CPUS]));
 
-/// Number of initialized PCRs.
 static PCR_COUNT: AtomicU32 = AtomicU32::new(0);
 
 static PCR_INIT: InitFlag = InitFlag::new();
 static GS_BASE_SET: InitFlag = InitFlag::new();
 
-// ==================== APIC ID ↔ CPU INDEX MAPPING ====================
-
 const INVALID_CPU_IDX: u32 = u32::MAX;
 
-/// Mapping from APIC ID to CPU index.
 static APIC_ID_TO_CPU_IDX: [AtomicU32; MAX_CPUS] = {
     const INIT: AtomicU32 = AtomicU32::new(INVALID_CPU_IDX);
     [INIT; MAX_CPUS]
 };
 
-/// BSP's APIC ID (set during init).
 static BSP_APIC_ID: AtomicU32 = AtomicU32::new(0);
 
-/// Register a bi-directional APIC ID ↔ CPU index mapping.
 fn register_apic_mapping(cpu_id: usize, apic_id: u32) {
     if (apic_id as usize) < MAX_CPUS {
         APIC_ID_TO_CPU_IDX[apic_id as usize].store(cpu_id as u32, Ordering::Release);
     }
 }
 
-/// Convert APIC ID to CPU index.
 #[inline]
 pub fn cpu_index_from_apic_id(apic_id: u32) -> Option<usize> {
     if (apic_id as usize) >= MAX_CPUS {
@@ -727,19 +566,15 @@ pub fn cpu_index_from_apic_id(apic_id: u32) -> Option<usize> {
     }
 }
 
-/// Convert CPU index to APIC ID.
 #[inline]
 pub fn apic_id_from_cpu_index(cpu_id: usize) -> Option<u32> {
     get_pcr(cpu_id).map(|pcr| pcr.apic_id)
 }
 
-/// Get the BSP's APIC ID.
 #[inline]
 pub fn get_bsp_apic_id() -> u32 {
     BSP_APIC_ID.load(Ordering::Acquire)
 }
-
-// ==================== INITIALIZATION ====================
 
 /// Initialize the BSP's PCR: set up data structures, APIC mapping, mark online.
 ///
@@ -758,9 +593,8 @@ pub fn init_bsp_pcr<'brand>(_token: &BspToken<'brand>, apic_id: u32) {
 
     // SAFETY: BSP-only init witnessed by the token + PCR_INIT one-shot;
     // we are the unique writer to BSP_PCR / ALL_PCRS / PCR_COUNT.
-    // NOTE: `self_ref`, `unsafe_sp`, and GS_BASE were already primed by
-    // the `_start` asm trampoline in `boot/limine_entry.s` before any
-    // instrumented Rust ran.  Re-writing them here is idempotent.
+    // `self_ref`, `unsafe_sp` and GS_BASE were already primed by the `_start`
+    // asm trampoline; re-writing them here is idempotent.
     unsafe {
         (*pcr).self_ref = pcr;
         (*pcr).cpu_id = 0;
@@ -770,7 +604,6 @@ pub fn init_bsp_pcr<'brand>(_token: &BspToken<'brand>, apic_id: u32) {
         (*ALL_PCRS.get()).0[0] = pcr;
         PCR_COUNT.store(1, Ordering::Release);
 
-        // Register APIC mapping and mark BSP online.
         register_apic_mapping(0, apic_id);
         (*pcr).online.store(true, Ordering::Release);
     }
@@ -811,16 +644,14 @@ pub fn init_ap_pcr<'brand>(
 
         PCR_COUNT.fetch_max(cpu_id as u32 + 1, Ordering::AcqRel);
 
-        // Register APIC mapping.
         register_apic_mapping(cpu_id, apic_id);
 
         pcr
     }
 }
 
-/// Safe wrapper around an Application-Processor PCR pointer returned by
-/// [`init_ap_pcr`]. Encapsulates the `init_gdt` + `install` sequence so
-/// AP-bringup callers don't need to dereference the raw pointer.
+/// Safe wrapper around the [`init_ap_pcr`] pointer: encapsulates the
+/// `init_gdt` + `install` sequence so AP-bringup callers never dereference it.
 pub struct ApPcrHandle {
     ptr: *mut ProcessorControlRegion,
 }
@@ -828,9 +659,8 @@ pub struct ApPcrHandle {
 unsafe impl Send for ApPcrHandle {}
 
 impl ApPcrHandle {
-    /// Allocate and prime the AP's PCR slot. The returned handle must
-    /// then have [`Self::init_gdt_and_install`] called on it before any
-    /// instrumented Rust runs that observes `gs:[…]`.
+    /// Allocate and prime the AP's PCR slot. [`Self::init_gdt_and_install`]
+    /// must then be called before any instrumented Rust observes `gs:[…]`.
     ///
     /// The `&ApToken<'brand>` witnesses AP-init; the underlying
     /// [`init_ap_pcr`] is per-AP one-shot via the AP-init InitFlag.
@@ -839,8 +669,6 @@ impl ApPcrHandle {
         Self { ptr }
     }
 
-    /// Load this AP's GDT, populate its TSS descriptor, then install
-    /// GS_BASE / KERNEL_GS_BASE.
     pub fn init_gdt_and_install(self) {
         // SAFETY: self.ptr was returned by init_ap_pcr above; the
         // referenced PCR lives in BSS and has not been observed by any
@@ -856,9 +684,7 @@ pub fn mark_gs_base_set() {
     GS_BASE_SET.init_once();
 }
 
-// ==================== CURRENT CPU ACCESS ====================
-
-/// Read the current CPU index via GS segment (fast path, ~1-3 cycles).
+/// Read the current CPU index via GS segment.
 ///
 /// Returns 0 (BSP) if GS_BASE has not been set yet.
 #[inline(always)]
@@ -883,8 +709,6 @@ pub fn get_current_cpu() -> usize {
     current_cpu_id()
 }
 
-/// Get the current CPU's PCR via GS segment (fast path).
-///
 /// # Safety
 /// GS_BASE must be set to point to a valid PCR (done during CPU init).
 #[inline(always)]
@@ -898,8 +722,6 @@ pub unsafe fn current_pcr() -> &'static ProcessorControlRegion {
     &*ptr
 }
 
-/// Get the current CPU's PCR as mutable via GS segment.
-///
 /// # Safety
 /// GS_BASE must be set to point to a valid PCR.
 /// Caller must ensure exclusive access.
@@ -914,39 +736,24 @@ pub unsafe fn current_pcr_mut() -> &'static mut ProcessorControlRegion {
     &mut *ptr
 }
 
-// ==================== SINGLE-INSTRUCTION PER-CPU OPS ====================
+// Migration-atomic accessors for per-CPU PCR scalars (the Linux `this_cpu_*`
+// discipline).
 //
-// Migration-atomic accessors for per-CPU PCR scalars (the Linux
-// `this_cpu_*` discipline, e.g. `incl %gs:__preempt_count`).
+// `current_pcr` materialises the PCR *pointer* and lets the caller dereference
+// it later; in preemptible context an IRQ-driven reschedule can migrate the
+// task between the fetch and the access, landing it on the previous CPU's PCR.
+// For the preempt count that split is fatal: the increment strands the old CPU
+// at a non-zero count while the new CPU's count stays 0, so the matching guard
+// drop underflows. Each accessor below is a SINGLE gs-relative instruction,
+// which the CPU executes atomically with respect to interrupts.
 //
-// [`current_pcr`] materialises the PCR *pointer* and lets the caller
-// dereference it later. In preemptible context (preempt_count == 0,
-// IRQs on — the head of every `SpinLock::lock`) an IRQ-driven
-// reschedule can migrate the task BETWEEN the pointer fetch and the
-// access, landing the access on the previous CPU's PCR. For the
-// preempt count that split is fatal: the increment lands on the old
-// CPU — which then never preempts again (stranded READY tasks) —
-// while the new CPU's count stays 0, so the matching guard drop
-// underflows. Each accessor below compiles to a SINGLE gs-relative
-// instruction, which the CPU executes atomically with respect to
-// interrupts: there is no window in which "this CPU" can change
-// between resolving the address and performing the access.
-//
-// No `lock` prefix on `add`/`xadd` (and none needed): these fields
-// are written only by their owning CPU — the preempt guards and
-// `switch_context` run on the CPU they account, and
-// `reschedule_pending` is set either locally or by the
-// reschedule-IPI handler executing on the target CPU. Cross-CPU
-// readers (diagnostics) tolerate stale snapshots. x86-TSO plus the
-// `asm!` blocks' implicit compiler barrier provide all the ordering
-// the previous `Ordering::Acquire`/`Release` atomics provided for
-// this CPU-local data.
+// No `lock` prefix on `add`/`xadd`: these fields are written only by their
+// owning CPU, and cross-CPU readers (diagnostics) tolerate stale snapshots.
+// x86-TSO plus the `asm!` blocks' implicit compiler barrier supply the rest.
 //
 // GS_BASE must point at a valid PCR when any of these run — the same
-// precondition `current_pcr` documents; both the BSP and AP entry
-// trampolines install GS_BASE before any instrumented Rust executes.
+// precondition `current_pcr` documents.
 
-/// Increment this CPU's preempt count by one (single instruction).
 #[inline(always)]
 pub(crate) fn preempt_count_inc() {
     // SAFETY: single gs-relative RMW on this CPU's PCR field; GS_BASE
@@ -960,8 +767,6 @@ pub(crate) fn preempt_count_inc() {
     }
 }
 
-/// Decrement this CPU's preempt count by one and return the
-/// pre-decrement value (single `xadd` instruction).
 #[inline(always)]
 pub(crate) fn preempt_count_dec_fetch_prev() -> u32 {
     let prev: u32;
@@ -977,7 +782,6 @@ pub(crate) fn preempt_count_dec_fetch_prev() -> u32 {
     prev
 }
 
-/// Read this CPU's preempt count (single load).
 #[inline(always)]
 pub(crate) fn preempt_count_get() -> u32 {
     let count: u32;
@@ -993,8 +797,7 @@ pub(crate) fn preempt_count_get() -> u32 {
     count
 }
 
-/// Overwrite this CPU's preempt count (single store). Only the
-/// context-switch count swap may use this, with IRQs disabled.
+/// Only the context-switch count swap may use this, with IRQs disabled.
 #[inline(always)]
 pub(crate) fn preempt_count_set(count: u32) {
     // SAFETY: single gs-relative store to this CPU's PCR field.
@@ -1008,7 +811,6 @@ pub(crate) fn preempt_count_set(count: u32) {
     }
 }
 
-/// Set this CPU's deferred-reschedule flag (single store).
 #[inline(always)]
 pub(crate) fn reschedule_pending_set() {
     // SAFETY: single gs-relative store to this CPU's PCR field.
@@ -1021,7 +823,6 @@ pub(crate) fn reschedule_pending_set() {
     }
 }
 
-/// Clear this CPU's deferred-reschedule flag (single store).
 #[inline(always)]
 pub(crate) fn reschedule_pending_clear() {
     // SAFETY: single gs-relative store to this CPU's PCR field.
@@ -1034,7 +835,6 @@ pub(crate) fn reschedule_pending_clear() {
     }
 }
 
-/// Read this CPU's deferred-reschedule flag (single load).
 #[inline(always)]
 pub(crate) fn reschedule_pending_get() -> u32 {
     let pending: u32;
@@ -1050,9 +850,8 @@ pub(crate) fn reschedule_pending_get() -> u32 {
     pending
 }
 
-/// Atomically read-and-clear this CPU's deferred-reschedule flag
-/// (single `xchg` instruction — implicitly locked, so a same-instant
-/// set from a local IRQ is either observed or preserved, never lost).
+/// `xchg` is implicitly locked, so a same-instant set from a local IRQ is
+/// either observed or preserved, never lost.
 #[inline(always)]
 pub(crate) fn reschedule_pending_take() -> u32 {
     let pending: u32;
@@ -1068,10 +867,6 @@ pub(crate) fn reschedule_pending_take() -> u32 {
     pending
 }
 
-// ==================== PCR LOOKUP BY CPU ID ====================
-
-/// Get a PCR by CPU ID.
-///
 /// Returns `None` if `cpu_id` is invalid or the PCR has not been initialized.
 pub fn get_pcr(cpu_id: usize) -> Option<&'static ProcessorControlRegion> {
     if cpu_id >= MAX_CPUS {
@@ -1083,8 +878,6 @@ pub fn get_pcr(cpu_id: usize) -> Option<&'static ProcessorControlRegion> {
     }
 }
 
-/// Get a mutable PCR by CPU ID.
-///
 /// # Safety
 /// Caller must ensure exclusive access to the PCR.
 pub unsafe fn get_pcr_mut(cpu_id: usize) -> Option<&'static mut ProcessorControlRegion> {
@@ -1095,13 +888,9 @@ pub unsafe fn get_pcr_mut(cpu_id: usize) -> Option<&'static mut ProcessorControl
     if ptr.is_null() { None } else { Some(&mut *ptr) }
 }
 
-/// `get_pcr_mut` exposed as a safe surface for per-CPU init-only
-/// mutators (TSS rsp0 update, IST slot binding) that are race-free
-/// under Inv. 8: each CPU mutates only its own `cpu_id` slot.
-///
-/// The name carries `_via_token` historically; the actual gate today
-/// is the per-CPU invariant. `cpu_id` validates inside `get_pcr_mut`
-/// and out-of-range values return `None`.
+/// `get_pcr_mut` exposed as a safe surface for per-CPU init-only mutators (TSS
+/// rsp0 update, IST slot binding), race-free under Inv. 8: each CPU mutates
+/// only its own `cpu_id` slot. Out-of-range `cpu_id` returns `None`.
 pub fn get_pcr_mut_via_token(cpu_id: usize) -> Option<&'static mut ProcessorControlRegion> {
     // SAFETY: per-CPU slot mutation under Inv. 8 — callers commit to
     // writing only `cpu_id`'s slot. The PCR is alive for the kernel
@@ -1109,15 +898,9 @@ pub fn get_pcr_mut_via_token(cpu_id: usize) -> Option<&'static mut ProcessorCont
     unsafe { get_pcr_mut(cpu_id) }
 }
 
-/// Safe surface for "get the *local* CPU's PCR by id". Resolves the
-/// current CPU via [`get_current_cpu`] then looks the slot up in the
-/// table. Returns `None` if PCR init hasn't run yet.
-///
-/// Replaces `unsafe { current_pcr() }` for the common pattern of
-/// reading the local CPU's PCR fields (counters, flags, atomic
-/// scratch slots like `syscall_pid`) — the per-CPU slot is alive for
-/// the kernel lifetime and the GS-relative fast path is not actually
-/// required for these uses.
+/// Safe surface for "get the *local* CPU's PCR by id", for the common pattern
+/// of reading this CPU's PCR fields where the GS-relative fast path is not
+/// required. Returns `None` if PCR init hasn't run yet.
 #[inline]
 pub fn current_pcr_local() -> Option<&'static ProcessorControlRegion> {
     get_pcr(get_current_cpu())
@@ -1133,15 +916,11 @@ pub fn current_pcr_local_mut() -> Option<&'static mut ProcessorControlRegion> {
 /// Prime/re-prime the current CPU's IST/exception SafeStack data-stack
 /// pointer ([`ProcessorControlRegion::ist_unsafe_sp`]).
 ///
-/// Single-writer-per-CPU by construction: invoked once at boot by
-/// `ist_stacks` (before interrupts are enabled, hence before any
-/// instrumented exception handler can run on this CPU), and re-primed by
-/// `retire_faulted_cpu` — the one exception path that `schedule()`s away
-/// without unwinding the IST data stack — so the abandoned depth does not
-/// accumulate across successive fatal user faults. The only other writer
-/// is the LLVM SafeStack prologue, which runs on this same CPU; callers
-/// invoke this with interrupts disabled (boot) or from a divergent
-/// exception path that never resumes the abandoned frames.
+/// Single-writer-per-CPU by construction: called at boot by `ist_stacks` with
+/// interrupts disabled, and by `retire_faulted_cpu` — the one exception path
+/// that `schedule()`s away without unwinding the IST data stack, so the
+/// abandoned depth does not accumulate. The only other writer is the LLVM
+/// SafeStack prologue, which runs on this same CPU.
 #[inline]
 pub fn set_local_ist_unsafe_sp(top: u64) {
     if let Some(pcr) = current_pcr_local() {
@@ -1154,8 +933,7 @@ pub fn set_local_ist_unsafe_sp(top: u64) {
     }
 }
 
-/// Read the current CPU's IST/exception data-stack pointer. Diagnostics
-/// only (e.g. overflow reporting); the hot path reads it via the naked
+/// Diagnostics only; the hot path reads this slot via the naked
 /// `__safestack_pointer_address` asm, never this fn.
 #[inline]
 pub fn local_ist_unsafe_sp() -> u64 {
@@ -1165,8 +943,8 @@ pub fn local_ist_unsafe_sp() -> u64 {
         .unwrap_or(0)
 }
 
-/// Prime this CPU's emergency SAFE-stack top (`PCR.panic_safe_sp`). Called by
-/// `ist_stacks` during per-CPU bringup, before any fatal fault can occur.
+/// Called by `ist_stacks` during per-CPU bringup, before any fatal fault can
+/// occur.
 #[inline]
 pub fn set_local_panic_safe_sp(top: u64) {
     if let Some(pcr) = current_pcr_local() {
@@ -1177,7 +955,6 @@ pub fn set_local_panic_safe_sp(top: u64) {
     }
 }
 
-/// Prime this CPU's emergency DATA-stack top (`PCR.panic_unsafe_sp`).
 #[inline]
 pub fn set_local_panic_unsafe_sp(top: u64) {
     if let Some(pcr) = current_pcr_local() {
@@ -1188,7 +965,7 @@ pub fn set_local_panic_unsafe_sp(top: u64) {
     }
 }
 
-/// Read this CPU's emergency SAFE-stack top (diagnostics / tests).
+/// Diagnostics / tests only.
 #[inline]
 pub fn local_panic_safe_sp() -> u64 {
     current_pcr_local()
@@ -1196,7 +973,7 @@ pub fn local_panic_safe_sp() -> u64 {
         .unwrap_or(0)
 }
 
-/// Read this CPU's emergency DATA-stack top (diagnostics / tests).
+/// Diagnostics / tests only.
 #[inline]
 pub fn local_panic_unsafe_sp() -> u64 {
     current_pcr_local()
@@ -1222,9 +999,8 @@ fn counter_exit_saturating(counter: &AtomicU32) -> u32 {
     }
 }
 
-/// Enter the fatal-panic path on this CPU, returning the PREVIOUS depth. A
-/// non-zero return means the fatal path itself faulted (recursion) and the
-/// caller must degrade to the format-free abort. Never decremented — a CPU
+/// Returns the PREVIOUS depth: non-zero means the fatal path itself faulted and
+/// the caller must degrade to the format-free abort. Never decremented — a CPU
 /// that enters the fatal path does not leave it.
 #[inline]
 pub fn panic_depth_enter() -> u32 {
@@ -1233,9 +1009,9 @@ pub fn panic_depth_enter() -> u32 {
         .unwrap_or(0)
 }
 
-/// Enter the panic handler on this CPU, returning the previous in-flight
-/// depth. A non-zero previous value means the panic handler re-entered before
-/// the prior panic reached an unwind catch boundary or a fatal halt.
+/// Returns the previous in-flight depth: non-zero means the panic handler
+/// re-entered before the prior panic reached an unwind catch boundary or a
+/// fatal halt.
 #[inline]
 pub fn panic_in_flight_enter() -> u32 {
     current_pcr_local()
@@ -1243,8 +1019,8 @@ pub fn panic_in_flight_enter() -> u32 {
         .unwrap_or(0)
 }
 
-/// Leave the panic handler after a caught panic crosses an unwind catch
-/// boundary. Returns the previous in-flight depth and saturates at zero.
+/// Call only after a caught panic crosses an unwind catch boundary. Returns the
+/// previous in-flight depth and saturates at zero.
 #[inline]
 pub fn panic_in_flight_exit() -> u32 {
     current_pcr_local()
@@ -1252,7 +1028,6 @@ pub fn panic_in_flight_exit() -> u32 {
         .unwrap_or(0)
 }
 
-/// Current panic-handler in-flight depth for this CPU.
 #[inline]
 pub fn panic_in_flight_depth() -> u32 {
     current_pcr_local()
@@ -1260,10 +1035,9 @@ pub fn panic_in_flight_depth() -> u32 {
         .unwrap_or(0)
 }
 
-/// Install a task's saved panic in-flight depth on this CPU. Context-switch
-/// use only: an unwinding task runs interrupts-on and can migrate, so the
-/// depth must travel with the task or the enter-CPU's counter leaks and a
-/// later `AbortOnUnwind` drop on that CPU false-aborts.
+/// Context-switch use only: an unwinding task runs interrupts-on and can
+/// migrate, so the depth must travel with the task or the enter-CPU's counter
+/// leaks and a later `AbortOnUnwind` drop on that CPU false-aborts.
 #[inline]
 pub fn panic_in_flight_store(depth: u32) {
     if let Some(pcr) = current_pcr_local() {
@@ -1271,8 +1045,7 @@ pub fn panic_in_flight_store(depth: u32) {
     }
 }
 
-/// Enter interrupt/exception context on this CPU, returning the previous
-/// nesting depth.
+/// Returns the previous nesting depth.
 #[inline]
 pub fn interrupt_nesting_enter() -> u32 {
     current_pcr_local()
@@ -1283,8 +1056,7 @@ pub fn interrupt_nesting_enter() -> u32 {
         .unwrap_or(0)
 }
 
-/// Leave interrupt/exception context on this CPU. Returns the previous nesting
-/// depth and saturates at zero.
+/// Returns the previous nesting depth and saturates at zero.
 #[inline]
 pub fn interrupt_nesting_exit() -> u32 {
     current_pcr_local()
@@ -1298,7 +1070,6 @@ pub fn interrupt_nesting_exit() -> u32 {
         .unwrap_or(0)
 }
 
-/// Current interrupt/exception nesting depth for this CPU.
 #[inline]
 pub fn interrupt_nesting_depth() -> u32 {
     current_pcr_local()
@@ -1306,7 +1077,6 @@ pub fn interrupt_nesting_depth() -> u32 {
         .unwrap_or(0)
 }
 
-/// True if this CPU is currently in interrupt/exception context.
 #[inline]
 pub fn in_interrupt_context() -> bool {
     current_pcr_local()
@@ -1317,11 +1087,8 @@ pub fn in_interrupt_context() -> bool {
         .unwrap_or(false)
 }
 
-/// Mark that this CPU has bottom-half work (single gs-relative store).
-///
-/// Reached from hard-IRQ handlers and from under cli-spinlocks, so it must stay
-/// one instruction: no table lookup, no bounds check, nothing that could take a
-/// lock.
+/// Must stay one instruction: no table lookup, no bounds check, nothing that
+/// could take a lock.
 #[inline(always)]
 pub fn bh_pending_set() {
     // SAFETY: single gs-relative store to this CPU's PCR field; GS_BASE is
@@ -1335,11 +1102,8 @@ pub fn bh_pending_set() {
     }
 }
 
-/// Read this CPU's bottom-half flag (single gs-relative load).
-///
-/// This is the whole cost of the point when there is nothing to do, and it sits
-/// on every outermost unlock, so it is one instruction rather than a call
-/// through the PCR table — which would inflate the frame of every function that
+/// One instruction rather than a call through the PCR table: it sits on every
+/// outermost unlock, and a call would inflate the frame of every function that
 /// releases a lock.
 #[inline(always)]
 pub fn bh_pending_get() -> bool {
@@ -1375,21 +1139,18 @@ pub fn bh_active_clear() {
     }
 }
 
-/// Enter a panic-recovery scope on this CPU, returning the previous recovery
-/// depth.
+/// Returns the previous recovery depth.
 #[inline]
 pub fn recovery_depth_enter() -> u32 {
     recovery_depth_enter_for_cpu(get_current_cpu())
 }
 
-/// Leave a panic-recovery scope on this CPU. Returns the previous recovery
-/// depth and saturates at zero.
+/// Returns the previous recovery depth and saturates at zero.
 #[inline]
 pub fn recovery_depth_exit() -> u32 {
     recovery_depth_exit_for_cpu(get_current_cpu())
 }
 
-/// Current panic-recovery depth for this CPU.
 #[inline]
 pub fn recovery_depth() -> u32 {
     current_pcr_local()
@@ -1397,12 +1158,11 @@ pub fn recovery_depth() -> u32 {
         .unwrap_or(0)
 }
 
-/// Panic-recovery depth for `cpu_id` (cross-CPU read; `0` for an unknown or
-/// offline CPU). Non-zero means that CPU is inside a `run_recoverable` scope,
-/// where a caught panic may run the DWARF unwinder with interrupts disabled
-/// (and thus without advancing its per-CPU timer tick) for a legitimately long
-/// time. The NMI watchdog reads this to grant that CPU a bounded grace before
-/// treating it as stuck.
+/// Cross-CPU read; `0` for an unknown or offline CPU. Non-zero means that CPU
+/// is inside a `run_recoverable` scope, where a caught panic may run the DWARF
+/// unwinder with interrupts disabled — and thus without advancing its per-CPU
+/// timer tick — for a legitimately long time, which is the grace the NMI
+/// watchdog grants it before treating it as stuck.
 #[inline]
 pub fn recovery_depth_for_cpu(cpu_id: usize) -> u32 {
     get_pcr(cpu_id)
@@ -1410,7 +1170,6 @@ pub fn recovery_depth_for_cpu(cpu_id: usize) -> u32 {
         .unwrap_or(0)
 }
 
-/// Replace this CPU's live panic-recovery depth.
 #[inline]
 pub fn recovery_depth_store(depth: u32) {
     if let Some(pcr) = current_pcr_local() {
@@ -1418,8 +1177,8 @@ pub fn recovery_depth_store(depth: u32) {
     }
 }
 
-/// Enter a panic-recovery scope for an explicit CPU id. Used by recovery
-/// guards so Drop exits the same per-CPU slot that was entered.
+/// Explicit `cpu_id` so a recovery guard's Drop exits the same per-CPU slot it
+/// entered.
 #[doc(hidden)]
 #[inline]
 pub fn recovery_depth_enter_for_cpu(cpu_id: usize) -> u32 {
@@ -1428,8 +1187,8 @@ pub fn recovery_depth_enter_for_cpu(cpu_id: usize) -> u32 {
         .unwrap_or(0)
 }
 
-/// Leave a panic-recovery scope for an explicit CPU id. Used by recovery
-/// guards so Drop exits the same per-CPU slot that was entered.
+/// Explicit `cpu_id` so a recovery guard's Drop exits the same per-CPU slot it
+/// entered.
 #[doc(hidden)]
 #[inline]
 pub fn recovery_depth_exit_for_cpu(cpu_id: usize) -> u32 {
@@ -1439,25 +1198,17 @@ pub fn recovery_depth_exit_for_cpu(cpu_id: usize) -> u32 {
 }
 
 /// Raw store of `top` into this CPU's `PCR.ist_unsafe_sp`, bypassing the
-/// SafeStack sanitizer.
+/// SafeStack sanitizer, to re-prime the exception data-stack pointer when a
+/// handler abandons it without unwinding (`retire_faulted_cpu`).
 ///
-/// Used to re-prime the exception data-stack pointer when an exception
-/// handler abandons it without unwinding (`retire_faulted_cpu`'s divergent
-/// `schedule()`). Why naked: that abandoning code runs *on* an IST stack,
-/// so `__safestack_pointer_address` resolves THIS very slot as its own
-/// data-SP — an instrumented setter's SafeStack epilogue would restore the
-/// slot to the setter's entry value and silently undo the re-prime. A naked
-/// fn has no prologue/epilogue, so its store sticks.
+/// Naked because that abandoning code runs *on* an IST stack, so
+/// `__safestack_pointer_address` resolves THIS very slot as its own data-SP: an
+/// instrumented setter's SafeStack epilogue would restore the slot to its entry
+/// value and undo the re-prime. Must therefore be called DIRECTLY — an
+/// instrumented wrapper re-introduces the same clobber. Clobbers only `rax`.
 ///
-/// Call it DIRECTLY from the abandoning path. Wrapping it in an
-/// instrumented helper re-introduces the same epilogue clobber (the
-/// wrapper, also running on the IST stack, would restore the slot on
-/// return), so there is intentionally no safe wrapper. Clobbers only `rax`.
-///
-/// Distinct from [`set_local_ist_unsafe_sp`], which is correct for *boot*
-/// priming because that runs on the boot/kernel stack — there
-/// `__safestack_pointer_address` resolves the per-task slot, not this one,
-/// so the setter's own frame never touches `ist_unsafe_sp`.
+/// [`set_local_ist_unsafe_sp`] remains correct for *boot* priming, which runs
+/// on the boot/kernel stack where the resolver picks the per-task slot instead.
 #[unsafe(naked)]
 pub extern "sysv64" fn reset_ist_unsafe_sp(top: u64) {
     naked_asm!(

@@ -563,8 +563,7 @@ static CB_BACKLOG: AtomicBool = AtomicBool::new(false);
 
 /// Check from the timer tick whether deferred callbacks need processing.
 ///
-/// Hardirq-safe; analogous to Linux's `rcu_sched_clock_irq()` raising
-/// `RCU_SOFTIRQ`.
+/// Hardirq-safe.
 #[inline]
 pub fn rcu_raise_softirq() {
     if !PENDING_HEAD.load(Ordering::Relaxed).is_null() || CB_BACKLOG.load(Ordering::Relaxed) {
@@ -576,11 +575,8 @@ pub fn rcu_raise_softirq() {
 ///
 /// [`PENDING_HEAD`] is the third and holds newly queued callbacks; it stays a
 /// lock-free stack so `call_rcu` gains no context constraint from any of this.
-///
-/// `wait` is a separate list from the pending stack because it carries a
-/// sequence number, and a single list has nowhere to record which grace period
-/// its callbacks are waiting for. That missing field is what forced the
-/// invocation step to take a grace period inline.
+/// `wait` is separate from that stack because it carries the sequence number
+/// its callbacks are waiting for.
 struct CbBatches {
     /// Queued before `wait_seq` was chosen; not yet invocable.
     wait: *mut RcuCallbackNode,
@@ -606,8 +602,8 @@ static CB_BATCHES: crate::sync::SpinLock<CbBatches> = crate::sync::SpinLock::new
 /// Callbacks invoked per drain pass.
 ///
 /// A pass runs on a CPU that has other things to do next, so the remainder goes
-/// back on `done` and the drain re-arms rather than running the whole backlog at
-/// once. Linux calls this `blimit`.
+/// back on `done` and the drain re-arms rather than running the whole backlog
+/// at once.
 const RCU_BLIMIT: usize = 64;
 
 /// Detach at most `limit` nodes from `*head`.
@@ -655,26 +651,23 @@ fn invoke_chain(chain: *mut RcuCallbackNode) {
 /// One drain pass: retire an elapsed batch, tag a fresh one, invoke up to
 /// `limit` callbacks. Returns whether anything remains.
 ///
-/// Never waits. That is the invariant the segments exist to establish: a pass
-/// invokes exactly those callbacks already observed to be past their grace
-/// period, and returns. A drain that took the grace period itself could not run
-/// anywhere a CPU has other work to get back to.
+/// Never waits: a pass invokes exactly those callbacks already observed to be
+/// past their grace period, and returns.
 ///
 /// The lock is `try_lock`ed and released before any callback runs, so a second
 /// CPU skips rather than spins, and a callback that itself calls `call_rcu` only
 /// pushes to the lock-free stack.
 fn drain_ready(limit: usize) -> bool {
     let Some(mut batches) = CB_BATCHES.try_lock() else {
-        // Hand the flag back. The CPU holding the lock re-arms for what it
-        // leaves behind, but it may have computed that before this swap, and a
-        // dropped arm is a backlog nothing comes back for.
+        // Hand the flag back: the lock holder may have computed its re-arm
+        // before this swap, and a dropped arm is a backlog nothing comes back
+        // for.
         RCU_CB_PENDING.store(true, Ordering::Release);
         return false;
     };
 
-    // Retire an elapsed batch. Only into an empty `done`, which keeps this
-    // O(1): a non-empty `done` means the previous pass hit its limit, and the
-    // caller comes straight back for it.
+    // Only into an empty `done`, which keeps this O(1): a non-empty `done`
+    // means the previous pass hit its limit and the caller comes back for it.
     if batches.done.is_null()
         && !batches.wait.is_null()
         && gp_done(GP_SEQ.load(Ordering::Acquire), batches.wait_seq)
@@ -682,7 +675,6 @@ fn drain_ready(limit: usize) -> bool {
         batches.done = core::mem::replace(&mut batches.wait, core::ptr::null_mut());
     }
 
-    // Tag a fresh batch with the period it has to outlive.
     if batches.wait.is_null() {
         let head = PENDING_HEAD.swap(core::ptr::null_mut(), Ordering::AcqRel);
         if !head.is_null() {
@@ -697,8 +689,6 @@ fn drain_ready(limit: usize) -> bool {
     CB_BACKLOG.store(more, Ordering::Release);
     drop(batches);
 
-    // Outside the lock: callbacks free to the heap, and one of them may queue
-    // another.
     invoke_chain(batch);
 
     // A batch was tagged but its period may not have started, and nothing else
@@ -713,11 +703,9 @@ fn drain_ready(limit: usize) -> bool {
 
 /// Invoke every callback whose grace period has already elapsed.
 ///
-/// Called from a CPU that has found nothing to dispatch, so it keeps going while
-/// callbacks are ready rather than leaving a backlog for the next pass: the
-/// batch limit is there to bound one pass, not to ration a CPU that has nothing
-/// else to do. Callbacks whose period has *not* elapsed are left alone — this
-/// never waits for one.
+/// Called from a CPU that has found nothing to dispatch, so it keeps going
+/// while callbacks are ready rather than leaving a backlog for the next pass.
+/// Callbacks whose period has *not* elapsed are left alone — this never waits.
 pub fn rcu_process_callbacks() {
     if !RCU_CB_PENDING.swap(false, Ordering::Acquire) {
         return;
@@ -727,9 +715,8 @@ pub fn rcu_process_callbacks() {
 
 /// Invoke one bounded batch from the bottom-half point.
 ///
-/// The witness is what distinguishes this from [`rcu_process_callbacks`]: the
-/// caller is a CPU on its way back to real work rather than one that has run
-/// out of it, so this takes a single pass and re-arms for the rest.
+/// Unlike [`rcu_process_callbacks`] the caller is a CPU on its way back to real
+/// work, so this takes a single pass and re-arms for the rest.
 pub(crate) fn invoke_callbacks(_bh: &crate::sync::bh::BhContext<'_>) {
     if !RCU_CB_PENDING.swap(false, Ordering::Acquire) {
         return;
@@ -739,21 +726,16 @@ pub(crate) fn invoke_callbacks(_bh: &crate::sync::bh::BhContext<'_>) {
 
 /// Wait until every callback queued before this call has been *invoked*.
 ///
-/// [`synchronize_rcu`] says a grace period elapsed; once invocation is
-/// asynchronous that no longer says the callbacks ran, and those are two
-/// different facts a caller tearing something down needs to keep apart.
+/// [`synchronize_rcu`] says a grace period elapsed, which since invocation is
+/// asynchronous no longer says the callbacks ran — two different facts a caller
+/// tearing something down needs to keep apart.
 ///
 /// Drives the drain itself rather than waiting on a peer, so it makes progress
 /// from a context that will not go idle.
 pub fn rcu_barrier() {
-    // Everything queued before this point is either on the pending stack or in
-    // a batch, and one full drain of both is what the caller is waiting for.
     while !PENDING_HEAD.load(Ordering::Acquire).is_null() || CB_BACKLOG.load(Ordering::Acquire) {
         RCU_CB_PENDING.store(true, Ordering::Release);
         rcu_process_callbacks();
-        // Unconditional, for the reason [`synchronize_rcu`] gives: a spinning
-        // CPU reaches no switch of its own, so a declined report leaves it
-        // waiting on itself.
         rcu_note_qs();
         rcu_gp_poll();
         crate::sync::spin_relax();
@@ -761,28 +743,12 @@ pub fn rcu_barrier() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// RcuCell<T> — safe RCU-protected atomic-pointer cell.
-// ---------------------------------------------------------------------------
-
 /// RCU-protected single-slot cell of `KBox<T>`.
 ///
-/// Stores at most one heap-owned `T`. Readers obtain an
-/// [`RcuCellGuard`] which holds an [`RcuReadGuard`] for its lifetime
-/// and derefs to `&T`. Writers replace the contents with another
-/// `KBox<T>`; the displaced value is freed after a grace period via
-/// [`rcu_call_typed`].
-///
-/// Designed for the global glyph atlas / per-namespace policy table
-/// pattern: hot-path readers are wait-free, writers are rare and
-/// pay for the grace period.
-///
-/// `T: Send + 'static` is required because writers may need to free
-/// the displaced box from a different CPU after the grace period.
-///
-/// Use [`RcuCell::store_unchecked`] for pre-scheduler init when no
-/// concurrent reader can exist — the displaced box is dropped
-/// synchronously, sidestepping the deferred-free fast path.
+/// Readers obtain an [`RcuCellGuard`] which holds an [`RcuReadGuard`] for its
+/// lifetime and derefs to `&T`; the value a writer displaces is freed after a
+/// grace period via [`rcu_call_typed`]. `T: Send` because that free may run on
+/// a different CPU from the one that published it.
 pub struct RcuCell<T: Send + 'static> {
     ptr: AtomicPtr<T>,
 }
@@ -811,7 +777,6 @@ impl<T: 'static> core::ops::Deref for RcuCellGuard<T> {
 }
 
 impl<T: Send + 'static> RcuCell<T> {
-    /// Construct an empty cell.
     #[inline]
     pub const fn empty() -> Self {
         Self {
@@ -836,12 +801,9 @@ impl<T: Send + 'static> RcuCell<T> {
         }
     }
 
-    /// Replace the cell contents with `new_value`. The displaced
-    /// `KBox<T>` (if any) is scheduled for deferred drop via
-    /// [`rcu_call_typed`] so concurrent readers can complete safely.
-    ///
-    /// Returns the raw `*mut T` of the displaced value (may be null
-    /// on first publish).
+    /// Replace the cell contents; the displaced `KBox<T>` is dropped after a
+    /// grace period via [`rcu_call_typed`]. Returns the raw `*mut T` of the
+    /// displaced value, null on first publish.
     pub fn replace(&self, new_value: crate::mm::KBox<T>) -> *mut T {
         let new_ptr = crate::mm::KBox::into_raw(new_value);
         let old = self.ptr.swap(new_ptr, Ordering::AcqRel);
@@ -855,10 +817,9 @@ impl<T: Send + 'static> RcuCell<T> {
         old
     }
 
-    /// Pre-scheduler-only store: replace the cell contents and drop
-    /// the displaced value immediately. Sound only when the caller
-    /// can prove no concurrent reader exists (e.g. the call happens
-    /// before the scheduler starts).
+    /// Replace the cell contents and drop the displaced value immediately.
+    /// Sound only where the caller can prove no concurrent reader exists —
+    /// before the scheduler starts.
     pub fn store_pre_scheduler(&self, new_value: crate::mm::KBox<T>) {
         let new_ptr = crate::mm::KBox::into_raw(new_value);
         let old = self.ptr.swap(new_ptr, Ordering::AcqRel);
@@ -877,19 +838,11 @@ unsafe impl<T: Send + Sync + 'static> Sync for RcuCell<T> {}
 
 /// RCU-protected slot holding at most one [`KArc<T>`].
 ///
-/// The refcounted sibling of [`RcuCell`]. Where `RcuCell` owns a `KBox<T>` and
-/// lends readers a guard that borrows it, this owns one *strong reference* and
-/// gives each reader one of their own — so a reader's handle stays valid after
-/// the slot has moved on. That is what a shared object with independent
-/// lifetime, like a process group, needs from a field that a *different* task
-/// may replace at any moment.
-///
-/// - **Read** — preemption off, one acquire load, one refcount increment.
-///   Wait-free: no lock, no allocation, and no ordering against the writer
-///   beyond the load itself.
-/// - **Write** — one swap, then the displaced reference is released after a
-///   grace period. So the destructor never runs on the writer's stack, never
-///   under the writer's locks, and never with interrupts off.
+/// The refcounted sibling of [`RcuCell`]: this owns one *strong reference* and
+/// gives each reader one of their own, so a reader's handle stays valid after
+/// the slot has moved on. Reads are wait-free; a write swaps and releases the
+/// displaced reference after a grace period, so the destructor never runs on
+/// the writer's stack, under its locks, or with interrupts off.
 ///
 /// # Why the read side holds the section across the increment
 ///
@@ -897,9 +850,7 @@ unsafe impl<T: Send + Sync + 'static> Sync for RcuCell<T> {}
 /// writer may swap the slot between them. What makes the increment sound is
 /// not that it beat the writer, but that the writer's *release* cannot run
 /// until every CPU has passed through a quiescent state — and this CPU cannot,
-/// because [`rcu_read_lock`] holds preemption off across both steps. Shrinking
-/// the section to cover only the load would reintroduce exactly the
-/// resurrection race the deferral exists to prevent.
+/// because [`rcu_read_lock`] holds preemption off across both steps.
 ///
 /// `T: Send + Sync` because a reference published here can be cloned, read and
 /// finally released by a CPU other than the one that stored it.
@@ -925,9 +876,6 @@ impl<T: Send + Sync + 'static> RcuArcSlot<T> {
         if raw.is_null() {
             return None;
         }
-        // Reconstruct the slot's parked reference without taking it, clone one
-        // fresh reference from it, then hand the borrow back untouched — the
-        // same balanced borrow the task placement primitives use.
         // SAFETY: `raw` was produced by `KArc::into_raw` on a reference this
         // slot still owns. A concurrent `store` cannot have released it yet:
         // that release is deferred past a grace period, which cannot complete
@@ -941,7 +889,7 @@ impl<T: Send + Sync + 'static> RcuArcSlot<T> {
     /// Publish `value`, releasing the displaced reference after a grace period.
     ///
     /// Must not be called with interrupts disabled or a lock held that the RCU
-    /// machinery could need — this is a writer path, and writers are rare.
+    /// machinery could need.
     pub fn store(&self, value: Option<crate::mm::KArc<T>>) {
         let new_raw = match value {
             Some(arc) => crate::mm::KArc::into_raw(arc).cast_mut(),
@@ -1002,9 +950,8 @@ impl<T: Send + Sync + 'static> Default for RcuArcSlot<T> {
 
 impl<T: Send + Sync + 'static> Drop for RcuArcSlot<T> {
     fn drop(&mut self) {
-        // The slot owns one reference; releasing it here is what keeps a
-        // dropped container from leaking its member. `&mut self` proves no
-        // reader can be mid-clone, so no grace period is needed.
+        // `&mut self` proves no reader can be mid-clone, so no grace period is
+        // needed.
         drop(self.replace_exclusive(None));
     }
 }
@@ -1025,14 +972,9 @@ fn drop_typed<T: Send + 'static>(_b: crate::mm::KBox<T>) {
 
 /// A CPU's quiescent-state counter.
 ///
-/// Diagnostics, and the only way to tell a *declined* report from a silent one:
-/// asserting `rcu_note_qs_from_interrupt` returned `false` would pass just as
-/// happily against a version that always declined and never reported, which is
-/// a liveness bug rather than a soundness one but still a bug a test should be
-/// able to see. Ungated rather than `test-helpers`-gated because it is a plain
-/// atomic load with no more privilege than `synchronize_rcu` already exercises,
-/// and `slopos-ostd/test-helpers` is not in the kernel test build's feature
-/// chain.
+/// Diagnostics, and the only way a test can tell a *declined* report from a
+/// silent one. Ungated rather than `test-helpers`-gated because
+/// `slopos-ostd/test-helpers` is not in the kernel test build's feature chain.
 pub fn rcu_qs_counter(cpu: usize) -> u64 {
     if cpu >= MAX_CPUS {
         return 0;
@@ -1040,7 +982,6 @@ pub fn rcu_qs_counter(cpu: usize) -> u64 {
     RCU_QS_CTR[cpu].0.load(Ordering::Acquire)
 }
 
-/// Test-only reset hook.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_backend_for_test() {
     BACKEND_INSTALLED.store(false, Ordering::Release);
@@ -1050,7 +991,6 @@ pub fn reset_backend_for_test() {
 mod tests {
     use super::{GP_IN_FLIGHT, gp_done, gp_snap};
 
-    /// From an idle sequence, the next period to run is the one to wait for.
     #[test]
     fn snap_from_idle_targets_the_next_completion() {
         assert_eq!(gp_snap(0), 2);
@@ -1058,9 +998,6 @@ mod tests {
         assert_eq!(gp_snap(100), 102);
     }
 
-    /// From an in-flight sequence, the running period does not count: it may
-    /// have begun before the caller unpublished, so a reader that entered
-    /// before the caller's store can still be inside it.
     #[test]
     fn snap_rounds_past_an_in_flight_period() {
         assert_eq!(gp_snap(1), 4);
@@ -1068,7 +1005,6 @@ mod tests {
         assert_eq!(gp_snap(101), 104);
     }
 
-    /// Every target names a completion, never a period in flight.
     #[test]
     fn snap_is_always_a_completed_sequence() {
         for seq in 0u64..64 {
@@ -1076,7 +1012,6 @@ mod tests {
         }
     }
 
-    /// A target is always strictly ahead, so no caller returns without waiting.
     #[test]
     fn snap_is_strictly_ahead_of_the_snapped_sequence() {
         for seq in 0u64..64 {
@@ -1092,9 +1027,8 @@ mod tests {
         assert!(gp_done(4, 2));
     }
 
-    /// The sequence is a wrapping counter, so the comparison has to be a signed
-    /// difference. A plain `>=` reads a wrapped counter as permanently behind
-    /// and every waiter hangs.
+    /// A plain `>=` reads a wrapped counter as permanently behind, and every
+    /// waiter hangs.
     #[test]
     fn done_survives_wrapping() {
         let target = gp_snap(u64::MAX - 3);

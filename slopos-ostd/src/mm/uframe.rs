@@ -403,25 +403,21 @@ impl<M: AnyUFrameMeta> USegment<M> {
         })
     }
 
-    /// Physical address of the run's first frame.
     pub fn head_paddr(&self) -> Paddr {
         self.head_paddr
     }
 
-    /// Number of pages in the run.
     pub fn len_pages(&self) -> usize {
         self.len_pages
     }
 
-    /// Total byte length of the run (`len_pages * PAGE_SIZE`).
     pub fn len_bytes(&self) -> usize {
         self.len_pages * PAGE_SIZE
     }
 
-    /// Read-only single-element vectored-I/O descriptor for the
-    /// run. Always one slice (segments are physically contiguous);
-    /// the single-element array shape is future-proofing for
-    /// scatter/gather lists.
+    /// Read-only vectored-I/O descriptor for the run. Always one slice
+    /// (segments are physically contiguous); the array shape is
+    /// future-proofing for scatter/gather lists.
     pub fn io_slices(&self) -> [UIoSlice; 1] {
         [UIoSlice {
             paddr: self.head_paddr,
@@ -429,7 +425,6 @@ impl<M: AnyUFrameMeta> USegment<M> {
         }]
     }
 
-    /// Mutable single-element vectored-I/O descriptor for the run.
     pub fn io_slices_mut(&mut self) -> [UIoSliceMut; 1] {
         [UIoSliceMut {
             paddr: self.head_paddr,
@@ -442,12 +437,10 @@ impl<M: AnyUFrameMeta> USegment<M> {
         if dst.is_empty() {
             return Ok(());
         }
-        // SAFETY: HHDM-style linear mapping — bytes at
-        // `phys_to_virt(head) + offset` cover the entire physically
-        // contiguous run. `offset + dst.len() <= len_bytes()` was
-        // just checked. `dst` is a Rust slice that cannot alias the
-        // frame mapping. `frames` retains a live ref per page for
-        // the lifetime of `&self`.
+        // SAFETY: the run is physically contiguous and the HHDM window linear,
+        // so `phys_to_virt(head) + offset` addresses it; the range check above
+        // bounds the copy; `dst` cannot alias the frame mapping; `frames`
+        // retains a live ref per page for the lifetime of `&self`.
         unsafe {
             let src = phys::phys_to_virt(self.head_paddr).add(offset);
             core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len());
@@ -491,48 +484,29 @@ impl<M: AnyUFrameMeta> USegment<M> {
     }
 }
 
-// `KVec<Frame<M>>` already drops every element when the segment
-// drops — Frame<M>::Drop releases the slot. No explicit Drop impl
-// needed.
-
-// ---------------------------------------------------------------------------
-// UIoSlice / UIoSliceMut: vectored-I/O descriptors.
-// ---------------------------------------------------------------------------
-
-/// Read-only vectored-I/O descriptor: `(paddr, len_bytes)`. A
-/// descriptor, not a reference — `UIoSlice` deliberately does not
-/// expose `&[u8]`. Named to avoid confusion with `std::io::IoSlice`.
+/// Read-only vectored-I/O descriptor: `(paddr, len_bytes)`. A descriptor, not
+/// a reference — it deliberately exposes no `&[u8]`.
 #[derive(Clone, Copy, Debug)]
 pub struct UIoSlice {
     pub paddr: Paddr,
     pub len: usize,
 }
 
-/// Mutable vectored-I/O descriptor: `(paddr, len_bytes)`. Distinct
-/// type from [`UIoSlice`] so the type system tracks read-vs-write
-/// intent. Neither variant exposes a Rust reference.
+/// Mutable vectored-I/O descriptor: `(paddr, len_bytes)`. Distinct type from
+/// [`UIoSlice`] so the type system tracks read-vs-write intent.
 #[derive(Debug)]
 pub struct UIoSliceMut {
     pub paddr: Paddr,
     pub len: usize,
 }
 
-// ---------------------------------------------------------------------------
-// Scatter-gather coalescing.
-// ---------------------------------------------------------------------------
-
 /// Coalesce a page chain into contiguous `(paddr, len)` DMA runs for the byte
 /// window `[byte_start, byte_start + len)`, where `byte_start` is an absolute
 /// offset into the chain (a pinned buffer's `base_off + intra_offset`).
 ///
-/// This is the canonical NIC scatter-gather builder over pinned [`UFrame`]s. The
-/// registered-buffer path ([`crate::mm`]'s pinned buffers) and the TCP
-/// `MSG_ZEROCOPY` send queue both drive it — the latter directly on its keepalive
-/// frames to re-derive a segment's runs on every (re)transmit at an arbitrary
-/// offset. Walks **only** `len` bytes (never the whole chain), so a partial send
-/// / segment never points the NIC at stale tail bytes; physically adjacent pages
-/// fold into one run. Stops cleanly if the window runs past the chain. The output
-/// `(paddr, len)` tuples are the form NIC TX descriptors consume directly.
+/// Walks **only** `len` bytes, never the whole chain, so a partial send never
+/// points the NIC at stale tail bytes; physically adjacent pages fold into one
+/// run. Stops cleanly if the window runs past the chain.
 pub fn coalesce_io_runs<M: AnyUFrameMeta>(
     frames: &[UFrame<M>],
     byte_start: usize,
@@ -575,9 +549,7 @@ pub fn coalesce_io_runs<M: AnyUFrameMeta>(
 
 /// Take an **independent** owning ref on every frame in `frames` (re-wrapping
 /// each paddr bumps the frame-slot ref count), so the clone keeps the pages
-/// pinned even if the original `frames` are dropped. The TCP `MSG_ZEROCOPY` send
-/// queue uses this to hand each in-flight (re)transmit its own driver-slot
-/// keepalive while the send-queue chunk keeps its own ref. `None` if the per-page
+/// pinned even if the original `frames` are dropped. `None` if the per-page
 /// list cannot be allocated.
 pub fn redup_frames(frames: &[UFrame<AnonymousMeta>]) -> Option<KVec<UFrame<AnonymousMeta>>> {
     let mut out = KVec::with_capacity(frames.len()).ok()?;
@@ -591,25 +563,14 @@ pub fn redup_frames(frames: &[UFrame<AnonymousMeta>]) -> Option<KVec<UFrame<Anon
 /// Pinned pages held across a DMA that outlives whatever registered them, with
 /// the pin charge that accounts for them.
 ///
-/// # Why this is charged separately from the buffer it was taken from
-///
-/// A keepalive exists precisely *because* it outlives its `PinnedUserBuffer`:
-/// a NIC TX DMA driven from a registered buffer survives a ring-fd close or a
-/// process exit, and these refs are what stop the pages being recycled
-/// mid-DMA. Sharing the buffer's `PinnedBytes` charge would therefore refund
-/// at ring teardown while the driver still held the pages — a memory-lock
-/// bypass at exactly the DMA boundary, and the reason the pin ceiling exists
-/// at all.
-///
-/// So the charge is independent and travels with the frames, refunded by this
-/// struct's own `Drop` wherever that lands — the driver's TX reclaim, a
-/// rejected submit, a torn-down send queue. Every one of those already drops
-/// the frames, so no new release point was invented for the charge.
+/// The charge is independent of the `PinnedUserBuffer` the frames came from and
+/// travels with them, refunded by this struct's own `Drop`. Sharing the
+/// buffer's `PinnedBytes` charge would refund at ring teardown while the driver
+/// still held the pages — a memory-lock bypass at the DMA boundary.
 ///
 /// A retransmit takes a *second* keepalive via [`redup`](Self::redup) and pays
-/// for it: two in-flight DMAs of the same pages are two pins, and counting
-/// them once would let a retransmit storm hold arbitrarily many pages against
-/// one charge.
+/// for it: counting two in-flight DMAs of the same pages once would let a
+/// retransmit storm hold arbitrarily many pages against one charge.
 pub struct KeepaliveFrames {
     frames: KVec<UFrame<AnonymousMeta>>,
     charge: Charge<PinnedBytesAxis>,
@@ -617,11 +578,9 @@ pub struct KeepaliveFrames {
 
 impl KeepaliveFrames {
     /// Take an independent owning ref on every page of `frames`, charged to
-    /// `account`.
-    ///
-    /// `None` on allocation failure or a refused charge — both of which mean
-    /// no keepalive was taken, so the caller falls back to the copy path
-    /// rather than proceeding with pages nothing is holding.
+    /// `account`. `None` on allocation failure or a refused charge: no
+    /// keepalive was taken, so the caller must fall back to the copy path
+    /// rather than proceed with pages nothing is holding.
     pub fn take(frames: &[UFrame<AnonymousMeta>], account: AccountId) -> Option<Self> {
         let pages = u32::try_from(frames.len()).ok()?;
         let charge = Charge::commit(try_charge::<PinnedBytesAxis>(account, pages).ok()?);
@@ -631,22 +590,16 @@ impl KeepaliveFrames {
         })
     }
 
-    /// A second, independently charged keepalive over the same pages.
+    /// A second, independently charged keepalive over the same pages — one per
+    /// in-flight DMA, each released on its own reclaim.
     ///
-    /// One per in-flight DMA: a retransmit hands the driver its own refs while
-    /// the send-queue chunk keeps this one, and each is a distinct pin that
-    /// must be paid for and released on its own reclaim.
-    ///
-    /// Charged to the same account as this one, read back off the charge
-    /// rather than passed in. That is what stops a retransmit re-homing a pin
-    /// onto whichever principal happens to be running the send path — the
-    /// pages belong to the process that registered them, and a retransmit
-    /// changes nothing about who is holding them down.
+    /// Charged to the same account, read back off the charge rather than
+    /// passed in: a retransmit must not re-home the pin onto whichever
+    /// principal happens to be running the send path.
     pub fn redup(&self) -> Option<Self> {
         Self::take(self.frames.as_slice(), self.charge.account())
     }
 
-    /// The pinned pages, for DMA-run coalescing and the copy fallback.
     #[inline]
     pub fn as_slice(&self) -> &[UFrame<AnonymousMeta>] {
         self.frames.as_slice()
@@ -666,10 +619,8 @@ impl KeepaliveFrames {
 /// Volatile byte-copy of `[byte_start, byte_start + dst.len())` out of a page
 /// chain into `dst`, transparently crossing page boundaries. `byte_start` is an
 /// absolute offset into the chain. The volatile reads make a concurrent user
-/// write well-defined; the caller acts only on the snapshot. Used by the TCP
-/// `MSG_ZEROCOPY` send queue for the zero-window 1-byte probe and the
-/// cold-neighbor copy fallback (reading a segment straight from its keepalive
-/// frames). `OutOfBounds` if the window runs past the chain.
+/// write well-defined; the caller acts only on the snapshot. `OutOfBounds` if
+/// the window runs past the chain.
 pub fn copy_out_frames<M: AnyUFrameMeta>(
     frames: &[UFrame<M>],
     byte_start: usize,
@@ -690,10 +641,6 @@ pub fn copy_out_frames<M: AnyUFrameMeta>(
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Tests (host-side, pure logic).
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -731,8 +678,6 @@ mod tests {
 
     #[test]
     fn uframe_is_pointer_sized() {
-        // Newtype must be zero-cost: same size as the inner Frame
-        // (which is itself a thin pointer to a MetaSlot).
         assert_eq!(
             core::mem::size_of::<UFrame<AnonymousMeta>>(),
             core::mem::size_of::<*const ()>()
