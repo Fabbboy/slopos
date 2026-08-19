@@ -99,17 +99,6 @@ fn signal_permitted(caller_flags: u16, target_id: u32, target_flags: u16) -> boo
     !signal_is_init(target_id) && signal_dominates(caller_flags, target_flags)
 }
 
-/// Whether a sender holding `caller_flags` may act on the live task `target_id`.
-///
-/// A target that does not exist answers `true`; the caller's own lookup
-/// reports that.
-pub(crate) fn may_signal(caller_flags: u16, target_id: u32) -> bool {
-    match task_find_by_id(target_id) {
-        Some(target) => signal_permitted(caller_flags, target_id, target.flags),
-        None => true,
-    }
-}
-
 struct Fanout {
     /// A task matched the selector but the caller may not signal it.
     denied: bool,
@@ -258,16 +247,17 @@ define_syscall!(syscall_kill
     let mut targets = TargetSet::new();
     let mut fanout = Fanout { denied: false };
     if pid > 0 {
-        let target_id = pid as u32;
-        // A kernel task is not a process: ESRCH rather than EPERM.
-        let target_flags = match task_find_by_id(target_id) {
-            Some(target) if signal_may_name(target.flags) => target.flags,
-            _ => return SyscallResult::Err(Errno::ESRCH),
+        // Resolved and authorized in one step, holding an owning reference to
+        // the target: without it the id could be recycled onto a stranger
+        // between this check and the delivery below.
+        let target = match crate::syscall::signalable::resolve_signal_target(
+            caller_flags,
+            pid as u32,
+        ) {
+            Ok(target) => target,
+            Err(e) => return SyscallResult::Err(e),
         };
-        if !signal_permitted(caller_flags, target_id, target_flags) {
-            return SyscallResult::Err(Errno::EPERM);
-        }
-        targets.push(target_id);
+        targets.push(target.id());
     } else if pid == 0 {
         if caller_id == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);

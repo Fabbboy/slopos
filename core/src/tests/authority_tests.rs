@@ -164,3 +164,98 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = the_table_classifies_power, suite = authority);
 slopos_testing::stest!(name = every_slot_is_classified, suite = authority);
 slopos_testing::stest!(name = ungated_operations_need_nothing, suite = authority);
+
+/// The capabilities every task holds, pinned so their removal is a visible
+/// diff rather than a silent widening.
+///
+/// Each names a global the kernel has not yet given an object form. They are
+/// classified rather than left ungated so that the deletion conditions in
+/// `slopos_ostd::authority` have something to delete: when `write` routes
+/// through the controlling TTY and the clipboard becomes fd-passing only,
+/// these entries go, and this test is what fails to say so.
+fn the_universal_capabilities_are_the_recorded_set() -> TestResult {
+    let ordinary = caps_from_task_flags(TASK_FLAG_USER_MODE);
+
+    for cap in [
+        Capability::ConsoleIo,
+        Capability::ClipboardGlobal,
+        Capability::SysInspect,
+        Capability::Fate,
+    ] {
+        if !mask_permits(ordinary, cap) {
+            return fail!(
+                "{} is no longer universal -- if deliberate, this test records it",
+                cap.name()
+            );
+        }
+    }
+
+    // The half that matters: a capability drifting into the universal set is
+    // how a model becomes ambient again, one convenience at a time.
+    for cap in [
+        Capability::Power,
+        Capability::Launch,
+        Capability::ProcSignal,
+        Capability::DisplaySeat,
+        Capability::InputSeat,
+        Capability::ConsoleConfig,
+        Capability::TestHarness,
+    ] {
+        if mask_permits(ordinary, cap) {
+            return fail!("{} leaked into the universal set", cap.name());
+        }
+    }
+    pass!()
+}
+
+/// `Signalable` resolves and authorizes in one step, and the authorization
+/// carries the object.
+///
+/// There must be no way to hold an authorization for one task and act on
+/// another. `syscall_terminate_task` used to check the compositor bit and then
+/// terminate an arbitrary target; a bare capability witness would have left
+/// that byte-identical, which is why the witness carries the target rather
+/// than merely attesting that a check ran.
+fn signalable_refuses_init_and_invalid_targets() -> TestResult {
+    use crate::syscall::signalable::resolve_signal_target;
+    use slopos_abi::Errno;
+    use slopos_abi::task::INVALID_TASK_ID;
+
+    // A caller holding every privilege: if these refusals hold for it, they
+    // hold for everybody.
+    let omnipotent = u16::MAX;
+
+    // The kernel phase runs at drivers/90, before `/sbin/init` launches, so
+    // `init_task_id()` is unset here and the init arm cannot be exercised from
+    // a `stest!`. Asserting it *is* unset keeps this honest: were it to become
+    // set, the branch below would start running and this test would need to
+    // stop skipping it rather than silently passing.
+    let init = crate::exec::init_task_id();
+    if init != INVALID_TASK_ID {
+        match resolve_signal_target(omnipotent, init) {
+            Err(Errno::EPERM) => {}
+            Err(other) => return fail!("init resolved to {:?}, want EPERM", other),
+            Ok(_) => return fail!("init must never resolve as a signal target"),
+        }
+    }
+
+    // A nonexistent id is ESRCH, never a success and never a permission answer
+    // that would disclose whether the id names anything.
+    for (id, label) in [(INVALID_TASK_ID, "an invalid id"), (0, "id 0")] {
+        match resolve_signal_target(omnipotent, id) {
+            Err(Errno::ESRCH) => {}
+            Err(other) => return fail!("{} gave {:?}, want ESRCH", label, other),
+            Ok(_) => return fail!("{} must not resolve", label),
+        }
+    }
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = the_universal_capabilities_are_the_recorded_set,
+    suite = authority
+);
+slopos_testing::stest!(
+    name = signalable_refuses_init_and_invalid_targets,
+    suite = authority
+);

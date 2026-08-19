@@ -365,17 +365,16 @@ define_syscall!(syscall_terminate_task
     if target_id == caller_id {
         return Err(Errno::EINVAL);
     }
-    // The relation is the whole authorization, which is why this is
-    // `NoneRelation` and not a capability. It used to also carry
-    // `requires(compositor)`, and that pairing was the counterexample worth
-    // remembering: the bit admitted the caller to the syscall, the handler then
-    // terminated `target_id` with only a self-exclusion, and adding a bare
-    // witness would have left it byte-identical. The variable that is checked
-    // must be the variable subsequently used.
-    if !crate::syscall::signal::may_signal(ctx.task().flags, target_id) {
-        return Err(Errno::EPERM);
-    }
-    if task_terminate(target_id) != 0 {
+    // Resolved and authorized in one step, and the authorization *carries the
+    // target*. This handler used to carry `requires(compositor)` and then
+    // terminate `target_id` with only a self-exclusion, which is the shape a
+    // bare witness cannot fix: the variable that is checked must be the
+    // variable subsequently used.
+    let target = crate::syscall::signalable::resolve_signal_target(
+        ctx.task().flags,
+        target_id,
+    )?;
+    if task_terminate(target.id()) != 0 {
         return Err(Errno::EINVAL);
     }
     Ok(())

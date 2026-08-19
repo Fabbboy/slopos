@@ -18,6 +18,7 @@ pub mod process_handlers;
 pub mod result;
 pub mod ring_handlers;
 pub mod signal;
+pub mod signalable;
 pub mod signalfd_handlers;
 pub mod test_handlers;
 #[cfg(feature = "test-hooks")]
