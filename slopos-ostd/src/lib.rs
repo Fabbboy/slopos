@@ -52,6 +52,7 @@ pub mod panic_recovery;
 pub mod pci;
 pub mod process;
 pub mod ring_buffer;
+pub mod seat;
 pub mod stacktrace;
 pub mod string;
 pub mod sync;

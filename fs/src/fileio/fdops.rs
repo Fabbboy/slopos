@@ -4,6 +4,7 @@ use core::sync::atomic::Ordering;
 use super::*;
 
 use slopos_abi::Errno;
+use slopos_abi::file_ops::file_kind_transferable;
 use slopos_abi::fs::UserFsEntry;
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{
@@ -886,11 +887,19 @@ pub fn fileio_handle_and_ops_from_ref(file: &FileRef) -> (usize, &'static dyn Fi
 
 /// Mint a [`FileRef`] alias of an open fd — the SCM_RIGHTS send side. The
 /// alias keeps the description alive until dropped or installed.
+///
+/// Refuses a non-transferable kind. This is the choke point every duplication
+/// path funnels through — SCM_RIGHTS, the spawn `CloneFd`/`TransferFd` arms,
+/// and the ring's fd resolution — so the predicate is tested once, here,
+/// rather than at each caller.
 pub fn fileio_clone_file_ref(table: FdTable, fd: i32) -> Option<FileRef> {
     let snap = {
         let inner = lock_table_slot(table)?;
         snapshot_fd(&inner, fd)?
     };
+    if !file_kind_transferable(snap.ops().kind()) {
+        return None;
+    }
     Some(FileRef {
         open_file: snap.open_file,
     })
@@ -958,9 +967,17 @@ pub fn fileio_install_file_ref_at(
 }
 
 /// Detach the description at `fd` — the spawn `TransferFd` move.
+///
+/// Refuses a non-transferable kind, leaving the descriptor in place: a seat
+/// moved into another process would leave the arbiter naming a task that no
+/// longer holds it.
 pub fn fileio_take_file_ref(table: FdTable, fd: c_int) -> Option<FileRef> {
     let entry = with_table_slot(table, |inner| {
         if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
+            return None;
+        }
+        let held = inner.descriptors[fd as usize].as_ref()?;
+        if !file_kind_transferable(held.open_file.ops.kind()) {
             return None;
         }
         inner.descriptors[fd as usize].take()

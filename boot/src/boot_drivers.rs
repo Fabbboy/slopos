@@ -74,6 +74,11 @@ fn boot_step_irq_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     slopos_sched::task::register_task_resource_cleanup_hook(
         slopos_drivers::input_event::input_cleanup_task,
     );
+    // Seat release is arbiter revocation, never the holder descriptor's `Drop`:
+    // a reference cycle among holders would wedge the display with no way back.
+    // The hook also runs before `exec`, so a compositor that execs something
+    // else hands the screen back rather than keeping it across the image swap.
+    slopos_sched::task::register_task_resource_cleanup_hook(slopos_ostd::seat::revoke_for_task);
     klog_debug!("IRQ dispatcher ready.");
 }
 

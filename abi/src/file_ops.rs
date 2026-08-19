@@ -37,6 +37,43 @@ pub enum FileKind {
     /// Network-state monitor (`net_monitor`). `POLLIN`-ready when the stack's
     /// configuration changes; `read` drains whole `NetEvent` records.
     Netmon = 9,
+    /// A held seat: the screen or the input sink (`slopos_ostd::seat`). The
+    /// fd's `handle` packs the [`crate::seat`] kind and the grant epoch.
+    /// Read/write give `-EINVAL`; the descriptor is a capability to *name* the
+    /// resource in `fb_flip`/`input_poll_batch`, never a byte stream.
+    ///
+    /// Non-transferable and non-duplicable — see
+    /// [`file_kind_transferable`].
+    Seat = 10,
+}
+
+/// Whether a descriptor of this kind may be duplicated into another process.
+///
+/// A seat is single-holder, and its holder is the task the arbiter revokes on
+/// death. Duplicating one into a second process would produce a second holder
+/// the arbiter does not know about, so the screen could not be reclaimed by
+/// killing whoever holds it. `false` here is what makes the seat *linear*
+/// across the process boundary; nothing else in the descriptor layer expresses
+/// non-duplicability.
+///
+/// Deliberately total over the enum rather than a `matches!` on one variant: a
+/// new `FileKind` has to state its answer, and "transferable" is the wrong
+/// default for anything that names a single-holder resource.
+#[inline]
+pub const fn file_kind_transferable(kind: FileKind) -> bool {
+    match kind {
+        FileKind::Regular
+        | FileKind::Socket
+        | FileKind::PipeRead
+        | FileKind::PipeWrite
+        | FileKind::Tty
+        | FileKind::Memfd
+        | FileKind::Ring
+        | FileKind::Pidfd
+        | FileKind::Signalfd
+        | FileKind::Netmon => true,
+        FileKind::Seat => false,
+    }
 }
 
 // `trait FileBacking` lives in `slopos_ostd::process::quota`: its `Charged`
