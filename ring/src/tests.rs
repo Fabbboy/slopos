@@ -54,6 +54,7 @@ fn make_ring(entries: u32) -> Ring {
         inflight: InFlightVec::with_capacity(layout.cq_entries as usize),
         user_addr: 0,
         owner: FdTable::Kernel,
+        allowed_ops: crate::opcode::OpcodeSet::all(),
         cq_overflow: 0,
         buffers: slopos_ostd::KBox::try_new(crate::buffers::BufferRegistry::new())
             .expect("ring test: buffer registry alloc"),

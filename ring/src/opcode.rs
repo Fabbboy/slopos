@@ -340,3 +340,117 @@ pub fn is_ownership_op(opcode: u8) -> bool {
         OP_ACCEPT | OP_OPENAT | OP_READ | OP_RECVMSG | OP_RECVFROM
     )
 }
+
+// ---------------------------------------------------------------------------
+// Authority classification (SLOPRING § 12 + the authority model)
+//
+// The ring must not be a capability bypass: an entry point that runs work
+// under a credential other than its creator's is a confused deputy by
+// construction. All fourteen opcodes are classified below, and the assert
+// holds the whole set to the property that makes the design sound -- no opcode
+// reaches a gated capability.
+//
+// That is what licenses the ring carrying no `Cred` snapshot. It is not a
+// claim about today's code that could quietly stop being true: an opcode that
+// ever reaches a capability class has to change `opcode_capability`, and the
+// assert below fails until somebody states what it now needs.
+// ---------------------------------------------------------------------------
+
+use slopos_ostd::authority::Capability;
+
+/// What `opcode` requires of the ring's owner.
+///
+/// Total over the opcode space, including the invalid range: an unrecognised
+/// opcode is rejected before dispatch, and classifying it as `Unimplemented`
+/// keeps this function total rather than needing a fallible return.
+pub const fn opcode_capability(opcode: u8) -> Capability {
+    match opcode {
+        // Names nothing outside the ring itself.
+        OP_NOP | OP_TIMEOUT | OP_CANCEL => Capability::NoneSelf,
+        // Names a descriptor the owner already holds. The fd is resolved
+        // against the *creator's* table (`Ring::owner`), never the caller's,
+        // which is what keeps a shared ring from laundering designation.
+        OP_READ | OP_WRITE | OP_SEND | OP_SEND_ZC | OP_RECVMSG | OP_RECVFROM | OP_ACCEPT
+        | OP_CONNECT | OP_POLL_ADD | OP_CLOSE => Capability::NoneFd,
+        // The one opcode naming a path rather than a descriptor. Routed
+        // through the same path rule as `fs_open`, so the ring is not a second
+        // namespace with its own policy.
+        OP_OPENAT => Capability::NoneFd,
+        _ => Capability::Unimplemented,
+    }
+}
+
+/// Every valid opcode, for the classification assert and the allow-list.
+pub const ALL_OPCODES: [u8; 14] = [
+    OP_NOP,
+    OP_READ,
+    OP_WRITE,
+    OP_RECVMSG,
+    OP_SEND,
+    OP_ACCEPT,
+    OP_POLL_ADD,
+    OP_TIMEOUT,
+    OP_CANCEL,
+    OP_RECVFROM,
+    OP_OPENAT,
+    OP_CLOSE,
+    OP_SEND_ZC,
+    OP_CONNECT,
+];
+
+const _: () = {
+    // The opcode set is exactly the range `probe` accepts, so a new opcode
+    // added without a classification fails here rather than defaulting.
+    assert!(
+        ALL_OPCODES.len() == (slopos_abi::ring::OP_MAX as usize) + 1,
+        "every opcode up to OP_MAX must be classified",
+    );
+
+    let mut i = 0;
+    while i < ALL_OPCODES.len() {
+        let cap = opcode_capability(ALL_OPCODES[i]);
+        assert!(
+            cap as u8 != Capability::Unimplemented as u8,
+            "a valid opcode must carry a classification",
+        );
+        // The load-bearing property: no opcode reaches a gated capability, so
+        // the ring needs no credential snapshot and cannot be a bypass.
+        assert!(
+            cap.bit() == 0,
+            "a ring opcode reached a gated capability -- the ring would need a \
+             Cred snapshot taken at ring_setup, because running an opcode under \
+             a credential other than its creator's is a confused deputy",
+        );
+        i += 1;
+    }
+};
+
+/// The opcode allow-list a ring is fixed to at `ring_setup`.
+///
+/// Monotone: set once at creation and never widened, so a ring cannot grow new
+/// powers after the fact.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct OpcodeSet(u32);
+
+impl OpcodeSet {
+    const _FITS: () = assert!(
+        slopos_abi::ring::OP_MAX < 32,
+        "the opcode allow-list is a u32 bitmap",
+    );
+
+    /// Every classified opcode. What `ring_setup` installs today.
+    pub const fn all() -> Self {
+        let mut bits = 0u32;
+        let mut i = 0;
+        while i < ALL_OPCODES.len() {
+            bits |= 1u32 << ALL_OPCODES[i];
+            i += 1;
+        }
+        Self(bits)
+    }
+
+    #[inline]
+    pub const fn permits(self, opcode: u8) -> bool {
+        opcode <= slopos_abi::ring::OP_MAX && (self.0 & (1u32 << opcode)) != 0
+    }
+}

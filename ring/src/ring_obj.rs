@@ -96,6 +96,10 @@ pub struct Ring {
     /// key: a recycled id would let whichever process next holds that number
     /// enter a ring it never created and act on the creator's descriptors.
     pub owner: FdTable,
+    /// Opcodes this ring may submit, fixed at `ring_setup` and monotone
+    /// thereafter: there is no widening operation on [`OpcodeSet`], so a ring
+    /// cannot grow new powers after creation.
+    pub allowed_ops: crate::opcode::OpcodeSet,
     /// Count of CQEs dropped on overflow (mirrors shared `cq_overflow`).
     pub cq_overflow: u32,
     /// Registered / provided buffer registry (ABI v2 zero-copy path). Shares

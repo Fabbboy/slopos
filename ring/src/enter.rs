@@ -112,6 +112,11 @@ pub fn ring_setup(
         inflight: InFlightVec::with_capacity(cq_cap),
         user_addr,
         owner: table,
+        // Fixed here and never widened. Today every classified opcode is
+        // permitted; the point is that the set is a property of the ring
+        // rather than of the dispatch code, so narrowing it later needs no
+        // new mechanism.
+        allowed_ops: crate::opcode::OpcodeSet::all(),
         cq_overflow: 0,
         buffers,
         pending_reap,
@@ -269,6 +274,14 @@ fn submit(table: FdTable, ring: &mut Ring, to_submit: u32) -> u32 {
 /// Process one submitted SQE: the special opcodes inline, the rest through the
 /// probe, posting a CQE or recording an in-flight row.
 fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe) {
+    // Checked before any dispatch, so an opcode outside the ring's set never
+    // reaches a probe. `EPERM` rather than `EINVAL`: the opcode is valid, this
+    // ring may not submit it.
+    if !ring.allowed_ops.permits(sqe.opcode) {
+        let _ = ring.post_cqe(sqe.user_data, eno(Errno::EPERM), 0);
+        return;
+    }
+
     match sqe.opcode {
         OP_CANCEL => {
             do_cancel(ring, sqe);
