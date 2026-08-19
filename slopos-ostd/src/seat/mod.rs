@@ -24,8 +24,8 @@
 //!   is recycled does not silently re-acquire: [`SeatGrant`] is only valid
 //!   while its epoch matches, so a stale one fails closed.
 //!
-//! The handle userland gets is a descriptor, made non-duplicable by
-//! `slopos_abi::file_ops::file_kind_transferable`; this module owns only the
+//! The handle userland gets is a descriptor, made non-duplicable by the
+//! `FdRights` stamped on its table entry; this module owns only the
 //! arbitration.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};

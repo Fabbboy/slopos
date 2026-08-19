@@ -4,7 +4,6 @@ use core::sync::atomic::Ordering;
 use super::*;
 
 use slopos_abi::Errno;
-use slopos_abi::file_ops::file_kind_transferable;
 use slopos_abi::fs::UserFsEntry;
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{
@@ -639,7 +638,9 @@ fn file_dup_fd_min(table: FdTable, old_fd: c_int, min_fd: usize) -> c_int {
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
         };
-        if !file_kind_transferable(src.open_file.ops.kind()) {
+        // `try_alias` refuses a non-duplicable entry, but EMFILE would be the
+        // wrong answer for it: distinguish before charging.
+        if !src.rights.duplicate {
             return Errno::EINVAL.raw() as _;
         }
         let Some(mut alias) = src.try_alias(account) else {
@@ -698,7 +699,7 @@ fn dup_into(table: FdTable, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup3
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Err(Errno::EBADF);
         };
-        if !file_kind_transferable(src.open_file.ops.kind()) {
+        if !src.rights.duplicate {
             return Err(Errno::EINVAL);
         }
         // Only a *free* target needs a fresh charge; an occupied one reuses the
@@ -903,7 +904,10 @@ pub fn fileio_clone_file_ref(table: FdTable, fd: i32) -> Option<FileRef> {
         let inner = lock_table_slot(table)?;
         snapshot_fd(&inner, fd)?
     };
-    if !file_kind_transferable(snap.ops().kind()) {
+    // The entry's stamped right, not a re-derivation from the kind: rights
+    // travel with the entry so a descriptor cannot regain them by being looked
+    // up somewhere more permissive.
+    if !snap.rights.transfer {
         return None;
     }
     Some(FileRef {
@@ -983,7 +987,7 @@ pub fn fileio_take_file_ref(table: FdTable, fd: c_int) -> Option<FileRef> {
             return None;
         }
         let held = inner.descriptors[fd as usize].as_ref()?;
-        if !file_kind_transferable(held.open_file.ops.kind()) {
+        if !held.rights.transfer {
             return None;
         }
         inner.descriptors[fd as usize].take()

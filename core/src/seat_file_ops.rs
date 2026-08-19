@@ -6,9 +6,10 @@
 //! one. A seat revoked out from under a holder leaves the fd open and every
 //! operation through it failing, rather than silently retargeting.
 //!
-//! Non-duplicable: `slopos_abi::file_ops::file_kind_transferable` answers
-//! `false`, which `fileio_clone_file_ref`, `fileio_take_file_ref` and the dup
-//! family all test. The backing's `Drop` does **not** release the seat —
+//! Non-duplicable and non-transferable: the entry is stamped
+//! `FdRights::LINEAR` at creation, and every aliasing and moving path reads
+//! that stamp rather than re-deriving it. The backing's `Drop` does **not**
+//! release the seat —
 //! release is arbiter revocation from the task cleanup hook, because a
 //! reference cycle among holders would otherwise wedge the display.
 

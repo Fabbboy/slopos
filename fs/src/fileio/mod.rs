@@ -205,6 +205,56 @@ impl FileRef {
     }
 }
 
+/// Per-descriptor rights, stamped at creation and immutable thereafter.
+///
+/// Rights live in the table **entry**, never in the token. `Handle::from_parts`
+/// is `pub const` and `Handle<T>` is unconditionally `Copy`, so a token is
+/// forgeable and freely duplicable — it cannot carry authority. The entry is
+/// what a lookup validates, which is this tree's equivalent of the
+/// descriptor-lookup choke point Capsicum found it needed.
+///
+/// Stamped from the creating context and travelling **with** the entry, never
+/// re-derived from whoever holds it now: a descriptor passed to a less
+/// privileged process must not regain rights by being looked up there, and the
+/// memfd clipboard's fd handoff already exercises that hazard.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FdRights {
+    /// May be aliased into another fd number (`dup`, `fork`, `CloneFd`).
+    pub duplicate: bool,
+    /// May be moved to another process (`SCM_RIGHTS`, `TransferFd`).
+    pub transfer: bool,
+}
+
+impl FdRights {
+    /// An ordinary descriptor: freely duplicated and passed.
+    pub const ALL: Self = Self {
+        duplicate: true,
+        transfer: true,
+    };
+
+    /// A single-holder resource. Neither duplicable nor transferable, so the
+    /// arbiter that revokes on holder death always names the one true holder.
+    pub const LINEAR: Self = Self {
+        duplicate: false,
+        transfer: false,
+    };
+
+    /// The rights a descriptor of `kind` is created with.
+    ///
+    /// Total over `FileKind`, so a new kind must state its answer rather than
+    /// inheriting a permissive default. This subsumes the standalone
+    /// transferability predicate: `file_kind_transferable` answered one
+    /// question, these answer both, and duplication is the one that was
+    /// reachable through `dup`.
+    pub const fn for_kind(kind: slopos_abi::file_ops::FileKind) -> Self {
+        if slopos_abi::file_ops::file_kind_transferable(kind) {
+            Self::ALL
+        } else {
+            Self::LINEAR
+        }
+    }
+}
+
 /// Per-descriptor inheritance policy, chosen by whoever installs the fd. Both
 /// flags live on the fd number rather than the shared description, so two
 /// aliases of one description can differ.
@@ -241,6 +291,9 @@ pub(super) struct FdEntry {
     pub(super) open_file: KArc<OpenFile>,
     pub(super) cloexec: bool,
     pub(super) close_on_fork: bool,
+    /// Stamped at creation from the description's kind, immutable, and carried
+    /// by every alias. Never re-derived at lookup time.
+    pub(super) rights: FdRights,
     /// Refunded by this struct's own `Drop`, with the amount it holds rather
     /// than one recomputed at the refund site.
     slot_charge: Charge<FdSlot>,
@@ -252,17 +305,28 @@ impl FdEntry {
         flags: FdFlags,
         reservation: Reservation<FdSlot>,
     ) -> Self {
+        let rights = FdRights::for_kind(open_file.ops.kind());
         Self {
             open_file,
             cloexec: flags.cloexec,
             close_on_fork: flags.close_on_fork,
+            rights,
             slot_charge: Charge::commit(reservation),
         }
     }
 
     /// Another descriptor number naming the same open file, charged to
-    /// `account`. `None` when that account has no room.
+    /// `account`. `None` when that account has no room, or when this
+    /// descriptor may not be duplicated.
+    ///
+    /// The rights check is here rather than at each caller because this is the
+    /// one function every aliasing path funnels through — `dup`, `fork`, and
+    /// the spawn `CloneFd` arm all reach it. A check at the callers is a check
+    /// that can be forgotten by the next one added.
     pub(super) fn try_alias(&self, account: AccountId) -> Option<Self> {
+        if !self.rights.duplicate {
+            return None;
+        }
         let reservation = try_charge::<FdSlot>(account, 1).ok()?;
         Some(Self::new(
             self.open_file.clone(),
@@ -286,9 +350,13 @@ impl FdEntry {
         let displaced = self.open_file;
         (
             Self {
-                open_file,
+                open_file: open_file.clone(),
                 cloexec: self.cloexec,
                 close_on_fork,
+                // Re-derived from the NEW description: the number is being
+                // repointed, so the rights are the incoming file's, not the
+                // displaced one's.
+                rights: FdRights::for_kind(open_file.ops.kind()),
                 slot_charge: self.slot_charge,
             },
             displaced,
@@ -536,6 +604,10 @@ pub(super) fn lock_table_slot(
 /// live from its atomics — the intended shared-offset POSIX behaviour.
 pub(super) struct FdSnapshot {
     pub(super) open_file: KArc<OpenFile>,
+    /// Copied from the entry at lookup, so every caller that snapshots an fd
+    /// also gets what may be done with it. `snapshot_fd` and `get_fd_entry`
+    /// are the two lookup choke points, which is where the plan puts the test.
+    pub(super) rights: FdRights,
 }
 
 impl FdSnapshot {
@@ -560,6 +632,7 @@ pub(super) fn snapshot_fd(inner: &FileTableSlotInner, fd: c_int) -> Option<FdSna
     let entry = get_fd_entry(inner, fd)?;
     Some(FdSnapshot {
         open_file: entry.open_file.clone(),
+        rights: entry.rights,
     })
 }
 
