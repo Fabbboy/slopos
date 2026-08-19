@@ -107,6 +107,13 @@ jobs:
       # Both boot-based ratchets parse the capture above rather than booting
       # again: three QEMU boots for one question each is two boots wasted, and a
       # second boot could disagree with the one that was actually graded.
+      # The tests kernel is the only variant whose allowlist carries
+      # `run_userland_tests` — it powers the machine off to end the run. Gated
+      # here rather than from `build_kernel.sh` because the walk disassembles
+      # the whole ELF (~8 s), which does not belong on the interactive loop.
+      - name: Authority reachability ratchet (tests kernel)
+        run: scripts/check_authority_reachability.sh --variant tests builddir/kernel-tests.elf
+
       - name: Test-count ratchet
         run: scripts/check_test_count.sh --log ci-test.log
 
@@ -154,8 +161,14 @@ jobs:
           scripts/check_stack_sizes.sh --self-test
           scripts/check_kernel_softfloat.sh --self-test
           scripts/check_registry_sections.sh --self-test
+          scripts/check_authority_reachability.sh --self-test
           KERNEL_RELEASE=1 just build-kernel-only
           scripts/check_registry_sections.sh builddir/kernel-release.elf
+          # The variant that ships. Its allowlist is shorter than dev's only
+          # because optimisation inlines the handler closures; a *handler*
+          # appearing here that is not in dev's list is a shipped image
+          # reaching power by a path the dev build does not have.
+          scripts/check_authority_reachability.sh --variant release builddir/kernel-release.elf
 
   miri:
     name: KernMiri (OSTD UB detection)

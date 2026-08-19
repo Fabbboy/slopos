@@ -1,0 +1,30 @@
+# check_authority_reachability allowlist — variant: release
+#
+# Syscall handlers that can reach a terminal power primitive
+# (`slopos_ostd::platform::power::{shutdown,reboot}`).
+#
+# Each must be classified `Power` at its `define_syscall!` site, or carry a
+# stated reason here for why the path is gated by something else. An entry
+# matching nothing fails the gate: a dead exemption would let the real path
+# grow back under its cover.
+#
+# Shorter than the dev list because optimisation inlines `define_syscall!`'s
+# closure bodies, so the `*0` symbols do not survive. The *set of handlers* is
+# what matters and it is identical.
+#
+#     scripts/check_authority_reachability.sh --variant release \
+#         --emit-allowlist builddir/kernel-release.elf
+
+# Classified `Power`.
+syscall_halt
+syscall_reboot
+
+# NOT `Power`: `Fate`, and its loss arm reaches the reboot primitive two calls
+# away — the reachability case a slot-level gate reads as green. The second key
+# is `BOOT_FLAG_FATE_REBOOT`. See gates/authority/dev.txt for the full note.
+syscall_roulette_result
+
+# `run_userland_tests` is deliberately ABSENT here and present in the tests
+# allowlist. A shipped image must not carry a syscall that powers the machine
+# off because a test run finished; if it ever appears in this file, that
+# property has been lost.
