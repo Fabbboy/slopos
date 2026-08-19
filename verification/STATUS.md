@@ -31,6 +31,7 @@ own doc-comments — not duplicated here.
 | `slopos_ostd::task` ownership core **LOGIC** | `proofs/task_ownership.rs` | Task ownership: the existence reference is flag-elected and parked/released at most once (T1), container transitions conserve the strong count (T2), registered ⟺ holds its existence reference (T3), no use-after-free (T4), exactly one winner of the 1→0 release with destruction exactly once (T5), a reap never fires on a dispatch-pinned task (T6), destruction implies full detachment (T7) |
 | `slopos_ring` index/state-machine **LOGIC** | `proofs/ring_cursor.rs` + `proofs/ring_layout.rs` | SlopRing cursors: CQ no-overwrite, CQ-full correctness, overflow monotone-latch, cq_tail advance-exactly-one, in-flight cap, submit/consume bound; masked SQE/CQE indices in bounds + `locate` no-OOB/no-straddle |
 | `slopos_net::tcp` zero-copy send queue **LOGIC** | `proofs/tcp_zc_pin.rs` | TCP `MSG_ZEROCOPY` pin lifetime: every (re)transmit reads in-bounds of its pin (INV-TCPZC-PIN-IN-BOUNDS); a pin is held across retransmits and freed only on cumulative ACK / teardown, never mid-DMA (INV-TCPZC-HELD-UNTIL-ACK) |
+| `slopos_ostd::authority` capability **LOGIC** | `proofs/authority.rs` | Authority: only a program load raises a task's mask (S1); exec is `grant(image) & caps`, so no capability survives that the image does not earn *and* the task did not hold (S2); a spawn confers the image's grant only to a spawner holding `Launch` (S3); reduction is total and idempotent with no error a caller can ignore (S4) |
 
 > `mm::vm_space` uses the coarse lock-per-`VmSpace` model, in two tiers. The
 > borrow checker admits one `CursorMut` per `VmSpace` *object* (`CursorMut<'a>`
@@ -76,6 +77,34 @@ own doc-comments — not duplicated here.
 > per in-flight DMA plus the send-queue chunk's, reaching zero only after ACK +
 > all reclaims) is an atomic weak-memory protocol Verus cannot model — it remains
 > audited-only and KernMiri-covered, like the `slopos_ring` accessors above.
+
+> `slopos_ostd::authority` verifies the **capability arithmetic LOGIC only** —
+> the abstract `Auth` mask over `Act`/`Drop`/`Exec`/`Fork`, proving that
+> authority is raised at exactly one site and that exec's intersection bounds
+> the result by both operands. Six broken witnesses carry the obligations: a
+> widening step, an exec that takes the grant un-intersected, an exec that keeps
+> the old mask, an unbounded spawn, a spawn written as `parent.caps & grant`
+> (which starves the grant — the shell holds no display authority, so
+> `/bin/roulette` could never draw), and a fallible drop. Removing the exec
+> intersection or the `Launch` bound each fails two obligations, confirmed by
+> planting both.
+>
+> **NOT machine-checked, and audited only:** the memory ordering on
+> `Task::caps`. The store is `Release` and the load `Acquire`, but Verus has no
+> weak-memory model, so nothing here says a reader on another CPU observes a
+> narrowing promptly. What licenses the cheap read is a *design* fact the proof
+> does not state: there is no cross-process revocation, so every narrowing
+> happens in the acting task's own context and no other CPU needs to see it at
+> any particular moment. Also excluded: `caps_from_task_flags` (a total pure
+> function, tested in the kernel suite rather than proved), and whether the
+> dispatcher consults the mask at all — that is the `const` totality assert over
+> the syscall table plus `scripts/check_authority_reachability.sh`, neither of
+> which is a Verus obligation.
+>
+> The model is deliberately **more permissive** than the tree in one place:
+> `Spawn` takes an arbitrary grant, whereas `grant_for` reads a fixed table
+> keyed on the image path. Proving the bound for every possible grant is
+> strictly stronger than proving it for the entries the table happens to name.
 
 > `slopos_ostd::task` verifies the **ownership state-machine LOGIC only** — the
 > strong-count ledger split by owner class, the existence-reference flag
