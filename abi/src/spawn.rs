@@ -13,8 +13,18 @@ pub enum SpawnFdActionKind {
     TransferFd = 2,
     /// Close the child's `target_fd`.
     Close = 3,
-    /// Open `open_path` into the child's `target_fd`.
-    Open = 4,
+    // Discriminant `4` is the retired `Open` and must not be reused.
+    //
+    // It opened an arbitrary VFS path into the child with no reference to what
+    // the parent held: endowment by *name*, which voids this ABI as an
+    // attenuating channel. Every other action moves or drops authority the
+    // spawner already has; `Open` minted it from a string, so a spawner could
+    // hand a child a descriptor it could not open itself.
+    //
+    // Deleted rather than redefined as parent-side resolve-plus-install
+    // because it had no in-tree consumer: no userland helper constructed one.
+    // A spawner that wants a child to hold a file opens it and transfers it,
+    // which is the same two syscalls and cannot exceed what the parent holds.
 }
 
 impl SpawnFdActionKind {
@@ -24,7 +34,8 @@ impl SpawnFdActionKind {
             1 => Some(Self::CloneFd),
             2 => Some(Self::TransferFd),
             3 => Some(Self::Close),
-            4 => Some(Self::Open),
+            // 4 is the retired `Open`: rejected as malformed, not silently
+            // ignored, so a caller still constructing one learns it is gone.
             _ => None,
         }
     }
@@ -41,11 +52,10 @@ pub struct SpawnFdAction {
     /// Destination fd in the child — every kind.
     pub target_fd: i32,
     pub _pad: u32,
-    /// User pointer to the path bytes — `Open`.
+    /// Retired with `Open`. Kept so the struct layout stays ABI-stable; every
+    /// remaining action ignores them, and a non-zero value is not an error.
     pub open_path_ptr: u64,
-    /// Path length in bytes — `Open`.
     pub open_path_len: u64,
-    /// POSIX open flags — `Open`.
     pub open_flags: u32,
     pub _pad2: u32,
 }
@@ -92,3 +102,34 @@ const _: () = assert!(core::mem::offset_of!(SpawnAttrs, actions_len) == 16);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, sigdefault_mask) == 24);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, envp_ptr) == 32);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, envp_len) == 40);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Discriminant 4 is retired, and must be *rejected* rather than silently
+    /// ignored: a caller still constructing an `Open` action learns it is gone
+    /// instead of getting a child that quietly lacks the descriptor.
+    #[test]
+    fn the_retired_open_discriminant_is_refused() {
+        assert_eq!(SpawnFdActionKind::from_u32(4), None);
+    }
+
+    /// The surviving actions all move or drop authority the spawner already
+    /// holds. That is the property `Open` broke by minting a descriptor from a
+    /// path string, and the reason it was removed rather than fixed.
+    #[test]
+    fn the_surviving_actions_are_the_attenuating_ones() {
+        for (raw, want) in [
+            (1u32, SpawnFdActionKind::CloneFd),
+            (2, SpawnFdActionKind::TransferFd),
+            (3, SpawnFdActionKind::Close),
+        ] {
+            assert_eq!(SpawnFdActionKind::from_u32(raw), Some(want));
+        }
+        // Nothing above the retired value decodes either.
+        for raw in [0u32, 5, 6, u32::MAX] {
+            assert_eq!(SpawnFdActionKind::from_u32(raw), None);
+        }
+    }
+}

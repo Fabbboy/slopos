@@ -97,28 +97,6 @@ fn read_user_cstr_list(ptrs: &[u64]) -> Result<KVec<KVec<u8>>, ()> {
     Ok(out)
 }
 
-/// Copy an `Open` action's path into a kernel buffer, trimming at the first NUL
-/// so both explicit-length and NUL-terminated paths are accepted.
-fn read_open_action_path(ptr: u64, len: u64) -> Result<KVec<u8>, Errno> {
-    if ptr == 0 || len == 0 {
-        return Err(Errno::EINVAL);
-    }
-    let mut tmp = [0u8; exec::EXEC_MAX_PATH];
-    let copied = syscall_bounded_from_user(&mut tmp, ptr, len, exec::EXEC_MAX_PATH)
-        .map_err(|_| Errno::EFAULT)?;
-    let bytes = &tmp[..copied];
-    let bytes = match bytes.iter().position(|&b| b == 0) {
-        Some(nul) => &bytes[..nul],
-        None => bytes,
-    };
-    if bytes.is_empty() {
-        return Err(Errno::EINVAL);
-    }
-    let mut buf = KVec::<u8>::with_capacity(bytes.len()).map_err(|_| Errno::ENOMEM)?;
-    buf.extend_from_slice(bytes).map_err(|_| Errno::ENOMEM)?;
-    Ok(buf)
-}
-
 /// Decode the spawn fd-action array from user memory into kernel-owned
 /// [`exec::FdAction`]s (`Open` paths copied in). Bounded by
 /// [`SPAWN_MAX_FD_ACTIONS`].
@@ -154,11 +132,6 @@ fn read_user_spawn_actions(attrs: &SpawnAttrs) -> Result<KVec<exec::FdAction>, E
             },
             SpawnFdActionKind::Close => exec::FdAction::Close {
                 target_fd: raw.target_fd,
-            },
-            SpawnFdActionKind::Open => exec::FdAction::Open {
-                target_fd: raw.target_fd,
-                path: read_open_action_path(raw.open_path_ptr, raw.open_path_len)?,
-                flags: raw.open_flags,
             },
         };
         out.push(action).map_err(|_| Errno::ENOMEM)?;

@@ -18,8 +18,7 @@ use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM
 use slopos_abi::task::{TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority};
 use slopos_fs::fileio::{
     FileRef, file_close_fd, fileio_clone_file_ref, fileio_create_empty_table_for_process,
-    fileio_destroy_table_for_process, fileio_install_file_ref_at, fileio_open_at_fd,
-    fileio_take_file_ref_matching,
+    fileio_destroy_table_for_process, fileio_install_file_ref_at, fileio_take_file_ref_matching,
 };
 use slopos_fs::vfs::ops::vfs_open;
 use slopos_mm::elf::{ElfError, ElfExecInfo};
@@ -74,11 +73,10 @@ pub enum FdAction {
     Close {
         target_fd: i32,
     },
-    Open {
-        target_fd: i32,
-        path: KVec<u8>,
-        flags: u32,
-    },
+    // `Open` is retired: it opened an arbitrary VFS path into the child with
+    // no reference to what the parent held, which is endowment by *name* and
+    // voids this list as an attenuating channel. Open-then-transfer is the
+    // replacement and cannot exceed the spawner's own authority.
 }
 
 impl From<ElfError> for ExecError {
@@ -155,11 +153,6 @@ pub(crate) fn apply_fd_actions(
                 // A fresh child table holds nothing at most fds; closing an absent one succeeds.
                 if rc == Errno::EBADF.raw() { 0 } else { rc }
             }
-            FdAction::Open {
-                target_fd,
-                path,
-                flags,
-            } => fileio_open_at_fd(child_table, *target_fd, path.as_slice(), *flags),
         };
         if rc < 0 {
             return Err(match Errno::from_raw(rc) {
