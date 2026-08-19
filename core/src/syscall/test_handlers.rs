@@ -74,7 +74,7 @@ define_syscall!(syscall_test_report
     Ok(())
 });
 
-define_syscall!(syscall_run_userland_tests (ctx) cap(NoneSelf)
+define_syscall!(syscall_run_userland_tests (ctx) cap(TestHarness)
     -> Result<(), Errno> {
     if !kernel_phase_summary::tests_enabled() {
         return Ok(());
@@ -137,7 +137,7 @@ define_syscall!(syscall_run_userland_tests (ctx) cap(NoneSelf)
     Ok(())
 });
 
-define_syscall!(syscall_test_panic (ctx) cap(NoneSelf)
+define_syscall!(syscall_test_panic (ctx) cap(TestHarness)
     -> Result<(), Errno> {
     // Boot-flag armed so production images expose no user-reachable panic
     // trigger.

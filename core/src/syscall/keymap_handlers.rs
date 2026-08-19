@@ -14,7 +14,7 @@ use slopos_mm::user_ptr::UserBytes;
 
 define_syscall!(syscall_keymap_load
     (ctx, data_ptr: u64, len: u64)
-    cap(NoneSelf)
+    cap(ConsoleConfig)
     requires(console_admin)
     -> Result<(), Errno>
 {

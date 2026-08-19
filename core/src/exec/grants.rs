@@ -75,6 +75,19 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         flags: TASK_FLAG_POWER,
         priority: None,
     },
+    // The seat tests exercise `screen_acquire` / `input_sink_acquire`, which
+    // need the seat capabilities the compositor holds. Granted to the test
+    // binary rather than widening the capability itself, so the *shipped*
+    // answer to "who may take the screen" stays one program.
+    //
+    // Present in every image: the grant table is keyed on a path, and a path
+    // that does not exist grants nothing. `/bin/seat_test` ships only in a
+    // tests image.
+    ProgramGrant {
+        path: b"/bin/seat_test",
+        flags: TASK_FLAG_COMPOSITOR,
+        priority: None,
+    },
 ];
 
 /// The flags and tier the kernel adds for `path`; `(0, None)` for any program

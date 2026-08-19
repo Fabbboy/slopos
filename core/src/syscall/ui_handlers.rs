@@ -21,7 +21,7 @@ use crate::syscall::result::SyscallResult;
 
 define_syscall!(syscall_screen_acquire
     (ctx, seat_raw: u32)
-    cap(NoneSelf)
+    cap(DisplaySeat)
     requires(let pid: process_id, let task_id: task_id)
     -> Result<u64, Errno>
 {
@@ -39,7 +39,7 @@ define_syscall!(syscall_screen_acquire
 
 define_syscall!(syscall_input_sink_acquire
     (ctx, seat_raw: u32)
-    cap(NoneSelf)
+    cap(InputSeat)
     requires(let pid: process_id, let task_id: task_id)
     -> Result<u64, Errno>
 {
@@ -146,7 +146,7 @@ define_syscall!(syscall_input_poll_batch
 
 define_syscall!(syscall_clipboard_copy
     (ctx, src: UserBytes)
-    cap(NoneSelf)
+    cap(ClipboardGlobal)
     requires(task_id: task_id)
     -> Result<u64, Errno>
 {
@@ -166,7 +166,7 @@ define_syscall!(syscall_clipboard_copy
 
 define_syscall!(syscall_clipboard_paste
     (ctx, dst: UserBytes)
-    cap(NoneSelf)
+    cap(ClipboardGlobal)
     requires(task_id: task_id)
     -> Result<u64, Errno>
 {
@@ -359,7 +359,7 @@ define_syscall!(syscall_roulette_draw
 });
 
 define_syscall!(syscall_roulette_spin (ctx)
-    cap(NoneSelf)
+    cap(Fate)
     requires(task_id: task_id)
     -> Result<u64, Errno>
 {

@@ -34,7 +34,7 @@ fn device_for(ifindex: u32) -> Result<DevIndex, Errno> {
 
 define_syscall!(syscall_net_monitor
     (ctx, mask: u32, flags: u32)
-    cap(NoneSelf)
+    cap(SysInspect)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {

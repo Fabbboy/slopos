@@ -138,7 +138,7 @@ define_syscall!(syscall_exit (ctx, code: u32) cap(NoneSelf)
 // that must survive a broken or absent fd 1. Deliberately unprivileged, like
 // Linux's `/dev/kmsg`, and it reaches the same serialised writer klog uses, so
 // a caller cannot interleave into a klog line or the harness's KTAP framing.
-define_syscall!(syscall_user_write (ctx, buf: UserBytes) cap(NoneSelf)
+define_syscall!(syscall_user_write (ctx, buf: UserBytes) cap(ConsoleIo)
     -> Result<u64, Errno> {
     if buf.base_u64() == 0 {
         return Err(Errno::EFAULT);
@@ -176,7 +176,7 @@ define_syscall!(syscall_user_read (ctx, buf: UserBytes) cap(NoneSelf)
     Ok(n as u64)
 });
 
-define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(NoneSelf)
+define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(SysInspect)
     -> Result<(), Errno> {
     let pages = get_page_allocator_stats();
     let tasks = get_task_stats();
@@ -202,7 +202,7 @@ define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(NoneS
 });
 
 define_syscall!(syscall_process_list
-    (ctx, buf: UserPtr<slopos_abi::syscall::UserTaskEntry>, max: u64) cap(NoneRelation)
+    (ctx, buf: UserPtr<slopos_abi::syscall::UserTaskEntry>, max: u64) cap(SysInspect)
     -> Result<u64, Errno>
 {
     use slopos_abi::syscall::UserTaskEntry;
@@ -278,7 +278,7 @@ define_syscall!(syscall_process_list
 });
 
 define_syscall!(syscall_cpu_info
-    (ctx, info_out: UserPtr<slopos_abi::syscall::UserCpuInfo>) cap(NoneSelf)
+    (ctx, info_out: UserPtr<slopos_abi::syscall::UserCpuInfo>) cap(SysInspect)
     -> Result<(), Errno>
 {
     use slopos_abi::syscall::UserCpuInfo;
@@ -299,7 +299,7 @@ define_syscall!(syscall_cpu_info
 });
 
 define_syscall!(syscall_percpu_stats
-    (ctx, buf: UserPtr<slopos_abi::syscall::UserPerCpuStats>, max: u64) cap(NoneSelf)
+    (ctx, buf: UserPtr<slopos_abi::syscall::UserPerCpuStats>, max: u64) cap(SysInspect)
     -> Result<u64, Errno>
 {
     use core::sync::atomic::Ordering;
