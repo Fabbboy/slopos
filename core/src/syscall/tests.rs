@@ -10,7 +10,6 @@ use crate::syscall::handlers::{
     syscall_arch_prctl, syscall_futex, syscall_getpgid, syscall_setpgid, syscall_setsid,
     syscall_user_read, syscall_waitpid,
 };
-use crate::syscall::keymap_handlers::syscall_keymap_load;
 use crate::syscall::signal::{
     deliver_pending_signal, deliver_pending_signal_on_irq_exit, syscall_kill, syscall_rt_sigaction,
     syscall_rt_sigprocmask, syscall_rt_sigreturn,
@@ -7008,12 +7007,15 @@ pub fn test_keymap_load_requires_console_admin() -> TestResult {
     let mut plain_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     plain_frame.regs_mut().rdi = user_buf;
     plain_frame.regs_mut().rsi = 16;
+    // Through the table entry, not the bare handler: the capability check
+    // lives in the dispatcher, so calling the handler directly would prove
+    // nothing about what userland can reach.
+    let keymap_entry = assert_some!(
+        crate::syscall::handlers::syscall_lookup(slopos_abi::syscall::SYSCALL_KEYMAP_LOAD),
+        "keymap_load is not registered"
+    );
     let _ = with_user_process_context(plain_pid, || {
-        crate::syscall::dispatch::dispatch_handler(
-            syscall_keymap_load,
-            &plain_guard,
-            &mut *plain_frame,
-        )
+        crate::syscall::dispatch::dispatch_entry(keymap_entry, &plain_guard, &mut *plain_frame)
     });
     assert_eq_test!(
         plain_frame.rax(),
@@ -7030,11 +7032,7 @@ pub fn test_keymap_load_requires_console_admin() -> TestResult {
     admin_frame.regs_mut().rdi = admin_buf;
     admin_frame.regs_mut().rsi = 16;
     let _ = with_user_process_context(admin_pid, || {
-        crate::syscall::dispatch::dispatch_handler(
-            syscall_keymap_load,
-            &admin_guard,
-            &mut *admin_frame,
-        )
+        crate::syscall::dispatch::dispatch_entry(keymap_entry, &admin_guard, &mut *admin_frame)
     });
     assert_test!(
         admin_frame.rax() != slopos_abi::Errno::EPERM.as_u64(),

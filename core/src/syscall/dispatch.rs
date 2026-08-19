@@ -181,6 +181,12 @@ fn debug_assert_erestartsys_not_leaked(user_ctx: &UserContext) {
 }
 
 /// Invoke a handler with a caller-built `UserContext`, bypassing ISR entry.
+///
+/// **Runs no authority check.** For a caller that has already made the
+/// decision, or one invoking an operation classified as needing nothing. A
+/// test reaching a gated handler through this proves the handler's own logic
+/// and says nothing about whether the operation is reachable — use
+/// [`dispatch_entry`] for that.
 pub fn dispatch_handler(
     handler: crate::syscall::common::SyscallHandler,
     task: &slopos_sched::task::TaskRef,
@@ -190,4 +196,28 @@ pub fn dispatch_handler(
     let result = handler(&ctx);
     ctx.write_result(result);
     result
+}
+
+/// Invoke a syscall through its table entry, applying the same authority
+/// decision `syscall_handle` makes.
+///
+/// The difference from [`dispatch_handler`] is the whole point: the capability
+/// check lives in the dispatcher, so a path that calls a handler directly is
+/// *not* the syscall. Anything asserting what userland can reach must come
+/// through here.
+pub fn dispatch_entry(
+    entry: &SyscallEntry,
+    task: &slopos_sched::task::TaskRef,
+    frame: &mut UserContext,
+) -> SyscallResult {
+    let Some(handler) = entry.handler else {
+        return SyscallResult::Err(Errno::ENOSYS);
+    };
+    if !authorize(task, entry, u64::MAX) {
+        let ctx = SyscallContext::from_task_ref(task, frame);
+        let result = SyscallResult::Err(Errno::EPERM);
+        ctx.write_result(result);
+        return result;
+    }
+    dispatch_handler(handler, task, frame)
 }

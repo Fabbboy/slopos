@@ -227,7 +227,6 @@ define_syscall!(syscall_openpty
 define_syscall!(syscall_fb_flip
     (ctx, fd: i64, damage_ptr: u64, damage_count: u64)
     cap(NoneFd)
-    requires(compositor)
     -> Result<u64, Errno>
 {
     // The seat, not the flag, is what says this task owns the screen: the flag
@@ -281,7 +280,6 @@ define_syscall!(syscall_fb_flip
 define_syscall!(syscall_cursor_set_image
     (ctx, image_ptr: u64, len: u64, hotspot: u64)
     cap(NoneFd)
-    requires(compositor)
     -> Result<(), Errno>
 {
     if !seat_held_by(SeatKind::Screen, ctx.task_id()) {
@@ -308,7 +306,6 @@ define_syscall!(syscall_cursor_set_image
 define_syscall!(syscall_cursor_move
     (ctx, pos: u32)
     cap(NoneFd)
-    requires(compositor)
     -> Result<(), Errno>
 {
     if !seat_held_by(SeatKind::Screen, ctx.task_id()) {
@@ -325,7 +322,6 @@ define_syscall!(syscall_cursor_move
 define_syscall!(syscall_set_display_mode
     (ctx, width: u32, height: u32)
     cap(NoneFd)
-    requires(compositor)
     -> Result<(), Errno>
 {
     if !seat_held_by(SeatKind::Screen, ctx.task_id()) {
@@ -340,7 +336,6 @@ define_syscall!(syscall_set_display_mode
 define_syscall!(syscall_roulette_draw
     (ctx, fate: u32)
     cap(NoneFd)
-    requires(display_exclusive)
     -> Result<(), Errno>
 {
     if !seat_held_by(SeatKind::Screen, ctx.task_id()) {

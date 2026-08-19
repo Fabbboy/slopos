@@ -7,8 +7,7 @@
 
 use slopos_abi::Errno;
 use slopos_abi::task::{
-    TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
-    TASK_FLAG_NET_ADMIN, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
+    TASK_FLAG_COMPOSITOR, TASK_FLAG_NET_ADMIN, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
 };
 use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
@@ -144,19 +143,6 @@ impl<'a> SyscallContext<'a> {
         self.has_flag(TASK_FLAG_COMPOSITOR)
     }
 
-    #[inline]
-    pub fn is_display_exclusive(&self) -> bool {
-        self.has_flag(TASK_FLAG_DISPLAY_EXCLUSIVE)
-    }
-
-    /// Console-administration privilege, modelled on Linux's
-    /// `capable(CAP_SYS_TTY_CONFIG)`. Conferred by path identity on
-    /// `/bin/keymap`; `TASK_FLAG_SYSTEM` implies it.
-    #[inline]
-    pub fn is_console_admin(&self) -> bool {
-        self.has_flag(TASK_FLAG_SYSTEM) || self.has_flag(TASK_FLAG_CONSOLE_ADMIN)
-    }
-
     /// Network-administration privilege, modelled on Linux's
     /// `capable(CAP_NET_ADMIN)`. Conferred by path identity at spawn.
     #[inline]
@@ -170,33 +156,6 @@ impl<'a> SyscallContext<'a> {
     #[inline]
     pub fn is_proc_admin(&self) -> bool {
         self.has_flag(TASK_FLAG_SYSTEM) || self.has_flag(TASK_FLAG_PROC_ADMIN)
-    }
-
-    #[inline]
-    pub fn require_compositor(&self) -> Result<(), Errno> {
-        if self.is_compositor() {
-            Ok(())
-        } else {
-            Err(Errno::EPERM)
-        }
-    }
-
-    #[inline]
-    pub fn require_display_exclusive(&self) -> Result<(), Errno> {
-        if self.is_display_exclusive() {
-            Ok(())
-        } else {
-            Err(Errno::EPERM)
-        }
-    }
-
-    #[inline]
-    pub fn require_console_admin(&self) -> Result<(), Errno> {
-        if self.is_console_admin() {
-            Ok(())
-        } else {
-            Err(Errno::EPERM)
-        }
     }
 
     #[inline]
