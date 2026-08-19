@@ -880,6 +880,19 @@ impl WindowManager {
 
 pub fn compositor_user_main() {
     tty::write(b"COMPOSITOR: starting\n");
+
+    // Ownership of the screen and the input stream is announced here, once,
+    // rather than re-asserted by every frame. Both fds are deliberately leaked
+    // for the process lifetime: closing one would not release the seat anyway
+    // (release is arbiter revocation at task exit), and holding them keeps the
+    // descriptor's existence honest about what this process owns.
+    if window::screen_acquire(window::SEAT_COMPOSITOR_PRIMARY) < 0 {
+        tty::write(b"COMPOSITOR: screen seat unavailable\n");
+    }
+    if window::input_sink_acquire(window::SEAT_COMPOSITOR_PRIMARY) < 0 {
+        tty::write(b"COMPOSITOR: input seat unavailable\n");
+    }
+
     let mut wm = WindowManager::new();
     let mut fb_info = DisplayInfo::default();
 

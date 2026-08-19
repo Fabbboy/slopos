@@ -5,6 +5,29 @@ use super::raw::{syscall1, syscall2, syscall3};
 use slopos_abi::DisplayInfo;
 use slopos_abi::damage::DamageRect;
 
+/// Seat ranks, mirroring `slopos_ostd::seat::SeatId`. Virtcon outranks the
+/// compositor so the kernel log and `/bin/roulette` can always take the
+/// display back.
+pub const SEAT_COMPOSITOR_PRIMARY: u32 = 0;
+pub const SEAT_VIRTCON: u32 = 1;
+
+/// Take the framebuffer seat, returning a non-duplicable descriptor naming it.
+///
+/// Must be held before `fb_flip`, the cursor calls, `set_display_mode` or
+/// `roulette_draw` will act. `-EBUSY` when a seat of equal or higher rank is
+/// held by a live task. The fd is neither inherited across `fork` nor kept
+/// across `exec`.
+#[inline(always)]
+pub fn screen_acquire(seat: u32) -> i64 {
+    unsafe { syscall1(SYSCALL_SCREEN_ACQUIRE, seat as u64) as i64 }
+}
+
+/// As [`screen_acquire`], for the raw input stream `input_poll_batch` drains.
+#[inline(always)]
+pub fn input_sink_acquire(seat: u32) -> i64 {
+    unsafe { syscall1(SYSCALL_INPUT_SINK_ACQUIRE, seat as u64) as i64 }
+}
+
 #[inline(always)]
 pub fn fb_info(out: &mut DisplayInfo) -> i64 {
     unsafe { syscall1(SYSCALL_FB_INFO, out as *mut _ as u64) as i64 }

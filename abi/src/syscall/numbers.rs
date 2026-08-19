@@ -358,8 +358,20 @@ pub const SYSCALL_NET_MONITOR: u64 = 173;
 /// cannot back off gracefully.
 pub const SYSCALL_PRLIMIT64: u64 = 174;
 
+/// `screen_acquire(seat_id)` — take the framebuffer seat, returning a
+/// non-duplicable descriptor naming it.
+///
+/// `seat_id` is `slopos_ostd::seat::SeatId`: 0 compositor-primary, 1 virtcon.
+/// `EBUSY` when a seat of equal or higher rank is held. Ownership is announced
+/// here and never conferred by presenting a frame.
+pub const SYSCALL_SCREEN_ACQUIRE: u64 = 175;
+
+/// `input_sink_acquire(seat_id)` — as [`SYSCALL_SCREEN_ACQUIRE`], for the raw
+/// input event stream that `input_poll_batch` drains.
+pub const SYSCALL_INPUT_SINK_ACQUIRE: u64 = 176;
+
 /// Size of the dispatch table; every syscall number must be below this.
-pub const SYSCALL_TABLE_SIZE: usize = 175;
+pub const SYSCALL_TABLE_SIZE: usize = 177;
 
 const _: () = assert!((SYSCALL_PIDFD_OPEN as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SIGNALFD as usize) < SYSCALL_TABLE_SIZE);
@@ -375,6 +387,8 @@ const _: () = assert!((SYSCALL_NET_ROUTE_CTL as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_NET_RESOLVER_SET as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_NET_MONITOR as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_PRLIMIT64 as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_SCREEN_ACQUIRE as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_INPUT_SINK_ACQUIRE as usize) < SYSCALL_TABLE_SIZE);
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

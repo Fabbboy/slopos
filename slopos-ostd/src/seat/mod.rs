@@ -241,6 +241,14 @@ pub fn is_held_by(kind: SeatKind, task_id: u32) -> bool {
     task_id != 0 && seat_slot(kind).holder.load(Ordering::Acquire) == task_id
 }
 
+/// The live epoch for `kind`. A descriptor minted under a different one names
+/// a grant the arbiter has since revoked, so comparing against this is what
+/// makes a stale seat fd fail closed.
+#[inline]
+pub fn current_epoch(kind: SeatKind) -> u64 {
+    seat_slot(kind).epoch.load(Ordering::Acquire)
+}
+
 /// Release `kind`'s seat if `task_id` holds it. Returns whether it did.
 ///
 /// The epoch bump is what invalidates every outstanding [`SeatGrant`], so a

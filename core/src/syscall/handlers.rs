@@ -52,9 +52,9 @@ pub use crate::syscall::test_handlers::{
 };
 pub use crate::syscall::ui_handlers::{
     syscall_clipboard_copy, syscall_clipboard_paste, syscall_cursor_move, syscall_cursor_set_image,
-    syscall_fb_flip, syscall_fb_info, syscall_getrandom, syscall_input_poll_batch, syscall_openpty,
-    syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin,
-    syscall_set_display_mode,
+    syscall_fb_flip, syscall_fb_info, syscall_getrandom, syscall_input_poll_batch,
+    syscall_input_sink_acquire, syscall_openpty, syscall_roulette_draw, syscall_roulette_result,
+    syscall_roulette_spin, syscall_screen_acquire, syscall_set_display_mode,
 };
 
 /// Build the static syscall dispatch table; unregistered slots stay `None`.
@@ -140,6 +140,9 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_CURSOR_SET_IMAGE]    => syscall_cursor_set_image,    "cursor_set_image";
     [SYSCALL_CURSOR_MOVE]         => syscall_cursor_move,         "cursor_move";
     [SYSCALL_SET_DISPLAY_MODE]    => syscall_set_display_mode,    "set_display_mode";
+
+    [SYSCALL_SCREEN_ACQUIRE]             => syscall_screen_acquire,             "screen_acquire";
+    [SYSCALL_INPUT_SINK_ACQUIRE]         => syscall_input_sink_acquire,         "input_sink_acquire";
 
     [SYSCALL_INPUT_POLL_BATCH]           => syscall_input_poll_batch,           "input_poll_batch";
     [SYSCALL_CLIPBOARD_COPY]             => syscall_clipboard_copy,             "clipboard_copy";

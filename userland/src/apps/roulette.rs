@@ -17,8 +17,15 @@ pub fn roulette_user_main() {
     if !fb_ok {
         text_fallback(fate);
     } else {
-        println!("ROULETTE: fb_info ok, drawing wheel");
-        let _ = roulette::draw(fate);
+        // The virtcon seat, which outranks the compositor's: roulette draws
+        // straight to the framebuffer before a compositor exists, and must be
+        // able to take the screen back if one is already up.
+        if window::screen_acquire(window::SEAT_VIRTCON) < 0 {
+            text_fallback(fate);
+        } else {
+            println!("ROULETTE: fb_info ok, drawing wheel");
+            let _ = roulette::draw(fate);
+        }
     }
 
     std::thread::sleep(std::time::Duration::from_millis(180));

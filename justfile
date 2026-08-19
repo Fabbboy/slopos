@@ -59,7 +59,7 @@ debug_flag    := if debug =~ '^(1|true|on|yes)$' { "boot.debug=on" } else { "" }
 boot_cmdline_effective := trim(boot_cmdline + " " + debug_flag)
 
 userland_bins      := "init shell terminal compositor roulette file_manager image_viewer sysmon nmap ip keymap ss nc curl ping oops_smoke"
-test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test spawn_privilege_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test"
+test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test spawn_privilege_test seat_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test"
 
 [doc("Install Rust + Go toolchains and verify workspace")]
 setup:

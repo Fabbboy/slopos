@@ -13,8 +13,37 @@ use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user, copy_to_use
 use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
 use slopos_ostd::KVec;
 
+use slopos_ostd::seat::{SeatId, SeatKind};
+
+use crate::seat_file_ops::{seat_acquire_fd, seat_held_by};
 use crate::syscall::args::{UserBytes, UserPtr};
 use crate::syscall::result::SyscallResult;
+
+define_syscall!(syscall_screen_acquire
+    (ctx, seat_raw: u32)
+    requires(let pid: process_id, let task_id: task_id)
+    -> Result<u64, Errno>
+{
+    let id = SeatId::try_from_u8(seat_raw as u8).ok_or(Errno::EINVAL)?;
+    let fd = seat_acquire_fd(pid, SeatKind::Screen, id, task_id);
+    if fd < 0 {
+        return Err(Errno::from_raw(fd).unwrap_or(Errno::EINVAL));
+    }
+    Ok(fd as u64)
+});
+
+define_syscall!(syscall_input_sink_acquire
+    (ctx, seat_raw: u32)
+    requires(let pid: process_id, let task_id: task_id)
+    -> Result<u64, Errno>
+{
+    let id = SeatId::try_from_u8(seat_raw as u8).ok_or(Errno::EINVAL)?;
+    let fd = seat_acquire_fd(pid, SeatKind::InputSink, id, task_id);
+    if fd < 0 {
+        return Err(Errno::from_raw(fd).unwrap_or(Errno::EINVAL));
+    }
+    Ok(fd as u64)
+});
 
 define_syscall!(syscall_getrandom
     (ctx, buf: UserBytes, _flags: u32) -> Result<u64, Errno>
@@ -48,6 +77,9 @@ define_syscall!(syscall_input_poll_batch
 {
     if events_out.as_u64() == 0 || max_count == 0 {
         return Ok(0);
+    }
+    if !seat_held_by(SeatKind::InputSink, task_id) {
+        return Err(Errno::EPERM);
     }
     let max_count = max_count as usize;
 
@@ -186,6 +218,12 @@ define_syscall!(syscall_fb_flip
     requires(compositor)
     -> Result<u64, Errno>
 {
+    // The seat, not the flag, is what says this task owns the screen: the flag
+    // admits it to the syscall, the seat says nobody outranking it holds the
+    // display right now.
+    if !seat_held_by(SeatKind::Screen, ctx.task_id()) {
+        return Err(Errno::EPERM);
+    }
     let fd = fd as i32;
     let damage_count = damage_count as usize;
 
@@ -234,6 +272,9 @@ define_syscall!(syscall_cursor_set_image
     requires(compositor)
     -> Result<(), Errno>
 {
+    if !seat_held_by(SeatKind::Screen, ctx.task_id()) {
+        return Err(Errno::EPERM);
+    }
     // virtio-gpu hardware cursors are at most 64×64 BGRA.
     const CURSOR_MAX_BYTES: usize = 64 * 64 * 4;
     let len = len as usize;
@@ -257,6 +298,9 @@ define_syscall!(syscall_cursor_move
     requires(compositor)
     -> Result<(), Errno>
 {
+    if !seat_held_by(SeatKind::Screen, ctx.task_id()) {
+        return Err(Errno::EPERM);
+    }
     let x = (pos >> 16) & 0xFFFF;
     let y = pos & 0xFFFF;
     if !video::cursor_move(x, y) {
@@ -270,6 +314,9 @@ define_syscall!(syscall_set_display_mode
     requires(compositor)
     -> Result<(), Errno>
 {
+    if !seat_held_by(SeatKind::Screen, ctx.task_id()) {
+        return Err(Errno::EPERM);
+    }
     if !video::set_display_mode(width, height) {
         return Err(Errno::EINVAL);
     }
@@ -281,6 +328,9 @@ define_syscall!(syscall_roulette_draw
     requires(display_exclusive)
     -> Result<(), Errno>
 {
+    if !seat_held_by(SeatKind::Screen, ctx.task_id()) {
+        return Err(Errno::EPERM);
+    }
     use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
     // Resolved before the switch away so the restore below names the caller
     // rather than re-reading an id afterwards.

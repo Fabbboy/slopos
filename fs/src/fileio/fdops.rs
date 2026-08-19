@@ -639,6 +639,9 @@ fn file_dup_fd_min(table: FdTable, old_fd: c_int, min_fd: usize) -> c_int {
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
         };
+        if !file_kind_transferable(src.open_file.ops.kind()) {
+            return Errno::EINVAL.raw() as _;
+        }
         let Some(mut alias) = src.try_alias(account) else {
             return Errno::EMFILE.raw() as _;
         };
@@ -695,6 +698,9 @@ fn dup_into(table: FdTable, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup3
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Err(Errno::EBADF);
         };
+        if !file_kind_transferable(src.open_file.ops.kind()) {
+            return Err(Errno::EINVAL);
+        }
         // Only a *free* target needs a fresh charge; an occupied one reuses the
         // displaced entry's, keeping exactly one charge per number at all times.
         let occupied = inner.descriptors[new_fd as usize].is_some();
