@@ -15,18 +15,20 @@ editing.
 | Document | Scope |
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
-| `authority-model.md` | What authority is: a flat per-process capability set, total by compile-time construction, with rights on objects |
 | `driver-framework-base.html` | Driver-framework base: unified Bus model, platform/ACPI registry, deferred-probe/hotplug/unbind |
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
 
-`authority-model.md` builds on two things that have landed. The `Process` object owns
-identity — `slopos_ostd::process`, with the address-space and descriptor tables keyed on
-`Handle<Process>` rather than on a recycled pid — so a credential has a principal to belong
-to. And per-principal accounting is complete: `slopos_ostd::process::quota` is the arena and
-the linear `Charge` token, every `ResourceKind` is charged and enforced, `mm::reclaim` bounds
-holding time as well as acquisition, and the numbers are published through `prlimit64`. The
-authority plan can assume a live `Account` per process rather than proposing one.
+The authority model has **landed and its plan is retired**. Authority is a flat
+per-capability mask whose classification is total by compile-time construction:
+`define_syscall!` takes a mandatory `cap(X)` clause and emits it into the dispatch table
+through the handler, so a `const` histogram in `core/src/syscall/handlers.rs` asserts both
+totality over all 177 slots and each capability's recorded entry-point count. Read the code
+rather than a document: `slopos_ostd::authority` for the vocabulary and the witness,
+`core/src/exec/grants.rs` for where authority enters, `slopos_ostd::seat` for the display
+and input seats, and `verification/proofs/authority.rs` for the four machine-checked
+obligations. `scripts/check_authority_reachability.sh` is what catches an unprivileged
+syscall reaching a power primitive two calls away, which a slot-level gate cannot see.
 
 ## When To Promote A Plan
 
