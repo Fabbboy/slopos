@@ -13,6 +13,7 @@ use crate::syscall::common::syscall_bounded_from_user;
 
 define_syscall!(syscall_test_report
     (ctx, status_raw: u32, name_ptr: u64, name_requested: u64, msg_ptr: u64, msg_requested: u64)
+    cap(NoneSelf)
     -> Result<(), Errno>
 {
     if status_raw > 2 {
@@ -73,7 +74,8 @@ define_syscall!(syscall_test_report
     Ok(())
 });
 
-define_syscall!(syscall_run_userland_tests (ctx) -> Result<(), Errno> {
+define_syscall!(syscall_run_userland_tests (ctx) cap(NoneSelf)
+    -> Result<(), Errno> {
     if !kernel_phase_summary::tests_enabled() {
         return Ok(());
     }
@@ -135,7 +137,8 @@ define_syscall!(syscall_run_userland_tests (ctx) -> Result<(), Errno> {
     Ok(())
 });
 
-define_syscall!(syscall_test_panic (ctx) -> Result<(), Errno> {
+define_syscall!(syscall_test_panic (ctx) cap(NoneSelf)
+    -> Result<(), Errno> {
     // Boot-flag armed so production images expose no user-reachable panic
     // trigger.
     if !slopos_ostd::boot_flags::has_flag(slopos_ostd::boot_flags::BOOT_FLAG_PANIC_RECOVER_SMOKE) {

@@ -386,6 +386,7 @@ fn query_resolver(buf: u64, len: usize) -> Result<u64, Errno> {
 
 define_syscall!(syscall_net_query
     (ctx, what: u64, index: u64, buf: u64, len: u64)
+    cap(NoneSelf)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {

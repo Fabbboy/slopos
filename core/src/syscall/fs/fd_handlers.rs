@@ -14,6 +14,7 @@ use crate::syscall::common::{errno_from_neg, errno_from_neg64};
 
 define_syscall!(syscall_dup
     (ctx, fd: Fd)
+    cap(NoneFd)
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
@@ -23,6 +24,7 @@ define_syscall!(syscall_dup
 
 define_syscall!(syscall_dup2
     (ctx, old_fd: Fd, new_fd: Fd)
+    cap(NoneFd)
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
@@ -32,6 +34,7 @@ define_syscall!(syscall_dup2
 
 define_syscall!(syscall_dup3
     (ctx, old_fd: Fd, new_fd: Fd, flags: u32)
+    cap(NoneFd)
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
@@ -41,6 +44,7 @@ define_syscall!(syscall_dup3
 
 define_syscall!(syscall_fcntl
     (ctx, fd: Fd, cmd: u64, arg: u64)
+    cap(NoneFd)
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
@@ -50,6 +54,7 @@ define_syscall!(syscall_fcntl
 
 define_syscall!(syscall_lseek
     (ctx, fd: Fd, off: i64, whence: u32)
+    cap(NoneFd)
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
@@ -59,6 +64,7 @@ define_syscall!(syscall_lseek
 
 define_syscall!(syscall_fstat
     (ctx, fd: Fd, out: UserPtr<UserFsStat>)
+    cap(NoneFd)
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
@@ -73,6 +79,7 @@ define_syscall!(syscall_fstat
 
 define_syscall!(syscall_pipe
     (ctx, fds: UserPtr<[i32; 2]>)
+    cap(NoneSelf)
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
@@ -89,6 +96,7 @@ define_syscall!(syscall_pipe
 
 define_syscall!(syscall_pipe2
     (ctx, fds: UserPtr<[i32; 2]>, flags: u32)
+    cap(NoneSelf)
     requires(let pid: process_id)
     -> Result<(), Errno>
 {

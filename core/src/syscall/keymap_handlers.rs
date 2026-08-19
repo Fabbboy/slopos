@@ -14,6 +14,7 @@ use slopos_mm::user_ptr::UserBytes;
 
 define_syscall!(syscall_keymap_load
     (ctx, data_ptr: u64, len: u64)
+    cap(NoneSelf)
     requires(console_admin)
     -> Result<(), Errno>
 {
@@ -22,6 +23,7 @@ define_syscall!(syscall_keymap_load
 
 define_syscall!(syscall_keymap_get_name
     (ctx, buf_ptr: u64, buf_len: u64)
+    cap(NoneSelf)
     -> Result<u64, Errno>
 {
     let mut name = [0u8; LAYOUT_NAME_LEN];

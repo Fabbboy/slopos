@@ -5,6 +5,7 @@ use slopos_abi::Errno;
 
 define_syscall!(syscall_signalfd
     (ctx, mask: u64, flags: u32)
+    cap(NoneSelf)
     requires(let task_id: task_id, let process_id: process_id)
     -> Result<u64, Errno>
 {

@@ -17,6 +17,7 @@ use crate::syscall::common::{USER_PATH_MAX, errno_from_neg};
 
 define_syscall!(syscall_fs_open
     (ctx, path: UserCStr<USER_PATH_MAX>, flags: u32)
+    cap(NoneFd)
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
@@ -30,6 +31,7 @@ define_syscall!(syscall_fs_open
 
 define_syscall!(syscall_fs_close
     (ctx, fd: Fd)
+    cap(NoneFd)
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
@@ -39,6 +41,7 @@ define_syscall!(syscall_fs_close
 
 define_syscall!(syscall_fs_read
     (ctx, fd: Fd, buf: UserBytes)
+    cap(NoneFd)
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
@@ -59,6 +62,7 @@ define_syscall!(syscall_fs_read
 
 define_syscall!(syscall_fs_write
     (ctx, fd: Fd, buf: UserBytes)
+    cap(NoneFd)
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
@@ -76,7 +80,8 @@ define_syscall!(syscall_fs_write
 });
 
 define_syscall!(syscall_fs_stat
-    (ctx, path: UserCStr<USER_PATH_MAX>, out: UserPtr<UserFsStat>) -> Result<(), Errno>
+    (ctx, path: UserCStr<USER_PATH_MAX>, out: UserPtr<UserFsStat>) cap(NoneFd)
+    -> Result<(), Errno>
 {
     let mut stat = UserFsStat { type_: 0, size: 0 };
     let rc = file_stat_path(path.as_bytes(), &mut stat.type_, &mut stat.size);
@@ -88,21 +93,24 @@ define_syscall!(syscall_fs_stat
 });
 
 define_syscall!(syscall_fs_mkdir
-    (ctx, path: UserCStr<USER_PATH_MAX>) -> Result<(), Errno>
+    (ctx, path: UserCStr<USER_PATH_MAX>) cap(NoneFd)
+    -> Result<(), Errno>
 {
     let rc = file_mkdir_path(path.as_bytes());
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
 define_syscall!(syscall_fs_unlink
-    (ctx, path: UserCStr<USER_PATH_MAX>) -> Result<(), Errno>
+    (ctx, path: UserCStr<USER_PATH_MAX>) cap(NoneFd)
+    -> Result<(), Errno>
 {
     let rc = file_unlink_path(path.as_bytes());
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
 define_syscall!(syscall_fs_list
-    (ctx, path: UserCStr<USER_PATH_MAX>, list: UserPtr<UserFsList>) -> Result<(), Errno>
+    (ctx, path: UserCStr<USER_PATH_MAX>, list: UserPtr<UserFsList>) cap(NoneFd)
+    -> Result<(), Errno>
 {
     let _ = pod_slice_as_bytes::<i8>;  // TODO(tech-debt): no-op keeping the helper symbol referenced — delete once the legacy users are gone.
     let mut list_hdr = copy_from_user(list.inner()).map_err(|_| Errno::EFAULT)?;
@@ -139,7 +147,8 @@ define_syscall!(syscall_fs_list
 });
 
 define_syscall!(syscall_rename
-    (ctx, old_path: UserCStr<USER_PATH_MAX>, new_path: UserCStr<USER_PATH_MAX>) -> Result<(), Errno>
+    (ctx, old_path: UserCStr<USER_PATH_MAX>, new_path: UserCStr<USER_PATH_MAX>) cap(NoneFd)
+    -> Result<(), Errno>
 {
     slopos_fs::vfs::ops::vfs_rename(old_path.as_bytes(), new_path.as_bytes())
         .map_err(|_| Errno::EINVAL)

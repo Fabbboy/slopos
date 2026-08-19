@@ -61,6 +61,7 @@ fn socket_fd_for(table: FdTable, fd: i32) -> Result<SocketFd, Errno> {
 
 define_syscall!(syscall_socket
     (ctx, domain: u32, sock_type: u32, protocol: u32)
+    cap(NoneSelf)
     requires(let process_id: process_id, let task_id: task_id)
     -> Result<u64, Errno>
 {
@@ -122,6 +123,7 @@ define_syscall!(syscall_socket
 
 define_syscall!(syscall_bind
     (ctx, fd: Fd, addr_ptr: u64, addr_len: u64)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
@@ -163,6 +165,7 @@ define_syscall!(syscall_bind
 
 define_syscall!(syscall_listen
     (ctx, fd: Fd, backlog: u32)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
@@ -175,6 +178,7 @@ define_syscall!(syscall_listen
 
 define_syscall!(syscall_accept
     (ctx, fd: Fd, peer_ptr: u64, peer_len: u64)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -249,6 +253,7 @@ define_syscall!(syscall_accept
 
 define_syscall!(syscall_connect
     (ctx, fd: Fd, addr_ptr: u64, addr_len: u64)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
@@ -290,6 +295,7 @@ define_syscall!(syscall_connect
 
 define_syscall!(syscall_send
     (ctx, fd: Fd, buf: UserBytes, _flags: u32)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -326,6 +332,7 @@ define_syscall!(syscall_send
 
 define_syscall!(syscall_recv
     (ctx, fd: Fd, buf: UserBytes, _flags: u32)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -368,6 +375,7 @@ define_syscall!(syscall_recv
 
 define_syscall!(syscall_sendto
     (ctx, fd: Fd, buf: UserBytes, _flags: u32, addr_ptr: u64, addr_len: u64)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -411,6 +419,7 @@ define_syscall!(syscall_sendto
 
 define_syscall!(syscall_recvfrom
     (ctx, fd: Fd, buf: UserBytes, _flags: u32, src_ptr: u64, src_len: u64)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -462,6 +471,7 @@ define_syscall!(syscall_recvfrom
 
 define_syscall!(syscall_setsockopt
     (ctx, fd: Fd, level: u32, optname: u32, optval: UserBytes)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
@@ -486,6 +496,7 @@ define_syscall!(syscall_setsockopt
 
 define_syscall!(syscall_getsockopt
     (ctx, fd: Fd, level: u32, optname: u32, optval_ptr: u64, optlen_ptr_raw: u64)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
@@ -522,6 +533,7 @@ define_syscall!(syscall_getsockopt
 
 define_syscall!(syscall_shutdown
     (ctx, fd: Fd, how: u32)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
@@ -535,6 +547,7 @@ define_syscall!(syscall_shutdown
 
 define_syscall!(syscall_resolve
     (ctx, hostname_ptr: u64, hostname_len: u64, result_ptr: u64)
+    cap(NoneSelf)
     requires(let _process_id: process_id)
     -> Result<(), Errno>
 {
@@ -573,6 +586,7 @@ define_syscall!(syscall_resolve
 
 define_syscall!(syscall_sendmsg
     (ctx, fd: Fd, msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>, _flags: u32)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -762,6 +776,7 @@ fn recvmsg_impl(
 
 define_syscall!(syscall_recvmsg
     (ctx, fd: Fd, msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>, _flags: u32)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -867,6 +882,7 @@ fn getsockname_inet(sock_idx: u32, addr_buf: u64, addrlen_ptr: u64) -> Result<()
 
 define_syscall!(syscall_getpeername
     (ctx, fd: Fd, addr_buf: u64, addrlen_ptr: u64)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
@@ -881,6 +897,7 @@ define_syscall!(syscall_getpeername
 
 define_syscall!(syscall_getsockname
     (ctx, fd: Fd, addr_buf: u64, addrlen_ptr: u64)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {

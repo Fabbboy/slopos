@@ -23,7 +23,8 @@ use slopos_sched::task::{get_task_stats, task_terminate};
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::user_copy::copy_to_user;
 
-define_syscall!(syscall_yield (ctx) -> SyscallResult {
+define_syscall!(syscall_yield (ctx) cap(NoneSelf)
+    -> SyscallResult {
     // rax is written before yielding and the handler returns `NoReturn`:
     // `yield_()` suspends, and the dispatcher's own `write_ok` on resume would
     // double-account the WL balance.
@@ -32,12 +33,14 @@ define_syscall!(syscall_yield (ctx) -> SyscallResult {
     SyscallResult::NoReturn
 });
 
-define_syscall!(syscall_get_time_ms (ctx) -> u64 {
+define_syscall!(syscall_get_time_ms (ctx) cap(NoneSelf)
+    -> u64 {
     slopos_kernel_services::clock::uptime_ms()
 });
 
 define_syscall!(syscall_clock_gettime
-    (ctx, clock_id: u64, ts: UserPtr<Timespec>) -> Result<(), Errno>
+    (ctx, clock_id: u64, ts: UserPtr<Timespec>) cap(NoneSelf)
+    -> Result<(), Errno>
 {
     if clock_id != CLOCK_MONOTONIC && clock_id != CLOCK_REALTIME {
         return Err(Errno::EINVAL);
@@ -51,19 +54,22 @@ define_syscall!(syscall_clock_gettime
     Ok(())
 });
 
-define_syscall!(syscall_halt (ctx) -> SyscallResult {
+define_syscall!(syscall_halt (ctx) cap(NoneSelf)
+    -> SyscallResult {
     platform::kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
     #[allow(unreachable_code)]
     SyscallResult::NoReturn
 });
 
-define_syscall!(syscall_reboot (ctx) -> SyscallResult {
+define_syscall!(syscall_reboot (ctx) cap(NoneSelf)
+    -> SyscallResult {
     platform::kernel_reboot(b"user reboot\0".as_ptr() as *const c_char);
     #[allow(unreachable_code)]
     SyscallResult::NoReturn
 });
 
-define_syscall!(syscall_sleep_ms (ctx, ms: u64) -> Result<(), Errno> {
+define_syscall!(syscall_sleep_ms (ctx, ms: u64) cap(NoneSelf)
+    -> Result<(), Errno> {
     let ms = ms.min(60000);
     if ms == 0 {
         return Ok(());
@@ -93,7 +99,8 @@ define_syscall!(syscall_sleep_ms (ctx, ms: u64) -> Result<(), Errno> {
     }
 });
 
-define_syscall!(syscall_exit (ctx, code: u32) -> SyscallResult {
+define_syscall!(syscall_exit (ctx, code: u32) cap(NoneSelf)
+    -> SyscallResult {
     let task_id = ctx.task_id();
     klog_debug!("SYSCALL_EXIT: task {} entering exit", task_id);
     {
@@ -120,7 +127,8 @@ define_syscall!(syscall_exit (ctx, code: u32) -> SyscallResult {
 // that must survive a broken or absent fd 1. Deliberately unprivileged, like
 // Linux's `/dev/kmsg`, and it reaches the same serialised writer klog uses, so
 // a caller cannot interleave into a klog line or the harness's KTAP framing.
-define_syscall!(syscall_user_write (ctx, buf: UserBytes) -> Result<u64, Errno> {
+define_syscall!(syscall_user_write (ctx, buf: UserBytes) cap(NoneSelf)
+    -> Result<u64, Errno> {
     if buf.base_u64() == 0 {
         return Err(Errno::EFAULT);
     }
@@ -139,7 +147,8 @@ define_syscall!(syscall_user_write (ctx, buf: UserBytes) -> Result<u64, Errno> {
 // `/dev/tty` semantics: the terminal resolves per process, so a task in a PTY
 // session reads its own PTY and one with no controlling terminal reads nothing
 // rather than the operator's console — `ENXIO`, as opening `/dev/tty` answers.
-define_syscall!(syscall_user_read (ctx, buf: UserBytes) -> Result<u64, Errno> {
+define_syscall!(syscall_user_read (ctx, buf: UserBytes) cap(NoneSelf)
+    -> Result<u64, Errno> {
     if buf.base_u64() == 0 || buf.len() == 0 {
         return Err(Errno::EFAULT);
     }
@@ -156,7 +165,8 @@ define_syscall!(syscall_user_read (ctx, buf: UserBytes) -> Result<u64, Errno> {
     Ok(n as u64)
 });
 
-define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) -> Result<(), Errno> {
+define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(NoneSelf)
+    -> Result<(), Errno> {
     let pages = get_page_allocator_stats();
     let tasks = get_task_stats();
     let sched = get_scheduler_stats();
@@ -181,7 +191,8 @@ define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) -> Result
 });
 
 define_syscall!(syscall_process_list
-    (ctx, buf: UserPtr<slopos_abi::syscall::UserTaskEntry>, max: u64) -> Result<u64, Errno>
+    (ctx, buf: UserPtr<slopos_abi::syscall::UserTaskEntry>, max: u64) cap(NoneRelation)
+    -> Result<u64, Errno>
 {
     use slopos_abi::syscall::UserTaskEntry;
     use slopos_abi::task::{INVALID_TASK_ID, MAX_TASKS};
@@ -256,7 +267,8 @@ define_syscall!(syscall_process_list
 });
 
 define_syscall!(syscall_cpu_info
-    (ctx, info_out: UserPtr<slopos_abi::syscall::UserCpuInfo>) -> Result<(), Errno>
+    (ctx, info_out: UserPtr<slopos_abi::syscall::UserCpuInfo>) cap(NoneSelf)
+    -> Result<(), Errno>
 {
     use slopos_abi::syscall::UserCpuInfo;
     use slopos_arch::cpu::cpuid;
@@ -276,7 +288,8 @@ define_syscall!(syscall_cpu_info
 });
 
 define_syscall!(syscall_percpu_stats
-    (ctx, buf: UserPtr<slopos_abi::syscall::UserPerCpuStats>, max: u64) -> Result<u64, Errno>
+    (ctx, buf: UserPtr<slopos_abi::syscall::UserPerCpuStats>, max: u64) cap(NoneSelf)
+    -> Result<u64, Errno>
 {
     use core::sync::atomic::Ordering;
     use slopos_abi::syscall::UserPerCpuStats;

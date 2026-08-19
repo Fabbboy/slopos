@@ -2,6 +2,8 @@ use core::ffi::c_char;
 
 use slopos_abi::syscall::*;
 
+use slopos_ostd::authority::Capability;
+
 use crate::syscall::common::SyscallEntry;
 pub use crate::syscall::core_handlers::{
     syscall_clock_gettime, syscall_cpu_info, syscall_exit, syscall_get_time_ms, syscall_halt,
@@ -57,16 +59,26 @@ pub use crate::syscall::ui_handlers::{
     syscall_roulette_spin, syscall_screen_acquire, syscall_set_display_mode,
 };
 
-/// Build the static syscall dispatch table; unregistered slots stay `None`.
+/// Build the static syscall dispatch table; unregistered slots stay
+/// `Unimplemented`.
+///
+/// The per-slot syntax is unchanged, but each arm now reads `$handler::DEF` —
+/// the constant `define_syscall!` emitted beside the handler — rather than
+/// rebuilding an entry here. That is the whole mechanism: the capability
+/// reaches this table *through* the handler, so no parallel list exists to
+/// drift out of step with the checks, and there is exactly one artifact for
+/// the totality assert to read.
 macro_rules! syscall_table {
-    (size: $size:expr; $( [$num:expr] => $handler:expr, $name:literal; )*) => {{
-        let mut table: [SyscallEntry; $size] = [SyscallEntry {
-            handler: None,
-            name: ::slopos_ostd::sync::KernelSync::new(core::ptr::null()),
-        }; $size];
+    (size: $size:expr; $( [$num:expr] => $handler:ident, $name:literal; )*) => {{
+        let mut table: [SyscallEntry; $size] = [SyscallEntry::EMPTY; $size];
         $(
             table[$num as usize] = SyscallEntry {
-                handler: Some($handler),
+                // Both from `DEF`, so the slot cannot name one handler and
+                // another's classification.
+                handler: $handler::DEF.handler,
+                cap: $handler::DEF.cap,
+                // The ABI spelling, which the handler's own identifier does
+                // not carry (`syscall_user_write` is `write`).
                 name: ::slopos_ostd::sync::KernelSync::new(
                     concat!($name, "\0").as_ptr() as *const c_char,
                 ),
@@ -226,4 +238,112 @@ pub fn syscall_lookup(sysno: u64) -> Option<&'static SyscallEntry> {
     } else {
         Some(entry)
     }
+}
+
+// ---------------------------------------------------------------------------
+// The distribution ratchet
+//
+// Upstream measured 451 of 1167 capability checks resolving to a single
+// administrative capability, up from 16% a decade earlier, and named the cause
+// as no overall coordination of capability use. This is that coordination, as
+// a compile error: per-capability entry-point counts asserted by `rustc`
+// against one `const` array with one author.
+//
+// A capability that grows past its recorded count fails the build. Raising a
+// count is a deliberate, reviewable diff -- which is the point. It detects
+// breadth, not over-broadness inside one entry; that residual is what the
+// admission test in `slopos_ostd::authority` is applied at review for.
+// ---------------------------------------------------------------------------
+
+/// Entry points classified `cap`, counted over the whole table at compile time.
+const fn count_of(cap: Capability) -> usize {
+    let mut n = 0;
+    let mut i = 0;
+    while i < SYSCALL_TABLE_SIZE {
+        // `Capability` is a fieldless enum, so a discriminant compare is a
+        // `const`-evaluable equality.
+        if SYSCALL_TABLE[i].cap as u8 == cap as u8 {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// The recorded shape of the classification.
+///
+/// Every capability appears, including the ones at zero, so adding an entry
+/// point to a capability that had none still moves a number here.
+const CAP_COUNTS: [(Capability, usize); 15] = [
+    (Capability::Unimplemented, 59),
+    (Capability::NoneSelf, 61),
+    (Capability::NoneFd, 42),
+    (Capability::NoneRelation, 15),
+    (Capability::Power, 0),
+    (Capability::Launch, 0),
+    (Capability::ProcSignal, 0),
+    (Capability::SysInspect, 0),
+    (Capability::DisplaySeat, 0),
+    (Capability::InputSeat, 0),
+    (Capability::ConsoleConfig, 0),
+    (Capability::ConsoleIo, 0),
+    (Capability::ClipboardGlobal, 0),
+    (Capability::Fate, 0),
+    (Capability::TestHarness, 0),
+];
+
+const _: () = {
+    // Every capability the enum defines is recorded here: a new variant that
+    // nobody adds a row for fails this, rather than silently counting zero.
+    assert!(
+        CAP_COUNTS.len() == Capability::ALL.len(),
+        "every Capability needs a row in CAP_COUNTS",
+    );
+
+    let mut i = 0;
+    let mut total = 0;
+    while i < CAP_COUNTS.len() {
+        let (cap, recorded) = CAP_COUNTS[i];
+        assert!(
+            cap as u8 == Capability::ALL[i] as u8,
+            "CAP_COUNTS must be in Capability::ALL order",
+        );
+        let measured = count_of(cap);
+        assert!(
+            measured == recorded,
+            "a capability's entry-point count moved; re-record it in CAP_COUNTS \
+             and justify the growth in the commit message",
+        );
+        total += measured;
+        i += 1;
+    }
+
+    // Totality: every slot in the table is classified, so "did you classify it"
+    // is not a question a script has to ask.
+    assert!(
+        total == SYSCALL_TABLE_SIZE,
+        "the classification must cover every dispatch-table slot",
+    );
+};
+
+/// Every registered slot carries a handler, and every unregistered one does
+/// not. `Unimplemented` is the absence of a handler, not a classification, so
+/// the two must agree or the dispatcher's check could run against a slot whose
+/// capability nobody chose.
+const _: () = {
+    let mut i = 0;
+    while i < SYSCALL_TABLE_SIZE {
+        let entry = SYSCALL_TABLE[i];
+        let unimplemented = entry.cap as u8 == Capability::Unimplemented as u8;
+        assert!(
+            entry.handler.is_none() == unimplemented,
+            "a registered slot must not be Unimplemented, and an empty slot must be",
+        );
+        i += 1;
+    }
+};
+
+/// Per-capability entry-point counts, for the boot-time dump and the tests.
+pub fn cap_counts() -> &'static [(Capability, usize); 15] {
+    &CAP_COUNTS
 }

@@ -18,6 +18,7 @@ use crate::syscall::args::RawFd;
 
 define_syscall!(syscall_ring_setup
     (ctx, entries: u32, params_ptr: u64)
+    cap(NoneSelf)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -43,6 +44,7 @@ define_syscall!(syscall_ring_setup
 
 define_syscall!(syscall_ring_enter
     (ctx, ring_fd: RawFd, to_submit: u32, min_complete: u32, flags: u32)
+    cap(NoneFd)
     requires(let task_id: task_id, let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -62,6 +64,7 @@ define_syscall!(syscall_ring_enter
 
 define_syscall!(syscall_ring_register
     (ctx, ring_fd: RawFd, op: u32, arg: u64, nr_args: u32)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {

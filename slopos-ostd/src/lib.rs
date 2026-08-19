@@ -27,6 +27,7 @@ mod abi_zeroable;
 pub mod acpi;
 pub mod arch;
 pub mod atomic_bitmap;
+pub mod authority;
 pub mod bitmap;
 pub mod bitmap_slice;
 pub mod boot;

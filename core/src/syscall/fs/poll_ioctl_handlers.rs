@@ -239,6 +239,7 @@ fn poll_to_select_mask(
 
 define_syscall!(syscall_poll
     (ctx, base_ptr: u64, nfds: u64, timeout_ms_raw: i64)
+    cap(NoneFd)
     requires(let task_id: task_id, let pid: process_id)
     -> Result<u64, Errno>
 {
@@ -356,6 +357,7 @@ define_syscall!(syscall_poll
 
 define_syscall!(syscall_select
     (ctx, nfds_raw: u64, rd_ptr: u64, wr_ptr: u64, ex_ptr: u64, tv_ptr: u64)
+    cap(NoneFd)
     requires(let task_id: task_id, let pid: process_id)
     -> Result<u64, Errno>
 {
@@ -553,6 +555,7 @@ define_syscall!(syscall_select
 
 define_syscall!(syscall_ioctl
     (ctx, fd: Fd, cmd: u64, arg: u64)
+    cap(NoneFd)
     requires(let task_id: task_id, let pid: process_id)
     -> Result<u64, Errno>
 {

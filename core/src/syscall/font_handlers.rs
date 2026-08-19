@@ -20,6 +20,7 @@ fn replace_and_schedule_free(new_atlas: slopos_font::atlas::GlyphAtlas) {
 
 define_syscall!(syscall_font_set
     (ctx, data_ptr: u64, width_raw: u32, height_raw: u32, glyph_count_raw: u32, format: u64)
+    cap(NoneSelf)
     requires(console_admin)
     -> Result<(), Errno>
 {

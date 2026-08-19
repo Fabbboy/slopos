@@ -5,6 +5,7 @@ use slopos_abi::Errno;
 
 define_syscall!(syscall_pidfd_open
     (ctx, pid: u32)
+    cap(NoneRelation)
     requires(let task_id: task_id, let process_id: process_id)
     -> Result<u64, Errno>
 {

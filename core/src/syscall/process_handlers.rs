@@ -190,6 +190,7 @@ fn validate_spawn_flags(flags: u16) -> Result<u16, Errno> {
 
 define_syscall!(syscall_spawn_path
     (ctx, path: UserBytes, argv_ptr: u64, argc_raw: u32, attrs_ptr: u64)
+    cap(NoneSelf)
     -> Result<u64, Errno>
 {
     if path.base_u64() == 0 || path.len() == 0 || path.len() > exec::EXEC_MAX_PATH {
@@ -282,7 +283,8 @@ define_syscall!(syscall_spawn_path
 });
 
 define_syscall!(syscall_sigdefault
-    (ctx, mask: u64) -> Result<u64, Errno>
+    (ctx, mask: u64) cap(NoneSelf)
+    -> Result<u64, Errno>
 {
     if let Some(task) = Some(ctx.task()) {
         task_default_signals_in_mask(task, mask);
@@ -291,7 +293,8 @@ define_syscall!(syscall_sigdefault
 });
 
 define_syscall!(syscall_waitpid
-    (ctx, target: WaitTarget, flags: u32) -> Result<u64, Errno>
+    (ctx, target: WaitTarget, flags: u32) cap(NoneRelation)
+    -> Result<u64, Errno>
 {
     let wnohang = (flags & 0x1) != 0;
     let caller_id = ctx.task_id();
@@ -351,6 +354,7 @@ define_syscall!(syscall_waitpid
 
 define_syscall!(syscall_terminate_task
     (ctx, target: Tid)
+    cap(NoneRelation)
     requires(compositor)
     -> Result<(), Errno>
 {
@@ -375,6 +379,7 @@ define_syscall!(syscall_terminate_task
 
 define_syscall!(syscall_exec
     (ctx, path_ptr: u64, argv_ptr: u64, envp_ptr: u64)
+    cap(NoneSelf)
     requires(let process_id: process_id)
     -> SyscallResult
 {
@@ -518,16 +523,19 @@ define_syscall!(syscall_exec
     }
 });
 
-define_syscall!(syscall_get_cpu_count (ctx) -> Result<u64, Errno> {
+define_syscall!(syscall_get_cpu_count (ctx) cap(NoneSelf)
+    -> Result<u64, Errno> {
     Ok(slopos_arch::pcr::get_cpu_count() as u64)
 });
 
-define_syscall!(syscall_get_current_cpu (ctx) -> Result<u64, Errno> {
+define_syscall!(syscall_get_current_cpu (ctx) cap(NoneSelf)
+    -> Result<u64, Errno> {
     Ok(slopos_arch::pcr::get_current_cpu() as u64)
 });
 
 define_syscall!(syscall_set_cpu_affinity
     (ctx, target: u32, new_affinity: u32)
+    cap(NoneRelation)
     requires(let task_id: task_id, let process_id: process_id)
     -> Result<(), Errno>
 {
@@ -550,6 +558,7 @@ define_syscall!(syscall_set_cpu_affinity
 
 define_syscall!(syscall_get_cpu_affinity
     (ctx, target: u32)
+    cap(NoneRelation)
     requires(let task_id: task_id, let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -564,19 +573,22 @@ define_syscall!(syscall_get_cpu_affinity
 });
 
 define_syscall!(syscall_getpid (ctx)
+    cap(NoneSelf)
     requires(let task_id: task_id)
     -> Result<u32, Errno>
 {
     Ok(task_id)
 });
 
-define_syscall!(syscall_getppid (ctx) -> Result<u32, Errno> {
+define_syscall!(syscall_getppid (ctx) cap(NoneSelf)
+    -> Result<u32, Errno> {
     let task = ctx.task();
     Ok(task.parent_task_id())
 });
 
 define_syscall!(syscall_getpgid
     (ctx, target: u32)
+    cap(NoneRelation)
     requires(let task_id: task_id)
     -> Result<u32, Errno>
 {
@@ -589,6 +601,7 @@ define_syscall!(syscall_getpgid
 
 define_syscall!(syscall_setpgid
     (ctx, pid: u32, pgid_arg: u32)
+    cap(NoneRelation)
     requires(let task_id: task_id)
     -> Result<(), Errno>
 {
@@ -644,6 +657,7 @@ define_syscall!(syscall_setpgid
 });
 
 define_syscall!(syscall_setsid (ctx)
+    cap(NoneSelf)
     requires(let task_id: task_id)
     -> Result<u32, Errno>
 {
@@ -664,13 +678,18 @@ define_syscall!(syscall_setsid (ctx)
     Ok(task.sid())
 });
 
-define_syscall!(syscall_getuid (ctx) -> u32 { 0 });
-define_syscall!(syscall_getgid (ctx) -> u32 { 0 });
-define_syscall!(syscall_geteuid (ctx) -> u32 { 0 });
-define_syscall!(syscall_getegid (ctx) -> u32 { 0 });
+define_syscall!(syscall_getuid (ctx) cap(NoneSelf)
+    -> u32 { 0 });
+define_syscall!(syscall_getgid (ctx) cap(NoneSelf)
+    -> u32 { 0 });
+define_syscall!(syscall_geteuid (ctx) cap(NoneSelf)
+    -> u32 { 0 });
+define_syscall!(syscall_getegid (ctx) cap(NoneSelf)
+    -> u32 { 0 });
 
 define_syscall!(syscall_chdir
-    (ctx, path: UserCStr<USER_PATH_MAX>) -> Result<(), Errno>
+    (ctx, path: UserCStr<USER_PATH_MAX>) cap(NoneSelf)
+    -> Result<(), Errno>
 {
     if path.is_empty() {
         return Err(Errno::EINVAL);
@@ -694,7 +713,8 @@ define_syscall!(syscall_chdir
 });
 
 define_syscall!(syscall_getcwd
-    (ctx, buf: UserBytes) -> Result<u64, Errno>
+    (ctx, buf: UserBytes) cap(NoneSelf)
+    -> Result<u64, Errno>
 {
     if buf.base_u64() == 0 {
         return Err(Errno::EFAULT);
@@ -710,7 +730,8 @@ define_syscall!(syscall_getcwd
 });
 
 define_syscall!(syscall_arch_prctl
-    (ctx, cmd: u64, addr: u64) -> Result<(), Errno>
+    (ctx, cmd: u64, addr: u64) cap(NoneSelf)
+    -> Result<(), Errno>
 {
     match cmd {
         ARCH_SET_FS => {
@@ -736,7 +757,8 @@ define_syscall!(syscall_arch_prctl
     }
 });
 
-define_syscall!(syscall_fork (ctx) -> Result<u64, Errno> {
+define_syscall!(syscall_fork (ctx) cap(NoneSelf)
+    -> Result<u64, Errno> {
     let task = ctx.task();
     let child_id = task_fork(task, Some(ctx.user_ctx()));
     if child_id == slopos_abi::task::INVALID_TASK_ID {
@@ -748,6 +770,7 @@ define_syscall!(syscall_fork (ctx) -> Result<u64, Errno> {
 
 define_syscall!(syscall_clone
     (ctx, flags: u64, child_stack: u64, parent_tidptr: u64, child_tidptr: u64, tls: u64)
+    cap(NoneSelf)
     -> Result<u64, Errno>
 {
     let parent = ctx.task();
@@ -766,7 +789,8 @@ define_syscall!(syscall_clone
 });
 
 define_syscall!(syscall_futex
-    (ctx, uaddr: u64, op: u64, val: u32, timeout: u64) -> Result<u64, Errno>
+    (ctx, uaddr: u64, op: u64, val: u32, timeout: u64) cap(NoneSelf)
+    -> Result<u64, Errno>
 {
     if (uaddr & 0x3) != 0 {
         return Err(Errno::EINVAL);
@@ -791,6 +815,7 @@ define_syscall!(syscall_futex
 });
 
 define_syscall!(syscall_vhangup (ctx)
+    cap(NoneRelation)
     requires(let task_id: task_id)
     -> Result<(), Errno>
 {
@@ -807,6 +832,7 @@ type _Unused<T> = UserPtr<T>;
 
 define_syscall!(syscall_prlimit64
     (ctx, pid: u32, resource: u32, new_ptr: u64, old_ptr: u64)
+    cap(NoneRelation)
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {

@@ -21,6 +21,7 @@ use crate::syscall::result::SyscallResult;
 
 define_syscall!(syscall_screen_acquire
     (ctx, seat_raw: u32)
+    cap(NoneSelf)
     requires(let pid: process_id, let task_id: task_id)
     -> Result<u64, Errno>
 {
@@ -38,6 +39,7 @@ define_syscall!(syscall_screen_acquire
 
 define_syscall!(syscall_input_sink_acquire
     (ctx, seat_raw: u32)
+    cap(NoneSelf)
     requires(let pid: process_id, let task_id: task_id)
     -> Result<u64, Errno>
 {
@@ -57,7 +59,8 @@ define_syscall!(syscall_input_sink_acquire
 });
 
 define_syscall!(syscall_getrandom
-    (ctx, buf: UserBytes, _flags: u32) -> Result<u64, Errno>
+    (ctx, buf: UserBytes, _flags: u32) cap(NoneSelf)
+    -> Result<u64, Errno>
 {
     if buf.base_u64() == 0 || buf.len() == 0 {
         return Ok(0);
@@ -83,6 +86,7 @@ define_syscall!(syscall_getrandom
 
 define_syscall!(syscall_input_poll_batch
     (ctx, events_out: UserPtr<u8>, max_count: u64)
+    cap(NoneFd)
     requires(task_id: task_id)
     -> Result<u64, Errno>
 {
@@ -142,6 +146,7 @@ define_syscall!(syscall_input_poll_batch
 
 define_syscall!(syscall_clipboard_copy
     (ctx, src: UserBytes)
+    cap(NoneSelf)
     requires(task_id: task_id)
     -> Result<u64, Errno>
 {
@@ -161,6 +166,7 @@ define_syscall!(syscall_clipboard_copy
 
 define_syscall!(syscall_clipboard_paste
     (ctx, dst: UserBytes)
+    cap(NoneSelf)
     requires(task_id: task_id)
     -> Result<u64, Errno>
 {
@@ -184,6 +190,7 @@ define_syscall!(syscall_clipboard_paste
 
 define_syscall!(syscall_openpty
     (ctx, master_out: UserPtr<u32>, slave_out: UserPtr<u32>)
+    cap(NoneSelf)
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
@@ -219,6 +226,7 @@ define_syscall!(syscall_openpty
 
 define_syscall!(syscall_fb_flip
     (ctx, fd: i64, damage_ptr: u64, damage_count: u64)
+    cap(NoneFd)
     requires(compositor)
     -> Result<u64, Errno>
 {
@@ -272,6 +280,7 @@ define_syscall!(syscall_fb_flip
 
 define_syscall!(syscall_cursor_set_image
     (ctx, image_ptr: u64, len: u64, hotspot: u64)
+    cap(NoneFd)
     requires(compositor)
     -> Result<(), Errno>
 {
@@ -298,6 +307,7 @@ define_syscall!(syscall_cursor_set_image
 
 define_syscall!(syscall_cursor_move
     (ctx, pos: u32)
+    cap(NoneFd)
     requires(compositor)
     -> Result<(), Errno>
 {
@@ -314,6 +324,7 @@ define_syscall!(syscall_cursor_move
 
 define_syscall!(syscall_set_display_mode
     (ctx, width: u32, height: u32)
+    cap(NoneFd)
     requires(compositor)
     -> Result<(), Errno>
 {
@@ -328,6 +339,7 @@ define_syscall!(syscall_set_display_mode
 
 define_syscall!(syscall_roulette_draw
     (ctx, fate: u32)
+    cap(NoneFd)
     requires(display_exclusive)
     -> Result<(), Errno>
 {
@@ -347,6 +359,7 @@ define_syscall!(syscall_roulette_draw
 });
 
 define_syscall!(syscall_roulette_spin (ctx)
+    cap(NoneSelf)
     requires(task_id: task_id)
     -> Result<u64, Errno>
 {
@@ -360,6 +373,7 @@ define_syscall!(syscall_roulette_spin (ctx)
 
 define_syscall!(syscall_roulette_result
     (ctx, packed: u64)
+    cap(NoneSelf)
     requires(task_id: task_id)
     -> SyscallResult
 {
@@ -386,7 +400,8 @@ define_syscall!(syscall_roulette_result
 });
 
 define_syscall!(syscall_fb_info
-    (ctx, info_out: UserPtr<DisplayInfo>) -> Result<(), Errno>
+    (ctx, info_out: UserPtr<DisplayInfo>) cap(NoneSelf)
+    -> Result<(), Errno>
 {
     let info = video::get_display_info().ok_or(Errno::EINVAL)?;
     copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;

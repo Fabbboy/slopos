@@ -570,6 +570,33 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     }
 
+    // `authority=warn` reports each distinct capability once and keeps booting,
+    // so one desktop boot enumerates everything the real userland needs --
+    // which the test suite cannot show, because under `tests=on` init exits
+    // before spawning the compositor, shell or terminal. `authority=off`
+    // measures the per-check cost without a separate build.
+    for token in cmdline.split_whitespace() {
+        if let Some(value) = token.strip_prefix("authority=") {
+            match value {
+                "off" => {
+                    slopos_ostd::authority::set_mode(slopos_ostd::authority::AuthorityMode::Off);
+                    boot_info(b"Boot option: authority=off (capability checks disabled)\0");
+                }
+                "warn" => {
+                    slopos_ostd::authority::set_mode(slopos_ostd::authority::AuthorityMode::Warn);
+                    boot_info(b"Boot option: authority=warn (report, do not deny)\0");
+                }
+                "enforce" | "on" => {
+                    slopos_ostd::authority::set_mode(
+                        slopos_ostd::authority::AuthorityMode::Enforce,
+                    );
+                    boot_info(b"Boot option: authority=enforce\0");
+                }
+                _ => boot_info(b"Boot option: authority= ignored (want off|warn|enforce)\0"),
+            }
+        }
+    }
+
     // `quota=warn` is the only tier a real high-water mark can be measured on;
     // `quota=off` still moves the counters, so attribution survives without
     // enforcement.

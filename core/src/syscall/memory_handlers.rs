@@ -5,6 +5,7 @@ use crate::syscall::result::SyscallResult;
 
 define_syscall!(syscall_brk
     (ctx, new_brk: u64)
+    cap(NoneSelf)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -18,6 +19,7 @@ define_syscall!(syscall_brk
 
 define_syscall!(syscall_mmap
     (ctx, addr: u64, length: u64, prot: u64, flags: u64, fd: RawFd, offset: u64)
+    cap(NoneSelf)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -66,6 +68,7 @@ define_syscall!(syscall_mmap
 
 define_syscall!(syscall_munmap
     (ctx, addr: u64, length: u64)
+    cap(NoneSelf)
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
@@ -81,6 +84,7 @@ define_syscall!(syscall_munmap
 
 define_syscall!(syscall_mprotect
     (ctx, addr: u64, length: u64, prot: u64)
+    cap(NoneSelf)
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
@@ -94,6 +98,7 @@ define_syscall!(syscall_mprotect
 
 define_syscall!(syscall_memfd_create
     (ctx, flags: u32)
+    cap(NoneSelf)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -115,6 +120,7 @@ define_syscall!(syscall_memfd_create
 
 define_syscall!(syscall_ftruncate
     (ctx, fd: Fd, size: u64)
+    cap(NoneFd)
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {

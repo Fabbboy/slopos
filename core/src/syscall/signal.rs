@@ -172,6 +172,7 @@ fn action_to_user(action: &SignalAction) -> UserSigaction {
 
 define_syscall!(syscall_rt_sigaction
     (ctx, signum: Signum, new_act_ptr: u64, old_act_ptr: u64, sigsetsize: u64)
+    cap(NoneSelf)
     -> Result<(), Errno>
 {
     if sigsetsize != core::mem::size_of::<SigSet>() as u64 {
@@ -211,6 +212,7 @@ define_syscall!(syscall_rt_sigaction
 
 define_syscall!(syscall_rt_sigprocmask
     (ctx, how: u32, set_ptr: u64, oldset_ptr: u64, sigsetsize: u64)
+    cap(NoneSelf)
     -> Result<(), Errno>
 {
     if sigsetsize != core::mem::size_of::<SigSet>() as u64 {
@@ -241,7 +243,8 @@ define_syscall!(syscall_rt_sigprocmask
 });
 
 define_syscall!(syscall_kill
-    (ctx, raw_pid_arg: i64, sig: u64) -> SyscallResult
+    (ctx, raw_pid_arg: i64, sig: u64) cap(NoneRelation)
+    -> SyscallResult
 {
     let caller_id = ctx.task_id();
 
@@ -404,7 +407,8 @@ fn stage_fpu_from_sigframe(
     staged
 }
 
-define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
+define_syscall!(syscall_rt_sigreturn (ctx) cap(NoneSelf)
+    -> SyscallResult {
     // After the handler's `ret` pops the restorer address, RSP points
     // directly at the SignalFrame.
     let rsp = ctx.user_rsp();

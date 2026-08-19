@@ -7,44 +7,78 @@
 //!     -> $crate::syscall::result::SyscallResult
 //! ```
 //!
+//! plus a **same-named module** holding `pub const DEF: SyscallEntry` — a
+//! function and a module occupy different namespaces, so both can be `$name`.
+//! `syscall_table!` reads `$handler::DEF`, which is what makes the
+//! classification and the handler one artifact.
+//!
 //! The first identifier in the parameter list is the *context name* the body
 //! sees (canonically `ctx`); subsequent `ident: Type` pairs are typed arguments
-//! parsed from `ctx.regs()`. Requirement clauses live in a trailing
-//! `requires(...)` block, and the body's return type must implement
+//! parsed from `ctx.regs()`. The `cap(...)` clause is **mandatory** and names
+//! exactly one `slopos_ostd::authority::Capability`; omitting it is a macro-arm
+//! mismatch, i.e. a compile error at the handler's own definition site, in the
+//! crate that owns it. Requirement clauses live in a trailing `requires(...)`
+//! block, and the body's return type must implement
 //! [`crate::syscall::result::IntoSyscallResult`].
 //!
 //! # Grammar
 //!
 //! ```ignore
 //! // no typed args
-//! define_syscall!(name(ctx) -> RetType { body });
+//! define_syscall!(name(ctx) cap(NoneSelf) -> RetType { body });
 //!
 //! // typed args
-//! define_syscall!(name(ctx, a: Ty1, b: Ty2) -> RetType { body });
+//! define_syscall!(name(ctx, a: Ty1, b: Ty2) cap(NoneFd) -> RetType { body });
 //!
 //! // requirement clause
-//! define_syscall!(name(ctx, fd: Fd, buf: UserBytes)
+//! define_syscall!(name(ctx, fd: Fd, buf: UserBytes) cap(NoneFd)
 //!     requires(let pid: process_id) -> RetType { body });
 //!
 //! // raw form — no typed arg parsing at all
-//! define_syscall!(raw $name(ctx) -> SyscallResult { body });
+//! define_syscall!(raw $name(ctx) cap(NoneSelf) -> SyscallResult { body });
 //! ```
+
+/// Emit the `SyscallEntry` constant for one handler, in a module sharing the
+/// handler's name.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __syscall_def {
+    ($name:ident, $cap:ident) => {
+        #[allow(non_snake_case)]
+        pub mod $name {
+            /// The dispatch-table entry for this handler.
+            ///
+            /// Registering the handler without this is impossible:
+            /// `syscall_table!` names `$handler::DEF`, so a slot can only be
+            /// filled by something that carries its own classification.
+            pub const DEF: $crate::syscall::common::SyscallEntry =
+                $crate::syscall::common::SyscallEntry {
+                    handler: ::core::option::Option::Some(super::$name),
+                    name: ::slopos_ostd::sync::KernelSync::new(
+                        concat!(stringify!($name), "\0").as_ptr() as *const ::core::ffi::c_char,
+                    ),
+                    cap: ::slopos_ostd::authority::Capability::$cap,
+                };
+        }
+    };
+}
 
 #[macro_export]
 macro_rules! define_syscall {
-    (raw $name:ident ($ctx:ident) -> $ret:ty $body:block) => {
+    (raw $name:ident ($ctx:ident) cap($cap:ident) -> $ret:ty $body:block) => {
         #[allow(unused_variables)]
         pub fn $name(
             $ctx: &$crate::syscall::context::SyscallContext,
         ) -> $crate::syscall::result::SyscallResult {
             <$ret as $crate::syscall::result::IntoSyscallResult>::into_syscall_result($body)
         }
+        $crate::__syscall_def!($name, $cap);
     };
 
     // The body runs inside a `move` closure returning the user-declared `$ret`,
     // so it can use both `?` on `Result<_, Errno>` and `return Err(errno)` with
     // natural variant names.
-    ($name:ident ( $ctx:ident ) -> $ret:ty $body:block) => {
+    ($name:ident ( $ctx:ident ) cap($cap:ident) -> $ret:ty $body:block) => {
         #[allow(unused_variables)]
         pub fn $name(
             $ctx: &$crate::syscall::context::SyscallContext,
@@ -52,9 +86,10 @@ macro_rules! define_syscall {
             let __body_value: $ret = (move || -> $ret { $body })();
             <$ret as $crate::syscall::result::IntoSyscallResult>::into_syscall_result(__body_value)
         }
+        $crate::__syscall_def!($name, $cap);
     };
 
-    ($name:ident ( $ctx:ident ) requires ( $($req:tt)* ) -> $ret:ty $body:block) => {
+    ($name:ident ( $ctx:ident ) cap($cap:ident) requires ( $($req:tt)* ) -> $ret:ty $body:block) => {
         #[allow(unused_variables)]
         pub fn $name(
             $ctx: &$crate::syscall::context::SyscallContext,
@@ -63,9 +98,11 @@ macro_rules! define_syscall {
             let __body_value: $ret = (move || -> $ret { $body })();
             <$ret as $crate::syscall::result::IntoSyscallResult>::into_syscall_result(__body_value)
         }
+        $crate::__syscall_def!($name, $cap);
     };
 
     ($name:ident ( $ctx:ident, $($arg_name:ident : $arg_ty:ty),+ $(,)? )
+        cap($cap:ident)
         -> $ret:ty $body:block) => {
         #[allow(unused_variables)]
         pub fn $name(
@@ -76,9 +113,11 @@ macro_rules! define_syscall {
             let __body_value: $ret = (move || -> $ret { $body })();
             <$ret as $crate::syscall::result::IntoSyscallResult>::into_syscall_result(__body_value)
         }
+        $crate::__syscall_def!($name, $cap);
     };
 
     ($name:ident ( $ctx:ident, $($arg_name:ident : $arg_ty:ty),+ $(,)? )
+        cap($cap:ident)
         requires ( $($req:tt)* )
         -> $ret:ty $body:block) => {
         #[allow(unused_variables)]
@@ -91,6 +130,7 @@ macro_rules! define_syscall {
             let __body_value: $ret = (move || -> $ret { $body })();
             <$ret as $crate::syscall::result::IntoSyscallResult>::into_syscall_result(__body_value)
         }
+        $crate::__syscall_def!($name, $cap);
     };
 
     (@reqs $ctx:ident,) => {};

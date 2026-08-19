@@ -8,9 +8,53 @@ use slopos_ostd::klog_info;
 use slopos_ostd::user::context::UserContext;
 use slopos_sched::task_struct::Task;
 
+use slopos_ostd::authority::{AuthorityDecision, decide};
+
+use crate::syscall::common::SyscallEntry;
 use crate::syscall::context::SyscallContext;
 use crate::syscall::handlers::syscall_lookup;
 use crate::syscall::result::SyscallResult;
+
+/// Whether `task` may invoke the operation `entry` classifies.
+///
+/// Returns `true` for every ungated operation without reading anything, so the
+/// common path is one compare on a byte already in cache.
+///
+/// The failure mode is split by kind, deliberately: invoking an operation your
+/// authority does not name is a *program bug* and is loud, because a program
+/// that asks for something it can never have wants to be told. Acting on an
+/// object you were not given is an ordinary `EPERM` and is silent — that one is
+/// an attacker probing, and a log line per probe is the denial-of-service.
+#[inline]
+fn authorize(task: &Task, entry: &SyscallEntry, sysno: u64) -> bool {
+    if !entry.cap.is_gated() {
+        return true;
+    }
+    match decide(task_caps(task), entry.cap) {
+        AuthorityDecision::Allow => true,
+        AuthorityDecision::WarnAndAllow => {
+            klog_info!(
+                "AUTHORITY: task {} invoked syscall {} without {} (authority=warn)",
+                task.task_id,
+                sysno,
+                entry.cap.name(),
+            );
+            true
+        }
+        AuthorityDecision::Deny => false,
+    }
+}
+
+/// The caller's effective capability mask.
+///
+/// Derived from `task.flags` until the `Cred` lands: the flags *are* the whole
+/// of today's privilege model, so deriving keeps one source of truth rather
+/// than adding a second that could disagree with it. The `Process`-owned
+/// `Cred` replaces this body without moving the call site.
+#[inline]
+fn task_caps(task: &Task) -> u64 {
+    slopos_ostd::authority::caps_from_task_flags(task.flags)
+}
 
 pub fn syscall_handle(user_ctx: &UserContext) {
     let sysno = user_ctx.rax();
@@ -32,6 +76,19 @@ pub fn syscall_handle(user_ctx: &UserContext) {
 
     match handler {
         Some(func) => {
+            // The authority decision lives here, not in the handler. The entry
+            // is already in a cache line this just touched, so the check is one
+            // compare against a byte beside the function pointer about to be
+            // called -- cheaper than the per-handler `require_*` calls it
+            // subsumes, total by construction, and impossible for a handler to
+            // forget.
+            if let Some(entry) = entry
+                && !authorize(task, entry, sysno)
+            {
+                user_ctx.set_rax(Errno::EPERM.as_u64());
+                crate::syscall::signal::deliver_pending_signal(&current, user_ctx);
+                return;
+            }
             let ctx = SyscallContext::from_current(&current, user_ctx);
             let result = func(&ctx);
             ctx.write_result(result);

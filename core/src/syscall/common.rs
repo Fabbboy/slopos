@@ -4,6 +4,7 @@
 use core::ffi::{c_char, c_int};
 
 use slopos_abi::Errno;
+use slopos_ostd::authority::Capability;
 use slopos_ostd::sync::KernelSync;
 
 use slopos_mm::paging_defs::PAGE_SIZE_4KB_USIZE;
@@ -35,6 +36,23 @@ pub struct SyscallEntry {
     /// Diagnostic label (NUL-terminated static string). `KernelSync` because
     /// raw pointers are `!Send + !Sync`; the target is `'static` text.
     pub name: KernelSync<*const c_char>,
+    /// What this operation requires of its caller.
+    ///
+    /// Reaches this table *through the handler* — `define_syscall!` emits it
+    /// into a same-named module and `syscall_table!` reads `$handler::DEF` —
+    /// so the dispatcher's decision and the handler's own witness cannot
+    /// disagree. There is exactly one artifact, which is what makes the
+    /// totality assert a `rustc` error rather than a script with an allowlist.
+    pub cap: Capability,
+}
+
+impl SyscallEntry {
+    /// A slot no handler was registered into.
+    pub const EMPTY: Self = Self {
+        handler: None,
+        name: KernelSync::new(core::ptr::null()),
+        cap: Capability::Unimplemented,
+    };
 }
 
 /// Copy a NUL-terminated string out of user memory, bounded by `dst`.

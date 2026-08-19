@@ -34,6 +34,7 @@ fn device_for(ifindex: u32) -> Result<DevIndex, Errno> {
 
 define_syscall!(syscall_net_monitor
     (ctx, mask: u32, flags: u32)
+    cap(NoneSelf)
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
@@ -47,6 +48,7 @@ define_syscall!(syscall_net_monitor
 
 define_syscall!(syscall_net_iface_ctl
     (ctx, ifindex: u32, op: u32, arg: u64)
+    cap(NoneRelation)
     requires(net_admin)
     -> Result<(), Errno>
 {
@@ -137,6 +139,7 @@ define_syscall!(syscall_net_iface_ctl
 // reinterprets user memory from an op code.
 define_syscall!(syscall_net_addr_ctl
     (ctx, op: u32, ptr: u64, len: u64)
+    cap(NoneRelation)
     requires(net_admin)
     -> Result<(), Errno>
 {
@@ -192,6 +195,7 @@ define_syscall!(syscall_net_addr_ctl
 
 define_syscall!(syscall_net_route_ctl
     (ctx, op: u32, ptr: u64, len: u64)
+    cap(NoneRelation)
     requires(net_admin)
     -> Result<(), Errno>
 {
@@ -237,6 +241,7 @@ define_syscall!(syscall_net_route_ctl
 // nameservers.
 define_syscall!(syscall_net_resolver_set
     (ctx, ptr: u64, len: u64)
+    cap(NoneRelation)
     requires(net_admin)
     -> Result<(), Errno>
 {
