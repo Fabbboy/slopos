@@ -558,7 +558,16 @@ pub fn input_cleanup_task(task_id: u32) {
                 KEYBOARD_FOCUS_FAST.store(0, Ordering::Release);
             }
             if s.pointer_focus == task_id {
-                s.pointer_focus = 0;
+                // Re-seed to whoever holds the input seat rather than leaving
+                // the pointer aimed at nothing. `input_poll_batch` used to do
+                // this on every call, at frame rate; the loss happens here, so
+                // the repair belongs here. Zero when no seat is held, which is
+                // the same state the old re-arm would have left.
+                s.pointer_focus = slopos_ostd::seat::holder(slopos_ostd::seat::SeatKind::InputSink)
+                    .filter(|holder| *holder != task_id)
+                    .unwrap_or(0);
+                s.window_offset_x = 0;
+                s.window_offset_y = 0;
             }
             if s.compositor_task_id == task_id {
                 s.compositor_task_id = 0;

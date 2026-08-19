@@ -264,3 +264,73 @@ slopos_testing::stest!(
     name = test_input_focus_claims_the_slot_up_front,
     suite = input_event
 );
+
+/// The pointer re-seed self-heal.
+///
+/// `input_poll_batch` used to re-seed the pointer focus on every call, at
+/// frame rate: `if get_pointer_focus() == 0 { set_pointer_focus(self) }`. That
+/// re-arm is gone, so the repair has to happen where the loss does — when the
+/// focused task is cleaned up. Without it the pointer stays aimed at nothing
+/// after any focused window dies, and nothing ever re-aims it.
+///
+/// A naive "consume a handle" rewrite deletes exactly this; the lost-wake
+/// failure class has already bitten this tree twice.
+pub fn test_pointer_focus_reseeds_to_the_seat_holder() -> TestResult {
+    use crate::input_event::{input_get_pointer_focus, input_set_pointer_focus};
+    use slopos_ostd::seat::{self, SeatId, SeatKind};
+
+    const SEAT_HOLDER: u32 = 1_000_023;
+    const FOCUSED: u32 = 1_000_029;
+
+    let restore = input_get_pointer_focus();
+    input_cleanup_task(SEAT_HOLDER);
+    input_cleanup_task(FOCUSED);
+    seat::reset_all();
+
+    // The compositor holds the input seat; a different task holds the pointer.
+    if seat::acquire(SeatKind::InputSink, SeatId::CompositorPrimary, SEAT_HOLDER).is_err() {
+        seat::reset_all();
+        return fail!("a reset arbiter must grant a free seat");
+    }
+    input_set_pointer_focus(FOCUSED, 0);
+    if input_get_pointer_focus() != FOCUSED {
+        seat::reset_all();
+        input_set_pointer_focus(restore, 0);
+        return fail!("pointer focus did not take");
+    }
+
+    // The focused task dies. The pointer must land back on the seat holder
+    // rather than on nothing.
+    input_cleanup_task(FOCUSED);
+    let reseeded = input_get_pointer_focus();
+
+    // A dying seat holder has no one to re-seed to, so the pointer goes to 0
+    // rather than back to itself.
+    input_cleanup_task(SEAT_HOLDER);
+    let after_holder_death = input_get_pointer_focus();
+
+    seat::reset_all();
+    input_set_pointer_focus(restore, 0);
+    input_cleanup_task(SEAT_HOLDER);
+    input_cleanup_task(FOCUSED);
+
+    if reseeded != SEAT_HOLDER {
+        return fail!(
+            "pointer focus = {} after the focused task died, want the seat holder {}",
+            reseeded,
+            SEAT_HOLDER
+        );
+    }
+    if after_holder_death != 0 {
+        return fail!(
+            "pointer focus = {} after the seat holder itself died, want 0",
+            after_holder_death
+        );
+    }
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_pointer_focus_reseeds_to_the_seat_holder,
+    suite = input_event
+);

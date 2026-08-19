@@ -29,6 +29,10 @@ define_syscall!(syscall_screen_acquire
     if fd < 0 {
         return Err(Errno::from_raw(fd).unwrap_or(Errno::EINVAL));
     }
+    // What `fb_flip` used to stamp on every frame. Announced by the arbiter at
+    // the acquire, so the owner is decided once by asking rather than
+    // repeatedly by acting.
+    video::set_compositor_task_id(task_id);
     Ok(fd as u64)
 });
 
@@ -41,6 +45,13 @@ define_syscall!(syscall_input_sink_acquire
     let fd = seat_acquire_fd(pid, SeatKind::InputSink, id, task_id);
     if fd < 0 {
         return Err(Errno::from_raw(fd).unwrap_or(Errno::EINVAL));
+    }
+    // What `input_poll_batch` used to re-arm on every call. The pointer
+    // re-seed is deliberately *not* repeated here: its loss happens at task
+    // cleanup, and that is where the repair now lives.
+    input::register_compositor(task_id);
+    if input::get_pointer_focus() == 0 {
+        input::set_pointer_focus(task_id, 0);
     }
     Ok(fd as u64)
 });
@@ -82,13 +93,6 @@ define_syscall!(syscall_input_poll_batch
         return Err(Errno::EPERM);
     }
     let max_count = max_count as usize;
-
-    if ctx.is_compositor() {
-        input::register_compositor(task_id);
-        if input::get_pointer_focus() == 0 {
-            input::set_pointer_focus(task_id, 0);
-        }
-    }
 
     #[allow(dead_code)]
     #[derive(slopos_ostd::Zeroable, slopos_ostd::Pod, Copy, Clone)]
@@ -261,7 +265,6 @@ define_syscall!(syscall_fb_flip
     if rc < 0 {
         return Err(Errno::EINVAL);
     }
-    video::set_compositor_task_id(ctx.task_id());
     // 0 = shown, 1 = suppressed (kernel log owns the screen, or a prior present
     // is still in flight); the compositor keeps damage pending on nonzero.
     Ok(rc as u64)
