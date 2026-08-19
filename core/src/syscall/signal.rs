@@ -79,8 +79,21 @@ pub(crate) fn signal_may_name(flags: u16) -> bool {
 
 /// Whether a task holding `caller_flags` may signal one holding `target_flags`.
 ///
-/// `task.flags` stands in for the user ids POSIX asks about: a sender may name
-/// a task whose privileges it already holds, and no other.
+/// A sender may name a task whose privileges it already holds, and no other —
+/// the relation standing in for the user ids POSIX asks about.
+///
+/// Stated on flags rather than on capability masks *deliberately*, and the
+/// distinction matters after exec: `exec` narrows `Task::caps` but leaves
+/// `Task::flags` alone, so a deprivileged process keeps the flag word it was
+/// spawned with. Reading flags here is the conservative direction — the
+/// exec'd process stays *protected* from its unprivileged peers rather than
+/// gaining the ability to signal them — and it keeps this relation answering
+/// the question it has always answered: who may be named, not what may be
+/// invoked.
+///
+/// A capability-mask version would be the wrong shape: `caps` is about
+/// operations, and two tasks with identical operational authority can still
+/// stand in a spawn relation where one should not signal the other.
 pub(crate) fn signal_dominates(caller_flags: u16, target_flags: u16) -> bool {
     target_flags & SPAWN_PRIVILEGED & !caller_flags == 0
 }

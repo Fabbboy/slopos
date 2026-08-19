@@ -35,12 +35,6 @@ fn pack(kind: SeatKind, epoch: u64) -> usize {
     ((epoch as usize) << 8) | (kind.as_u8() as usize)
 }
 
-#[inline]
-fn unpack(handle: usize) -> Option<(SeatKind, u64)> {
-    let kind = SeatKind::try_from_u8((handle & 0xFF) as u8)?;
-    Some((kind, (handle >> 8) as u64))
-}
-
 /// Owns nothing the arbiter does not already own: the seat is released by
 /// [`seat::revoke_for_task`], not here. This exists to carry the quota charge
 /// for the object row, so a process cannot mint unbounded seat fds.
@@ -110,33 +104,18 @@ pub fn seat_acquire_fd(table: FdTable, kind: SeatKind, id: SeatId, task_id: u32)
     fd
 }
 
-/// Resolve `fd` to the seat it names, checking that `task_id` is still the
-/// live holder and that the grant is the current one.
+/// Whether `task_id` holds `kind`'s seat.
 ///
-/// This is where a seat fd is *tested* rather than merely presented — the
-/// descriptor-lookup choke point the whole design rests on. `EBADF` for a
-/// non-seat fd, `EPERM` for a grant the arbiter has since revoked.
-pub fn seat_resolve(table: FdTable, fd: i32, task_id: u32) -> Result<SeatKind, Errno> {
-    let (file_kind, handle) =
-        slopos_fs::fileio::fileio_get_open_file_handle(table, fd).ok_or(Errno::EBADF)?;
-    if file_kind != FileKind::Seat {
-        return Err(Errno::EBADF);
-    }
-    let (kind, epoch) = unpack(handle).ok_or(Errno::EBADF)?;
-    // Holder and epoch both: the id alone would let a recycled task id
-    // validate a dead holder's descriptor.
-    if !seat::is_held_by(kind, task_id) {
-        return Err(Errno::EPERM);
-    }
-    let live = seat::current_epoch(kind);
-    if live != epoch {
-        return Err(Errno::EPERM);
-    }
-    Ok(kind)
-}
-
-/// A held-seat check that names no descriptor, for the frame-rate callers that
-/// have not yet been converted to pass one.
+/// The display syscalls check this rather than resolving a descriptor
+/// argument, because their ABI predates the seat and takes no fd. The seat is
+/// still the authority: the arbiter decides who holds it, the descriptor is
+/// the holder's evidence, and this asks the arbiter directly.
+///
+/// A descriptor-taking form was written and then deleted rather than left
+/// unused: a security helper with no callers drifts out of step with the one
+/// that is actually used, and the next person to need it copies whichever they
+/// find first. When `fb_flip` grows an fd argument, it comes back with a
+/// caller.
 #[inline]
 pub fn seat_held_by(kind: SeatKind, task_id: u32) -> bool {
     seat::is_held_by(kind, task_id)
