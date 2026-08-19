@@ -1,0 +1,35 @@
+# check_authority_reachability allowlist — variant: dev
+#
+# Syscall handlers that can reach a terminal power primitive
+# (`slopos_ostd::platform::power::{shutdown,reboot}`).
+#
+# Each must be classified `Power` at its `define_syscall!` site, or carry a
+# stated reason here for why the path is gated by something else. An entry
+# matching nothing fails the gate: a dead exemption would let the real path
+# grow back under its cover.
+#
+# The `*0` symbols are the closure bodies `define_syscall!` wraps each handler
+# in; they are the same code and appear because the walk reads the ELF rather
+# than the source.
+#
+#     scripts/check_authority_reachability.sh --variant dev \
+#         --emit-allowlist builddir/kernel-dev.elf
+
+# Classified `Power`. The witness `slopos_ostd::platform::power` demands is
+# minted from the caller's own mask, so these cannot be reached unchecked.
+syscall_halt
+syscall_halt0
+syscall_reboot
+syscall_reboot0
+
+# NOT classified `Power`, and deliberately so: this is the reachability case
+# the whole gate exists for. `roulette_result` is `Fate` — an unprivileged,
+# retryable syscall — and its loss arm reaches the reboot primitive two calls
+# away, which a slot-level gate reads as green.
+#
+# The second key is `BOOT_FLAG_FATE_REBOOT`, set only for an interactive boot
+# and clear under `tests=on`, so a test image exposes no user-reachable path
+# that power-cycles the machine mid-run. Removing that flag check must fail
+# review; this entry is where the reason is written down.
+syscall_roulette_result
+syscall_roulette_result0
