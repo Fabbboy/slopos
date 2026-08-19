@@ -74,4 +74,12 @@ static PLATFORM_SERVICES: PlatformServices = PlatformServices {
 
 pub fn register_boot_services() {
     register_platform_services(&PLATFORM_SERVICES);
+    // OSTD owns the *authority* for power -- the witness and the single choke
+    // point -- while the sequence stays here, where the ACPI and UEFI state it
+    // needs lives. `boot` sits above OSTD, so the mechanism is registered in
+    // rather than called out to.
+    slopos_ostd::platform::power::register(slopos_ostd::platform::power::PowerOps {
+        shutdown: kernel_shutdown_fn,
+        reboot: kernel_reboot_fn,
+    });
 }

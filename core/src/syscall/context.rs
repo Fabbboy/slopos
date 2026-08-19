@@ -97,6 +97,25 @@ impl<'a> SyscallContext<'a> {
         Ok(self.task_id)
     }
 
+    /// This caller's effective capability mask.
+    #[inline]
+    pub fn caps(&self) -> u64 {
+        slopos_ostd::authority::caps_from_task_flags(self.task.flags)
+    }
+
+    /// Mint the witness for `R`, or `EPERM`.
+    ///
+    /// Branded to this context's borrow of the calling task, so the witness
+    /// cannot outlive the request that produced it. The dispatcher has already
+    /// made the same decision for the slot's declared capability; this is what
+    /// a *primitive* demands, and the two read the same mask.
+    #[inline]
+    pub fn require_cap<R: slopos_ostd::authority::CapKind>(
+        &self,
+    ) -> Result<slopos_ostd::authority::Cap<'_, R>, Errno> {
+        slopos_ostd::authority::check_mask::<R, _>(self.task, self.caps())
+    }
+
     /// The calling process's descriptor table, read from the task's own
     /// generation-checked handle rather than resolved from its id. `ESRCH` for
     /// a kernel task — never [`FdTable::Kernel`], whose descriptors every

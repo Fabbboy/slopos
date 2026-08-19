@@ -373,7 +373,7 @@ define_syscall!(syscall_roulette_spin (ctx)
 
 define_syscall!(syscall_roulette_result
     (ctx, packed: u64)
-    cap(NoneSelf)
+    cap(Fate)
     requires(task_id: task_id)
     -> SyscallResult
 {
@@ -393,7 +393,19 @@ define_syscall!(syscall_roulette_result
         SyscallResult::Ok(0)
     } else {
         fate_apply_outcome(&stored as *const FateResult, 0, false);
-        platform::kernel_reboot(b"Roulette loss - spinning again\0".as_ptr() as *const i8);
+        // Two keys. `Fate` admits the caller to the syscall; the boot flag says
+        // this image is one where losing costs a reboot. Without it the loss is
+        // still a loss -- the joke survives -- but the machine stays up, which
+        // is what a test image needs.
+        //
+        // This arm is why a slot-level gate is not sufficient on its own: an
+        // unprivileged, retryable syscall sat two calls from the reboot
+        // primitive, and `check_authority_reachability.sh` is what sees that.
+        if !slopos_ostd::boot_flags::has_flag(slopos_ostd::boot_flags::BOOT_FLAG_FATE_REBOOT) {
+            return SyscallResult::Ok(1);
+        }
+        let cap = slopos_ostd::platform::power::kernel_authority();
+        slopos_ostd::platform::power::reboot(&cap, b"Roulette loss - spinning again\0".as_ptr() as *const i8);
         #[allow(unreachable_code)]
         SyscallResult::NoReturn
     }

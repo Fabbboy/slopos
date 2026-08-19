@@ -220,6 +220,18 @@ pub const TASK_FLAG_CONSOLE_ADMIN: u16 = 0x400;
 /// Conferred on `/bin/sysmon`; `TASK_FLAG_SYSTEM` implies it.
 pub const TASK_FLAG_PROC_ADMIN: u16 = 0x800;
 
+/// May halt or reboot the machine.
+///
+/// Conferred on exactly one program, `/bin/halt`. Power is deliberately not a
+/// shell builtin: Linux gates `reboot(2)` on `CAP_SYS_BOOT` and ships
+/// `/sbin/halt` as a separate privileged binary, `systemctl poweroff` asks
+/// logind rather than acting, and Redox puts every such resource behind a
+/// daemon that holds the authority. All three keep the shell as the thing that
+/// *asks*, never the thing that holds.
+///
+/// `TASK_FLAG_SYSTEM` implies it, so init can still bring the machine down.
+pub const TASK_FLAG_POWER: u16 = 0x1000;
+
 // `task.flags` is the entirety of SlopOS's privilege model; the four masks
 // below partition it, so "may a caller set this bit?" is answered once, here.
 
@@ -242,7 +254,8 @@ pub const SPAWN_PRIVILEGED: u16 = TASK_FLAG_NO_PREEMPT
     | TASK_FLAG_DISPLAY_EXCLUSIVE
     | TASK_FLAG_NET_ADMIN
     | TASK_FLAG_CONSOLE_ADMIN
-    | TASK_FLAG_PROC_ADMIN;
+    | TASK_FLAG_PROC_ADMIN
+    | TASK_FLAG_POWER;
 
 /// The two ring bits. They describe where the task executes, not what it may do,
 /// hence classified apart from the privileges. `USER_MODE` is forced on
@@ -259,7 +272,7 @@ pub const SPAWN_MODE_BITS: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_KERNEL_MODE;
 /// `0x0040` is the retired `TASK_FLAG_FPU_INITIALIZED` and must not be reused.
 /// Adding a `TASK_FLAG_*` means clearing its bit here *and* adding it to exactly
 /// one of the three masks above; the asserts fail until both are done.
-pub const SPAWN_RESERVED: u16 = 0xF040;
+pub const SPAWN_RESERVED: u16 = 0xE040;
 
 const _: () = assert!(
     (SPAWN_USER_SETTABLE | SPAWN_PRIVILEGED | SPAWN_MODE_BITS | SPAWN_RESERVED) == u16::MAX,

@@ -14,7 +14,7 @@
 
 use slopos_abi::task::{
     TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
-    TASK_FLAG_NET_ADMIN, TASK_FLAG_PROC_ADMIN, TaskPriority,
+    TASK_FLAG_NET_ADMIN, TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN, TaskPriority,
 };
 
 struct ProgramGrant {
@@ -64,6 +64,15 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
     ProgramGrant {
         path: b"/bin/sysmon",
         flags: TASK_FLAG_PROC_ADMIN,
+        priority: None,
+    },
+    // The only program that may halt or reboot. Power is deliberately not a
+    // shell builtin — Linux gates `reboot(2)` on `CAP_SYS_BOOT` and ships
+    // `/sbin/halt` separately, `systemctl poweroff` asks logind, and Redox puts
+    // the resource behind a daemon. The shell spawns this and waits.
+    ProgramGrant {
+        path: b"/bin/halt",
+        flags: TASK_FLAG_POWER,
         priority: None,
     },
 ];

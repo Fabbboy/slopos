@@ -276,10 +276,10 @@ const fn count_of(cap: Capability) -> usize {
 /// point to a capability that had none still moves a number here.
 const CAP_COUNTS: [(Capability, usize); 15] = [
     (Capability::Unimplemented, 59),
-    (Capability::NoneSelf, 61),
+    (Capability::NoneSelf, 58),
     (Capability::NoneFd, 42),
     (Capability::NoneRelation, 15),
-    (Capability::Power, 0),
+    (Capability::Power, 2),
     (Capability::Launch, 0),
     (Capability::ProcSignal, 0),
     (Capability::SysInspect, 0),
@@ -288,7 +288,7 @@ const CAP_COUNTS: [(Capability, usize); 15] = [
     (Capability::ConsoleConfig, 0),
     (Capability::ConsoleIo, 0),
     (Capability::ClipboardGlobal, 0),
-    (Capability::Fate, 0),
+    (Capability::Fate, 1),
     (Capability::TestHarness, 0),
 ];
 

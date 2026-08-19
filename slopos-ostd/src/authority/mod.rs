@@ -399,6 +399,18 @@ pub fn decide(mask: u64, cap: Capability) -> AuthorityDecision {
     }
 }
 
+/// Mint a `Power` witness for a kernel-initiated action.
+///
+/// `pub(crate)` so only [`crate::platform::power`] can reach it, and that
+/// module re-exports it under a name the reachability gate greps for. The
+/// authority of a kernel-initiated shutdown comes from *being the kernel*,
+/// which no runtime check can establish; what keeps the caller set small is
+/// the tracked list, not this function.
+#[inline]
+pub(crate) fn mint_kernel_power() -> Cap<'static, Power> {
+    Cap::mint()
+}
+
 /// Derive a capability mask from a task's flag word.
 ///
 /// A bridge, not the model: `task.flags` is the whole of today's privilege
@@ -414,7 +426,7 @@ pub fn decide(mask: u64, cap: Capability) -> AuthorityDecision {
 pub const fn caps_from_task_flags(flags: u16) -> u64 {
     use slopos_abi::task::{
         TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
-        TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
+        TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
     };
 
     let mut mask = CAP_NONE;
@@ -430,11 +442,12 @@ pub const fn caps_from_task_flags(flags: u16) -> u64 {
     if flags & (TASK_FLAG_PROC_ADMIN | TASK_FLAG_SYSTEM) != 0 {
         mask |= Capability::SysInspect.bit();
     }
+    if flags & (TASK_FLAG_POWER | TASK_FLAG_SYSTEM) != 0 {
+        mask |= Capability::Power.bit();
+    }
     if flags & TASK_FLAG_SYSTEM != 0 {
-        mask |= Capability::Power.bit()
-            | Capability::Launch.bit()
-            | Capability::ProcSignal.bit()
-            | Capability::TestHarness.bit();
+        mask |=
+            Capability::Launch.bit() | Capability::ProcSignal.bit() | Capability::TestHarness.bit();
     }
     mask
 }

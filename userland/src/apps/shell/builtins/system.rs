@@ -117,14 +117,44 @@ pub fn cmd_clear(_argc: i32, _argv: &[&[u8]]) -> i32 {
     0
 }
 
+/// Ask `/bin/halt` to bring the machine down.
+///
+/// Spawned rather than issued directly: `halt` and `reboot` need the `Power`
+/// capability, which the kernel confers on exactly one program. A shell that
+/// held it would put whole-machine authority in the process that runs every
+/// command the user types — which is why Linux ships `/sbin/halt` as a
+/// separate binary, `systemctl poweroff` asks logind, and Redox puts the
+/// resource behind a daemon.
+///
+/// Returns only on failure; on success the child powers the machine off.
+fn spawn_halt(action: &[u8]) -> i32 {
+    let argv: [*const u8; 1] = [action.as_ptr()];
+    let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];
+    let tid = process::spawn_path_with_actions(
+        b"/bin/halt",
+        &argv,
+        slopos_abi::task::TaskPriority::Normal,
+        slopos_abi::task::TASK_FLAG_USER_MODE,
+        &actions,
+        0,
+    );
+    if tid <= 0 {
+        shell_write(b"sh: cannot start /bin/halt\n");
+        return 1;
+    }
+    process::waitpid(tid as u32);
+    // Reached only if the child failed: a successful halt never returns.
+    1
+}
+
 pub fn cmd_shutdown(_argc: i32, _argv: &[&[u8]]) -> i32 {
     shell_write(HALTED.as_bytes());
-    process::halt();
+    spawn_halt(b"halt\0")
 }
 
 pub fn cmd_reboot(_argc: i32, _argv: &[&[u8]]) -> i32 {
     shell_write(REBOOTING.as_bytes());
-    process::reboot();
+    spawn_halt(b"reboot\0")
 }
 
 fn info_kv(label: &[u8], value: impl core::fmt::Display) {

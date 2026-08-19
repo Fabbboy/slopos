@@ -47,7 +47,6 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 | [SLOPOS-2026-0020](#slopos-2026-0020) | 7.1 | HIGH | `execve` is not an address-space boundary |
 | [SLOPOS-2026-0021](#slopos-2026-0021) | 7.1 | HIGH | Mount resolution is a textual prefix match on the unnormalised user path |
 | [SLOPOS-2026-0037](#slopos-2026-0037) | 7.1 | HIGH | The compositor clipboard has no authorization |
-| [SLOPOS-2026-0049](#slopos-2026-0049) | 5.5 | MEDIUM | `halt` and `reboot` have no authorization check, by three separate paths |
 | [SLOPOS-2026-0043](#slopos-2026-0043) | 6.6 | MEDIUM | ext2 mounts and writes any image whose magic and geometry are sane, with no feature-compatibility gate |
 | [SLOPOS-2026-0022](#slopos-2026-0022) | 6.3 | MEDIUM | ramfs recycles inode ids immediately on unlink while descriptors still name them |
 | [SLOPOS-2026-0014](#slopos-2026-0014) | 5.9 | MEDIUM | TCP initial sequence numbers come from an invertible FNV chain |
@@ -518,20 +517,6 @@ These are **candidate CVE-style records** for internal tracking. They are not of
   Mount an ext4 image with extents enabled. It mounts read-write, and any write corrupts it.
 - Remediation: Check `s_feature_incompat` against the set actually implemented and refuse to mount otherwise; check `s_feature_ro_compat` and mount read-only when an unsupported read-only-compatible feature is present. This is exactly the gate Linux's `ext4_feature_set_ok` performs.
 
-### SLOPOS-2026-0049
-- Title: `halt` and `reboot` have no authorization check, by three separate paths
-- Status: open
-- Confidence: 92 — evidence 38 (all three handlers read; two carry no `requires` clause and the third carries only an existence check), exploitability 28 (one syscall), reproducibility 26 (deterministic)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` — **5.5 MEDIUM**
-- Impact: One instruction from any task powers off or reboots the machine. The third path matters because a slot-level authorization gate would leave it green: an unprivileged, retryable syscall reaches the reboot primitive two calls away from the one being audited.
-- Evidence:
-  - core/src/syscall/core_handlers.rs:57 — `syscall_halt` carries no `requires` clause.
-  - core/src/syscall/core_handlers.rs:63 — `syscall_reboot` carries no `requires` clause.
-  - core/src/syscall/ui_handlers.rs:312-333 — `syscall_roulette_result` carries only `requires(task_id: task_id)` and calls `platform::kernel_reboot` on its loss arm; `roulette`/`roulette_result` are unprivileged and retryable.
-  - kernel-services/src/platform.rs:57,62 — the terminal primitives are function-pointer indirections in a peer service crate of `core`, so no type-level obligation can currently be attached to them.
-- Repro:
-  `syscall_halt()` from the shell. Or `roulette_spin()` followed by `roulette_result()` until the loss arm is taken.
-- Remediation: A `Power` capability on `halt` and `reboot`, with the terminal primitives moved into `slopos-ostd` behind a witness so an unchecked call site does not compile; the roulette loss arm additionally gated on a boot-mask bit in the idiom `syscall_test_panic` already uses (core/src/syscall/test_handlers.rs:123-129). A reachability gate covers the kernel-initiated callers. See `plans/authority-model.md` phase 3.
 
 ## Relevant NVD CVE Analogs (fetched)
 
@@ -560,4 +545,4 @@ Ordered by what removes the most exposure per unit of work, not by score.
 3. **The TLB correctness set** (0017, 0018, 0019). Stale writable translations across address spaces are the only findings here that could become memory corruption rather than denial of service.
 4. **The filesystem integrity set** (0021–0027, 0042, 0043). Individually low-scoring, collectively the reason the filesystem cannot yet be trusted with data that matters.
 5. **The residue of resource accounting** (0016, 0030, 0031). Per-principal accounting has landed in full and 0035 went with it — a ring is a `FileBacking`, so it now carries a per-process `ObjectRow` charge. These three do **not** fall out of it, and grouping them under it was the error: a per-principal count bounds how many of a thing one process holds, and none of these is that shape. 0016 is a reference *cycle*, which no count collects; its fix is a type restriction on what may be passed over a socket, the same place io_uring landed after five years. 0030 is a scheduling-fairness gap, not a capacity one. 0031 is a shared *namespace* — fill one futex bucket and every other process whose word hashes there is denied — which per-principal partitioning would fix and per-principal counting would not — the accounting design named this and put it out of scope deliberately.
-6. **Authorization** (0049, and the structural halves of the fixed authorization findings). The relation checks have landed; the capability set, the witness that makes a missing check a compile error, and the display and input seats are `plans/authority-model.md`, which depends on `plans/process-object.md`.
+6. **Authorization** — landed. Every dispatch-table slot names one capability at its handler's definition site, and a `const` histogram asserts both totality and the per-capability distribution, so an unclassified operation and a capability growing into a catch-all are each a `rustc` error. `halt` and `reboot` (formerly 0049) now require `Power`, conferred by program identity on `/bin/halt` alone — the shell spawns it rather than holding whole-machine authority, matching Linux's `CAP_SYS_BOOT` + `/sbin/halt` split, `systemctl poweroff`'s delegation to logind, and Redox's daemon-backed schemes. The `roulette_result` reachability arm is two-keyed on a boot flag, clear under `tests=on`. The display and input seats replace the last-actor-wins ownership stamps.

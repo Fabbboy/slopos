@@ -20,12 +20,19 @@ slopos_ostd::kcommand! {
     run = run_reboot,
 }
 
+// Kernel-initiated: the trigger is a key on the physical console, which no
+// userland process can forge and which carries no credential to check. The
+// authority is `being the kernel`, minted through the tracked seam rather than
+// derived from a caller.
+
 fn run_poweroff(kc: &mut KConsole<'_>) {
     kline!(kc, "kconsole: poweroff requested from the console");
-    crate::shutdown::kernel_shutdown(c"kconsole poweroff".as_ptr())
+    let cap = slopos_ostd::platform::power::kernel_authority();
+    slopos_ostd::platform::power::shutdown(&cap, c"kconsole poweroff".as_ptr())
 }
 
 fn run_reboot(kc: &mut KConsole<'_>) {
     kline!(kc, "kconsole: reboot requested from the console");
-    crate::shutdown::kernel_reboot(c"kconsole reboot".as_ptr())
+    let cap = slopos_ostd::platform::power::kernel_authority();
+    slopos_ostd::platform::power::reboot(&cap, c"kconsole reboot".as_ptr())
 }

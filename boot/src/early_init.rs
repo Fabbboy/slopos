@@ -510,6 +510,11 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     if cmdline.contains("tests=on") {
         slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_TESTS_ENABLED);
         boot_info(b"Boot option: userland test mode enabled\0");
+    } else {
+        // The Wheel of Fate's reboot is armed for an interactive boot only. A
+        // test image must expose no user-reachable path that power-cycles the
+        // machine mid-run -- the same reasoning that gates `test_panic`.
+        slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_FATE_REBOOT);
     }
 
     if cmdline.contains("panic.on_oops=on")

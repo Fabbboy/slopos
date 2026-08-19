@@ -15,6 +15,7 @@ use crate::syscall::common::{
 use crate::syscall::result::SyscallResult;
 use slopos_kernel_services::platform;
 use slopos_kernel_services::syscall_services::tty;
+use slopos_ostd::platform::power;
 use slopos_sched::scheduler::{
     get_scheduler_stats, schedule, scheduler_is_preemption_enabled, sleep_current_task_ms, yield_,
 };
@@ -54,16 +55,26 @@ define_syscall!(syscall_clock_gettime
     Ok(())
 });
 
-define_syscall!(syscall_halt (ctx) cap(NoneSelf)
+define_syscall!(syscall_halt (ctx) cap(Power)
     -> SyscallResult {
-    platform::kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
+    // The dispatcher already refused a caller lacking `Power`. The witness is
+    // what the primitive itself demands, so a path reaching it without one
+    // does not compile -- which is the whole point of moving the primitive
+    // into ostd.
+    let Ok(cap) = ctx.require_cap::<slopos_ostd::authority::Power>() else {
+        return SyscallResult::Err(Errno::EPERM);
+    };
+    power::shutdown(&cap, b"user halt\0".as_ptr() as *const c_char);
     #[allow(unreachable_code)]
     SyscallResult::NoReturn
 });
 
-define_syscall!(syscall_reboot (ctx) cap(NoneSelf)
+define_syscall!(syscall_reboot (ctx) cap(Power)
     -> SyscallResult {
-    platform::kernel_reboot(b"user reboot\0".as_ptr() as *const c_char);
+    let Ok(cap) = ctx.require_cap::<slopos_ostd::authority::Power>() else {
+        return SyscallResult::Err(Errno::EPERM);
+    };
+    power::reboot(&cap, b"user reboot\0".as_ptr() as *const c_char);
     #[allow(unreachable_code)]
     SyscallResult::NoReturn
 });

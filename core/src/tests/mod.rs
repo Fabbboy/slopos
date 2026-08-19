@@ -1,3 +1,4 @@
+pub mod authority_tests;
 pub mod bh_tests;
 pub mod event_bus_tests;
 pub mod helpers;

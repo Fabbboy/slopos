@@ -58,6 +58,15 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         flags: TASK_FLAG_USER_MODE,
         desc: "Spin the Wheel of Fate",
     },
+    // The kernel confers `Power` on this path alone. Requested unprivileged,
+    // like every other entry: the grant is the kernel's to make.
+    ProgramSpec {
+        name: "halt",
+        path: "/bin/halt",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Halt or reboot the machine",
+    },
     ProgramSpec {
         name: "file_manager",
         path: "/bin/file_manager",
