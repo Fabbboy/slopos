@@ -53,7 +53,7 @@ fn authorize(task: &Task, entry: &SyscallEntry, sysno: u64) -> bool {
 /// `Cred` replaces this body without moving the call site.
 #[inline]
 fn task_caps(task: &Task) -> u64 {
-    slopos_ostd::authority::caps_from_task_flags(task.flags)
+    slopos_ostd::task::ops::task_caps(task)
 }
 
 pub fn syscall_handle(user_ctx: &UserContext) {

@@ -426,7 +426,7 @@ pub(crate) fn mint_kernel_power() -> Cap<'static, Power> {
 pub const fn caps_from_task_flags(flags: u16) -> u64 {
     use slopos_abi::task::{
         TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
-        TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
+        TASK_FLAG_LAUNCH, TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
     };
 
     // Held by every user task. These are the capabilities whose deletion
@@ -461,9 +461,11 @@ pub const fn caps_from_task_flags(flags: u16) -> u64 {
     if flags & (TASK_FLAG_POWER | TASK_FLAG_SYSTEM) != 0 {
         mask |= Capability::Power.bit();
     }
+    if flags & (TASK_FLAG_LAUNCH | TASK_FLAG_SYSTEM) != 0 {
+        mask |= Capability::Launch.bit();
+    }
     if flags & TASK_FLAG_SYSTEM != 0 {
-        mask |=
-            Capability::Launch.bit() | Capability::ProcSignal.bit() | Capability::TestHarness.bit();
+        mask |= Capability::ProcSignal.bit() | Capability::TestHarness.bit();
     }
     mask
 }

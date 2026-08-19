@@ -13,7 +13,7 @@
 //! protection on `/bin`, which SlopOS does not have.
 
 use slopos_abi::task::{
-    TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
+    TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_LAUNCH,
     TASK_FLAG_NET_ADMIN, TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN, TaskPriority,
 };
 
@@ -34,8 +34,27 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
     // refuses from anybody.
     ProgramGrant {
         path: b"/bin/compositor",
-        flags: TASK_FLAG_COMPOSITOR,
+        // `Launch` because the dock and the shelf spawn programs, and the
+        // network popover spawns `/bin/ip` -- which carries NET_ADMIN, so a
+        // bound excluding the compositor breaks the network toggle. This is
+        // the fourth launcher, and the grant table's own "revisit past about
+        // four entries" threshold is therefore already reached.
+        flags: TASK_FLAG_COMPOSITOR | TASK_FLAG_LAUNCH,
         priority: Some(TaskPriority::High),
+    },
+    // Launches every program the user types. Holds `Launch` and nothing else:
+    // a shell that also held Power or NET_ADMIN would put that authority in
+    // the process that runs every command.
+    ProgramGrant {
+        path: b"/bin/shell",
+        flags: TASK_FLAG_LAUNCH,
+        priority: None,
+    },
+    // Spawns `/bin/shell` onto its PTY slave.
+    ProgramGrant {
+        path: b"/bin/terminal",
+        flags: TASK_FLAG_LAUNCH,
+        priority: None,
     },
     // Draws straight to the framebuffer before a compositor exists — what
     // `roulette_draw`'s `requires(display_exclusive)` gates.

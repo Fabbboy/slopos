@@ -251,6 +251,32 @@ pub fn spawn_program_with_attrs(
         // refused every privileged bit the caller asked for, so flags follow
         // the program, not the requester.
         let (granted_flags, granted_priority) = grants::grant_for(normalized_path);
+
+        // ...and a spawn that *raises* authority additionally needs the
+        // spawner to hold `Launch`. Without this any task obtains a privileged
+        // child by spawning the privileged path, which leaks an entitlement to
+        // an unrelated program without granting anything to it.
+        //
+        // Checked only when the grant is non-empty: an ordinary spawn raises
+        // nothing and needs no right. Deliberately not an intersection with the
+        // spawner's own authority — the shell holds no display authority, so
+        // `spawner & grant` would mean `/bin/roulette` could never draw.
+        if granted_flags != 0 {
+            let spawner_may_launch = match task_find_by_id(parent_task_id) {
+                Some(parent) => slopos_ostd::authority::mask_permits(
+                    slopos_ostd::task::ops::task_caps(&parent),
+                    slopos_ostd::authority::Capability::Launch,
+                ),
+                // No parent task: `launch_init`, the kernel-only root. That is
+                // exactly the raise `Launch` exists to bound, performed by the
+                // one caller that cannot be userland.
+                None => true,
+            };
+            if !spawner_may_launch {
+                return Err(ExecError::NoExec);
+            }
+        }
+
         flags |= granted_flags;
         if let Some(granted) = granted_priority {
             priority = granted;
@@ -322,7 +348,13 @@ pub fn spawn_program_with_attrs(
             .as_ref()
             .map(|parent| resolve_inherited_job_control(parent, task_id, flags));
 
+        // Authority enters here, from the program-identity grant applied
+        // above -- the single raise site. Stamped on the child before it is
+        // findable, so no other CPU can observe it with an unset mask.
+        let child_caps = slopos_ostd::authority::caps_from_task_flags(flags);
+
         let Some((fg_handoff, displaced_group)) = spawn.with_child(|child| {
+            slopos_ostd::task::ops::task_set_caps(child, child_caps);
             child.entry_point = entry;
             child.context.get_mut().rip = entry;
             child.context.get_mut().rsp = stack_ptr;

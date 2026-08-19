@@ -5,6 +5,7 @@
 //! `TaskInner` itself.
 
 use crate::sync::BUS;
+use core::sync::atomic::Ordering;
 use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SIGNAL_KILLED, SIGNAL_MASK, SigSet, sig_bit};
 
@@ -213,4 +214,49 @@ pub fn task_clone_from<K, U>(dest: &mut TaskInner<K, U>, other: &TaskInner<K, U>
 #[inline]
 pub fn task_has_deliverable_signal<K, U>(task: &TaskInner<K, U>) -> bool {
     (task.signal_pending() & SIGNAL_MASK & !task.signal_blocked()) != 0
+}
+
+// ---------------------------------------------------------------------------
+// Authority
+// ---------------------------------------------------------------------------
+
+/// This task's effective capability mask.
+///
+/// Falls back to the flag-derived value while the stored mask is
+/// [`CAPS_UNSET`], so a task built on a path that never set one is answered
+/// consistently rather than as omnipotent or powerless.
+#[inline]
+pub fn task_caps<K, U>(task: &TaskInner<K, U>) -> u64 {
+    let stored = task.caps.load(Ordering::Acquire);
+    if stored == crate::task::kernel_task::CAPS_UNSET {
+        crate::authority::caps_from_task_flags(task.flags)
+    } else {
+        stored
+    }
+}
+
+/// Publish `mask` as this task's authority.
+///
+/// The only widening path, and only the loader reaches it: a program-identity
+/// grant at load is where authority enters the system.
+#[inline]
+pub fn task_set_caps<K, U>(task: &TaskInner<K, U>, mask: u64) {
+    task.caps.store(mask, Ordering::Release);
+}
+
+/// Narrow this task's authority to `mask`, keeping only what it already held.
+///
+/// **Total and infallible.** A reduction has no error return a caller could
+/// ignore: a historical local root came from an attacker making a privilege
+/// *drop* fail inside a program that ignored the result. Returns the mask now
+/// in force, for the log line.
+///
+/// Monotone by construction — the result is an intersection, so no call to
+/// this can raise authority regardless of what `mask` names.
+#[inline]
+pub fn task_restrict_caps<K, U>(task: &TaskInner<K, U>, mask: u64) -> u64 {
+    let current = task_caps(task);
+    let narrowed = current & mask;
+    task.caps.store(narrowed, Ordering::Release);
+    narrowed
 }

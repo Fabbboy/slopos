@@ -99,7 +99,7 @@ impl<'a> SyscallContext<'a> {
     /// This caller's effective capability mask.
     #[inline]
     pub fn caps(&self) -> u64 {
-        slopos_ostd::authority::caps_from_task_flags(self.task.flags)
+        slopos_ostd::task::ops::task_caps(self.task)
     }
 
     /// Mint the witness for `R`, or `EPERM`.

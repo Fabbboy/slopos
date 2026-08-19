@@ -748,8 +748,8 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
 
     let (flags, priority) = grant_for(b"/bin/compositor");
     assert_test!(
-        flags == TASK_FLAG_COMPOSITOR,
-        "the compositor must be granted COMPOSITOR"
+        flags == TASK_FLAG_COMPOSITOR | slopos_abi::task::TASK_FLAG_LAUNCH,
+        "the compositor must be granted COMPOSITOR and LAUNCH"
     );
     assert_test!(
         matches!(priority, Some(TaskPriority::High)),
@@ -780,8 +780,15 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
         grant_for(INIT_PATH) == (0, None),
         "init must not be grantable: SYSTEM stays kernel-only"
     );
+    // The shell is a launcher, not an ordinary program: it holds `Launch` and
+    // nothing else, so it may spawn a program whose identity earns authority
+    // without holding any of that authority itself.
     assert_test!(
-        grant_for(b"/bin/shell") == (0, None),
+        grant_for(b"/bin/shell") == (slopos_abi::task::TASK_FLAG_LAUNCH, None),
+        "the shell must be granted LAUNCH and nothing more"
+    );
+    assert_test!(
+        grant_for(b"/bin/file_manager") == (0, None),
         "an ordinary program must get nothing"
     );
     assert_test!(

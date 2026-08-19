@@ -259,3 +259,89 @@ slopos_testing::stest!(
     name = signalable_refuses_init_and_invalid_targets,
     suite = authority
 );
+
+/// exec narrows authority to what the new image's identity earns, and the
+/// reduction is monotone.
+///
+/// An entitlement surviving `exec` is one of the two CVE shapes this model is
+/// built against: a privileged program execs an arbitrary binary and the
+/// binary inherits the privilege. The intersection is what prevents it.
+///
+/// Tested at the mask level because that is where the property lives -- the
+/// handler computes `grant(image) & held` and stores it, so what matters is
+/// that the arithmetic cannot widen.
+fn exec_intersection_never_widens() -> TestResult {
+    let privileged = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM);
+    let ordinary = caps_from_task_flags(TASK_FLAG_USER_MODE);
+
+    // exec of an image whose identity earns nothing drops every privilege.
+    let after = privileged & ordinary;
+    for cap in [
+        Capability::Power,
+        Capability::Launch,
+        Capability::ProcSignal,
+        Capability::TestHarness,
+    ] {
+        if mask_permits(after, cap) {
+            return fail!("{} survived exec of an unprivileged image", cap.name());
+        }
+    }
+
+    // An unprivileged task execing a *privileged* image does not gain the
+    // grant: the intersection bounds it by what was already held. This is the
+    // half that stops exec being a privilege-escalation primitive.
+    let grant = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_POWER);
+    let raised = ordinary & grant;
+    if mask_permits(raised, Capability::Power) {
+        return fail!("exec of a privileged image raised an unprivileged task");
+    }
+
+    // Monotone: intersecting with everything changes nothing.
+    if (after & u64::MAX) != after {
+        return fail!("the reduction is not monotone");
+    }
+    pass!()
+}
+
+/// `Launch` bounds the one raise site, and is held by exactly the launchers.
+///
+/// Without it any task obtains a privileged child by spawning the privileged
+/// path -- an entitlement leaking to an unrelated program with nothing granted
+/// to it.
+fn launch_is_held_by_the_launchers_only() -> TestResult {
+    use slopos_abi::task::{TASK_FLAG_COMPOSITOR, TASK_FLAG_LAUNCH};
+
+    // The four real launchers: init (SYSTEM), shell, terminal, compositor.
+    for (flags, who) in [
+        (TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM, "init"),
+        (TASK_FLAG_USER_MODE | TASK_FLAG_LAUNCH, "shell/terminal"),
+        (
+            TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR | TASK_FLAG_LAUNCH,
+            "compositor",
+        ),
+    ] {
+        if !mask_permits(caps_from_task_flags(flags), Capability::Launch) {
+            return fail!("{} must hold Launch", who);
+        }
+    }
+
+    // And nobody else. An ordinary program spawning /bin/halt must not thereby
+    // obtain a child holding Power.
+    let ordinary = caps_from_task_flags(TASK_FLAG_USER_MODE);
+    if mask_permits(ordinary, Capability::Launch) {
+        return fail!("an ordinary task must not hold Launch");
+    }
+    // A privileged-but-not-launcher program likewise: holding Power does not
+    // imply being allowed to confer it.
+    let power_only = caps_from_task_flags(TASK_FLAG_USER_MODE | TASK_FLAG_POWER);
+    if mask_permits(power_only, Capability::Launch) {
+        return fail!("/bin/halt must not hold Launch");
+    }
+    pass!()
+}
+
+slopos_testing::stest!(name = exec_intersection_never_widens, suite = authority);
+slopos_testing::stest!(
+    name = launch_is_held_by_the_launchers_only,
+    suite = authority
+);

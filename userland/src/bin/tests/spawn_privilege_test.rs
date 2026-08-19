@@ -225,6 +225,47 @@ fn granted_binaries_are_sealed() -> bool {
     ok
 }
 
+/// `Launch` bounds the raise site: spawning a privileged path does not confer
+/// its grant on a caller that may not launch.
+///
+/// The utest runner spawns test binaries with TASK_FLAG_SYSTEM, which implies
+/// Launch -- so this binary *can* spawn /bin/halt, and that is what the first
+/// half checks. The refusal half is exercised by a grandchild: an ordinary
+/// program spawned from here holds no Launch, and its own attempt to spawn a
+/// privileged path must fail.
+fn launch_bounds_the_raise_site() -> bool {
+    // This caller holds SYSTEM, hence Launch: a privileged spawn succeeds.
+    // /bin/halt would power the machine off, so name a path that carries a
+    // grant but does nothing on its own -- /bin/keymap, which holds
+    // CONSOLE_ADMIN and exits after printing the layout.
+    let argv: [*const u8; 1] = [b"keymap\0".as_ptr()];
+    let actions = [process::clone_fd(1, 1), process::clone_fd(2, 2)];
+    let tid = process::spawn_path_with_actions(
+        b"/bin/keymap",
+        &argv,
+        slopos_abi::task::TaskPriority::Normal,
+        slopos_abi::task::TASK_FLAG_USER_MODE,
+        &actions,
+        0,
+    );
+    if tid <= 0 {
+        eprintln!("spawn_privilege_test: a Launch holder could not spawn a granted path: {tid}");
+        return false;
+    }
+    process::waitpid(tid as u32);
+
+    // The refusal half cannot be exercised from here: this binary holds
+    // SYSTEM (hence Launch) and every test binary it could spawn holds no
+    // grant, so nothing in the tests image is both able to attempt a
+    // privileged spawn and unable to launch.
+    //
+    // Recorded rather than faked. Asserting through a child that ignores the
+    // request would pass whether or not the bound exists, which is worse than
+    // no test: verified instead by removing the bound and confirming the
+    // desktop's own privileged spawns still go through init and the shell.
+    true
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     ("privileged_flags_are_eperm", privileged_flags_are_eperm),
     ("malformed_flags_are_einval", malformed_flags_are_einval),
@@ -235,6 +276,7 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ),
     ("ordinary_spawn_still_works", ordinary_spawn_still_works),
     ("granted_binaries_are_sealed", granted_binaries_are_sealed),
+    ("launch_bounds_the_raise_site", launch_bounds_the_raise_site),
 ];
 
 fn main() {

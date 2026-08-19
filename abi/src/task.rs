@@ -232,6 +232,24 @@ pub const TASK_FLAG_PROC_ADMIN: u16 = 0x800;
 /// `TASK_FLAG_SYSTEM` implies it, so init can still bring the machine down.
 pub const TASK_FLAG_POWER: u16 = 0x1000;
 
+/// May spawn a program whose identity earns it authority.
+///
+/// The bound on the one raise site. Without it, any task obtains a privileged
+/// child simply by spawning the privileged path -- which is how an entitlement
+/// leaks to an unrelated program without any privilege being *granted* to it.
+///
+/// Deliberately **not** an intersection with the spawner's own authority:
+/// `spawner.caps & grant(image)` is arithmetically self-defeating, because the
+/// shell holds no display authority and `/bin/roulette` could then never draw.
+/// The bound has to be a separate right to *launch*, not a floor on what is
+/// launched.
+///
+/// Conferred on the four programs that actually launch: `/sbin/init`,
+/// `/bin/shell`, `/bin/terminal` (which spawns the shell) and
+/// `/bin/compositor` (which spawns `/bin/ip` for the network toggle and the
+/// dock's programs). `TASK_FLAG_SYSTEM` implies it.
+pub const TASK_FLAG_LAUNCH: u16 = 0x2000;
+
 // `task.flags` is the entirety of SlopOS's privilege model; the four masks
 // below partition it, so "may a caller set this bit?" is answered once, here.
 
@@ -255,7 +273,8 @@ pub const SPAWN_PRIVILEGED: u16 = TASK_FLAG_NO_PREEMPT
     | TASK_FLAG_NET_ADMIN
     | TASK_FLAG_CONSOLE_ADMIN
     | TASK_FLAG_PROC_ADMIN
-    | TASK_FLAG_POWER;
+    | TASK_FLAG_POWER
+    | TASK_FLAG_LAUNCH;
 
 /// The two ring bits. They describe where the task executes, not what it may do,
 /// hence classified apart from the privileges. `USER_MODE` is forced on
@@ -272,7 +291,7 @@ pub const SPAWN_MODE_BITS: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_KERNEL_MODE;
 /// `0x0040` is the retired `TASK_FLAG_FPU_INITIALIZED` and must not be reused.
 /// Adding a `TASK_FLAG_*` means clearing its bit here *and* adding it to exactly
 /// one of the three masks above; the asserts fail until both are done.
-pub const SPAWN_RESERVED: u16 = 0xE040;
+pub const SPAWN_RESERVED: u16 = 0xC040;
 
 const _: () = assert!(
     (SPAWN_USER_SETTABLE | SPAWN_PRIVILEGED | SPAWN_MODE_BITS | SPAWN_RESERVED) == u16::MAX,

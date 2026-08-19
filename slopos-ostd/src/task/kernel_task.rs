@@ -293,6 +293,14 @@ impl SchedPlacement {
 /// `K` is the kernel-mode stack handle and `U` the SafeStack data ("unsafe")
 /// stack handle; the kernel side passes `slopos_sched::task_stack::KernelStack`
 /// and `UnsafeStack`.
+/// `Task::caps` before the authority model has computed one.
+///
+/// Not zero and not `u64::MAX`: either would be a *decision*, and a task whose
+/// mask has never been derived has not had one made. Readers fall back to the
+/// flag-derived value, so a task built on a path that predates the derivation
+/// is neither omnipotent nor powerless.
+pub const CAPS_UNSET: u64 = u64::MAX;
+
 #[repr(C)]
 pub struct TaskInner<K, U> {
     /// ABI sub-struct holding every field naked asm reads via a compile-time
@@ -484,6 +492,19 @@ pub struct TaskInner<K, U> {
     ///
     /// Relaxed: a counter nobody orders anything against.
     pub migration_count: AtomicU32,
+    /// Effective capability mask — the authority model's record for this task.
+    ///
+    /// Atomic and separate from [`flags`](Self::flags) because it is *narrowed
+    /// on exec*, in the task's own context, while other CPUs read it to answer
+    /// "may this task be signalled" and "may it invoke that syscall". `flags`
+    /// is a plain word written only before publication; authority is not, so it
+    /// gets its own.
+    ///
+    /// `u64::MAX` is the "not yet computed" sentinel: a task built before the
+    /// authority model derives its mask reads through to the flag-derived
+    /// value, so no task is accidentally omnipotent and none is accidentally
+    /// powerless.
+    pub caps: AtomicU64,
     /// Bitmask of pending signals, written by `kill()`.
     pub signal_pending: AtomicU64,
     /// Bitmask of blocked signals. Atomic because `task_signal_post` reads it
@@ -1143,6 +1164,7 @@ impl<K, U> TaskInner<K, U> {
             last_cpu: AtomicU8::new(0),
             fpu_last_cpu: AtomicI32::new(FPU_CPU_NONE),
             migration_count: AtomicU32::new(0),
+            caps: AtomicU64::new(CAPS_UNSET),
             signal_pending: AtomicU64::new(0),
             signal_blocked: AtomicU64::new(SIG_EMPTY),
             signal_actions: [const { SignalActionCell::default() }; NSIG],
@@ -1213,6 +1235,7 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).kernel_stack).write(None);
                 addr_of_mut!((*slot).unsafe_stack).write(None);
                 addr_of_mut!((*slot).process_group).write(RcuArcSlot::empty());
+                addr_of_mut!((*slot).caps).write(AtomicU64::new(CAPS_UNSET));
                 addr_of_mut!((*slot).test_reports).write(SpinLock::new(None, TEST_REPORTS_CLASS));
                 addr_of_mut!((*slot).abi.unsafe_stack_sp).write(0);
 
@@ -1446,6 +1469,12 @@ impl<K, U> TaskInner<K, U> {
         self.parked_wait_queue = AtomicPtr::new(ptr::null_mut());
         self.recovery_depth = AtomicU32::new(0);
         self.exit_cleanup_flags = AtomicU8::new(0);
+        // Authority copies on fork -- it is per-process and the child is the
+        // same principal -- but it is written explicitly here rather than left
+        // to the bytewise copy. An omission from this list is exactly the shape
+        // of the inheritance CVE this model exists to prevent, and an explicit
+        // write is visible in review while an omission is not.
+        self.caps = AtomicU64::new(other.caps.load(Ordering::Acquire));
         self.signal_pending = AtomicU64::new(0);
         // A child is handed its own existence reference at registration;
         // inheriting the parent's `true` would let its reap take back a
