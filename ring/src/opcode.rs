@@ -341,20 +341,10 @@ pub fn is_ownership_op(opcode: u8) -> bool {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Authority classification (SLOPRING § 12 + the authority model)
-//
-// The ring must not be a capability bypass: an entry point that runs work
-// under a credential other than its creator's is a confused deputy by
-// construction. All fourteen opcodes are classified below, and the assert
-// holds the whole set to the property that makes the design sound -- no opcode
-// reaches a gated capability.
-//
-// That is what licenses the ring carrying no `Cred` snapshot. It is not a
-// claim about today's code that could quietly stop being true: an opcode that
-// ever reaches a capability class has to change `opcode_capability`, and the
-// assert below fails until somebody states what it now needs.
-// ---------------------------------------------------------------------------
+// Authority classification (SLOPRING § 12). The assert below is what licenses
+// the ring carrying no `Cred` snapshot: no opcode reaches a gated capability,
+// so an opcode running under its creator's credential can be a confused deputy
+// for nothing.
 
 use slopos_ostd::authority::Capability;
 

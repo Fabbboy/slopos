@@ -429,18 +429,9 @@ pub const fn caps_from_task_flags(flags: u16) -> u64 {
         TASK_FLAG_LAUNCH, TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
     };
 
-    // Held by every user task. These are the capabilities whose deletion
-    // condition is already written down: each names a global the kernel has
-    // not yet given an object form, so gating them on a grant today would
-    // break every program while protecting nothing an attacker could not
-    // reach another way.
-    //
-    // `ConsoleIo` is the belt while `write` still reaches the global console
-    // with no descriptor; `ClipboardGlobal` dies when the clipboard is
-    // memfd-plus-fd-passing only; `SysInspect` is already relation-scoped
-    // inside `process_list`, which reports only what the caller could signal.
-    // Listing them here rather than leaving them ungated is what makes the
-    // deletion visible as a diff when the object form lands.
+    // Universal: each names a global with no object form yet, so a grant would
+    // break every program and protect nothing. Classified rather than ungated
+    // so their deletion is a diff here when that form lands.
     let mut mask = Capability::ConsoleIo.bit()
         | Capability::ClipboardGlobal.bit()
         | Capability::SysInspect.bit()

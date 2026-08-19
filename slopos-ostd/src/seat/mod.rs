@@ -1,28 +1,19 @@
 //! Single-holder seats for the display and the input sink.
 //!
-//! `fb_flip` and `input_poll_batch` used to stamp the caller as the global
-//! compositor / input sink on *every* call, at frame rate. That is a re-arm,
-//! not an acquire: no credential reaches it, and whoever acts last owns the
-//! screen. An object that supports no access check is not protected by any
-//! sandbox around it.
-//!
-//! A seat replaces the stamp with an object. Ownership is announced by the
-//! arbiter here and is never conferred by presenting a frame.
+//! `fb_flip` and `input_poll_batch` used to stamp the caller as the owner on
+//! every call, at frame rate — a re-arm, not an acquire, so whoever acted last
+//! owned the screen. Ownership is now announced by the arbiter and never
+//! conferred by presenting a frame.
 //!
 //! Three properties are load-bearing:
 //!
-//! - **Two named seats, strict priority.** [`SeatId::Virtcon`] outranks
-//!   [`SeatId::CompositorPrimary`], so the kernel log and `/bin/roulette` can
-//!   always take the screen back and the display stays recoverable. A seat
-//!   request naming the lower rank fails while the higher one is held.
-//! - **Release is arbiter revocation, not holder `Drop`.** The holder is named
-//!   by task id and dropped by [`revoke_for_task`], driven from the task
-//!   cleanup hook that already runs at exit *and* at `exec`. A reference cycle
-//!   among holders would otherwise wedge the display unrecoverably — a
-//!   documented failure of process descriptors elsewhere.
-//! - **The grant carries a generation.** A holder that dies and whose task id
-//!   is recycled does not silently re-acquire: [`SeatGrant`] is only valid
-//!   while its epoch matches, so a stale one fails closed.
+//! - **Strict priority.** [`SeatId::Virtcon`] outranks the compositor, so the
+//!   kernel log and `/bin/roulette` can always take the screen back.
+//! - **Release is arbiter revocation, not holder `Drop`** ([`revoke_for_task`],
+//!   from the task cleanup hook). A reference cycle among holders would
+//!   otherwise wedge the display unrecoverably.
+//! - **The grant carries an epoch**, so a recycled task id cannot revive a dead
+//!   holder's grant.
 //!
 //! The handle userland gets is a descriptor, made non-duplicable by the
 //! `FdRights` stamped on its table entry; this module owns only the

@@ -245,15 +245,9 @@ pub fn spawn_program_with_attrs(
         // the program, not the requester.
         let (granted_flags, granted_priority) = grants::grant_for(normalized_path);
 
-        // ...and a spawn that *raises* authority additionally needs the
-        // spawner to hold `Launch`. Without this any task obtains a privileged
-        // child by spawning the privileged path, which leaks an entitlement to
-        // an unrelated program without granting anything to it.
-        //
-        // Checked only when the grant is non-empty: an ordinary spawn raises
-        // nothing and needs no right. Deliberately not an intersection with the
-        // spawner's own authority — the shell holds no display authority, so
-        // `spawner & grant` would mean `/bin/roulette` could never draw.
+        // A raise needs `Launch`; an ordinary spawn raises nothing and needs
+        // no right. Not an intersection with the spawner's own authority: the
+        // shell holds no display authority, so `/bin/roulette` could not draw.
         if granted_flags != 0 {
             let spawner_may_launch = match task_find_by_id(parent_task_id) {
                 Some(parent) => slopos_ostd::authority::mask_permits(

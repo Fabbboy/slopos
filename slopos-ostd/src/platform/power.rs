@@ -1,28 +1,15 @@
 //! The terminal power primitives, behind a capability witness.
 //!
-//! These are the only two operations in the kernel whose effect is the whole
-//! machine and which cannot be undone or observed afterwards. Both take a
-//! `&Cap<'_, Power>`, so a call site that never checked does not compile —
-//! which turns a class of permission-check placement bug into a type error for
-//! the paths this covers.
+//! Both take a `&Cap<'_, Power>`, so a call site that never checked does not
+//! compile.
 //!
-//! # Why the implementation is still a function pointer
+//! The sequence itself stays in `boot`, which owns the ACPI and UEFI state it
+//! needs and sits above OSTD, so it is registered in rather than called out to.
+//! OSTD owns the authority; `boot` owns the mechanism.
 //!
-//! The actual sequence — quiescing interrupt controllers, flushing
-//! filesystems, walking the reboot-method table — lives in `boot`, which sits
-//! *above* OSTD in the dependency order and owns the ACPI and UEFI state it
-//! needs. OSTD cannot call it directly. So this module owns the *authority*
-//! (the witness, and the single choke point every caller funnels through)
-//! while `boot` keeps the mechanism, registered once at init.
-//!
-//! # The documented seam
-//!
-//! Kernel-initiated shutdowns — the kconsole commands, the test harness's exit
-//! path — have no syscall caller and therefore no capability to check. They
-//! mint through [`kernel_authority`], which is public. That is the one place
-//! the compile-error claim has a seam, and it is held closed by
-//! `scripts/check_authority_reachability.sh` against a tracked list of callers
-//! rather than by the type system.
+//! Kernel-initiated shutdowns have no caller to check and mint through
+//! [`kernel_authority`]. That is the one seam in the compile-error claim, held
+//! closed by `scripts/check_authority_reachability.sh` rather than by types.
 
 use core::ffi::c_char;
 
@@ -52,9 +39,6 @@ fn ops() -> Option<&'static PowerOps> {
 }
 
 /// Power the machine off.
-///
-/// The witness is the whole point: `&Cap<'_, Power>` can only be produced by
-/// the authority checker, so this cannot be reached without one having run.
 pub fn shutdown(_cap: &Cap<'_, Power>, reason: *const c_char) -> ! {
     dispatch_shutdown(reason)
 }
@@ -64,17 +48,12 @@ pub fn reboot(_cap: &Cap<'_, Power>, reason: *const c_char) -> ! {
     dispatch_reboot(reason)
 }
 
-/// Mint a `Power` witness for a kernel-initiated shutdown.
+/// Mint a `Power` witness for a caller that has no credential to check — the
+/// kconsole commands, the harness exit, the panic path.
 ///
-/// For the callers that have no syscall context and therefore no credential to
-/// check: the kconsole destructive commands, the test harness's exit, the
-/// panic path. Their authority comes from *being the kernel*, which no runtime
-/// check can establish and no type can express.
-///
-/// Public by necessity — kconsole commands register from `mm`, `sched`, `core`
-/// and `boot`. Held to a tracked caller list by
-/// `scripts/check_authority_reachability.sh`; that gate, not this signature, is
-/// what keeps the set small.
+/// Public because those register from `mm`, `sched`, `core` and `boot`. What
+/// keeps the set small is the reachability gate's tracked list, not this
+/// signature.
 pub fn kernel_authority() -> Cap<'static, Power> {
     crate::authority::mint_kernel_power()
 }
@@ -93,9 +72,8 @@ fn dispatch_reboot(reason: *const c_char) -> ! {
     }
 }
 
-/// No power implementation registered — before `boot` runs, or in a unit-test
-/// build. Parking is the only honest answer: returning would hand a `!` caller
-/// a value it cannot have.
+/// No implementation registered — before `boot` runs, or under a host test.
+/// Parking is the only answer a `!` return admits.
 fn halt_forever() -> ! {
     loop {
         core::hint::spin_loop();

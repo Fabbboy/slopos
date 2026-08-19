@@ -49,14 +49,9 @@ fn power_is_granted_by_program_identity() -> TestResult {
     if !mask_permits(halt_binary, Capability::Power) {
         return fail!("/bin/halt's grant must confer Power");
     }
-    // ...and no *other privilege*. A power binary that could also launch,
-    // signal or reconfigure the console would be a second `Admin` by another
-    // name, which is the failure this whole model exists to avoid.
-    //
-    // The capabilities every task holds (`ConsoleIo`, `ClipboardGlobal`,
-    // `SysInspect`, `Fate`) are deliberately excluded: they name globals with
-    // no object form yet, so holding one says nothing about privilege. Each
-    // carries a deletion condition, and this list shrinks as they land.
+    // ...and no other privilege: a power binary that could also launch or
+    // signal is a second `Admin`. The universal capabilities are excluded —
+    // holding one says nothing about privilege.
     for other in [
         Capability::Launch,
         Capability::ProcSignal,

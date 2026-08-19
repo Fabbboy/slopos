@@ -76,12 +76,9 @@ pub fn syscall_handle(user_ctx: &UserContext) {
 
     match handler {
         Some(func) => {
-            // The authority decision lives here, not in the handler. The entry
-            // is already in a cache line this just touched, so the check is one
-            // compare against a byte beside the function pointer about to be
-            // called -- cheaper than the per-handler `require_*` calls it
-            // subsumes, total by construction, and impossible for a handler to
-            // forget.
+            // Here, not in the handler: the entry is already in cache, so the
+            // check is one compare beside the pointer about to be called — and
+            // a handler cannot forget what it does not perform.
             if let Some(entry) = entry
                 && !authorize(task, entry, sysno)
             {

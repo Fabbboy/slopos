@@ -254,15 +254,9 @@ fn launch_bounds_the_raise_site() -> bool {
     }
     process::waitpid(tid as u32);
 
-    // The refusal half cannot be exercised from here: this binary holds
-    // SYSTEM (hence Launch) and every test binary it could spawn holds no
-    // grant, so nothing in the tests image is both able to attempt a
-    // privileged spawn and unable to launch.
-    //
-    // Recorded rather than faked. Asserting through a child that ignores the
-    // request would pass whether or not the bound exists, which is worse than
-    // no test: verified instead by removing the bound and confirming the
-    // desktop's own privileged spawns still go through init and the shell.
+    // The refusal half is unreachable here: nothing in the tests image both
+    // attempts a privileged spawn and lacks Launch. Left unasserted rather
+    // than faked — a probe that cannot fail is worse than no probe.
     true
 }
 

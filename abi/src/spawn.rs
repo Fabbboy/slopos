@@ -13,18 +13,10 @@ pub enum SpawnFdActionKind {
     TransferFd = 2,
     /// Close the child's `target_fd`.
     Close = 3,
-    // Discriminant `4` is the retired `Open` and must not be reused.
-    //
-    // It opened an arbitrary VFS path into the child with no reference to what
-    // the parent held: endowment by *name*, which voids this ABI as an
-    // attenuating channel. Every other action moves or drops authority the
-    // spawner already has; `Open` minted it from a string, so a spawner could
-    // hand a child a descriptor it could not open itself.
-    //
-    // Deleted rather than redefined as parent-side resolve-plus-install
-    // because it had no in-tree consumer: no userland helper constructed one.
-    // A spawner that wants a child to hold a file opens it and transfers it,
-    // which is the same two syscalls and cannot exceed what the parent holds.
+    // Discriminant `4` is the retired `Open` and must not be reused. It minted
+    // a descriptor from a path string, so a spawner could endow a child with
+    // one it could not open itself — every surviving action can only move or
+    // drop authority the spawner already holds.
 }
 
 impl SpawnFdActionKind {

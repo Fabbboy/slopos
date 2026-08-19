@@ -388,14 +388,9 @@ define_syscall!(syscall_roulette_result
         SyscallResult::Ok(0)
     } else {
         fate_apply_outcome(&stored as *const FateResult, 0, false);
-        // Two keys. `Fate` admits the caller to the syscall; the boot flag says
-        // this image is one where losing costs a reboot. Without it the loss is
-        // still a loss -- the joke survives -- but the machine stays up, which
-        // is what a test image needs.
-        //
-        // This arm is why a slot-level gate is not sufficient on its own: an
-        // unprivileged, retryable syscall sat two calls from the reboot
-        // primitive, and `check_authority_reachability.sh` is what sees that.
+        // Second key: `Fate` admits the caller, the flag says this image is
+        // one where losing costs a reboot. A test image loses without
+        // rebooting. Reachability here is what the gate script exists for.
         if !slopos_ostd::boot_flags::has_flag(slopos_ostd::boot_flags::BOOT_FLAG_FATE_REBOOT) {
             return SyscallResult::Ok(1);
         }

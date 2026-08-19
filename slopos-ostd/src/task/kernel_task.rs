@@ -1469,11 +1469,9 @@ impl<K, U> TaskInner<K, U> {
         self.parked_wait_queue = AtomicPtr::new(ptr::null_mut());
         self.recovery_depth = AtomicU32::new(0);
         self.exit_cleanup_flags = AtomicU8::new(0);
-        // Authority copies on fork -- it is per-process and the child is the
-        // same principal -- but it is written explicitly here rather than left
-        // to the bytewise copy. An omission from this list is exactly the shape
-        // of the inheritance CVE this model exists to prevent, and an explicit
-        // write is visible in review while an omission is not.
+        // Authority copies — the child is the same principal — but written
+        // explicitly, because an omission from this list is invisible in review
+        // and is how an entitlement leaks into a child.
         self.caps = AtomicU64::new(other.caps.load(Ordering::Acquire));
         self.signal_pending = AtomicU64::new(0);
         // A child is handed its own existence reference at registration;

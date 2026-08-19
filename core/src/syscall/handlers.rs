@@ -240,20 +240,9 @@ pub fn syscall_lookup(sysno: u64) -> Option<&'static SyscallEntry> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The distribution ratchet
-//
-// Upstream measured 451 of 1167 capability checks resolving to a single
-// administrative capability, up from 16% a decade earlier, and named the cause
-// as no overall coordination of capability use. This is that coordination, as
-// a compile error: per-capability entry-point counts asserted by `rustc`
-// against one `const` array with one author.
-//
-// A capability that grows past its recorded count fails the build. Raising a
-// count is a deliberate, reviewable diff -- which is the point. It detects
-// breadth, not over-broadness inside one entry; that residual is what the
-// admission test in `slopos_ostd::authority` is applied at review for.
-// ---------------------------------------------------------------------------
+// Upstream's catch-all grew because nothing coordinated capability use. These
+// asserts are that coordination: breadth is a compile error, not a measurement
+// taken a decade late.
 
 /// Entry points classified `cap`, counted over the whole table at compile time.
 const fn count_of(cap: Capability) -> usize {

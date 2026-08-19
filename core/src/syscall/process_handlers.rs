@@ -453,21 +453,8 @@ define_syscall!(syscall_exec
             // Point of no return: the old image is gone.
             let task_id = ctx.task_id();
 
-            // Authority becomes `grant(image) & held`. Both halves matter:
-            // intersecting is what stops a privileged program's authority
-            // surviving into an arbitrary binary (an entitlement outliving
-            // exec is one of the two CVE shapes this model is built against),
-            // and taking the grant at all is what lets a launcher hand a
-            // program the authority its *identity* earns.
-            //
-            // Reduction is total and infallible -- no error return a caller
-            // could ignore -- because a historical local root came from an
-            // attacker making a privilege drop fail inside a program that
-            // ignored the result.
-            //
-            // Here rather than in `do_exec`: this is the point of no return,
-            // past every fallible step and before the new image's first
-            // instruction.
+            // Here rather than in `do_exec`: past every fallible step, before
+            // the new image's first instruction.
             {
                 let (granted_flags, _) = exec::grants::grant_for(path);
                 let granted = slopos_ostd::authority::caps_from_task_flags(

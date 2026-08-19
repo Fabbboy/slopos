@@ -168,14 +168,9 @@ macro_rules! define_syscall {
         };
         $($crate::define_syscall!(@reqs $ctx, $($rest)*);)?
     };
-    // The `compositor`, `display_exclusive` and `console_admin` arms are
-    // retired: their capabilities absorbed them, and their shape was the wrong
-    // template to leave available to copy. They did
-    // `if let Err(e) = ... { return ... }` and threw the `Ok` away, which is
-    // how `syscall_terminate_task` came to check the compositor bit and then
-    // terminate an arbitrary target -- the variable that is checked was not the
-    // variable subsequently used. A new requirement clause must bind, like the
-    // `task_id` and `process_id` arms above.
+    // The retired `compositor` / `display_exclusive` / `console_admin` arms
+    // discarded the `Ok`, so the checked value was never the value used. A new
+    // clause must bind, like the `task_id` and `process_id` arms above.
     (@reqs $ctx:ident, net_admin $(, $($rest:tt)*)?) => {
         if let Err(e) = $ctx.require_net_admin() {
             return $crate::syscall::result::SyscallResult::Err(e);

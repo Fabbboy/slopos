@@ -1,22 +1,11 @@
 //! `Signalable` — a signal target, resolved once and authorized in the same
 //! step.
 //!
-//! # The shape this exists to prevent
-//!
-//! A bare capability witness proves "someone checked something somewhere". It
-//! does not prove the check named *this* target. The in-tree counterexample
-//! was `syscall_terminate_task`: it carried `requires(compositor)` and then
-//! terminated `target_id` with only a self-exclusion, so it could kill init —
-//! and adding a `&Cap<ProcSignal>` would have left it byte-identical. Work on
-//! type qualifiers for the Linux kernel found exploitable bugs of exactly that
-//! shape: the variable that is checked is not the variable subsequently used.
-//!
-//! So the witness here *carries the object*. A handler cannot hold a
-//! `Signalable` for one task and act on another, because acting is a method on
-//! the thing itself and there is no way to name a target except through one.
-//!
-//! Linear and `#[must_use]`: resolving a target and then not using it is a
-//! resolved-and-discarded authorization, which is a bug worth a warning.
+//! A bare witness proves only that *a* check ran, not that it named this
+//! target. `syscall_terminate_task` was the in-tree counterexample: it checked
+//! the compositor bit and then terminated any id, and a `&Cap<ProcSignal>`
+//! would have left it byte-identical. So the witness carries the object —
+//! acting is a method on the target, and there is no other way to name one.
 
 use slopos_abi::Errno;
 use slopos_abi::task::INVALID_TASK_ID;
@@ -26,9 +15,8 @@ use crate::syscall::signal::{signal_dominates, signal_is_init, signal_may_name};
 
 /// A live task the caller has been authorized to signal.
 ///
-/// Holds a `TaskRef` — an owning handle — not a bare id, so the target cannot
-/// exit and have its id recycled onto a stranger between the check and the
-/// act. That window is the confused deputy this replaces.
+/// Owns a `TaskRef` rather than an id: the target cannot exit and be recycled
+/// onto a stranger between the check and the act.
 #[must_use = "a resolved signal target that is never acted on is a discarded \
               authorization; drop it explicitly if that is intended"]
 pub struct Signalable {
@@ -37,8 +25,8 @@ pub struct Signalable {
 }
 
 impl Signalable {
-    /// The target's task id, for the log line and the return value. Never a
-    /// re-lookup key: the reference is what names the task.
+    /// The target's id, for reporting. Never a re-lookup key — the reference
+    /// is what names the task.
     #[inline]
     pub fn id(&self) -> u32 {
         self.id
@@ -76,16 +64,9 @@ pub fn resolve_signal_target(caller_flags: u16, target_id: u32) -> Result<Signal
     if !signal_may_name(target.flags) {
         return Err(Errno::ESRCH);
     }
-    // Init is never a target: a terminating signal there takes the system down
-    // undebuggably. Dominance already covers it today; the guarantee should not
-    // rest on that.
-    //
-    // NOT covered by a test, and deliberately recorded as such: the kernel
-    // phase runs at drivers/90, before `/sbin/init` launches, so a `stest!`
-    // sees `init_task_id() == INVALID_TASK_ID` and skips the branch; and no
-    // userland ABI resolves init's id, so a `utest!` cannot name it either.
-    // Adding a syscall solely to test this would widen the surface to check a
-    // guard on the surface. Audited, not tested.
+    // A terminating signal to init takes the system down undebuggably.
+    // Dominance already covers it; the guarantee should not rest on that.
+    // Audited, not tested: no test phase can name init's id.
     if signal_is_init(target_id) {
         return Err(Errno::EPERM);
     }

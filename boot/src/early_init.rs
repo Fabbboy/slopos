@@ -575,11 +575,9 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     }
 
-    // `authority=warn` reports each distinct capability once and keeps booting,
-    // so one desktop boot enumerates everything the real userland needs --
-    // which the test suite cannot show, because under `tests=on` init exits
-    // before spawning the compositor, shell or terminal. `authority=off`
-    // measures the per-check cost without a separate build.
+    // `warn` reports each capability once and keeps booting, so one desktop
+    // boot enumerates what the real userland needs — which `tests=on` cannot
+    // show, since init exits before spawning the compositor or shell.
     for token in cmdline.split_whitespace() {
         if let Some(value) = token.strip_prefix("authority=") {
             match value {
