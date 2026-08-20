@@ -383,6 +383,9 @@ struct VirtioGpuState {
     edid_supported: bool,
     geom: ScanoutGeom,
     cursor_state: CursorState,
+    /// Backing of the previous scanout, held until the mode after next so a
+    /// consumer that still points at it cannot write into freed memory.
+    retired_backing: PhysAddr,
 }
 
 impl VirtioGpuState {
@@ -398,6 +401,7 @@ impl VirtioGpuState {
                 write_field!(slot, edid_supported, false);
                 write_field!(slot, geom, ScanoutGeom::empty());
                 write_field!(slot, cursor_state, CursorState::empty());
+                write_field!(slot, retired_backing, PhysAddr::NULL);
                 Ok(slot.finish())
             },
         )
@@ -974,10 +978,20 @@ impl VirtioGpuInner {
         let _ = self.transfer_to_host(new_rid, full, 0);
         let _ = self.resource_flush(new_rid, full);
 
+        // The old backing is parked, not freed: consumers (the vconsole, the
+        // mouse bounds, the scanout registry) still point at it until the
+        // caller adopts the new one. Releasing here would leave a later
+        // vconsole blit — a crash restore or a panic screen — writing into
+        // memory the buddy allocator has handed to somebody else.
         if old.resource_id != 0 {
             let _ = self.resource_unref(old.resource_id);
             if !old.backing_phys.is_null() {
-                free_page_frame(old.backing_phys);
+                let mut st = self.state.lock();
+                let stale = core::mem::replace(&mut st.retired_backing, old.backing_phys);
+                drop(st);
+                if !stale.is_null() {
+                    free_page_frame(stale);
+                }
             }
         }
 

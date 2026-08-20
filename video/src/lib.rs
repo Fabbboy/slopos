@@ -101,14 +101,23 @@ fn video_cursor_move(x: u32, y: u32) -> bool {
     }
 }
 
+/// A runtime mode-set returns the old scanout pages to the buddy allocator,
+/// so every consumer holding the old base and pitch must be re-pointed at the
+/// new one. Adopting only the framebuffer left the vconsole writing into freed
+/// memory on its next blit — a crash-recovery restore or a panic screen, which
+/// is exactly when it is least tolerable.
 fn video_set_display_mode(width: u32, height: u32) -> bool {
     let Some(g) = gpu_control() else {
         return false;
     };
-    match (g.set_mode)(width, height) {
-        Some(fb) => framebuffer::init_with_display_info(fb.address, &fb.info) == 0,
-        None => false,
-    }
+    let Some(fb) = (g.set_mode)(width, height) else {
+        return false;
+    };
+    install_scanout_provider(&InstallCtx {
+        fb,
+        flush: None,
+        gpu_control: None,
+    })
 }
 
 fn task_cleanup_callback(task_id: u32) {

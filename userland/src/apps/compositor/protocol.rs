@@ -102,6 +102,12 @@ struct ProtocolSurface {
     cursor_shape: u8,
     last_enter_serial: u32,
     has_pointer: bool,
+    /// Serial of the most recent key event delivered to this surface, and
+    /// whether it currently holds keyboard focus. Together these are what a
+    /// clipboard request must present, so a surface the user is not typing
+    /// into cannot read or replace the selection.
+    last_key_serial: u32,
+    has_keyboard_focus: bool,
 }
 
 impl ProtocolSurface {
@@ -144,6 +150,8 @@ impl ProtocolSurface {
             cursor_shape: 0,
             last_enter_serial: 0,
             has_pointer: false,
+            last_key_serial: 0,
+            has_keyboard_focus: false,
         }
     }
 }
@@ -308,10 +316,31 @@ impl ProtocolBridge {
                     self.cleanup_client(client_idx);
                     return false;
                 }
-                Err(_) => break,
+                // A protocol violation is fatal to the connection, as it is
+                // in Wayland. Breaking instead left the undecodable prefix at
+                // the buffer head to be re-parsed forever: the client was
+                // never serviced again, got no error, and kept its windows on
+                // screen and its slot held.
+                Err(err) => {
+                    self.fail_client(client_idx, err);
+                    return false;
+                }
             }
         }
         true
+    }
+
+    /// Report a protocol violation to the client, then disconnect it.
+    fn fail_client(&mut self, client_idx: usize, err: ProtocolError) {
+        let _ = self.server.queue_event(
+            client_idx,
+            &Event::Error {
+                object_id: 0,
+                code: err as u32,
+            },
+        );
+        self.server.flush_clients();
+        self.cleanup_client(client_idx);
     }
 
     fn handle_request(&mut self, client_idx: usize, req: Request) {
@@ -391,14 +420,22 @@ impl ProtocolBridge {
             } => {
                 self.handle_interactive_resize(client_idx, toplevel, serial, edges);
             }
-            Request::ClipboardCopy { len, buffer_fd } => {
-                self.handle_clipboard_copy(buffer_fd, len);
+            Request::ClipboardCopy {
+                len,
+                serial,
+                buffer_fd,
+            } => {
+                self.handle_clipboard_copy(client_idx, serial, buffer_fd, len);
             }
-            Request::ClipboardPaste => {
-                self.handle_clipboard_paste(client_idx);
+            Request::ClipboardPaste { serial } => {
+                self.handle_clipboard_paste(client_idx, serial);
             }
-            Request::ClipboardRead { len, buffer_fd } => {
-                self.handle_clipboard_read(client_idx, buffer_fd, len);
+            Request::ClipboardRead {
+                len,
+                serial,
+                buffer_fd,
+            } => {
+                self.handle_clipboard_read(client_idx, serial, buffer_fd, len);
             }
         }
     }
@@ -678,8 +715,17 @@ impl ProtocolBridge {
     /// Publish a new clipboard: map the received source memfd read-only,
     /// replacing (and so closing) any previous source. The mapping keeps the
     /// memfd backing alive after the client closes its own copy.
-    fn handle_clipboard_copy(&mut self, buffer_fd: Option<OwnedFd>, len: u32) {
+    fn handle_clipboard_copy(
+        &mut self,
+        client_idx: usize,
+        serial: u32,
+        buffer_fd: Option<OwnedFd>,
+        len: u32,
+    ) {
         let Some(fd) = buffer_fd else { return };
+        if !self.client_holds_keyboard_serial(client_idx, serial) {
+            return;
+        }
         let len = len.min(MAX_CLIPBOARD_BYTES);
         if len == 0 {
             self.clipboard.source = None;
@@ -705,7 +751,10 @@ impl ProtocolBridge {
     /// Announce the current clipboard size; the client follows up with a
     /// `ClipboardRead` carrying a destination memfd, since the server event path
     /// cannot itself carry an fd.
-    fn handle_clipboard_paste(&mut self, client_idx: usize) {
+    fn handle_clipboard_paste(&mut self, client_idx: usize, serial: u32) {
+        if !self.client_holds_keyboard_serial(client_idx, serial) {
+            return;
+        }
         let _ = self.server.queue_event(
             client_idx,
             &Event::PasteReady {
@@ -717,13 +766,33 @@ impl ProtocolBridge {
     /// Copy the clipboard into the client-provided destination memfd and report
     /// the valid byte count. The source mapping is retained so the clipboard
     /// survives repeated pastes.
+    /// Whether `client_idx` owns a keyboard-focused surface whose most recent
+    /// key event carried `serial`.
+    ///
+    /// The `wl_data_device` rule: clipboard access is tied to an input event
+    /// the user actually generated, so a process that merely connected cannot
+    /// read what was last copied or substitute content into a paste.
+    fn client_holds_keyboard_serial(&self, client_idx: usize, serial: u32) -> bool {
+        serial != 0
+            && self.surfaces.iter().any(|s| {
+                s.active
+                    && s.client_idx == client_idx
+                    && s.has_keyboard_focus
+                    && s.last_key_serial == serial
+            })
+    }
+
     fn handle_clipboard_read(
         &mut self,
         client_idx: usize,
+        serial: u32,
         buffer_fd: Option<OwnedFd>,
         dst_len: u32,
     ) {
         let Some(fd) = buffer_fd else { return };
+        if !self.client_holds_keyboard_serial(client_idx, serial) {
+            return;
+        }
         let dst_len = dst_len.min(MAX_CLIPBOARD_BYTES) as usize;
         let raw = fd.into_raw();
         let mut copied = 0u32;
@@ -961,6 +1030,12 @@ impl ProtocolBridge {
             return;
         };
         *serial = serial.wrapping_add(1);
+        // Focus follows the key: this surface is the one the user is typing
+        // into, and the serial is what a clipboard request must echo back.
+        for (i, s) in self.surfaces.iter_mut().enumerate() {
+            s.has_keyboard_focus = i == idx && s.active;
+        }
+        self.surfaces[idx].last_key_serial = *serial;
         self.send_modifiers(idx, modifier_state as u32);
         self.send_key(
             idx,

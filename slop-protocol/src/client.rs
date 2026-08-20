@@ -20,6 +20,9 @@ pub struct Client {
     /// Serial of the most recent `Event::PointerEnter`, echoed in
     /// `SetCursorShape` to prove the request belongs to the current focus.
     last_pointer_enter_serial: u32,
+    /// Serial of the most recent key event, which the clipboard requests must
+    /// present so the compositor can tie them to real user input.
+    last_key_serial: u32,
 }
 
 impl Client {
@@ -69,6 +72,7 @@ impl Client {
             capabilities,
             next_id: 1,
             last_pointer_enter_serial: 0,
+            last_key_serial: 0,
         })
     }
 
@@ -224,10 +228,14 @@ impl Client {
     /// Publish a clipboard selection backed by `fd` (a memfd holding `len`
     /// valid bytes). The compositor keeps its own reference, so the caller may
     /// close its copy after this returns.
+    /// Carries the last key serial: the compositor refuses a clipboard
+    /// request that cannot be tied to recent keyboard input on a focused
+    /// surface.
     pub fn clipboard_copy(&mut self, fd: i32, len: u32) -> Result<(), ProtocolError> {
         self.conn.send_with_fd(
             &Request::ClipboardCopy {
                 len,
+                serial: self.last_key_serial,
                 buffer_fd: None,
             },
             fd,
@@ -237,7 +245,9 @@ impl Client {
     /// Ask the compositor for the current clipboard size. Replies with
     /// `Event::PasteReady { len }`.
     pub fn clipboard_paste(&mut self) -> Result<(), ProtocolError> {
-        self.conn.send(&Request::ClipboardPaste)
+        self.conn.send(&Request::ClipboardPaste {
+            serial: self.last_key_serial,
+        })
     }
 
     /// Hand the compositor a destination memfd (`fd`, sized for `len` bytes)
@@ -246,6 +256,7 @@ impl Client {
         self.conn.send_with_fd(
             &Request::ClipboardRead {
                 len,
+                serial: self.last_key_serial,
                 buffer_fd: None,
             },
             fd,
@@ -294,6 +305,28 @@ impl Client {
                     serial,
                     x,
                     y,
+                }))
+            }
+            Some(Event::Key {
+                serial,
+                time,
+                scancode,
+                ascii,
+                keycode,
+                codepoint,
+                modifiers,
+                pressed,
+            }) => {
+                self.last_key_serial = serial;
+                Ok(Some(Event::Key {
+                    serial,
+                    time,
+                    scancode,
+                    ascii,
+                    keycode,
+                    codepoint,
+                    modifiers,
+                    pressed,
                 }))
             }
             Some(Event::OutputInfo {

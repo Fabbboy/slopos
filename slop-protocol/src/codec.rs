@@ -271,14 +271,19 @@ impl Encode for Request {
                 let p = put_u32(buf, p, *serial)?;
                 put_u8(buf, p, *shape)
             }
-            Request::ClipboardCopy { len, .. } => {
+            Request::ClipboardCopy { len, serial, .. } => {
                 let p = put_u8(buf, 0, REQ_CLIPBOARD_COPY)?;
-                put_u32(buf, p, *len)
+                let p = put_u32(buf, p, *len)?;
+                put_u32(buf, p, *serial)
             }
-            Request::ClipboardPaste => put_u8(buf, 0, REQ_CLIPBOARD_PASTE),
-            Request::ClipboardRead { len, .. } => {
+            Request::ClipboardPaste { serial } => {
+                let p = put_u8(buf, 0, REQ_CLIPBOARD_PASTE)?;
+                put_u32(buf, p, *serial)
+            }
+            Request::ClipboardRead { len, serial, .. } => {
                 let p = put_u8(buf, 0, REQ_CLIPBOARD_READ)?;
-                put_u32(buf, p, *len)
+                let p = put_u32(buf, p, *len)?;
+                put_u32(buf, p, *serial)
             }
             Request::InteractiveMove { toplevel, serial } => {
                 let p = put_u8(buf, 0, REQ_INTERACTIVE_MOVE)?;
@@ -454,14 +459,33 @@ impl Decode for Request {
             }
             REQ_CLIPBOARD_COPY => {
                 let (len, p) = get_u32(buf, p)?;
+                let (serial, p) = get_u32(buf, p)?;
                 let buffer_fd = fds.take();
-                Ok((Request::ClipboardCopy { len, buffer_fd }, p))
+                Ok((
+                    Request::ClipboardCopy {
+                        len,
+                        serial,
+                        buffer_fd,
+                    },
+                    p,
+                ))
             }
-            REQ_CLIPBOARD_PASTE => Ok((Request::ClipboardPaste, p)),
+            REQ_CLIPBOARD_PASTE => {
+                let (serial, p) = get_u32(buf, p)?;
+                Ok((Request::ClipboardPaste { serial }, p))
+            }
             REQ_CLIPBOARD_READ => {
                 let (len, p) = get_u32(buf, p)?;
+                let (serial, p) = get_u32(buf, p)?;
                 let buffer_fd = fds.take();
-                Ok((Request::ClipboardRead { len, buffer_fd }, p))
+                Ok((
+                    Request::ClipboardRead {
+                        len,
+                        serial,
+                        buffer_fd,
+                    },
+                    p,
+                ))
             }
             REQ_INTERACTIVE_MOVE => {
                 let (toplevel, p) = get_u32(buf, p)?;

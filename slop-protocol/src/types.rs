@@ -184,19 +184,28 @@ pub enum Request {
 
     /// Publish a clipboard selection: the bytes live in a memfd passed via
     /// SCM_RIGHTS, `len` is the valid byte count (the memfd is page-rounded).
+    /// `serial` must match a recent key event delivered to a surface of this
+    /// client that holds keyboard focus, as `wl_data_device::set_selection`
+    /// requires. Without it any connected process can replace what the user
+    /// last copied, or read it.
     ClipboardCopy {
         len: u32,
+        serial: u32,
         buffer_fd: Option<OwnedFd>,
     },
     /// Ask the compositor for the current clipboard. It replies with
     /// `Event::PasteReady { len }`; the client then sends `ClipboardRead`.
-    ClipboardPaste,
+    /// Same serial rule as [`Request::ClipboardCopy`].
+    ClipboardPaste {
+        serial: u32,
+    },
     /// Provide a destination memfd (via SCM_RIGHTS) for the compositor to copy
     /// `len` clipboard bytes into; it replies with `Event::PasteResult`. The
     /// receiver provides the buffer because the server→client event path
-    /// cannot carry an fd.
+    /// cannot carry an fd. Same serial rule as [`Request::ClipboardCopy`].
     ClipboardRead {
         len: u32,
+        serial: u32,
         buffer_fd: Option<OwnedFd>,
     },
 

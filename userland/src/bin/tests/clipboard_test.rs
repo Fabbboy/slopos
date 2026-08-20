@@ -10,9 +10,11 @@ use slopos_protocol::{Decode, Encode, FdFifo};
 use slopos_userland::syscall::memory;
 use slopos_userland::syscall::{CachedShmMapping, ShmBuffer, fs};
 
+/// Tag, length, then the input serial the compositor authorizes against.
 fn test_clipboard_copy_wire_is_tag_plus_len() -> bool {
     let req = Request::ClipboardCopy {
         len: 0x00AB_CDEF,
+        serial: 0x1234_5678,
         buffer_fd: None,
     };
     let mut buf = [0u8; 64];
@@ -20,12 +22,16 @@ fn test_clipboard_copy_wire_is_tag_plus_len() -> bool {
         Ok(n) => n,
         Err(_) => return false,
     };
-    n == 5 && buf[0] == 13 && u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) == 0x00AB_CDEF
+    n == 9
+        && buf[0] == 13
+        && u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) == 0x00AB_CDEF
+        && u32::from_le_bytes([buf[5], buf[6], buf[7], buf[8]]) == 0x1234_5678
 }
 
 fn test_clipboard_read_wire_is_tag_plus_len() -> bool {
     let req = Request::ClipboardRead {
         len: 1_048_576,
+        serial: 99,
         buffer_fd: None,
     };
     let mut buf = [0u8; 64];
@@ -33,7 +39,10 @@ fn test_clipboard_read_wire_is_tag_plus_len() -> bool {
         Ok(n) => n,
         Err(_) => return false,
     };
-    n == 5 && buf[0] == 17 && u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) == 1_048_576
+    n == 9
+        && buf[0] == 17
+        && u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) == 1_048_576
+        && u32::from_le_bytes([buf[5], buf[6], buf[7], buf[8]]) == 99
 }
 
 fn test_paste_events_wire_is_tag_plus_len() -> bool {
@@ -57,6 +66,7 @@ fn test_paste_events_wire_is_tag_plus_len() -> bool {
 fn test_clipboard_copy_decode_without_fd() -> bool {
     let req = Request::ClipboardCopy {
         len: 777_777,
+        serial: 4242,
         buffer_fd: None,
     };
     let mut buf = [0u8; 64];
@@ -68,7 +78,14 @@ fn test_clipboard_copy_decode_without_fd() -> bool {
     let mut count = 0u8;
     let mut fifo = FdFifo::new(&mut fds, &mut count);
     match Request::decode(&buf[..n], &mut fifo) {
-        Ok((Request::ClipboardCopy { len, buffer_fd }, _)) => len == 777_777 && buffer_fd.is_none(),
+        Ok((
+            Request::ClipboardCopy {
+                len,
+                serial,
+                buffer_fd,
+            },
+            _,
+        )) => len == 777_777 && serial == 4242 && buffer_fd.is_none(),
         _ => false,
     }
 }
@@ -81,6 +98,7 @@ fn test_clipboard_copy_decode_with_fd() -> bool {
     }
     let req = Request::ClipboardCopy {
         len: 42,
+        serial: 7,
         buffer_fd: None,
     };
     let mut buf = [0u8; 64];
@@ -96,10 +114,14 @@ fn test_clipboard_copy_decode_with_fd() -> bool {
     let mut count = 1u8;
     let mut fifo = FdFifo::new(&mut fds, &mut count);
     match Request::decode(&buf[..n], &mut fifo) {
-        Ok((Request::ClipboardCopy { len, buffer_fd }, _)) => {
-            let ok = len == 42 && buffer_fd.as_ref().map(|f| f.raw()) == Some(fd);
-            ok
-        }
+        Ok((
+            Request::ClipboardCopy {
+                len,
+                serial,
+                buffer_fd,
+            },
+            _,
+        )) => len == 42 && serial == 7 && buffer_fd.as_ref().map(|f| f.raw()) == Some(fd),
         _ => {
             memory::close(fd);
             false
