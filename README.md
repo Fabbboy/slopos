@@ -6,7 +6,10 @@
 </p>
 
 <p align="center">
-  <img src="assets/logo.png" alt="SlopOS" width="600" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-on-dark.svg">
+    <img alt="SlopOS" src="assets/logo-on-light.svg" width="438">
+  </picture>
 </p>
 
 <p align="center">
