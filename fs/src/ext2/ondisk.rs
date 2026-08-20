@@ -27,6 +27,24 @@ pub const DIR_FT_SYMLINK: u8 = 7;
 /// Maximum bytes storable inline in a fast symlink (i_block[0..14] = 60 bytes).
 pub const FAST_SYMLINK_MAX: usize = 60;
 
+/// `s_state`: the filesystem was unmounted cleanly.
+pub const EXT2_VALID_FS: u16 = 1;
+/// `s_state`: errors were detected, or the image is currently mounted.
+pub const EXT2_ERROR_FS: u16 = 2;
+
+/// `s_feature_incompat` bits this implementation understands. An image
+/// carrying any other incompat bit has a layout we cannot represent, so
+/// mounting it read-write would corrupt it.
+pub const SUPPORTED_INCOMPAT: u32 = INCOMPAT_FILETYPE;
+/// Directory entries carry a file-type byte; `dir.rs` writes and reads one.
+pub const INCOMPAT_FILETYPE: u32 = 0x0002;
+
+/// `s_feature_ro_compat` bits this implementation understands. Anything else
+/// is safe to *read* but not to write, so the mount is forced read-only.
+pub const SUPPORTED_RO_COMPAT: u32 = RO_COMPAT_SPARSE_SUPER | RO_COMPAT_LARGE_FILE;
+pub const RO_COMPAT_SPARSE_SUPER: u32 = 0x0001;
+pub const RO_COMPAT_LARGE_FILE: u32 = 0x0002;
+
 #[derive(Debug, Copy, Clone)]
 pub struct Superblock {
     pub inodes_count: u32,
@@ -38,9 +56,13 @@ pub struct Superblock {
     pub blocks_per_group: u32,
     pub inodes_per_group: u32,
     pub magic: u16,
+    pub state: u16,
     pub rev_level: u32,
     pub first_ino: u32,
     pub inode_size: u16,
+    pub feature_compat: u32,
+    pub feature_incompat: u32,
+    pub feature_ro_compat: u32,
 }
 
 impl Superblock {
@@ -58,9 +80,13 @@ impl Superblock {
             blocks_per_group: le32(data, 32),
             inodes_per_group: le32(data, 40),
             magic: le16(data, 56),
+            state: le16(data, 58),
             rev_level: le32(data, 76),
             first_ino: le32(data, 84),
             inode_size: le16(data, 88),
+            feature_compat: le32(data, 92),
+            feature_incompat: le32(data, 96),
+            feature_ro_compat: le32(data, 100),
         };
         if sb.magic != EXT2_MAGIC {
             return Err(Ext2Error::InvalidSuperblock);
@@ -70,7 +96,28 @@ impl Superblock {
         if sb.inodes_per_group == 0 || sb.blocks_per_group == 0 || sb.inodes_count == 0 {
             return Err(Ext2Error::InvalidSuperblock);
         }
+        // A layout we cannot represent (extents, 64-bit block numbers,
+        // metadata checksums) must not be mounted read-write: we would write
+        // records every other implementation then reads as corruption.
+        let unsupported_incompat = sb.feature_incompat & !SUPPORTED_INCOMPAT;
+        if sb.rev_level >= 1 && unsupported_incompat != 0 {
+            return Err(Ext2Error::UnsupportedFeature);
+        }
+        // The inode table is indexed by multiplying this out; an inode that
+        // does not fit its own block makes that arithmetic address outside
+        // the block it just read.
+        let block_size = sb.block_size()?;
+        let inode_size = sb.effective_inode_size() as u32;
+        if inode_size < 128 || !inode_size.is_power_of_two() || inode_size > block_size {
+            return Err(Ext2Error::InvalidSuperblock);
+        }
         Ok(sb)
+    }
+
+    /// Whether the image must be mounted read-only: it carries a
+    /// read-only-compatible feature this implementation does not write.
+    pub fn requires_readonly(&self) -> bool {
+        self.rev_level >= 1 && (self.feature_ro_compat & !SUPPORTED_RO_COMPAT) != 0
     }
 
     pub fn encode_free_counts(&self, data: &mut [u8]) {

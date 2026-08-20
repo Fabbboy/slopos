@@ -11,6 +11,8 @@ use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota::{Charge, FileBacking, try_charge};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
+use crate::fileio::OpenMode;
+
 use crate::vfs::{FileSystem, InodeId};
 
 /// Open vnodes system-wide — this kernel's `fs.file-max`.
@@ -173,7 +175,7 @@ impl FileOps for VfsFileOps {
         total as isize
     }
 
-    fn write(&self, handle: usize, buf: &dyn IoBufRead, offset: u64, _flags: u32) -> isize {
+    fn write(&self, handle: usize, buf: &dyn IoBufRead, offset: u64, flags: u32) -> isize {
         let Some((fs, inode)) = resolve(handle) else {
             return Errno::EBADF.as_isize();
         };
@@ -181,6 +183,17 @@ impl FileOps for VfsFileOps {
         if buf.is_empty() {
             return 0;
         }
+        // POSIX: O_APPEND resolves the offset from the current size at write
+        // time, not at open. A snapshot taken at open lets two descriptions
+        // overwrite each other, so an append-only log is not append-only.
+        let offset = if OpenMode::from_bits(flags).contains(OpenMode::APPEND) {
+            match fs.stat(inode) {
+                Ok(st) => st.size,
+                Err(_) => return Errno::EIO.as_isize(),
+            }
+        } else {
+            offset
+        };
         let mut staging = match slopos_ostd::KVec::<u8>::zeroed(buf.len().min(IO_STAGING_SIZE)) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),

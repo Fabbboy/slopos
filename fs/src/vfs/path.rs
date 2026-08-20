@@ -1,4 +1,5 @@
-use crate::vfs::mount::resolve_mount;
+use crate::vfs::canon::canonicalise;
+use crate::vfs::mount::mount_at;
 use crate::vfs::traits::{FileSystem, FileType, InodeId, VfsError, VfsResult};
 
 pub struct ResolvedPath {
@@ -7,24 +8,32 @@ pub struct ResolvedPath {
 }
 
 pub fn resolve_path(path: &[u8]) -> VfsResult<ResolvedPath> {
-    if path.is_empty() || path[0] != b'/' {
-        return Err(VfsError::InvalidPath);
-    }
+    let canon = canonicalise(path)?;
+    resolve_canonical(canon.as_bytes())
+}
 
-    let (fs, relative) = resolve_mount(path)?;
-
+/// Walk an already-canonical path, re-resolving the mount table at each
+/// directory component.
+///
+/// Selecting a filesystem once up front means a mount point crossed mid-walk
+/// is never honoured: the walk continues inside the covered directory of the
+/// filesystem underneath.
+fn resolve_canonical(path: &[u8]) -> VfsResult<ResolvedPath> {
+    let mut fs = mount_at(b"/").ok_or(VfsError::NotFound)?;
     let mut current_inode = fs.root_inode();
 
-    for component in PathComponents::new(relative) {
-        if component == b"." {
-            continue;
-        }
+    // Byte offset in `path` of the end of the components consumed so far,
+    // which is what the mount table is keyed on.
+    let mut prefix_end = 0usize;
 
-        if component == b".." {
-            match fs.lookup(current_inode, b"..") {
-                Ok(parent) => current_inode = parent,
-                Err(_) => {}
-            }
+    for component in PathComponents::new(path) {
+        prefix_end += 1 + component.len();
+
+        // `canonicalise` has already resolved `.` and `..` lexically, so a
+        // component here is always a real name.
+        if let Some(mounted) = mount_at(&path[..prefix_end]) {
+            fs = mounted;
+            current_inode = fs.root_inode();
             continue;
         }
 
@@ -38,20 +47,48 @@ pub fn resolve_path(path: &[u8]) -> VfsResult<ResolvedPath> {
 }
 
 pub fn resolve_parent(path: &[u8]) -> VfsResult<(ResolvedPath, &[u8])> {
-    if path.is_empty() || path[0] != b'/' {
-        return Err(VfsError::InvalidPath);
-    }
+    let canon = canonicalise(path)?;
+    let canon_bytes = canon.as_bytes();
 
-    let (parent_path, name) = split_path(path).ok_or(VfsError::InvalidPath)?;
-
-    let resolved = resolve_path(parent_path)?;
+    let (parent_path, name) = split_path(canon_bytes).ok_or(VfsError::InvalidPath)?;
+    let resolved = resolve_canonical(parent_path)?;
 
     let stat = resolved.fs.stat(resolved.inode)?;
     if stat.file_type != FileType::Directory {
         return Err(VfsError::NotDirectory);
     }
 
-    Ok((resolved, name))
+    // The name is returned as a slice of the caller's path, so the canonical
+    // buffer need not outlive this call. Canonicalisation never rewrites the
+    // final component of a path that has one.
+    let name_in_input = tail_component(path, name)?;
+    Ok((resolved, name_in_input))
+}
+
+/// Locate `name` as a suffix of the caller's own `path` buffer.
+fn tail_component<'a>(path: &'a [u8], name: &[u8]) -> VfsResult<&'a [u8]> {
+    if name.len() > path.len() {
+        return Err(VfsError::InvalidPath);
+    }
+    let start = path.len() - name.len();
+    if &path[start..] == name {
+        return Ok(&path[start..]);
+    }
+    // A trailing slash was trimmed during canonicalisation.
+    let trimmed = {
+        let mut end = path.len();
+        while end > 1 && path[end - 1] == b'/' {
+            end -= 1;
+        }
+        &path[..end]
+    };
+    if name.len() <= trimmed.len() {
+        let start = trimmed.len() - name.len();
+        if &trimmed[start..] == name {
+            return Ok(&trimmed[start..]);
+        }
+    }
+    Err(VfsError::InvalidPath)
 }
 
 fn split_path(path: &[u8]) -> Option<(&[u8], &[u8])> {

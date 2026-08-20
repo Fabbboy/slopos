@@ -171,6 +171,115 @@ pub fn test_vfs_unlink() -> TestResult {
     TestResult::Pass
 }
 
+/// `//tmp/x`, `/./tmp/x` and `/a/../tmp/x` all name `/tmp/x`. Before
+/// canonicalisation each missed the `/tmp` mount and landed on the root
+/// filesystem's shadowed directory, so one visible path named two files.
+pub fn test_vfs_canonicalise_table() -> TestResult {
+    use crate::vfs::canonicalise;
+
+    // `static`, not a local: a by-value case table is a stack frame, and the
+    // kernel bounds those at 2 KiB.
+    static CASES: [(&[u8], &[u8]); 10] = [
+        (b"/", b"/"),
+        (b"//", b"/"),
+        (b"/tmp", b"/tmp"),
+        (b"//tmp/x", b"/tmp/x"),
+        (b"/./tmp/x", b"/tmp/x"),
+        (b"/a/../tmp/x", b"/tmp/x"),
+        (b"/tmp/./x", b"/tmp/x"),
+        (b"/tmp//x", b"/tmp/x"),
+        (b"/../../tmp", b"/tmp"),
+        (b"/tmp/x/..", b"/tmp"),
+    ];
+
+    for &(input, want) in CASES.iter() {
+        let got = match canonicalise(input) {
+            Ok(c) => c,
+            Err(_) => return slopos_testing::fail!("canonicalise rejected a valid path"),
+        };
+        if got.as_bytes() != want {
+            return slopos_testing::fail!(
+                "canonicalise({:?}) = {:?}, want {:?}",
+                core::str::from_utf8(input).unwrap_or("?"),
+                core::str::from_utf8(got.as_bytes()).unwrap_or("?"),
+                core::str::from_utf8(want).unwrap_or("?")
+            );
+        }
+    }
+
+    if canonicalise(b"relative/path").is_ok() {
+        return slopos_testing::fail!("a relative path must be rejected");
+    }
+    TestResult::Pass
+}
+
+/// The mount is reached through every spelling of its path, so writes through
+/// `//tmp/f` and reads through `/tmp/f` name one file.
+pub fn test_vfs_mount_reached_through_every_spelling() -> TestResult {
+    let payload = b"canonical";
+    if vfs_open(b"/tmp/canon_probe.txt", true)
+        .and_then(|h| h.write(0, payload))
+        .is_err()
+    {
+        return slopos_testing::fail!("could not create the probe file");
+    }
+
+    for spelling in [
+        b"//tmp/canon_probe.txt".as_slice(),
+        b"/./tmp/canon_probe.txt".as_slice(),
+        b"/tmp/../tmp/canon_probe.txt".as_slice(),
+    ] {
+        let (_kind, size) = match vfs_stat(spelling) {
+            Ok(s) => s,
+            Err(_) => {
+                return slopos_testing::fail!(
+                    "{:?} did not reach the mount",
+                    core::str::from_utf8(spelling).unwrap_or("?")
+                );
+            }
+        };
+        if size != payload.len() as u32 {
+            return slopos_testing::fail!("a spelling of the path named a different file");
+        }
+    }
+
+    let _ = vfs_unlink(b"/tmp/canon_probe.txt");
+    TestResult::Pass
+}
+
+/// A name past `MAX_NAME_LEN` must be refused, not truncated: a truncated
+/// entry can never be matched by the name that created it, so the file and
+/// its inode are unreachable and unreclaimable.
+pub fn test_ramfs_long_name_refused() -> TestResult {
+    let mut path = [b'A'; 64];
+    path[..5].copy_from_slice(b"/tmp/");
+    let long = &path[..];
+
+    match vfs_open(long, true) {
+        Err(crate::vfs::VfsError::NameTooLong) => TestResult::Pass,
+        Err(other) => slopos_testing::fail!("want NameTooLong, got {:?}", other),
+        Ok(_) => slopos_testing::fail!("an over-long name was accepted"),
+    }
+}
+
+/// Renaming a directory into its own descendant detaches the subtree: it
+/// becomes unreachable from the root and unremovable.
+pub fn test_ramfs_rename_into_descendant_refused() -> TestResult {
+    if vfs_mkdir(b"/tmp/anc").is_err() || vfs_mkdir(b"/tmp/anc/child").is_err() {
+        return slopos_testing::fail!("could not build the fixture");
+    }
+
+    let result = vfs_rename(b"/tmp/anc", b"/tmp/anc/child/loop");
+    let outcome = match result {
+        Err(_) => TestResult::Pass,
+        Ok(()) => slopos_testing::fail!("a directory was spliced into its own descendant"),
+    };
+
+    let _ = vfs_unlink(b"/tmp/anc/child");
+    let _ = vfs_unlink(b"/tmp/anc");
+    outcome
+}
+
 pub fn test_vfs_storage_contention_stress_baseline() -> TestResult {
     if vfs_mkdir(b"/vfs_stress").is_err() {
         return TestResult::Fail;
@@ -466,6 +575,68 @@ fn build_minimal_ext2_image(blocks: u32, inodes: u32) -> Option<MemoryBlockDevic
         file_data: None,
         file_block: 0,
     })
+}
+
+/// An image declaring an incompat feature we cannot represent (extents,
+/// 64-bit block numbers, metadata checksums) must be refused, not mounted
+/// read-write and written into corruption.
+pub fn test_ext2_unsupported_incompat_feature_refused() -> TestResult {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
+        return TestResult::Pass;
+    };
+    let sb_offset = 1024usize;
+    device.with_buffer_mut(|buf| {
+        let sb = &mut buf[sb_offset..sb_offset + 1024];
+        // EXT4_FEATURE_INCOMPAT_EXTENTS.
+        sb[96..100].copy_from_slice(&0x0040u32.to_le_bytes());
+    });
+
+    match Ext2Fs::mount_params(&device) {
+        Err(Ext2Error::UnsupportedFeature) => TestResult::Pass,
+        other => slopos_testing::fail!("want UnsupportedFeature, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// A read-only-compatible feature we do not write forces a read-only mount
+/// rather than a refusal: the image is still safe to read.
+pub fn test_ext2_unsupported_ro_compat_forces_readonly() -> TestResult {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
+        return TestResult::Pass;
+    };
+    let sb_offset = 1024usize;
+    device.with_buffer_mut(|buf| {
+        let sb = &mut buf[sb_offset..sb_offset + 1024];
+        // EXT4_FEATURE_RO_COMPAT_METADATA_CSUM.
+        sb[100..104].copy_from_slice(&0x0400u32.to_le_bytes());
+    });
+
+    mount_ext2!(device, cache, fs);
+    if !fs.is_read_only() {
+        return slopos_testing::fail!("an unsupported ro_compat feature must force read-only");
+    }
+    match fs.create_file(2, b"nope") {
+        Err(Ext2Error::ReadOnly) => TestResult::Pass,
+        other => slopos_testing::fail!("want ReadOnly, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// An inode larger than the block that holds it makes the inode-table offset
+/// arithmetic address outside the block it just read.
+pub fn test_ext2_inode_size_beyond_block_rejected() -> TestResult {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
+        return TestResult::Pass;
+    };
+    let sb_offset = 1024usize;
+    device.with_buffer_mut(|buf| {
+        let sb = &mut buf[sb_offset..sb_offset + 1024];
+        // Block size is 1024 here; claim a 4096-byte inode.
+        sb[88..90].copy_from_slice(&4096u16.to_le_bytes());
+    });
+
+    match Ext2Fs::mount_params(&device) {
+        Err(Ext2Error::InvalidSuperblock) => TestResult::Pass,
+        other => slopos_testing::fail!("want InvalidSuperblock, got {:?}", other.map(|_| ())),
+    }
 }
 
 pub fn test_ext2_invalid_superblock_magic() -> TestResult {
@@ -1113,7 +1284,14 @@ slopos_testing::stest!(name = test_vfs_file_roundtrip);
 slopos_testing::stest!(name = test_vfs_list);
 slopos_testing::stest!(name = test_vfs_cd_into_listed_dirs);
 slopos_testing::stest!(name = test_vfs_unlink);
+slopos_testing::stest!(name = test_vfs_canonicalise_table);
+slopos_testing::stest!(name = test_vfs_mount_reached_through_every_spelling);
+slopos_testing::stest!(name = test_ramfs_long_name_refused);
+slopos_testing::stest!(name = test_ramfs_rename_into_descendant_refused);
 slopos_testing::stest!(name = test_vfs_storage_contention_stress_baseline);
+slopos_testing::stest!(name = test_ext2_unsupported_incompat_feature_refused);
+slopos_testing::stest!(name = test_ext2_unsupported_ro_compat_forces_readonly);
+slopos_testing::stest!(name = test_ext2_inode_size_beyond_block_rejected);
 slopos_testing::stest!(name = test_ext2_invalid_superblock_magic);
 slopos_testing::stest!(name = test_ext2_unsupported_block_size);
 slopos_testing::stest!(name = test_ext2_zero_inodes_per_group_rejected);

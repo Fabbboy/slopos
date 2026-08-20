@@ -261,6 +261,17 @@ pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) ->
         cache,
         superblock_dirty: false,
     });
+
+    // The not-clean bit is what tells a later fsck it must run. Without it a
+    // crash or an unflushed reboot leaves an image that still claims to be
+    // clean, so the damage is never repaired.
+    if let Some(cached) = guard.as_mut() {
+        let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
+        let mut fs = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is);
+        if fs.mark_dirty_on_disk().is_ok() {
+            cached.superblock = fs.superblock();
+        }
+    }
     drop(guard);
 
     start_flusher();
@@ -309,6 +320,30 @@ pub fn ext2_vfs_sync() -> VfsResult<()> {
 pub fn ext2_vfs_shutdown_sync() {
     FLUSH_STOP.request();
     let _ = ext2_vfs_sync();
+    mark_filesystem_clean();
+}
+
+/// Clear the not-clean bit, so the next mount knows the image was shut down
+/// in an orderly way. Runs after the final sync: a failure to flush must
+/// leave the image marked dirty.
+fn mark_filesystem_clean() {
+    if !EXT2_VFS_INIT.is_set() {
+        return;
+    }
+    let Ok(mut guard) = CACHED_EXT2.lock() else {
+        return;
+    };
+    let Some(cached) = guard.as_mut() else {
+        return;
+    };
+    if cached.cache.dirty_count() > 0 || cached.superblock_dirty {
+        return;
+    }
+    let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
+    let mut fs = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is);
+    if fs.mark_clean().is_ok() {
+        cached.superblock = fs.superblock();
+    }
 }
 
 fn start_flusher() {
@@ -364,6 +399,8 @@ fn ext2_error_to_vfs(e: Ext2Error) -> VfsError {
     match e {
         Ext2Error::InvalidSuperblock => VfsError::IoError,
         Ext2Error::UnsupportedBlockSize => VfsError::IoError,
+        Ext2Error::UnsupportedFeature => VfsError::NotSupported,
+        Ext2Error::ReadOnly => VfsError::PermissionDenied,
         Ext2Error::InvalidInode => VfsError::NotFound,
         Ext2Error::InvalidBlock => VfsError::IoError,
         Ext2Error::UnsupportedIndirection => VfsError::NotSupported,

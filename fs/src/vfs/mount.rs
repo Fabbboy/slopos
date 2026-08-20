@@ -203,6 +203,19 @@ pub fn with_mount_table<R>(f: impl FnOnce(&MountTable) -> R) -> R {
     f(&guard)
 }
 
+/// The filesystem mounted **exactly** at `path`, if one is.
+///
+/// A per-component walk asks this at each step, so a mount crossed mid-path is
+/// honoured rather than resolved inside the filesystem underneath it.
+pub fn mount_at(path: &[u8]) -> Option<&'static dyn FileSystem> {
+    let guard = MOUNT_TABLE.read();
+    guard
+        .mounts
+        .iter()
+        .find(|mp| mp.is_active() && mp.path_bytes() == path)
+        .and_then(|mp| mp.fs)
+}
+
 pub fn resolve_mount<'a>(path: &'a [u8]) -> VfsResult<(&'static dyn FileSystem, &'a [u8])> {
     let (fs, match_len) = {
         let guard = MOUNT_TABLE.read();

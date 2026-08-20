@@ -56,6 +56,10 @@ impl OpenMode {
         self.0
     }
 
+    pub const fn from_bits(raw: u32) -> Self {
+        Self(raw)
+    }
+
     pub const fn with_raw(self, raw: u32) -> Self {
         Self(self.0 | raw)
     }
@@ -152,6 +156,9 @@ pub(super) struct OpenFile {
     pub(super) ops: &'static dyn FileOps,
     pub(super) handle: usize,
     pub(super) position: AtomicU64,
+    /// Held across the offset read, the I/O and the offset advance, so two
+    /// writers sharing this description cannot resolve the same offset.
+    pub(super) position_lock: SpinLock<()>,
     pub(super) status_flags: AtomicU32,
     /// Owned lifetime token for the subsystem object behind `handle`.
     /// `None` only for backings with no teardown (e.g. pidfd).
@@ -461,6 +468,15 @@ pub(super) static PROCESS_TABLES: [FileTableSlot; MAX_PROCESSES] = [const {
         lock_class!("PROCESS_FILE_TABLE", LOCK_LEVEL_REGISTRY),
     )
 }; MAX_PROCESSES];
+/// Ranked above the filesystem locks it is held across, and `LO_DUPOK`
+/// because distinct open descriptions are distinct instances of one class:
+/// a caller only ever holds one at a time.
+pub(super) const OPEN_FILE_POSITION_CLASS: &LockClassKey = lock_class!(
+    "OPEN_FILE_POSITION",
+    LOCK_LEVEL_REGISTRY,
+    slopos_ostd::sync::lock_tracking::LO_DUPOK
+);
+
 pub(super) static OPEN_FILES_STATE: SpinLock<OpenFilesState> = SpinLock::new(
     OpenFilesState::uninitialized(),
     lock_class!("OPEN_FILES_STATE", LOCK_LEVEL_RESOURCE),
@@ -676,6 +692,7 @@ pub(super) fn new_open_file(
         ops,
         handle,
         position: AtomicU64::new(position),
+        position_lock: SpinLock::new((), OPEN_FILE_POSITION_CLASS),
         status_flags: AtomicU32::new(status_flags.bits()),
         backing,
     })

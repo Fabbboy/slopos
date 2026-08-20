@@ -216,6 +216,11 @@ const REBOOT_METHODS: &[(&str, fn())] = &[
 pub fn kernel_reboot(reason: *const c_char) -> ! {
     ensure_shutdown_mmio_mapped();
     slopos_ostd::watchdog::snapshot_max_stalls();
+    // Must precede `disable_interrupts`, for the reason `kernel_shutdown`
+    // gives: the virtio-blk completion path needs IRQs and the scheduler to
+    // post the used-buffer event. Without this a reboot discards write-back
+    // data that a halt would have persisted.
+    flush_filesystems_for_shutdown();
     slopos_ostd::watchdog::leave_watched_set();
     cpu::disable_interrupts();
 

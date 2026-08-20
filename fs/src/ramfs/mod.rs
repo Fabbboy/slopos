@@ -11,7 +11,7 @@ use crate::MAX_NAME_LEN;
 /// from exhausting kernel memory.
 const RAMFS_MAX_INODES: usize = 4096;
 
-const ROOT_INODE: InodeId = 1;
+const ROOT_SLOT: usize = 1;
 
 #[derive(Clone, Copy)]
 struct DirEntry {
@@ -30,6 +30,30 @@ impl DirEntry {
     }
 }
 
+/// Slot index and generation packed into the [`InodeId`] a descriptor holds.
+///
+/// Slots are recycled the moment an inode is unlinked, so an id that named
+/// only a slot would silently follow the *next* file created in it. The
+/// generation moves on every recycle, so a descriptor outliving its file
+/// fails instead of aliasing a stranger's.
+const INODE_GEN_SHIFT: u32 = 32;
+const INODE_SLOT_MASK: u64 = 0xFFFF_FFFF;
+
+#[inline]
+fn pack_inode_id(slot: u64, generation: u32) -> InodeId {
+    ((generation as u64) << INODE_GEN_SHIFT) | (slot & INODE_SLOT_MASK)
+}
+
+#[inline]
+fn inode_slot(id: InodeId) -> usize {
+    (id & INODE_SLOT_MASK) as usize
+}
+
+#[inline]
+fn inode_generation(id: InodeId) -> u32 {
+    (id >> INODE_GEN_SHIFT) as u32
+}
+
 struct RamInode {
     in_use: bool,
     file_type: FileType,
@@ -40,6 +64,8 @@ struct RamInode {
     nlink: u32,
     /// Refuses every mutation once set; never cleared while the inode lives.
     sealed: bool,
+    /// Bumped on every reset, so a stale id fails to resolve.
+    generation: u32,
 }
 
 impl RamInode {
@@ -53,6 +79,7 @@ impl RamInode {
             mode: 0o644,
             nlink: 1,
             sealed: false,
+            generation: 1,
         }
     }
 
@@ -67,6 +94,7 @@ impl RamInode {
         self.mode = 0o644;
         self.nlink = 1;
         self.sealed = false;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     fn data_len(&self) -> usize {
@@ -78,6 +106,11 @@ impl RamInode {
     }
 
     fn add_dir_entry(&mut self, name: &[u8], inode: InodeId) -> VfsResult<()> {
+        // Truncating instead would store a name no lookup can match, since
+        // every comparison here tests `name_len == name.len()`.
+        if name.len() > MAX_NAME_LEN {
+            return Err(VfsError::NameTooLong);
+        }
         for entry in self.dir_entries.iter() {
             if entry.name_len == name.len() && entry.name[..entry.name_len] == *name {
                 return Err(VfsError::AlreadyExists);
@@ -85,7 +118,7 @@ impl RamInode {
         }
 
         let mut entry = DirEntry::empty();
-        let len = name.len().min(MAX_NAME_LEN);
+        let len = name.len();
         entry.name[..len].copy_from_slice(&name[..len]);
         entry.name_len = len;
         entry.inode = inode;
@@ -128,59 +161,91 @@ impl RamFsInner {
         if self.initialized {
             return;
         }
-        // Index 0 is a reserved sentinel; inode ids start at ROOT_INODE (1).
-        while self.inodes.len() <= ROOT_INODE as usize {
+        // Index 0 is a reserved sentinel; inode slots start at ROOT_SLOT (1).
+        while self.inodes.len() <= ROOT_SLOT {
             self.inodes.push(RamInode::new()).expect("ramfs: alloc");
         }
         self.initialized = true;
 
-        let root = &mut self.inodes[ROOT_INODE as usize];
+        let root_id = pack_inode_id(ROOT_SLOT as u64, self.inodes[ROOT_SLOT].generation);
+        let root = &mut self.inodes[ROOT_SLOT];
         root.in_use = true;
         root.file_type = FileType::Directory;
         root.mode = 0o755;
         root.nlink = 2;
-        root.parent = ROOT_INODE;
+        root.parent = root_id;
 
-        root.add_dir_entry(b".", ROOT_INODE).ok();
-        root.add_dir_entry(b"..", ROOT_INODE).ok();
+        root.add_dir_entry(b".", root_id).ok();
+        root.add_dir_entry(b"..", root_id).ok();
     }
 
     fn alloc_inode(&mut self) -> VfsResult<InodeId> {
-        for id in (ROOT_INODE as usize + 1)..self.inodes.len() {
-            if !self.inodes[id].in_use {
-                return Ok(id as InodeId);
+        for slot in (ROOT_SLOT + 1)..self.inodes.len() {
+            if !self.inodes[slot].in_use {
+                return Ok(pack_inode_id(slot as u64, self.inodes[slot].generation));
             }
         }
         if self.inodes.len() >= RAMFS_MAX_INODES {
             return Err(VfsError::NoSpace);
         }
-        let id = self.inodes.len();
+        let slot = self.inodes.len();
         self.inodes
             .push(RamInode::new())
             .map_err(|_| VfsError::NoSpace)?;
-        Ok(id as InodeId)
+        Ok(pack_inode_id(slot as u64, self.inodes[slot].generation))
     }
 
     fn get_inode(&self, id: InodeId) -> VfsResult<&RamInode> {
-        if id as usize >= self.inodes.len() {
+        let slot = inode_slot(id);
+        if slot >= self.inodes.len() {
             return Err(VfsError::NotFound);
         }
-        let inode = &self.inodes[id as usize];
-        if !inode.in_use {
+        let inode = &self.inodes[slot];
+        if !inode.in_use || inode.generation != inode_generation(id) {
             return Err(VfsError::NotFound);
         }
         Ok(inode)
     }
 
     fn get_inode_mut(&mut self, id: InodeId) -> VfsResult<&mut RamInode> {
-        if id as usize >= self.inodes.len() {
+        let slot = inode_slot(id);
+        if slot >= self.inodes.len() {
             return Err(VfsError::NotFound);
         }
-        let inode = &mut self.inodes[id as usize];
-        if !inode.in_use {
+        let inode = &mut self.inodes[slot];
+        if !inode.in_use || inode.generation != inode_generation(id) {
             return Err(VfsError::NotFound);
         }
         Ok(inode)
+    }
+
+    /// Is `maybe_ancestor` at or above `start` in the directory tree?
+    ///
+    /// Walks parent links, bounded by the table size so a pre-existing cycle
+    /// terminates the walk instead of hanging it.
+    fn is_ancestor_of(&self, maybe_ancestor: InodeId, start: InodeId) -> VfsResult<bool> {
+        let root = self.root_id();
+        let mut current = start;
+        for _ in 0..RAMFS_MAX_INODES {
+            if current == maybe_ancestor {
+                return Ok(true);
+            }
+            if current == root {
+                return Ok(false);
+            }
+            current = self.get_inode(current)?.parent;
+        }
+        Ok(true)
+    }
+
+    /// The root's id carries its generation like any other.
+    fn root_id(&self) -> InodeId {
+        let generation = self
+            .inodes
+            .get(ROOT_SLOT)
+            .map(|i| i.generation)
+            .unwrap_or(1);
+        pack_inode_id(ROOT_SLOT as u64, generation)
     }
 }
 
@@ -225,7 +290,7 @@ impl FileSystem for RamFs {
     }
 
     fn root_inode(&self) -> InodeId {
-        ROOT_INODE
+        self.with_inner(|inner| inner.root_id())
     }
 
     fn lookup(&self, parent: InodeId, name: &[u8]) -> VfsResult<InodeId> {
@@ -328,7 +393,7 @@ impl FileSystem for RamFs {
             let new_id = inner.alloc_inode()?;
 
             {
-                let new_inode = &mut inner.inodes[new_id as usize];
+                let new_inode = &mut inner.inodes[inode_slot(new_id)];
                 new_inode.in_use = true;
                 new_inode.file_type = file_type;
                 new_inode.data.clear();
@@ -383,7 +448,7 @@ impl FileSystem for RamFs {
                 inner.get_inode_mut(parent)?.nlink -= 1;
             }
 
-            inner.inodes[target_id as usize].reset();
+            inner.inodes[inode_slot(target_id)].reset();
 
             Ok(())
         })
@@ -461,16 +526,45 @@ impl FileSystem for RamFs {
                 old_parent_node.lookup(old_name)?
             };
 
+            let source_type = inner.get_inode(target_inode)?.file_type;
+
+            // Splicing a directory into its own descendant detaches the whole
+            // subtree: it becomes unreachable from the root and unremovable.
+            if source_type == FileType::Directory
+                && inner.is_ancestor_of(target_inode, new_parent)?
             {
+                return Err(VfsError::InvalidPath);
+            }
+
+            let displaced = {
                 let new_parent_node = inner.get_inode(new_parent)?;
                 if new_parent_node.file_type != FileType::Directory {
                     return Err(VfsError::NotDirectory);
                 }
-                if new_parent_node.lookup(new_name).is_ok() {
-                    inner
-                        .get_inode_mut(new_parent)?
-                        .remove_dir_entry(new_name)?;
+                match new_parent_node.lookup(new_name) {
+                    Ok(existing) => Some(existing),
+                    Err(_) => None,
                 }
+            };
+
+            if let Some(existing) = displaced {
+                let existing_type = inner.get_inode(existing)?.file_type;
+                match (source_type, existing_type) {
+                    (FileType::Directory, FileType::Directory) => {
+                        if inner.get_inode(existing)?.dir_entry_count() > 2 {
+                            return Err(VfsError::NotEmpty);
+                        }
+                    }
+                    (FileType::Directory, _) => return Err(VfsError::NotDirectory),
+                    (_, FileType::Directory) => return Err(VfsError::IsDirectory),
+                    _ => {}
+                }
+                inner
+                    .get_inode_mut(new_parent)?
+                    .remove_dir_entry(new_name)?;
+                // Unlinking the entry alone leaks the inode out of the fixed
+                // table, which repeated overwrites then exhaust.
+                inner.inodes[inode_slot(existing)].reset();
             }
 
             inner

@@ -288,6 +288,10 @@ fn write_open_file(
     }
 
     let seekable = ops.seekable();
+    // Serialises the offset read, the write and the offset advance against
+    // another writer sharing this description; an unlocked read-modify-write
+    // on `position` lets two writers land on the same offset.
+    let _pos_guard = seekable.then(|| open_file.position_lock.lock());
     let used_offset = if seekable { open_file.position() } else { 0 };
     let mut flag_bits = open_file.status_flags().bits();
     let mut socket_guard = None;

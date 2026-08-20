@@ -165,7 +165,13 @@ pub fn truncate(
     Ok(())
 }
 
-fn free_indirect(
+/// Free every block reachable through an indirect block at `depth`, leaving
+/// the indirect block itself to the caller.
+///
+/// The pointer buffer is heap-allocated: at depth 3 an inline `[BlockNum;
+/// 1024]` per frame would put 12 KiB across the recursion, well past the
+/// kernel's bounded-stack budget.
+pub(crate) fn free_indirect(
     block: BlockNum,
     depth: u32,
     cache: &mut BlockCache,
@@ -177,8 +183,9 @@ fn free_indirect(
         return Ok(());
     }
 
-    let mut ptrs = [BlockNum::ZERO; 1024];
-    let count = cmp::min(ptrs_per_block as usize, ptrs.len());
+    let count = cmp::min(ptrs_per_block as usize, 1024);
+    let mut ptrs =
+        slopos_ostd::KVec::<BlockNum>::zeroed(count).map_err(|_| Ext2Error::OutOfMemory)?;
     {
         let blk = cache.get(block, device)?;
         let data = blk.data();

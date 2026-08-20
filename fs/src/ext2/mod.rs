@@ -12,7 +12,8 @@ pub mod types;
 
 use cache::BlockCache;
 use ondisk::{
-    DIR_FT_DIR, DIR_FT_REG_FILE, DirEntry, GroupDesc, Inode, MODE_DIRECTORY, MODE_FILE, Superblock,
+    DIR_FT_DIR, DIR_FT_REG_FILE, DirEntry, EXT2_ERROR_FS, EXT2_VALID_FS, GroupDesc, Inode,
+    MODE_DIRECTORY, MODE_FILE, Superblock,
 };
 use types::{BlockNum, GroupIdx, InodeNum};
 
@@ -24,6 +25,12 @@ pub use ondisk::EXT2_MAX_BLOCK_SIZE;
 pub enum Ext2Error {
     InvalidSuperblock,
     UnsupportedBlockSize,
+    /// The image declares an incompatible feature this implementation cannot
+    /// represent; mounting it read-write would corrupt it.
+    UnsupportedFeature,
+    /// The mount is read-only, either by request or because the image carries
+    /// an unsupported read-only-compatible feature.
+    ReadOnly,
     InvalidInode,
     InvalidBlock,
     UnsupportedIndirection,
@@ -54,6 +61,9 @@ pub struct Ext2Fs<'a> {
     /// Set when an op changed the in-memory free-counts, leaving the on-disk
     /// superblock stale; persisted only by [`Self::sync`], never mid-operation.
     superblock_dirty: bool,
+    /// Refuses every mutating entry point. Set when the image declares a
+    /// read-only-compatible feature this implementation does not write.
+    read_only: bool,
 }
 
 impl<'a> Ext2Fs<'a> {
@@ -80,6 +90,7 @@ impl<'a> Ext2Fs<'a> {
         block_size: u32,
         inode_size: u16,
     ) -> Self {
+        let read_only = superblock.requires_readonly();
         Self {
             device,
             superblock,
@@ -88,7 +99,50 @@ impl<'a> Ext2Fs<'a> {
             inode_size,
             ptrs_per_block: block_size / 4,
             superblock_dirty: false,
+            read_only,
         }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Gate for every mutating entry point.
+    fn check_writable(&self) -> Result<(), Ext2Error> {
+        if self.read_only {
+            return Err(Ext2Error::ReadOnly);
+        }
+        Ok(())
+    }
+
+    /// Mark the image as not cleanly unmounted, so a later fsck knows it must
+    /// run. Cleared again by [`Self::mark_clean`] on a clean unmount.
+    pub fn mark_dirty_on_disk(&mut self) -> Result<(), Ext2Error> {
+        if self.read_only || self.superblock.state == EXT2_ERROR_FS {
+            return Ok(());
+        }
+        self.superblock.state = EXT2_ERROR_FS;
+        self.write_superblock_state()
+    }
+
+    pub fn mark_clean(&mut self) -> Result<(), Ext2Error> {
+        if self.read_only {
+            return Ok(());
+        }
+        self.superblock.state = EXT2_VALID_FS;
+        self.write_superblock_state()
+    }
+
+    fn write_superblock_state(&mut self) -> Result<(), Ext2Error> {
+        let mut sb_buf = [0u8; 1024];
+        self.device
+            .read_at(1024, &mut sb_buf)
+            .map_err(|_| Ext2Error::DeviceError)?;
+        sb_buf[58..60].copy_from_slice(&self.superblock.state.to_le_bytes());
+        self.device
+            .write_at(1024, &sb_buf)
+            .map_err(|_| Ext2Error::DeviceError)?;
+        Ok(())
     }
 
     pub fn superblock(&self) -> Superblock {
@@ -199,6 +253,7 @@ impl<'a> Ext2Fs<'a> {
     }
 
     pub fn write_file(&mut self, ino: u32, offset: u32, buffer: &[u8]) -> Result<usize, Ext2Error> {
+        self.check_writable()?;
         let ino_num = InodeNum(ino);
         let mut inode = self.read_inode_num(ino_num)?;
         let free_before = self.superblock.free_blocks_count;
@@ -295,12 +350,30 @@ impl<'a> Ext2Fs<'a> {
         name: &[u8],
         is_dir: bool,
     ) -> Result<InodeNum, Ext2Error> {
+        self.check_writable()?;
         if name.is_empty() || name.len() > 255 {
             return Err(Ext2Error::NameTooLong);
         }
         let mut parent = self.read_inode_num(parent_num)?;
         if !parent.is_directory() {
             return Err(Ext2Error::NotDirectory);
+        }
+
+        // Without this a second create writes a second record under the same
+        // name: lookup answers whichever comes first and the other inode is
+        // unreachable, leaving the image inconsistent for every other ext2
+        // implementation.
+        if dir::lookup_child(
+            &parent,
+            name,
+            &mut *self.cache,
+            self.device,
+            self.ptrs_per_block,
+            self.block_size,
+        )
+        .is_ok()
+        {
+            return Err(Ext2Error::AlreadyExists);
         }
 
         let new_ino = ext2_alloc::allocate_inode(
@@ -382,6 +455,7 @@ impl<'a> Ext2Fs<'a> {
     }
 
     pub fn unlink_entry(&mut self, parent: u32, name: &[u8]) -> Result<(), Ext2Error> {
+        self.check_writable()?;
         let parent_num = InodeNum(parent);
         let mut parent_inode = self.read_inode_num(parent_num)?;
         if !parent_inode.is_directory() {
@@ -460,6 +534,10 @@ impl<'a> Ext2Fs<'a> {
         Ok(GroupDesc::parse(&block.data()[within..within + 32]))
     }
 
+    /// Free every block an inode owns: the twelve direct ones and all three
+    /// indirect trees. Missing depths 2 and 3 leaks every block past the
+    /// single-indirect reach on each delete, with no way to recover the space
+    /// short of reformatting.
     fn release_file_blocks(&mut self, inode: &Inode) -> Result<(), Ext2Error> {
         for blk in inode.block.iter().take(12) {
             if blk.is_valid() {
@@ -472,46 +550,40 @@ impl<'a> Ext2Fs<'a> {
                 )?;
             }
         }
-        if inode.block[12].is_valid() {
-            let indirect = inode.block[12];
-            // An inline `[BlockNum::ZERO; 1024]` would put ≈4 KiB on the kernel
-            // stack here, so the pointer buffer goes through `KVec`.
-            let ptrs: slopos_ostd::KVec<BlockNum> = {
-                let block = self.cache.get(indirect, self.device)?;
-                let data = block.data();
-                let count = self.block_size as usize / 4;
-                let mut ptrs = slopos_ostd::KVec::<BlockNum>::zeroed(1024)
-                    .map_err(|_| Ext2Error::OutOfMemory)?;
-                for i in 0..count.min(1024) {
-                    let off = i * 4;
-                    ptrs[i] = BlockNum(u32::from_le_bytes([
-                        data[off],
-                        data[off + 1],
-                        data[off + 2],
-                        data[off + 3],
-                    ]));
-                }
-                ptrs
-            };
-            for &p in ptrs.iter().take(self.block_size as usize / 4) {
-                if p.is_valid() {
-                    ext2_alloc::free_block(
-                        p,
-                        &mut self.superblock,
-                        &mut *self.cache,
-                        self.device,
-                        self.block_size,
-                    )?;
-                }
+
+        let mut freed: slopos_ostd::KVec<BlockNum> = slopos_ostd::KVec::new();
+        for (slot, depth) in [(12usize, 1u32), (13, 2), (14, 3)] {
+            let root = inode.block[slot];
+            if !root.is_valid() {
+                continue;
             }
+            // `free_indirect` hands back every block it walks; the frees are
+            // applied afterwards because the superblock and the cache it
+            // needs are borrowed for the walk.
+            file::free_indirect(
+                root,
+                depth,
+                &mut self.cache,
+                self.device,
+                self.ptrs_per_block,
+                &mut |b| {
+                    freed.push(b).map_err(|_| Ext2Error::OutOfMemory)?;
+                    Ok(())
+                },
+            )?;
+            freed.push(root).map_err(|_| Ext2Error::OutOfMemory)?;
+        }
+
+        for blk in freed.iter() {
             ext2_alloc::free_block(
-                indirect,
+                *blk,
                 &mut self.superblock,
                 &mut *self.cache,
                 self.device,
                 self.block_size,
             )?;
         }
+
         Ok(())
     }
 
