@@ -43,11 +43,20 @@ fn map_cap_region(info: &PciDeviceInfo, bar: u8, offset: u32, length: u32) -> Mm
         return MmioRegion::empty();
     }
     let bar_info = &info.bars[bar as usize];
-    if bar_info.base == 0 || bar_info.is_io != 0 {
+    // The device supplies both offset and length; a function that declares a
+    // window past its own BAR would otherwise get whatever physical memory
+    // sits there mapped for it.
+    let Some(base) = bar_info.window(offset as u64, length as u64) else {
+        klog_info!(
+            "virtio: capability window bar{} +{:#x}..{:#x} escapes BAR size {:#x}; ignoring",
+            bar,
+            offset,
+            offset as u64 + length as u64,
+            bar_info.size,
+        );
         return MmioRegion::empty();
-    }
-    let phys = PhysAddr::new(bar_info.base.wrapping_add(offset as u64));
-    MmioRegion::map(phys, length as usize).unwrap_or_else(MmioRegion::empty)
+    };
+    MmioRegion::map(PhysAddr::new(base), length as usize).unwrap_or_else(MmioRegion::empty)
 }
 
 pub fn parse_capabilities(info: &PciDeviceInfo) -> VirtioMmioCaps {

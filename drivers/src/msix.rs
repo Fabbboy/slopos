@@ -200,8 +200,13 @@ pub fn msix_map_table(
         return Err(MsixError::BarNotAvailable);
     }
 
+    // Table size, offset and BIR all come from the device. An unchecked
+    // offset maps MMIO outside the BAR the function actually owns.
     let table_bytes = (cap.table_size as usize) * MSIX_ENTRY_SIZE;
-    let table_phys = PhysAddr::new(table_bar.base.wrapping_add(cap.table_offset as u64));
+    let table_base = table_bar
+        .window(cap.table_offset as u64, table_bytes as u64)
+        .ok_or(MsixError::BarNotAvailable)?;
+    let table_phys = PhysAddr::new(table_base);
     let table_region = MmioRegion::map(table_phys, table_bytes).ok_or(MsixError::MappingFailed)?;
 
     let pba_bar_idx = cap.pba_bar as usize;
@@ -215,7 +220,10 @@ pub fn msix_map_table(
 
     // PBA: one bit per table entry, rounded up to QWORD granularity.
     let pba_bytes = (((cap.table_size as usize) + 63) / 64) * 8;
-    let pba_phys = PhysAddr::new(pba_bar.base.wrapping_add(cap.pba_offset as u64));
+    let pba_base = pba_bar
+        .window(cap.pba_offset as u64, pba_bytes as u64)
+        .ok_or(MsixError::BarNotAvailable)?;
+    let pba_phys = PhysAddr::new(pba_base);
     let pba_region = MmioRegion::map(pba_phys, pba_bytes).ok_or(MsixError::MappingFailed)?;
 
     klog_info!(

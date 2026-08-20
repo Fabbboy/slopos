@@ -68,7 +68,11 @@ define_syscall!(syscall_fstat
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
-    let mut stat = UserFsStat { type_: 0, size: 0 };
+    let mut stat = UserFsStat {
+        type_: 0,
+        _pad: [0; 3],
+        size: 0,
+    };
     let rc = file_fstat_fd(pid, fd.raw(), &mut stat);
     if rc != 0 {
         return Err(errno_from_neg(rc));

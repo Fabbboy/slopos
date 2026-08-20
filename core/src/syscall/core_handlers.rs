@@ -188,6 +188,7 @@ define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(SysIn
         allocated_pages: pages.allocated,
         total_tasks: tasks.total_tasks,
         active_tasks: tasks.active_tasks,
+        _pad0: 0,
         task_context_switches: tasks.context_switches,
         scheduler_context_switches: sched.context_switches,
         scheduler_yields: sched.yields,
@@ -195,6 +196,7 @@ define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(SysIn
         schedule_calls: sched.schedule_calls,
         wl_balance: slopos_ostd::wl_currency::check_balance(),
         boot_flags: slopos_ostd::boot_flags::get_flags(),
+        _pad1: 0,
     };
 
     copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;

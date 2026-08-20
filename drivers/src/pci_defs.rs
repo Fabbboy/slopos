@@ -149,6 +149,23 @@ impl PciBarInfo {
             prefetchable: 0,
         }
     }
+
+    /// Physical address of a `len`-byte window at `offset` within this BAR,
+    /// or `None` if it does not fit.
+    ///
+    /// The offsets and lengths that reach this are read from device config
+    /// space, which a hostile function controls. Unchecked, they map or index
+    /// MMIO anywhere in the physical address space.
+    pub fn window(&self, offset: u64, len: u64) -> Option<u64> {
+        if self.base == 0 || self.is_io != 0 || len == 0 {
+            return None;
+        }
+        let end = offset.checked_add(len)?;
+        if end > self.size {
+            return None;
+        }
+        self.base.checked_add(offset)
+    }
 }
 
 /// A PCI capability found in the config-space linked list. The header carries an

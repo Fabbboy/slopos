@@ -270,6 +270,15 @@ pub fn notify_queue(
     queue: &Virtqueue,
     queue_index: u16,
 ) {
-    let offset = (queue.notify_off as u32) * notify_off_multiplier;
-    notify_cfg.write::<u16>(offset as usize, queue_index);
+    // Both factors are device-supplied, and `IoMem::write` asserts rather
+    // than returns, so an out-of-range product would panic the kernel from
+    // the TX hot path.
+    let offset = (queue.notify_off as u64).saturating_mul(notify_off_multiplier as u64);
+    let Ok(offset) = usize::try_from(offset) else {
+        return;
+    };
+    if !notify_cfg.is_valid_offset(offset, size_of::<u16>()) {
+        return;
+    }
+    notify_cfg.write::<u16>(offset, queue_index);
 }

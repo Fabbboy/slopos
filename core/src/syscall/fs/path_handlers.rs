@@ -83,7 +83,11 @@ define_syscall!(syscall_fs_stat
     (ctx, path: UserCStr<USER_PATH_MAX>, out: UserPtr<UserFsStat>) cap(NoneFd)
     -> Result<(), Errno>
 {
-    let mut stat = UserFsStat { type_: 0, size: 0 };
+    let mut stat = UserFsStat {
+        type_: 0,
+        _pad: [0; 3],
+        size: 0,
+    };
     let rc = file_stat_path(path.as_bytes(), &mut stat.type_, &mut stat.size);
     if rc != 0 {
         return Err(errno_from_neg(rc));

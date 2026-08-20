@@ -363,6 +363,39 @@ pub fn test_msix_configure_invalid_vector() -> TestResult {
     pass!()
 }
 
+/// The BAR window helper is what stands between a device-declared offset and
+/// an arbitrary MMIO mapping, so it must reject everything that does not fit.
+pub fn test_bar_window_bounds() -> TestResult {
+    let bar = PciBarInfo {
+        base: 0xF000_0000,
+        size: 0x1000,
+        is_io: 0,
+        is_64bit: 0,
+        prefetchable: 0,
+    };
+
+    assert_eq_test!(bar.window(0, 0x1000), Some(0xF000_0000), "exact fit");
+    assert_eq_test!(bar.window(0x800, 0x800), Some(0xF000_0800), "tail fit");
+    assert_test!(bar.window(0, 0x1001).is_none(), "one byte past the BAR");
+    assert_test!(bar.window(0x1000, 4).is_none(), "offset at the end");
+    assert_test!(bar.window(0xFFFF_0000, 4).is_none(), "offset far past");
+    assert_test!(bar.window(u64::MAX, 4).is_none(), "offset overflows");
+    assert_test!(bar.window(0, 0).is_none(), "zero length");
+
+    let io_bar = PciBarInfo {
+        base: 0x1000,
+        size: 0x100,
+        is_io: 1,
+        is_64bit: 0,
+        prefetchable: 0,
+    };
+    assert_test!(io_bar.window(0, 4).is_none(), "I/O space is never mapped");
+
+    let absent = PciBarInfo::zeroed();
+    assert_test!(absent.window(0, 4).is_none(), "an absent BAR maps nothing");
+    pass!()
+}
+
 pub fn test_msix_configure_invalid_entry() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -729,3 +762,4 @@ slopos_testing::stest!(name = test_msix_cap_is_enabled_method, suite = msix);
 slopos_testing::stest!(name = test_msix_cap_is_function_masked_method, suite = msix);
 slopos_testing::stest!(name = test_all_msix_devices_fields_valid, suite = msix);
 slopos_testing::stest!(name = test_sata_no_msix, suite = msix);
+slopos_testing::stest!(name = test_bar_window_bounds, suite = msix);

@@ -14,6 +14,11 @@ pub struct UserTimeval {
 }
 
 /// System information returned by SYSCALL_SYS_INFO
+///
+/// The `_pad` members are named on purpose: `copy_to_user` copies
+/// `size_of::<Self>()` bytes, and implicit padding is uninitialized under the
+/// Rust abstract machine, so a hole here is a repeatable disclosure of the
+/// calling task's kernel stack.
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 pub struct UserSysInfo {
@@ -22,6 +27,7 @@ pub struct UserSysInfo {
     pub allocated_pages: u32,
     pub total_tasks: u32,
     pub active_tasks: u32,
+    pub _pad0: u32,
     pub task_context_switches: u64,
     pub scheduler_context_switches: u64,
     pub scheduler_yields: u64,
@@ -29,7 +35,13 @@ pub struct UserSysInfo {
     pub schedule_calls: u32,
     pub wl_balance: i64,
     pub boot_flags: u32,
+    pub _pad1: u32,
 }
+
+const _: () = assert!(
+    core::mem::size_of::<UserSysInfo>() == 72,
+    "UserSysInfo must carry no implicit padding"
+);
 
 pub const BOOT_FLAG_ROULETTE_SKIP: u32 = 1 << 0;
 pub const BOOT_FLAG_TESTS_ENABLED: u32 = 1 << 1;

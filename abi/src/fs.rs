@@ -63,12 +63,23 @@ impl Default for UserFsEntry {
 }
 
 /// Stat information returned by the fs_stat syscall.
+///
+/// `_pad` is named rather than implicit: `copy_to_user` copies
+/// `size_of::<Self>()` bytes, and a hole between `type_` and `size` would
+/// carry three uninitialized bytes of the calling task's kernel stack to
+/// userland on every call.
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 pub struct UserFsStat {
     pub type_: u8,
+    pub _pad: [u8; 3],
     pub size: u32,
 }
+
+const _: () = assert!(
+    core::mem::size_of::<UserFsStat>() == 8,
+    "UserFsStat must carry no implicit padding"
+);
 
 impl UserFsStat {
     pub fn is_directory(&self) -> bool {
