@@ -84,6 +84,8 @@ pub struct DataState {
 
     pub reset_received: bool,
     pub peer_closed: bool,
+
+    pub challenge_budget: challenge_ack::ChallengeBudget,
 }
 
 impl DataState {
@@ -139,6 +141,11 @@ impl DataState {
                 write_field!(slot, last_ack_sent, 0u32);
                 write_field!(slot, reset_received, false);
                 write_field!(slot, peer_closed, false);
+                write_field!(
+                    slot,
+                    challenge_budget,
+                    challenge_ack::ChallengeBudget::new()
+                );
                 Ok(slot.finish())
             },
         )
@@ -193,6 +200,11 @@ impl DataState {
                 write_field!(slot, last_ack_sent, 0u32);
                 write_field!(slot, reset_received, false);
                 write_field!(slot, peer_closed, false);
+                write_field!(
+                    slot,
+                    challenge_budget,
+                    challenge_ack::ChallengeBudget::new()
+                );
                 Ok(slot.finish())
             },
         )
@@ -245,6 +257,7 @@ impl DataState {
             last_ack_sent: 0,
             reset_received: false,
             peer_closed: false,
+            challenge_budget: challenge_ack::ChallengeBudget::new(),
         }
     }
 
@@ -274,8 +287,16 @@ impl DataState {
         let mut actions = Actions::new();
         let tuple = pcb.tuple;
 
+        // RFC 5961 §4: a SYN in a synchronized state is answered with a
+        // challenge ACK irrespective of its sequence number, never a RST.
         if hdr.is_syn() {
-            return Self::on_unexpected_syn(pcb, hdr, actions);
+            return Self::on_unexpected_syn(pcb, now_ms, actions);
+        }
+
+        // RFC 793 §3.9: everything below this point may only act on a segment
+        // that falls in the receive window.
+        if !data_segment_acceptable(pcb, hdr, payload.len()) {
+            return unacceptable_segment_ack(pcb, now_ms, actions);
         }
 
         if data_paws_should_drop(pcb, options) {
@@ -355,14 +376,20 @@ impl DataState {
         actions
     }
 
-    fn on_unexpected_syn(pcb: &mut Pcb, _hdr: &TcpHeader, mut actions: Actions) -> Actions {
+    fn on_unexpected_syn(pcb: &mut Pcb, now_ms: u64, mut actions: Actions) -> Actions {
         let tuple = pcb.tuple;
-        let PcbState::Data(data) = &pcb.state else {
+        let PcbState::Data(data) = &mut pcb.state else {
             unreachable!()
         };
-        actions.push_segment(SegmentBuilder::bare_rst(tuple, data.snd_nxt.raw()));
-        actions.release = true;
-        actions.notify |= SocketNotify::RESET_RECEIVED | SocketNotify::RECV_WAKE;
+        let snd_nxt = data.snd_nxt.raw();
+        let rcv_nxt = data.rcv_nxt.raw();
+        let rcv_wnd = data.rcv_wnd;
+        let ts_opt = data.ts_option(now_ms);
+        if data.challenge_budget.try_consume(now_ms) {
+            let mut ack = SegmentBuilder::ack(tuple, snd_nxt, rcv_nxt, rcv_wnd);
+            ack.timestamp = ts_opt;
+            actions.push_segment(ack);
+        }
         actions
     }
 
@@ -821,7 +848,10 @@ fn handle_data_rst(pcb: &mut Pcb, hdr: &TcpHeader, now_ms: u64) -> Actions {
     match challenge_ack::classify_rst(hdr.seq_num, rcv_nxt, effective_wnd) {
         challenge_ack::RstAction::Accept => DataState::on_rst(pcb, actions),
         challenge_ack::RstAction::ChallengeAck => {
-            if challenge_ack::try_challenge_ack(now_ms) {
+            let PcbState::Data(data) = &mut pcb.state else {
+                unreachable!()
+            };
+            if data.challenge_budget.try_consume(now_ms) {
                 let mut ack = SegmentBuilder::ack(tuple, snd_nxt, rcv_nxt, rcv_wnd);
                 ack.timestamp = ts_opt;
                 actions.push_segment(ack);
@@ -830,6 +860,40 @@ fn handle_data_rst(pcb: &mut Pcb, hdr: &TcpHeader, now_ms: u64) -> Actions {
         }
         challenge_ack::RstAction::Drop => actions,
     }
+}
+
+/// RFC 793 §3.9 acceptability for a Data-state segment, with the receive
+/// window scaled as negotiated.
+#[inline(never)]
+fn data_segment_acceptable(pcb: &Pcb, hdr: &TcpHeader, payload_len: usize) -> bool {
+    let PcbState::Data(data) = &pcb.state else {
+        return false;
+    };
+    let effective_wnd = if data.wscale_enabled {
+        (data.rcv_wnd as u32) << data.rcv_wscale
+    } else {
+        data.rcv_wnd as u32
+    };
+    let seg_len = payload_len as u32 + u32::from(hdr.is_fin());
+    challenge_ack::segment_acceptable(hdr.seq_num, seg_len, data.rcv_nxt.raw(), effective_wnd)
+}
+
+/// RFC 793 §3.9: an unacceptable segment is dropped, and unless it carried a
+/// RST an ACK is sent back so the peer resynchronises.
+#[inline(never)]
+fn unacceptable_segment_ack(pcb: &Pcb, now_ms: u64, mut actions: Actions) -> Actions {
+    let PcbState::Data(data) = &pcb.state else {
+        return actions;
+    };
+    let mut ack = SegmentBuilder::ack(
+        pcb.tuple,
+        data.snd_nxt.raw(),
+        data.rcv_nxt.raw(),
+        data.rcv_wnd,
+    );
+    ack.timestamp = data.ts_option(now_ms);
+    actions.push_segment(ack);
+    actions
 }
 
 /// Does the incoming segment's timestamp option trip PAWS?

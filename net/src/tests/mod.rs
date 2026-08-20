@@ -38,6 +38,7 @@ pub mod tcp_retx_tests;
 pub mod tcp_rst_validation_tests;
 pub mod tcp_rtt_tests;
 pub mod tcp_seq_tests;
+pub mod tcp_siphash_tests;
 pub mod tcp_socket_tests;
 pub mod tcp_tests;
 pub mod tcp_timestamp_tests;

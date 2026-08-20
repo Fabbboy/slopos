@@ -1,13 +1,13 @@
-//! RST validation and challenge ACK rate limiting (RFC 5961).
+//! Segment acceptability, RST validation and challenge ACK rate limiting
+//! (RFC 793 §3.9, RFC 5961).
 //!
 //! An in-window RST whose `seg.seq` is not exactly `rcv_nxt` is answered with a
 //! bare ACK carrying `rcv_nxt` instead of being accepted, so an off-path
-//! injector cannot tear the connection down; a per-epoch cap keeps that reply
-//! from becoming an amplification vector.
+//! injector cannot tear the connection down; a per-connection per-epoch cap
+//! keeps that reply from becoming an amplification vector, and keeps one
+//! connection's budget from reporting on another's window (CVE-2016-5696).
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-
-use super::seq::{seq_gt, seq_lt};
+use super::seq::{seq_ge, seq_gt, seq_lt};
 
 /// Action to take for an incoming RST segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,35 +35,78 @@ pub fn classify_rst(seg_seq: u32, rcv_nxt: u32, window: u32) -> RstAction {
     RstAction::Drop
 }
 
-/// Per-epoch cap, matching Linux's `tcp_challenge_ack_limit` default.
+/// RFC 793 §3.9 segment acceptability.
+///
+/// `seg_len` counts the SYN and FIN control bits the segment carries, since
+/// each occupies a sequence position.
+pub fn segment_acceptable(seg_seq: u32, seg_len: u32, rcv_nxt: u32, rcv_wnd: u32) -> bool {
+    let in_window = |s: u32| seq_ge(s, rcv_nxt) && seq_lt(s, rcv_nxt.wrapping_add(rcv_wnd));
+
+    match (seg_len, rcv_wnd) {
+        (0, 0) => seg_seq == rcv_nxt,
+        (0, _) => in_window(seg_seq),
+        // A zero receive window accepts no data, only a pure ACK probing it.
+        (_, 0) => false,
+        (len, _) => in_window(seg_seq) || in_window(seg_seq.wrapping_add(len).wrapping_sub(1)),
+    }
+}
+
+/// Per-epoch cap. RFC 5961 §7 leaves the value to the implementer; the count
+/// is per connection, not global, so probing one connection's budget says
+/// nothing about another's receive window.
 const CHALLENGE_ACK_LIMIT: u32 = 1000;
 
 const EPOCH_MS: u64 = 1000;
 
-/// Monotonic ms; `0` means the next call initializes the epoch.
-static EPOCH_START: AtomicU64 = AtomicU64::new(0);
-
-static CHALLENGE_COUNT: AtomicU32 = AtomicU32::new(0);
-
-/// `false` when the per-epoch cap is reached and the RST must be dropped
-/// unanswered instead.
-pub fn try_challenge_ack(now_ms: u64) -> bool {
-    let epoch = EPOCH_START.load(Ordering::Relaxed);
-
-    if now_ms >= epoch.wrapping_add(EPOCH_MS) || epoch == 0 {
-        // A racing caller may win the CAS instead; either epoch start is correct.
-        let _ = EPOCH_START.compare_exchange(epoch, now_ms, Ordering::Relaxed, Ordering::Relaxed);
-        CHALLENGE_COUNT.store(1, Ordering::Relaxed);
-        return true;
-    }
-
-    let prev = CHALLENGE_COUNT.fetch_add(1, Ordering::Relaxed);
-    prev < CHALLENGE_ACK_LIMIT
+/// Per-connection challenge-ACK budget.
+///
+/// The jitter is drawn per epoch so the exact count at which replies stop is
+/// not a constant an observer can calibrate against.
+#[derive(Clone, Copy, Debug)]
+pub struct ChallengeBudget {
+    epoch_start_ms: u64,
+    count: u32,
+    limit: u32,
+    started: bool,
 }
 
-/// Reset the rate limiter; called by [`super::reset_all`].
-#[cfg(feature = "test-hooks")]
-pub fn reset_for_tests() {
-    EPOCH_START.store(0, Ordering::Relaxed);
-    CHALLENGE_COUNT.store(0, Ordering::Relaxed);
+impl ChallengeBudget {
+    pub const fn new() -> Self {
+        Self {
+            epoch_start_ms: 0,
+            count: 0,
+            limit: CHALLENGE_ACK_LIMIT,
+            started: false,
+        }
+    }
+
+    /// `false` when the epoch's budget is spent and the segment must be
+    /// dropped unanswered instead.
+    pub fn try_consume(&mut self, now_ms: u64) -> bool {
+        if !self.started || now_ms >= self.epoch_start_ms.wrapping_add(EPOCH_MS) {
+            self.epoch_start_ms = now_ms;
+            self.count = 1;
+            self.limit = jittered_limit();
+            self.started = true;
+            return true;
+        }
+
+        let prev = self.count;
+        self.count = self.count.saturating_add(1);
+        prev < self.limit
+    }
+}
+
+impl Default for ChallengeBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Half the nominal cap plus a random half, so the effective limit lands in
+/// `[LIMIT/2, LIMIT)` and moves every epoch.
+fn jittered_limit() -> u32 {
+    let half = CHALLENGE_ACK_LIMIT / 2;
+    let r = (slopos_kernel_services::platform::rng_next() % (half as u64)) as u32;
+    half + r
 }

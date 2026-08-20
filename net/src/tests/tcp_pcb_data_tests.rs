@@ -99,14 +99,18 @@ pub fn test_data_rst_releases_and_notifies() -> TestResult {
     pass!()
 }
 
-pub fn test_data_unexpected_syn_triggers_rst_and_release() -> TestResult {
+/// RFC 5961 §4: a SYN in a synchronized state draws a challenge ACK and
+/// leaves the connection standing. Answering it with a RST is the blind-reset
+/// vector the mitigation exists to close.
+pub fn test_data_unexpected_syn_draws_challenge_ack() -> TestResult {
     let mut pcb = make_pcb_in_phase(ClosePhase::Established);
     let mut bufs = TcpBufferPair::new(TCP_BUFFER_SIZE).expect("alloc");
     let actions = DataState::on_segment(&mut pcb, &mut bufs, &hdr(TCP_FLAG_SYN, 0, 0), &[], &[], 0);
-    assert_eq_test!(actions.segments_len, 1, "one RST emitted");
-    let rst = actions.segments[0].as_ref().unwrap();
-    assert_test!((rst.flags & TCP_FLAG_RST) != 0, "RST flag");
-    assert_test!(actions.release, "release");
+    assert_eq_test!(actions.segments_len, 1, "one challenge ACK emitted");
+    let ack = actions.segments[0].as_ref().unwrap();
+    assert_test!((ack.flags & TCP_FLAG_ACK) != 0, "ACK flag");
+    assert_test!((ack.flags & TCP_FLAG_RST) == 0, "never a RST");
+    assert_test!(!actions.release, "connection stands");
     pass!()
 }
 
@@ -363,7 +367,7 @@ slopos_testing::stest!(
     suite = tcp_pcb_data
 );
 slopos_testing::stest!(
-    name = test_data_unexpected_syn_triggers_rst_and_release,
+    name = test_data_unexpected_syn_draws_challenge_ack,
     suite = tcp_pcb_data
 );
 slopos_testing::stest!(

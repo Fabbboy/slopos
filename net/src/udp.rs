@@ -241,7 +241,10 @@ pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
         return;
     };
 
-    if src_port == super::dns::DNS_PORT {
+    // RFC 5452: a reply is only a candidate if it came from the server the
+    // query went to and landed on the port it left from. Without this, any
+    // host that can guess the ID poisons the resolver cache.
+    if src_port == super::dns::DNS_PORT && super::dns::response_is_expected(src_ip, dst_port) {
         if let Some(d) = crate::net_driver_service::net_driver() {
             (d.dns_intercept_response)(udp_payload);
         }

@@ -3,7 +3,6 @@
 //! A minimal in-kernel stub resolver for A-record lookups over UDP, with
 //! `dns_resolve()` as the synchronous `SYSCALL_RESOLVE` entry point.
 
-use core::sync::atomic::{AtomicU16, Ordering};
 use slopos_ostd::lock_class;
 
 use slopos_ostd::klog_debug;
@@ -25,7 +24,60 @@ const DNS_TIMEOUT_MS: u32 = 3000;
 const DNS_MAX_RETRIES: usize = 3;
 const DNS_CACHE_SIZE: usize = 16;
 
-static QUERY_ID: AtomicU16 = AtomicU16::new(0x4242);
+/// RFC 5452 §9: the transaction ID carries no entropy unless it is drawn
+/// unpredictably, and the source port must contribute entropy of its own
+/// rather than being a function of the ID.
+fn random_query_id() -> u16 {
+    slopos_kernel_services::platform::rng_next() as u16
+}
+
+/// Ephemeral source port for a query, drawn independently of the ID.
+fn random_source_port() -> u16 {
+    const EPHEMERAL_BASE: u32 = 49_152;
+    const EPHEMERAL_COUNT: u32 = 16_384;
+    let r = (slopos_kernel_services::platform::rng_next() % EPHEMERAL_COUNT as u64) as u32;
+    (EPHEMERAL_BASE + r) as u16
+}
+
+/// Provenance of the query currently in flight.
+///
+/// A response is only a candidate if it came from the server the query went
+/// to and landed on the port the query left from; the ID check alone accepts
+/// a datagram from any host (RFC 5452 §9).
+#[derive(Clone, Copy)]
+struct PendingQuery {
+    server_ip: [u8; 4],
+    src_port: u16,
+    active: bool,
+}
+
+static PENDING_QUERY: SpinLock<PendingQuery> = SpinLock::new(
+    PendingQuery {
+        server_ip: [0; 4],
+        src_port: 0,
+        active: false,
+    },
+    lock_class!("DNS_PENDING_QUERY", LOCK_LEVEL_REGISTRY),
+);
+
+fn set_pending_query(server_ip: [u8; 4], src_port: u16) {
+    let mut q = PENDING_QUERY.lock();
+    q.server_ip = server_ip;
+    q.src_port = src_port;
+    q.active = true;
+}
+
+fn clear_pending_query() {
+    PENDING_QUERY.lock().active = false;
+}
+
+/// Whether a UDP datagram from `src_ip` to `dst_port` could be the reply to
+/// the query in flight. The receive path drops everything else before it can
+/// reach the resolver's buffer.
+pub fn response_is_expected(src_ip: [u8; 4], dst_port: u16) -> bool {
+    let q = PENDING_QUERY.lock();
+    q.active && q.server_ip == src_ip && q.src_port == dst_port
+}
 
 /// Errors returned by [`dns_resolve`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -581,7 +633,7 @@ impl DnsResolver {
     pub fn new(hostname: &[u8]) -> Result<Self, DnsResolveError> {
         let mut query_buf =
             slopos_ostd::KVec::<u8>::zeroed(512).map_err(|_| DnsResolveError::NoDnsServer)?;
-        let cur_id = QUERY_ID.fetch_add(1, Ordering::Relaxed);
+        let cur_id = random_query_id();
         let query_len = dns_build_query(cur_id, hostname, DnsType::A, query_buf.as_mut())
             .ok_or(DnsResolveError::InvalidHostname)?;
         Ok(Self {
@@ -604,7 +656,7 @@ impl DnsResolver {
     }
 
     fn refresh_id(&mut self) {
-        self.cur_id = QUERY_ID.fetch_add(1, Ordering::Relaxed);
+        self.cur_id = random_query_id();
         self.query_buf.as_mut()[0..2].copy_from_slice(&self.cur_id.to_be_bytes());
     }
 
@@ -695,15 +747,22 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
                 // the IP-literal shortcut above send no packet.
                 crate::connectivity::note_dns_success();
                 dns_cache_insert(hostname, addr, ttl);
+                clear_pending_query();
                 return Ok(addr);
             }
-            DnsStep::Failed(err) => return Err(err),
+            DnsStep::Failed(err) => {
+                clear_pending_query();
+                return Err(err);
+            }
             DnsStep::Query { timeout_ms } => {
-                let src_port = 49152 + (resolver.query_id() % 16384);
+                let src_port = random_source_port();
 
                 if let Some(d) = crate::net_driver_service::net_driver() {
                     (d.dns_rx_clear)();
                 }
+                // Published before the query goes out: the reply may arrive
+                // on another CPU before `transmit` returns here.
+                set_pending_query(dns_server, src_port);
 
                 let transmitted = crate::net_driver_service::net_driver()
                     .map(|d| {

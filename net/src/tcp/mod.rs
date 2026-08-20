@@ -16,6 +16,7 @@ pub mod retx;
 pub mod rtt;
 pub mod segment;
 pub mod seq;
+pub mod siphash;
 pub mod table;
 pub mod tuple;
 
@@ -1366,6 +1367,4 @@ pub fn zero_window_probe(id: ConnId, _now_ms: u64) -> Option<TcpOutSegment> {
 pub fn reset_all() {
     table::clear_all();
     isn::reset_for_tests();
-    #[cfg(feature = "test-hooks")]
-    challenge_ack::reset_for_tests();
 }

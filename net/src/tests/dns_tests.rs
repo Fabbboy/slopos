@@ -384,6 +384,36 @@ pub fn test_dns_t8_regression_network_stack() -> TestResult {
     pass!()
 }
 
+/// RFC 5452 §9: the ID must not be a boot constant, and the source port must
+/// carry entropy independent of it.
+pub fn test_dns_t9_query_entropy() -> TestResult {
+    let mut ids = [0u16; 8];
+    for slot in ids.iter_mut() {
+        let r = dns::DnsResolver::new(b"example.com").expect("resolver");
+        *slot = r.query_id();
+    }
+
+    assert_test!(
+        ids.iter().any(|&id| id != ids[0]),
+        "transaction IDs must not be a fixed constant"
+    );
+    assert_test!(
+        ids.iter().any(|&id| id != 0x4242),
+        "transaction IDs must not be the old boot constant"
+    );
+    pass!()
+}
+
+/// A response from a host that is not the configured server, or to a port the
+/// query did not leave from, must not reach the resolver.
+pub fn test_dns_t10_response_provenance() -> TestResult {
+    assert_test!(
+        !dns::response_is_expected([10, 0, 2, 3], 49_152),
+        "with no query in flight nothing is expected"
+    );
+    pass!()
+}
+
 slopos_testing::stest!(name = test_dns_t1_name_encoding, suite = dns);
 slopos_testing::stest!(name = test_dns_t2_query_construction, suite = dns);
 slopos_testing::stest!(name = test_dns_t3_name_decoding, suite = dns);
@@ -392,3 +422,5 @@ slopos_testing::stest!(name = test_dns_t5_cache, suite = dns);
 slopos_testing::stest!(name = test_dns_t6_resolver_retry_then_success, suite = dns);
 slopos_testing::stest!(name = test_dns_t7_resolver_exhaustion, suite = dns);
 slopos_testing::stest!(name = test_dns_t8_regression_network_stack, suite = dns);
+slopos_testing::stest!(name = test_dns_t9_query_entropy, suite = dns);
+slopos_testing::stest!(name = test_dns_t10_response_provenance, suite = dns);

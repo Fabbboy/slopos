@@ -310,6 +310,7 @@ impl NetDevice for VirtioNetDev {
 
         let mut packets = KVec::with_capacity(budget.min(64)).unwrap_or_else(|_| KVec::new());
         let mut posted = 0usize;
+        let mut refill_needed = false;
 
         for _ in 0..budget {
             let Some(used) = state.device.rx_queue.try_pop_used() else {
@@ -356,7 +357,16 @@ impl NetDevice for VirtioNetDev {
                 state.rx_buffers[idx] = Some(new_page);
                 state.device.rx_queue.submit(idx as u16);
                 posted += 1;
+            } else {
+                refill_needed = true;
             }
+        }
+
+        // A descriptor whose buffer allocation failed is unposted, not
+        // retired: retry it here, or the ring drains one descriptor per
+        // allocation failure and never recovers.
+        if refill_needed {
+            posted += virtnet_prepost_rx_buffers(&mut state);
         }
 
         if posted > 0 {
@@ -377,7 +387,7 @@ impl NetDevice for VirtioNetDev {
     fn set_up(&self) {
         let mut state = VIRTIO_NET_STATE.lock();
         state.device.ready = true;
-        virtnet_prepost_rx_buffers(&mut state);
+        virtnet_refill_rx_and_notify(&mut state);
     }
 
     fn set_down(&self) {
@@ -749,7 +759,9 @@ fn alloc_tx_page() -> Option<OwnedPageFrame> {
     Some(page)
 }
 
-fn virtnet_prepost_rx_buffers(state: &mut VirtioNetState) {
+/// Returns the number of descriptors newly posted. The caller notifies: a
+/// refill folded into a poll shares that poll's single notification.
+fn virtnet_prepost_rx_buffers(state: &mut VirtioNetState) -> usize {
     let mut posted = 0usize;
     let queue_size = (state.device.rx_queue.size as usize).min(RX_RING_SIZE);
     for idx in 0..queue_size {
@@ -773,7 +785,11 @@ fn virtnet_prepost_rx_buffers(state: &mut VirtioNetState) {
         posted += 1;
     }
 
-    if posted > 0 {
+    posted
+}
+
+fn virtnet_refill_rx_and_notify(state: &mut VirtioNetState) {
+    if virtnet_prepost_rx_buffers(state) > 0 {
         queue::notify_queue(
             &state.caps.notify_cfg,
             state.caps.notify_off_multiplier,
@@ -1008,7 +1024,7 @@ fn virtio_net_irq_handler(queue_idx: u8) {
 /// [`virtio_net_publish_device`].
 #[inline(never)]
 fn virtio_net_register_device(state: &mut VirtioNetState) -> bool {
-    virtnet_prepost_rx_buffers(state);
+    virtnet_refill_rx_and_notify(state);
 
     // Seed before the device is visible: `carrier()` is answerable the moment
     // `register` returns, and the registry enumerates without asking us first.

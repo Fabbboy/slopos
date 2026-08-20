@@ -1264,7 +1264,9 @@ pub fn test_tcp_rst_to_unknown_ignored() -> TestResult {
     pass!()
 }
 
-pub fn test_tcp_syn_in_established_sends_rst() -> TestResult {
+/// RFC 5961 §4: a blind SYN on an established connection is answered with a
+/// challenge ACK and must not tear the connection down.
+pub fn test_tcp_syn_in_established_sends_challenge_ack() -> TestResult {
     reset();
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
@@ -1283,12 +1285,13 @@ pub fn test_tcp_syn_in_established_sends_rst() -> TestResult {
         urgent_ptr: 0,
     };
     let result = tcp::input(remote_ip, local_ip, &syn, &[], &[], 0);
-    assert_test!(result.segments().next().is_some(), "RST response");
+    assert_test!(result.segments().next().is_some(), "challenge ACK response");
     let seg = result.segments().next().unwrap().clone();
-    assert_test!(seg.flags & TCP_FLAG_RST != 0, "RST flag");
+    assert_test!(seg.flags & TCP_FLAG_ACK != 0, "ACK flag");
+    assert_test!(seg.flags & TCP_FLAG_RST == 0, "never a RST");
     assert_test!(
-        result.notify.contains(SocketNotify::RESET_RECEIVED),
-        "reset"
+        !result.notify.contains(SocketNotify::RESET_RECEIVED),
+        "the connection must not be reported reset"
     );
     pass!()
 }
@@ -1630,7 +1633,10 @@ slopos_testing::stest!(name = test_tcp_retransmit_timer, suite = tcp);
 slopos_testing::stest!(name = test_tcp_time_wait_timer, suite = tcp);
 slopos_testing::stest!(name = test_tcp_rst_in_established, suite = tcp);
 slopos_testing::stest!(name = test_tcp_rst_to_unknown_ignored, suite = tcp);
-slopos_testing::stest!(name = test_tcp_syn_in_established_sends_rst, suite = tcp);
+slopos_testing::stest!(
+    name = test_tcp_syn_in_established_sends_challenge_ack,
+    suite = tcp
+);
 slopos_testing::stest!(name = test_tcp_segment_no_connection_sends_rst, suite = tcp);
 slopos_testing::stest!(name = test_tcp_ephemeral_ports_unique, suite = tcp);
 slopos_testing::stest!(name = test_tcp_state_names, suite = tcp);

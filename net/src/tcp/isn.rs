@@ -1,56 +1,64 @@
-//! Initial Sequence Number generator — RFC 6528 in spirit.
+//! Initial Sequence Number generator — RFC 6528.
 //!
 //! ```text
-//!     ISN = FNV-mix(4-tuple || boot_secret) + (monotonic_ns / 4µs)
+//!     ISN = SipHash-2-4(key, 4-tuple) + (monotonic_ns / 4µs)
 //! ```
 //!
-//! `boot_secret` is seeded once from [`slopos_kernel_services::clock::monotonic_ns`],
-//! which the HPET/TSC drives; a race between two cores is harmless, since
-//! whichever write wins is still a fresh unpredictable secret.
-//!
-//! Intentionally **not** a keyed hash — SlopOS ships no SipHash/Blake3
-//! primitive.
+//! The key is 128 bits drawn once from the kernel CSPRNG, so the output is a
+//! keyed PRF of the connection identifier: an observer who collects ISNs
+//! recovers nothing about the key and so cannot predict the ISN of a tuple it
+//! has not seen.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::TcpTuple;
+use super::siphash::siphash24;
 
-/// Per-boot secret; `0` means "not yet initialized" and the first caller
-/// seeds it.  Loads are `Relaxed`: any non-zero value is a valid secret.
-static ISN_SECRET: AtomicU64 = AtomicU64::new(0);
+const KEY_UNSET: usize = 0;
+const KEY_SEEDING: usize = 1;
+const KEY_READY: usize = 2;
 
-fn boot_secret() -> u64 {
-    let s = ISN_SECRET.load(Ordering::Relaxed);
-    if s != 0 {
-        return s;
+static ISN_KEY_STATE: AtomicUsize = AtomicUsize::new(KEY_UNSET);
+static ISN_KEY0: AtomicU64 = AtomicU64::new(0);
+static ISN_KEY1: AtomicU64 = AtomicU64::new(0);
+
+/// The key must be one consistent pair: a second caller racing the seeder must
+/// wait rather than read a half-written key and hash under it.
+fn isn_key() -> (u64, u64) {
+    loop {
+        match ISN_KEY_STATE.load(Ordering::Acquire) {
+            KEY_READY => {
+                return (
+                    ISN_KEY0.load(Ordering::Relaxed),
+                    ISN_KEY1.load(Ordering::Relaxed),
+                );
+            }
+            KEY_UNSET => {
+                if ISN_KEY_STATE
+                    .compare_exchange(KEY_UNSET, KEY_SEEDING, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    let k0 = slopos_kernel_services::platform::rng_next();
+                    let k1 = slopos_kernel_services::platform::rng_next();
+                    ISN_KEY0.store(k0, Ordering::Relaxed);
+                    ISN_KEY1.store(k1, Ordering::Relaxed);
+                    ISN_KEY_STATE.store(KEY_READY, Ordering::Release);
+                    return (k0, k1);
+                }
+            }
+            _ => core::hint::spin_loop(),
+        }
     }
-    // Mixing through the golden ratio spreads a low near-boot nanosecond
-    // count across all 64 bits.
-    let seed = slopos_kernel_services::clock::monotonic_ns()
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(0x243F_6A88_85A3_08D3);
-    let seed = if seed == 0 { 1 } else { seed };
-    ISN_SECRET.store(seed, Ordering::Relaxed);
-    seed
 }
 
-/// Reset the secret to the uninitialized sentinel, so [`super::tcp_reset_all`]
-/// callers see a freshly seeded secret on the next call.
+/// Reset the key to the uninitialized sentinel, so [`super::tcp_reset_all`]
+/// callers see a freshly seeded key on the next call.
 pub(crate) fn reset_for_tests() {
-    ISN_SECRET.store(0, Ordering::Relaxed);
-}
-
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01B3;
-
-#[inline]
-fn fnv_mix(mut h: u64, byte: u8) -> u64 {
-    h ^= byte as u64;
-    h.wrapping_mul(FNV_PRIME)
+    ISN_KEY_STATE.store(KEY_UNSET, Ordering::Release);
 }
 
 pub(crate) fn generate_isn(tuple: &TcpTuple) -> u32 {
-    let mut h = FNV_OFFSET ^ boot_secret();
+    let (k0, k1) = isn_key();
     // Network byte order, so mirrored-endian hosts hash the same tuple alike.
     let tuple_bytes: [u8; 12] = [
         tuple.local_ip[0],
@@ -66,9 +74,7 @@ pub(crate) fn generate_isn(tuple: &TcpTuple) -> u32 {
         (tuple.remote_port >> 8) as u8,
         tuple.remote_port as u8,
     ];
-    for b in tuple_bytes {
-        h = fnv_mix(h, b);
-    }
+    let h = siphash24(k0, k1, &tuple_bytes);
     // RFC 6528 §3: a 4-microsecond clock drift so a re-used 4-tuple still
     // lands on a different ISN after TIME_WAIT expires.
     let drift = (slopos_kernel_services::clock::monotonic_ns() / 4_000) as u32;
