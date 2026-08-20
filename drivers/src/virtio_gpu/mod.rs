@@ -772,6 +772,11 @@ impl VirtioGpuInner {
 
     /// Brings up scanout 0 on a fresh backing, seeded from the firmware
     /// framebuffer so the boot splash survives the takeover.
+    ///
+    /// `#[inline(never)]`: a one-shot probe-time path whose locals would
+    /// otherwise land in `virtio_gpu_probe`'s frame, which the stack gate
+    /// bounds.
+    #[inline(never)]
     fn setup_scanout(&self, boot_fb: Option<FramebufferData>) -> Option<FramebufferData> {
         if self.state.lock().num_scanouts == 0 {
             klog_warn!("virtio-gpu: device reports zero scanouts");
@@ -947,6 +952,28 @@ impl VirtioGpuInner {
         }
     }
 
+    /// Park the previous scanout's backing instead of freeing it: consumers
+    /// (the vconsole, the mouse bounds, the scanout registry) still point at
+    /// it until the caller adopts the new one. Releasing here would leave a
+    /// later vconsole blit — a crash restore or a panic screen — writing into
+    /// memory the buddy allocator has handed to somebody else.
+    fn retire_previous_scanout(&self, old: ScanoutGeom) {
+        if old.resource_id == 0 {
+            return;
+        }
+        let _ = self.resource_unref(old.resource_id);
+        if old.backing_phys.is_null() {
+            return;
+        }
+        let stale = {
+            let mut st = self.state.lock();
+            core::mem::replace(&mut st.retired_backing, old.backing_phys)
+        };
+        if !stale.is_null() {
+            free_page_frame(stale);
+        }
+    }
+
     fn set_mode(&self, w: u32, h: u32) -> Option<FramebufferData> {
         let (w, h) = sanitize_mode(w, h)?;
         let old = self.state.lock().geom;
@@ -978,22 +1005,7 @@ impl VirtioGpuInner {
         let _ = self.transfer_to_host(new_rid, full, 0);
         let _ = self.resource_flush(new_rid, full);
 
-        // The old backing is parked, not freed: consumers (the vconsole, the
-        // mouse bounds, the scanout registry) still point at it until the
-        // caller adopts the new one. Releasing here would leave a later
-        // vconsole blit — a crash restore or a panic screen — writing into
-        // memory the buddy allocator has handed to somebody else.
-        if old.resource_id != 0 {
-            let _ = self.resource_unref(old.resource_id);
-            if !old.backing_phys.is_null() {
-                let mut st = self.state.lock();
-                let stale = core::mem::replace(&mut st.retired_backing, old.backing_phys);
-                drop(st);
-                if !stale.is_null() {
-                    free_page_frame(stale);
-                }
-            }
-        }
+        self.retire_previous_scanout(old);
 
         {
             let mut st = self.state.lock();
