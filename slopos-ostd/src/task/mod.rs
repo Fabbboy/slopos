@@ -37,7 +37,7 @@ pub use drop_context::{
 pub use exit_info::ExitInfo;
 pub use job_control::{ProcessGroup, Session, new_group_in_session, new_session_group};
 pub use kernel_task::SchedPlacement;
-pub use link_roles::{ReadyQueueRole, RemoteWakeRole, SiblingRole};
+pub use link_roles::{FutexRole, ReadyQueueRole, RemoteWakeRole, SiblingRole};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use pcr_ty::HostStack;
 pub use pcr_ty::{PcrStackTy, PcrTaskType};

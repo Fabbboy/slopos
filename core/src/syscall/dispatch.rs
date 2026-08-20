@@ -4,7 +4,6 @@ use slopos_abi::Errno;
 use slopos_abi::signal::{SA_RESTART, SIG_DFL, SIG_IGN, SIGNAL_MASK};
 use slopos_abi::syscall::ERRNO_ERESTARTSYS;
 use slopos_abi::task::TASK_FLAG_USER_MODE;
-use slopos_ostd::klog_info;
 use slopos_ostd::user::context::UserContext;
 use slopos_sched::task_struct::Task;
 
@@ -33,7 +32,9 @@ fn authorize(task: &Task, entry: &SyscallEntry, sysno: u64) -> bool {
     match decide(task_caps(task), entry.cap) {
         AuthorityDecision::Allow => true,
         AuthorityDecision::WarnAndAllow => {
-            klog_info!(
+            // Also userland-driven: a loop on a syscall it lacks the
+            // capability for would otherwise drive the log at line rate.
+            slopos_ostd::klog_warn_ratelimited!(
                 "AUTHORITY: task {} invoked syscall {} without {} (authority=warn)",
                 task.task_id,
                 sysno,
@@ -98,7 +99,9 @@ pub fn syscall_handle(user_ctx: &UserContext) {
         }
         None => {
             if entry.is_none() {
-                klog_info!("SYSCALL: Unknown syscall {} -> ENOSYS", sysno);
+                // Userland picks the syscall number, so this site is a
+                // one-line loop away from monopolising the log lock.
+                slopos_ostd::klog_warn_ratelimited!("SYSCALL: Unknown syscall {} -> ENOSYS", sysno);
             }
             user_ctx.set_rax(slopos_abi::syscall::ENOSYS_RETURN);
         }

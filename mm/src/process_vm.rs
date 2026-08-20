@@ -2574,8 +2574,15 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
             {
                 region.protection = old_protection;
             }
+            // The partial walk already narrowed some entries, so the peers
+            // must drop them even on the failure path.
+            tlb::flush_all_for_process(slot_tlb_key(slot));
             return -1;
         }
+        // The cursor issues only a local INVLPG. Without this, a peer CPU
+        // keeps the old wider translation and a page just made read-only
+        // stays writable there for as long as its entry survives.
+        tlb::flush_all_for_process(slot_tlb_key(slot));
     }
 
     0

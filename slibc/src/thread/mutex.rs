@@ -69,7 +69,7 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut pthread_mutex_t) -> i32 
         if old == 0 {
             return 0;
         }
-        let _ = Sys::futex_wait(state.as_ptr() as *const u32, 2, 0);
+        super::futex::futex_wait_or_abort(state.as_ptr() as *const u32, 2, 0);
     }
 }
 

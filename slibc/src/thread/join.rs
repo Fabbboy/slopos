@@ -31,7 +31,11 @@ pub unsafe extern "C" fn pthread_join(thread: pthread_t, retval: *mut *mut u8) -
         if tid_val == 0 {
             break;
         }
-        let _ = Sys::futex_wait(&raw const (*tcb).child_tid as *const u32, tid_val as u32, 0);
+        super::futex::futex_wait_or_abort(
+            &raw const (*tcb).child_tid as *const u32,
+            tid_val as u32,
+            0,
+        );
     }
 
     if !retval.is_null() {

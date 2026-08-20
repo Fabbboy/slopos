@@ -32,7 +32,9 @@ use crate::task::fpu_owner::{
     FPU_CPU_NONE, fpu_owner_assert_may_take, fpu_owner_take, fpu_owner_yield_after_save,
 };
 use crate::task::job_control::ProcessGroup;
-use crate::task::link_roles::{ReadyQueueRole, ReclaimRole, RemoteWakeRole, SiblingRole};
+use crate::task::link_roles::{
+    FutexRole, ReadyQueueRole, ReclaimRole, RemoteWakeRole, SiblingRole,
+};
 use crate::task::state::TaskState;
 use crate::task::test_reports::TestReportRing;
 use crate::user::context::UserContext;
@@ -541,6 +543,12 @@ pub struct TaskInner<K, U> {
     /// the pusher won the final release, so the count is already zero and the
     /// pusher owns the allocation outright. That is why it gets its own role.
     pub reclaim_link: Link<TaskInner<K, U>, ReclaimRole>,
+    /// Membership in a futex wait bucket. Doubly linked so a waiter that is
+    /// woken by a signal, a kill or a timeout unlinks itself in O(1) without
+    /// naming which bucket holds it.
+    pub futex_link: DLink<TaskInner<K, U>, FutexRole>,
+    /// The futex word this task is parked on while `futex_link` is linked.
+    pub futex_addr: AtomicU64,
     /// Explicit scheduler placement owner. The cross-role gate that keeps a task
     /// out of a ready queue and a remote wake inbox at the same time.
     pub sched_placement: AtomicU8,
@@ -1098,6 +1106,10 @@ impl<K, U> TaskInner<K, U> {
             !self.remote_inbox_link.is_linked(),
             "task dropped while still linked into a remote wake inbox"
         );
+        debug_assert!(
+            !self.futex_link.is_linked(),
+            "task dropped while still linked into a futex bucket"
+        );
         // The graveyard pops a node before destroying it; still being linked
         // means the destructor is running on a node another drain still names.
         debug_assert!(
@@ -1174,6 +1186,8 @@ impl<K, U> TaskInner<K, U> {
             remote_inbox_link: Link::new(),
             children: IntrusiveDList::new(),
             sibling_link: DLink::new(),
+            futex_link: DLink::new(),
+            futex_addr: AtomicU64::new(0),
             reclaim_link: Link::new(),
             sched_placement: AtomicU8::new(SchedPlacement::Nascent.as_u8()),
             parked_wait_queue: AtomicPtr::new(ptr::null_mut()),
@@ -1504,6 +1518,12 @@ impl<K, U> crate::task::LinkProvider<RemoteWakeRole> for TaskInner<K, U> {
 impl<K, U> crate::task::DLinkProvider<SiblingRole> for TaskInner<K, U> {
     fn dlink(&self) -> &DLink<Self, SiblingRole> {
         &self.sibling_link
+    }
+}
+
+impl<K, U> crate::task::DLinkProvider<FutexRole> for TaskInner<K, U> {
+    fn dlink(&self) -> &DLink<Self, FutexRole> {
+        &self.futex_link
     }
 }
 

@@ -2,6 +2,7 @@
 
 pub mod condvar;
 pub mod create;
+pub(crate) mod futex;
 pub mod join;
 pub mod keys;
 pub mod mutex;

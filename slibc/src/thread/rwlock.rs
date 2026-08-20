@@ -51,7 +51,7 @@ pub unsafe extern "C" fn pthread_rwlock_rdlock(rwlock: *mut pthread_rwlock_t) ->
                 return 0;
             }
         } else {
-            let _ = Sys::futex_wait((*rwlock).state.as_ptr() as *const u32, s as u32, 0);
+            super::futex::futex_wait_or_abort((*rwlock).state.as_ptr() as *const u32, s as u32, 0);
         }
     }
 }
@@ -90,7 +90,7 @@ pub unsafe extern "C" fn pthread_rwlock_wrlock(rwlock: *mut pthread_rwlock_t) ->
             return 0;
         }
         let s = (*rwlock).state.load(Ordering::Relaxed);
-        let _ = Sys::futex_wait((*rwlock).state.as_ptr() as *const u32, s as u32, 0);
+        super::futex::futex_wait_or_abort((*rwlock).state.as_ptr() as *const u32, s as u32, 0);
     }
 }
 

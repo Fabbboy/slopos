@@ -21,6 +21,14 @@ pub enum RemoteWakeRole {}
 /// owner list holds it.
 pub enum SiblingRole {}
 
+/// Role tag for a task's membership in a futex wait bucket.
+///
+/// Its own slot so a task can be futex-parked while also owner-listed. The
+/// list is unbounded by construction: the link lives in the task, so enqueue
+/// allocates nothing and no fixed-capacity array can overflow and force a
+/// waiter to spin instead of block.
+pub enum FutexRole {}
+
 /// Role tag for the task graveyard: the lock-free stack of tasks whose last
 /// strong reference was released where the allocator-heavy destructor could not
 /// run.

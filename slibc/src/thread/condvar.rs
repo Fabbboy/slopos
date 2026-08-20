@@ -53,7 +53,7 @@ pub unsafe extern "C" fn pthread_cond_wait(
     (*cond).mutex = mutex;
 
     pthread_mutex_unlock(mutex);
-    let _ = Sys::futex_wait((*cond).seq.as_ptr() as *const u32, saved_seq, 0);
+    super::futex::futex_wait_or_abort((*cond).seq.as_ptr() as *const u32, saved_seq, 0);
     pthread_mutex_lock(mutex);
 
     0

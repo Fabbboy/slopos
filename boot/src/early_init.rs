@@ -768,6 +768,9 @@ pub fn kernel_main_impl() {
         };
         slopos_ostd::sync::wait_queue::register_wait_queue_backend(token, &WAIT_QUEUE_OPS);
         slopos_ostd::sync::rcu::register_rcu_backend(token, &RCU_OPS);
+        slopos_ostd::klog::klog_register_clock(|| {
+            slopos_drivers::hpet::nanoseconds(slopos_drivers::hpet::read_counter())
+        });
         slopos_ostd::mm::io_mem::register_io_mem_registry(token, MMIO_RANGES);
         slopos_ostd::io::port::register_io_port_registry(token, PORT_RANGES);
         slopos_ostd::irq::line::register_irq_reserved(token, RESERVED_VECTORS);

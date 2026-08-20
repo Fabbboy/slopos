@@ -6493,6 +6493,71 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
+/// A bucket takes more waiters than the old fixed array held.
+///
+/// The cap was 16, and the 17th waiter got ENOMEM — which every userland
+/// futex wrapper discards, turning a blocked waiter into a full-core spin.
+/// The list is intrusive now, so the only bound is the number of tasks.
+pub fn test_futex_bucket_exceeds_old_fixed_cap() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    const WAITERS: usize = 24;
+    let uaddr = 0x4321_0000u64;
+    let mut ids = [INVALID_TASK_ID; WAITERS];
+    let mut parked = 0usize;
+    let mut outcome = TestResult::Pass;
+
+    for slot in ids.iter_mut() {
+        let id = task_create(
+            b"FutexMany\0".as_ptr() as *const c_char,
+            dummy_task_entry,
+            ptr::null_mut(),
+            TaskPriority::Normal.as_u8(),
+            TASK_FLAG_KERNEL_MODE,
+        );
+        if id == INVALID_TASK_ID {
+            break;
+        }
+        *slot = id;
+        if !scheduler::clear_nascent_for_test(id) || !dispatch_as_current(id) {
+            break;
+        }
+        if !crate::futex::futex_park_for_test(uaddr) {
+            klog_info!("SCHED_TEST: bucket refused waiter {}", parked + 1);
+            outcome = TestResult::Fail;
+            break;
+        }
+        parked += 1;
+    }
+    park_bootstrap_on_current_cpu();
+
+    if parked <= 16 {
+        klog_info!("SCHED_TEST: only {} waiters parked; cap not lifted", parked);
+        outcome = TestResult::Fail;
+    }
+    if crate::futex::futex_waiters_for_test(uaddr) != parked {
+        klog_info!("SCHED_TEST: bucket does not hold every parked waiter");
+        outcome = TestResult::Fail;
+    }
+
+    let woken = crate::futex::futex_wake(uaddr, parked as u32);
+    if woken != parked as i64 {
+        klog_info!("SCHED_TEST: woke {} of {} waiters", woken, parked);
+        outcome = TestResult::Fail;
+    }
+    if crate::futex::futex_waiters_for_test(uaddr) != 0 {
+        klog_info!("SCHED_TEST: bucket not drained after wake");
+        outcome = TestResult::Fail;
+    }
+
+    for &id in ids.iter() {
+        if id != INVALID_TASK_ID {
+            let _ = task_terminate(id);
+        }
+    }
+    outcome
+}
+
 /// A futex waiter always leaves its bucket, and the dequeue reports *who*
 /// dequeued it.
 ///
@@ -6571,6 +6636,10 @@ pub fn test_futex_waiter_always_leaves_its_bucket() -> TestResult {
 
 slopos_testing::stest!(
     name = test_futex_waiter_always_leaves_its_bucket,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_futex_bucket_exceeds_old_fixed_cap,
     suite = sched_core
 );
 
