@@ -44,7 +44,16 @@
 #
 # `process` at 113 against ~109 live account rows is not a leak: the userland
 # phase spawns a test binary per utest and most are still referenced at the
-# dump point. The charge is released at the reap (`process_retire`), which is
+# dump point.
+#
+# 2026-08-24, one more utest binary (`dns_resolve_test`):
+#   process    120 -> 121. Deterministic at 121; the cap is exact.
+#   pages      655360 -> 735232, kernelmeta 6500 -> 6933. Unlike `process`
+#     these move with test order, because which address spaces are still
+#     unreaped at the dump point varies. Re-measured over six runs: pages
+#     634 502-685 027 (spread 50 525), kernelmeta 6249-6591 (spread 342).
+#     Each cap is that maximum plus the spread, so ordinary interleaving
+#     cannot trip the gate while a real regression still does. The charge is released at the reap (`process_retire`), which is
 # when the registry slot is given up, rather than at the final `Drop`, which
 # lags for as long as any designator still resolves.
 #
@@ -81,11 +90,11 @@ post-kernel-tests	process	20
 post-kernel-tests	task	8
 post-userland-tests	custody	8
 post-userland-tests	fdslot	256
-post-userland-tests	kernelmeta	6500
+post-userland-tests	kernelmeta	6933
 post-userland-tests	objectrow	257
-post-userland-tests	pages	655360
+post-userland-tests	pages	735232
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	120
+post-userland-tests	process	121
 post-userland-tests	task	10
 
 # Cycles per charge+refund round trip, by account-chain depth. The charge path

@@ -110,9 +110,13 @@ require-phase post-userland-tests
 # `OPEN_FILE_POSITION` is not reached until userland does real file I/O. The
 # userland phase reaches both (+2). Edge and chain caps still bound the kernel
 # phase; the userland chain cap moves with them, below.
+#
+# 2026-08-24: userland 192 -> 193. `dns_resolve_test` is the first utest to
+# take the resolver path, so `DNS_PENDING_QUERY` now registers in the userland
+# phase too. Deterministic — 193 on every run — so the cap is exact.
 boot	classes	71
 post-kernel-tests	classes	183
-post-userland-tests	classes	192
+post-userland-tests	classes	193
 
 # Edges and chains depend on which *orders* were observed, so they move with
 # scheduling. Each cap is the observed maximum plus that phase's spread, so

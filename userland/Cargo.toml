@@ -216,6 +216,10 @@ path = "src/bin/tests/session_smoke_test.rs"
 name = "spawn_output_test"
 path = "src/bin/tests/spawn_output_test.rs"
 
+[[bin]]
+name = "dns_resolve_test"
+path = "src/bin/tests/dns_resolve_test.rs"
+
 [features]
 default = []
 testbins = []

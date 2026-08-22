@@ -418,7 +418,10 @@ if [ "$ADD_SCRATCH_DISK" = "1" ]; then
     )
 fi
 QEMU_ARGS+=(
-    -netdev "user,id=slopnet0,dns=1.1.1.1${NET_HOSTFWD}"
+    # No `dns=`: it sets the guest-visible address of SLIRP's own stub, not an
+    # upstream to forward to, so naming a public resolver moves the stub
+    # somewhere nothing replies from and every lookup times out.
+    -netdev "user,id=slopnet0${NET_HOSTFWD}"
     -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"
     -boot "order=d,menu=off"
     "${SERIAL_ARGS[@]}"
