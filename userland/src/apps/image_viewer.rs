@@ -255,7 +255,7 @@ impl WindowedApp for ImageViewer {
                         target_w,
                         target_h,
                         ImageFit::Stretch,
-                        ImageSampling::Bilinear,
+                        ImageSampling::for_resize(image.width, image.height, target_w, target_h),
                         &clip,
                     );
                 }

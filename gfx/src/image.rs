@@ -51,6 +51,20 @@ pub enum ImageSampling {
     Bilinear,
 }
 
+impl ImageSampling {
+    /// Sampling for resizing `src` to `dst`. Magnification has no missing
+    /// samples to reconstruct, so interpolating there only blurs detail the
+    /// source actually has; minification drops source pixels, which is where
+    /// averaging neighbours beats picking one.
+    pub fn for_resize(src_w: u32, src_h: u32, dst_w: i32, dst_h: i32) -> Self {
+        if dst_w >= src_w as i32 && dst_h >= src_h as i32 {
+            Self::Nearest
+        } else {
+            Self::Bilinear
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn draw_image<T: Canvas>(
     target: &mut T,
@@ -371,6 +385,47 @@ mod scale_tests {
     fn tolerates_an_empty_source() {
         assert_eq!(integer_scale_to_fit(0, 0, 1920, 1080), (0, 0));
         assert_eq!(integer_scale_to_fit(73, 0, 1920, 1080), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod sampling_tests {
+    use super::ImageSampling;
+
+    #[test]
+    fn magnification_keeps_pixels_sharp() {
+        assert_eq!(
+            ImageSampling::for_resize(73, 18, 876, 216),
+            ImageSampling::Nearest
+        );
+    }
+
+    #[test]
+    fn one_to_one_is_nearest() {
+        assert_eq!(
+            ImageSampling::for_resize(73, 18, 73, 18),
+            ImageSampling::Nearest
+        );
+    }
+
+    #[test]
+    fn minification_interpolates() {
+        assert_eq!(
+            ImageSampling::for_resize(1536, 1024, 384, 256),
+            ImageSampling::Bilinear
+        );
+    }
+
+    #[test]
+    fn shrinking_either_axis_interpolates() {
+        assert_eq!(
+            ImageSampling::for_resize(100, 100, 200, 50),
+            ImageSampling::Bilinear
+        );
+        assert_eq!(
+            ImageSampling::for_resize(100, 100, 50, 200),
+            ImageSampling::Bilinear
+        );
     }
 }
 
