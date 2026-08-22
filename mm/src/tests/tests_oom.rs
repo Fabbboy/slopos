@@ -53,6 +53,7 @@ pub fn test_page_alloc_until_oom() -> TestResult {
         free_page_frame(allocated[i]);
     }
 
+    settle_frees();
     let free_after = get_page_allocator_stats().free;
 
     assert_test!(free_after >= free_before - 10, "memory leak after OOM test");
@@ -349,6 +350,25 @@ pub fn test_kzalloc_zeroed_under_pressure() -> TestResult {
     pass!()
 }
 
+/// Return every frame the frees above staged, so a free-count comparison sees
+/// them.
+///
+/// A free does not go straight back to the buddy. Once any user address space
+/// exists, `quiesce` requires a quarantine pass before a frame may be reused,
+/// and order-0 frames otherwise land in the per-CPU magazine; the buddy's own
+/// free count includes neither. Without this the tests below read back exactly
+/// what they allocated and call it a leak.
+fn settle_frees() {
+    crate::mmu::quiesce::force_close_epoch_for_test();
+    for _ in 0..4 {
+        crate::page_alloc::quarantine_rotate();
+        while crate::page_alloc::quarantine_has_releasable()
+            && crate::page_alloc::quarantine_release_some(u32::MAX) > 0
+        {}
+    }
+    crate::page_alloc::pcp_drain_all();
+}
+
 pub fn test_alloc_free_cycles_no_leak() -> TestResult {
     let free_start = get_page_allocator_stats().free;
 
@@ -375,6 +395,7 @@ pub fn test_alloc_free_cycles_no_leak() -> TestResult {
         }
     }
 
+    settle_frees();
     let free_end = get_page_allocator_stats().free;
 
     assert_test!(

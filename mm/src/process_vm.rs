@@ -661,7 +661,15 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
         None => return -1,
     };
 
-    let layout = aslr::randomize_process_layout(&DEFAULT_PROCESS_LAYOUT);
+    // Stack and heap are re-randomised; `code_start` is **not**.
+    // `process_vm_load_elf_data` loads every image at the fixed
+    // `PROCESS_CODE_START_VA`, so a re-randomised `code_start` would describe
+    // a code VMA the loader never writes into — the mapping and the pages
+    // would disagree, and the new image would fault on its first instruction
+    // or run against a stale window.
+    let mut layout = aslr::randomize_process_layout(&DEFAULT_PROCESS_LAYOUT);
+    layout.code_start = DEFAULT_PROCESS_LAYOUT.code_start;
+    layout.data_start = DEFAULT_PROCESS_LAYOUT.data_start;
 
     let mut proc = PROCESS_VMS[slot].lock();
     if proc.process_id != process.id() {
@@ -713,7 +721,11 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
     inner.stack_start = layout.stack_top - layout.stack_size;
     inner.stack_end = layout.stack_top;
 
-    let rc = seed_fresh_layout(inner, slot);
+    // The VMA is seeded but its pages are not mapped here: `do_exec` calls
+    // `process_vm_reset_stack` immediately after loading the image, which
+    // unmaps and remaps the whole extent. Mapping it twice charges 256 pages
+    // to the account for the window between the two.
+    let rc = seed_fresh_layout(inner, slot, false);
     abort_guard.disarm();
     rc
 }
@@ -721,7 +733,7 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
 /// The three initial VMAs, the mapped stack and the null page — the single
 /// definition of what a fresh SlopOS address space looks like, so `exec` and
 /// process creation cannot drift apart.
-fn seed_fresh_layout(inner: &mut ProcessVm, slot: usize) -> c_int {
+fn seed_fresh_layout(inner: &mut ProcessVm, slot: usize, map_stack: bool) -> c_int {
     let code_s = inner.code_start;
     let data_s = inner.data_start;
     let heap_s = inner.heap_start;
@@ -771,12 +783,14 @@ fn seed_fresh_layout(inner: &mut ProcessVm, slot: usize) -> c_int {
     .to_page_flags()
     .bits();
 
-    let vm_space_for_map = match inner.vm_space.as_mut() {
-        Some(v) => v,
-        None => return -1,
-    };
-    if map_user_range(vm_space_for_map, stack_s, stack_e, stack_flags_bits).is_err() {
-        return -1;
+    if map_stack {
+        let vm_space_for_map = match inner.vm_space.as_mut() {
+            Some(v) => v,
+            None => return -1,
+        };
+        if map_user_range(vm_space_for_map, stack_s, stack_e, stack_flags_bits).is_err() {
+            return -1;
+        }
     }
 
     let vm_space_for_null = match inner.vm_space.as_mut() {

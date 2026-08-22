@@ -17,6 +17,7 @@ crate::utest!(
 );
 crate::utest!(name = utest_curl_e2e, bin = "/bin/curl_e2e_test");
 crate::utest!(name = utest_cd, bin = "/bin/cd_test");
+crate::utest!(name = utest_spawn_output, bin = "/bin/spawn_output_test");
 crate::utest!(name = utest_ring, bin = "/bin/ring_test");
 crate::utest!(name = utest_pidfd, bin = "/bin/pidfd_e2e_test");
 crate::utest!(name = utest_signalfd, bin = "/bin/signalfd_test");

@@ -25,9 +25,20 @@ const MARKER: &[u8] = b"pre-exec-image";
 /// closes, and a later test that compares free-page counts against a baseline
 /// would otherwise read that deferral as a leak.
 fn settle_teardown() {
+    // Address-space teardown returns frames by three staged routes, and a
+    // later test that compares global free-page counts against a baseline
+    // sees them only once all three have run: the quiesce epoch has to close
+    // before a frame is reusable, the quarantine holds it for a rotation
+    // after that, and the per-CPU cache holds it after that again.
     crate::mmu::quiesce::force_close_epoch_for_test();
-    // Teardown frees through the per-CPU cache; a later test that compares
-    // global free-page counts only sees those pages once the cache is drained.
+    for _ in 0..4 {
+        crate::page_alloc::quarantine_rotate();
+        while crate::page_alloc::quarantine_has_releasable() {
+            if crate::page_alloc::quarantine_release_some(u32::MAX) == 0 {
+                break;
+            }
+        }
+    }
     crate::page_alloc::pcp_drain_all();
 }
 
@@ -101,9 +112,15 @@ pub fn test_exec_severs_previous_image_mappings() -> TestResult {
     pass!()
 }
 
-/// The reset must leave an address space a new program can actually run in:
-/// the three initial VMAs and a mapped stack, exactly as process creation
-/// produces. A reset that only unmapped would fault the new image immediately.
+/// The reset must leave an address space a new program can be loaded into: the
+/// three initial VMAs describing the fresh layout, and a heap wound back to
+/// its start.
+///
+/// The stack's *pages* are deliberately not mapped here — `do_exec` calls
+/// `process_vm_reset_stack` straight after the load, which unmaps and remaps
+/// that whole extent, so mapping it twice would charge the caller 256 pages
+/// for the window between them. The VMA is what the loader needs; the pages
+/// are the next step's job.
 pub fn test_exec_reset_reseeds_a_usable_layout() -> TestResult {
     let pid = create_process_vm();
     if pid == slopos_abi::task::INVALID_PROCESS_ID {
@@ -119,13 +136,19 @@ pub fn test_exec_reset_reseeds_a_usable_layout() -> TestResult {
     }
 
     let stack_top = crate::process_vm::process_vm_get_stack_top(process);
-    let stack_ok = stack_top != 0 && {
+
+    // `reset_stack` is what `do_exec` runs next; after it the stack is backed
+    // and writable, which is the property the new image actually depends on.
+    let stack_rc = crate::process_vm::process_vm_reset_stack(process);
+    let stack_ok = stack_top != 0 && stack_rc == 0 && {
         let Some(vm_space) = process_vm_get_vm_space(process) else {
             destroy_process_vm(process);
             settle_teardown();
             return fail!("no vm_space after reset");
         };
-        process_vm_write_user_bytes(&vm_space, stack_top - 16, b"ok").is_ok()
+        let ok = process_vm_write_user_bytes(&vm_space, stack_top - 16, b"ok").is_ok();
+        drop(vm_space);
+        ok
     };
 
     let rc2 = process_vm_reset_for_exec(process);
@@ -133,7 +156,11 @@ pub fn test_exec_reset_reseeds_a_usable_layout() -> TestResult {
     destroy_process_vm(process);
     settle_teardown();
 
-    assert_test!(stack_ok, "the re-seeded stack is not writable");
+    assert_test!(stack_rc == 0, "process_vm_reset_stack failed: {}", stack_rc);
+    assert_test!(
+        stack_ok,
+        "the stack is not writable after reset + reset_stack"
+    );
     assert_test!(rc2 == 0, "a second reset failed: {}", rc2);
     pass!()
 }

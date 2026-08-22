@@ -20,9 +20,20 @@ const PML4: u64 = 0x1_000;
 /// closes, and a later test that compares free-page counts against a baseline
 /// would otherwise read that deferral as a leak.
 fn settle_teardown() {
+    // Address-space teardown returns frames by three staged routes, and a
+    // later test that compares global free-page counts against a baseline
+    // sees them only once all three have run: the quiesce epoch has to close
+    // before a frame is reusable, the quarantine holds it for a rotation
+    // after that, and the per-CPU cache holds it after that again.
     crate::mmu::quiesce::force_close_epoch_for_test();
-    // Teardown frees through the per-CPU cache; a later test that compares
-    // global free-page counts only sees those pages once the cache is drained.
+    for _ in 0..4 {
+        crate::page_alloc::quarantine_rotate();
+        while crate::page_alloc::quarantine_has_releasable() {
+            if crate::page_alloc::quarantine_release_some(u32::MAX) == 0 {
+                break;
+            }
+        }
+    }
     crate::page_alloc::pcp_drain_all();
 }
 

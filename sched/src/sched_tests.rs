@@ -7241,3 +7241,38 @@ slopos_testing::stest!(
     name = test_aging_backstop_preserves_priority_in_the_common_case,
     suite = sched_core
 );
+
+/// The backstop must never hold back `High` or `KernelIo`.
+///
+/// `KernelIo` runs the paths the rest of the kernel's progress depends on —
+/// NAPI receive, TX ring drain, TCP retransmit timers. A `Low` task served
+/// ahead of one of those does not add latency, it stalls the work that makes
+/// the machine answer at all: with those threads starved, `ping` and `curl`
+/// produce no output and nothing in the log says why.
+pub fn test_aging_never_holds_back_kernel_io() -> TestResult {
+    use crate::fair::{AGING_THRESHOLD, AgingState};
+
+    let aging = AgingState::new();
+    let both = [false, true, false, true, false];
+    for _ in 0..(AGING_THRESHOLD * 8) {
+        if aging.tier_owed(&both).is_some() {
+            return slopos_testing::fail!(
+                "the backstop offered to preempt KernelIo, which starves packet delivery"
+            );
+        }
+        aging.note_dispatch(1, &both);
+    }
+
+    // The debt is real, though: once KernelIo has nothing runnable, the tier
+    // that waited is served rather than being starved a second time.
+    let low_only = [false, false, false, true, false];
+    if aging.tier_owed(&low_only) != Some(3) {
+        return slopos_testing::fail!("Low was starved even after KernelIo drained");
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_aging_never_holds_back_kernel_io,
+    suite = sched_core
+);

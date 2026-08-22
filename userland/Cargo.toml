@@ -212,6 +212,10 @@ path = "src/bin/tests/rlimit_test.rs"
 name = "session_smoke_test"
 path = "src/bin/tests/session_smoke_test.rs"
 
+[[bin]]
+name = "spawn_output_test"
+path = "src/bin/tests/spawn_output_test.rs"
+
 [features]
 default = []
 testbins = []

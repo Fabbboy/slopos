@@ -130,7 +130,16 @@ boot	edges	49
 post-kernel-tests	edges	161
 post-userland-tests	edges	205
 
-# chains measured: boot 110, kernel 335-343, userland 379-386
+# 2026-08-24: kernel 351 -> 359, userland 404 -> 409. Two new kernel test
+# modules (`tests_exec_boundary`, `tests_pcid`) create and tear down address
+# spaces, and the OOM tests now drain the quarantine and the per-CPU magazine
+# before reading a free count; both take the quiesce and quarantine locks
+# around the buddy lock, an ordering the kernel phase previously reached only
+# from process exit. Re-measured over twelve runs: kernel 345-352, userland
+# 395-402 — spread 7 in both, unchanged from the recorded spread. Each cap is
+# that maximum plus the spread.
+#
+# chains measured: boot 110, kernel 345-352, userland 395-402
 #
 # 2026-08-12: the userland cap moves 399 -> 404. The two new locks above add
 # their own chains, and the append path now takes OPEN_FILE_POSITION around a
@@ -140,5 +149,5 @@ post-userland-tests	edges	205
 # than sitting on the observation, since a cap set to a single sample of a
 # scheduling-dependent quantity fails on ordinary interleaving.
 boot	chains	112
-post-kernel-tests	chains	351
-post-userland-tests	chains	404
+post-kernel-tests	chains	359
+post-userland-tests	chains	409

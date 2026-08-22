@@ -35,6 +35,17 @@ pub const AGING_THRESHOLD: u32 = 16;
 /// Number of tiers the backstop tracks. Mirrors the run queue's level count.
 pub const NUM_TIERS: usize = 5;
 
+/// The first tier the backstop may hold back.
+///
+/// `High` and `KernelIo` are not preferences, they are correctness statements:
+/// `KernelIo` runs the paths whose progress the rest of the kernel depends on
+/// (delivering packets, draining TX rings, firing TCP retransmit timers), and
+/// a `Low` task served ahead of one of those does not merely add latency, it
+/// stalls the work that makes the machine answer at all. Aging bounds the wait
+/// of the tiers that are *policy* — `Normal`, `Low`, `Idle` — and never
+/// reorders the two above them.
+pub const FIRST_AGEABLE_TIER: usize = 2;
+
 /// Per-CPU passed-over counts, one per tier.
 ///
 /// Not atomic and carrying no lock of its own: every method is called with the
@@ -68,7 +79,13 @@ impl AgingState {
     /// behind it.
     #[inline]
     pub fn tier_owed(&self, non_empty: &[bool; NUM_TIERS]) -> Option<usize> {
-        for tier in 0..NUM_TIERS {
+        // No debt may displace a privileged tier that has work.
+        for tier in 0..FIRST_AGEABLE_TIER {
+            if non_empty[tier] {
+                return None;
+            }
+        }
+        for tier in FIRST_AGEABLE_TIER..NUM_TIERS {
             if non_empty[tier] && self.passed_over[tier].get() >= AGING_THRESHOLD {
                 return Some(tier);
             }
@@ -83,7 +100,7 @@ impl AgingState {
         if selected < NUM_TIERS {
             self.passed_over[selected].set(0);
         }
-        for tier in (selected + 1)..NUM_TIERS {
+        for tier in (selected + 1).max(FIRST_AGEABLE_TIER)..NUM_TIERS {
             if non_empty[tier] {
                 let slot = &self.passed_over[tier];
                 slot.set(slot.get().saturating_add(1));
@@ -127,6 +144,23 @@ mod tests {
         }
         aging.note_dispatch(3, &non_empty);
         assert!(aging.tier_owed(&non_empty).is_none());
+    }
+
+    #[test]
+    fn a_privileged_tier_is_never_held_back() {
+        let aging = AgingState::new();
+        let non_empty = [false, true, false, true, false];
+        for _ in 0..(AGING_THRESHOLD * 4) {
+            aging.note_dispatch(1, &non_empty);
+        }
+        // Low has waited a long time, but KernelIo still has work: the strict
+        // scan must keep winning, or packet delivery stalls behind background
+        // work.
+        assert_eq!(aging.tier_owed(&non_empty), None);
+
+        // Once KernelIo drains, the debt Low accrued is honoured.
+        let only_low = [false, false, false, true, false];
+        assert_eq!(aging.tier_owed(&only_low), Some(3));
     }
 
     #[test]
