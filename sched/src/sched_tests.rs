@@ -7109,3 +7109,135 @@ pub fn test_quota_charge_cost() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_quota_charge_cost, suite = sched_core);
+
+/// A `Normal` task that never blocks must not starve a `Low` task forever.
+///
+/// Under strict priority the `Low` task is never selected while any `Normal`
+/// task is runnable, which is the finding. The aging backstop bounds that: a
+/// non-empty tier passed over `AGING_THRESHOLD` times is served once, so the
+/// wait is bounded rather than merely improbable.
+pub fn test_low_priority_is_not_starved_by_busy_normal() -> TestResult {
+    use crate::fair::AGING_THRESHOLD;
+    use crate::per_cpu::with_local_scheduler;
+
+    let _fixture = SchedFixture::new();
+
+    let normal_id = task_create(
+        b"BusyNormal\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    let low_id = task_create(
+        b"StarvedLow\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Low.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if normal_id == INVALID_TASK_ID || low_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let (Some(normal), Some(low)) = (task_find_by_id(normal_id), task_find_by_id(low_id)) else {
+        return TestResult::Fail;
+    };
+    if !make_task_ready(normal_id) || !make_task_ready(low_id) {
+        return TestResult::Fail;
+    }
+
+    // The `Low` task is enqueued once and never re-enqueued; the `Normal` task
+    // is put back every time it is picked, modelling a task that never blocks.
+    // Under strict priority alone, `Low` is never chosen.
+    schedule_task(&low);
+    schedule_task(&normal);
+
+    let mut low_ran_at: Option<usize> = None;
+    let rounds = (AGING_THRESHOLD as usize) * 4;
+
+    for round in 0..rounds {
+        let Some(picked) = with_local_scheduler(|rq| rq.dequeue_highest_priority()) else {
+            break;
+        };
+        let is_low = {
+            let body: &Task = &picked;
+            body.task_id == low_id
+        };
+        if is_low {
+            low_ran_at = Some(round);
+            let _ = picked
+                .sched_placement_compare_exchange(SchedPlacement::OnCpu, SchedPlacement::None);
+            break;
+        }
+        with_local_scheduler(|rq| {
+            let _ = rq.enqueue_from_on_cpu(&picked);
+        });
+    }
+
+    // Drain so the fixture's teardown sees an empty queue.
+    while let Some(t) = with_local_scheduler(|rq| rq.dequeue_highest_priority()) {
+        let _ = t.sched_placement_compare_exchange(SchedPlacement::OnCpu, SchedPlacement::None);
+    }
+
+    match low_ran_at {
+        Some(round) => {
+            klog_info!("SCHED_TEST: Low ran after {} Normal dispatches", round);
+            if round > AGING_THRESHOLD as usize + 1 {
+                return slopos_testing::fail!(
+                    "Low waited {} dispatches, past the {} bound",
+                    round,
+                    AGING_THRESHOLD
+                );
+            }
+            TestResult::Pass
+        }
+        None => slopos_testing::fail!("a busy Normal task starved Low for all {} rounds", rounds),
+    }
+}
+
+/// The backstop must not reorder the priority tiers in the ordinary case: a
+/// bounded burst of higher-priority work still runs first.
+pub fn test_aging_backstop_preserves_priority_in_the_common_case() -> TestResult {
+    use crate::fair::{AGING_THRESHOLD, AgingState, NUM_TIERS};
+
+    let aging = AgingState::new();
+    let non_empty = [false, false, true, true, false];
+
+    // Below the threshold nothing is owed, so selection stays strict.
+    for _ in 0..(AGING_THRESHOLD - 1) {
+        if aging.tier_owed(&non_empty).is_some() {
+            return slopos_testing::fail!("a tier was owed before the threshold");
+        }
+        aging.note_dispatch(2, &non_empty);
+    }
+    aging.note_dispatch(2, &non_empty);
+    if aging.tier_owed(&non_empty) != Some(3) {
+        return slopos_testing::fail!("the starved tier was not owed at the threshold");
+    }
+    // Serving it clears the debt.
+    aging.note_dispatch(3, &non_empty);
+    if aging.tier_owed(&non_empty).is_some() {
+        return slopos_testing::fail!("serving the owed tier did not clear it");
+    }
+
+    // An empty tier is never owed, however long it is passed over.
+    let only_normal = [false, false, true, false, false];
+    let fresh = AgingState::new();
+    for _ in 0..(AGING_THRESHOLD * 4) {
+        fresh.note_dispatch(2, &only_normal);
+    }
+    if fresh.tier_owed(&only_normal).is_some() {
+        return slopos_testing::fail!("an empty tier must never be owed a dispatch");
+    }
+    let _ = NUM_TIERS;
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_low_priority_is_not_starved_by_busy_normal,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_aging_backstop_preserves_priority_in_the_common_case,
+    suite = sched_core
+);

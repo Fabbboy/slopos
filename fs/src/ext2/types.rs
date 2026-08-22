@@ -24,10 +24,14 @@ pub struct FileBlock(pub u32);
 #[repr(transparent)]
 pub struct InodeNum(pub u32);
 
-/// Block group index.
+/// Block group index, always below the mounted image's `groups_count`.
+///
+/// The field is private and the only constructor is
+/// `Ext2Geometry::group`, so an index that was never bounded against the
+/// group count cannot be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct GroupIdx(pub u32);
+pub struct GroupIdx(u32);
 
 /// Byte offset on the block device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -67,16 +71,16 @@ impl InodeNum {
         self.0 != 0
     }
 
-    pub fn block_group(self, inodes_per_group: u32) -> GroupIdx {
-        GroupIdx((self.0 - 1) / inodes_per_group)
-    }
-
     pub fn local_index(self, inodes_per_group: u32) -> u32 {
         (self.0 - 1) % inodes_per_group
     }
 }
 
 impl GroupIdx {
+    pub(crate) fn new_unchecked_internal(raw: u32) -> Self {
+        Self(raw)
+    }
+
     pub fn raw(self) -> u32 {
         self.0
     }

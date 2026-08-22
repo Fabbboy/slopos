@@ -1,43 +1,36 @@
 use super::Ext2Error;
 use super::cache::BlockCache;
-use super::ondisk::{GroupDesc, Superblock};
+use super::geometry::Ext2Geometry;
+use super::ondisk::{GROUP_DESC_SIZE, GroupDesc, Superblock};
 use super::types::{BlockNum, GroupIdx, InodeNum};
 use crate::blockdev::BlockDevice;
 use slopos_ostd::bitmap_slice;
 
 pub fn allocate_block_near(
     goal: BlockNum,
+    geom: &Ext2Geometry,
     superblock: &mut Superblock,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    block_size: u32,
 ) -> Result<BlockNum, Ext2Error> {
-    let groups_count = superblock.groups_count();
-    if groups_count == 0 {
-        return Err(Ext2Error::NoSpace);
-    }
-    let goal_group = if goal.is_valid() {
-        GroupIdx(
-            (goal.raw().saturating_sub(superblock.first_data_block.raw()))
-                / superblock.blocks_per_group,
-        )
-    } else {
-        GroupIdx(0)
-    };
+    let first_group = geom.group(0).ok_or(Ext2Error::NoSpace)?;
+    let goal_group = geom
+        .locate_block(goal)
+        .map(|(g, _)| g)
+        .unwrap_or(first_group);
 
-    if let Some(block) =
-        try_alloc_block_in_group(goal_group, superblock, cache, device, block_size)?
-    {
+    if let Some(block) = try_alloc_block_in_group(goal_group, geom, superblock, cache, device)? {
         return Ok(block);
     }
 
-    for g in 0..groups_count {
-        let group = GroupIdx(g);
+    for g in 0..geom.groups_count() {
+        let Some(group) = geom.group(g) else {
+            continue;
+        };
         if group == goal_group {
             continue;
         }
-        if let Some(block) = try_alloc_block_in_group(group, superblock, cache, device, block_size)?
-        {
+        if let Some(block) = try_alloc_block_in_group(group, geom, superblock, cache, device)? {
             return Ok(block);
         }
     }
@@ -46,39 +39,34 @@ pub fn allocate_block_near(
 }
 
 pub fn allocate_block(
+    geom: &Ext2Geometry,
     superblock: &mut Superblock,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    block_size: u32,
 ) -> Result<BlockNum, Ext2Error> {
-    allocate_block_near(BlockNum::ZERO, superblock, cache, device, block_size)
+    allocate_block_near(BlockNum::ZERO, geom, superblock, cache, device)
 }
 
 pub fn allocate_inode(
     parent_group: GroupIdx,
+    geom: &Ext2Geometry,
     superblock: &mut Superblock,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    block_size: u32,
 ) -> Result<InodeNum, Ext2Error> {
-    let groups_count = superblock.groups_count();
-    if groups_count == 0 {
-        return Err(Ext2Error::NoSpace);
-    }
-
     // Locality: files in one directory belong in one group.
-    if let Some(ino) =
-        try_alloc_inode_in_group(parent_group, superblock, cache, device, block_size)?
-    {
+    if let Some(ino) = try_alloc_inode_in_group(parent_group, geom, superblock, cache, device)? {
         return Ok(ino);
     }
 
-    for g in 0..groups_count {
-        let group = GroupIdx(g);
+    for g in 0..geom.groups_count() {
+        let Some(group) = geom.group(g) else {
+            continue;
+        };
         if group == parent_group {
             continue;
         }
-        if let Some(ino) = try_alloc_inode_in_group(group, superblock, cache, device, block_size)? {
+        if let Some(ino) = try_alloc_inode_in_group(group, geom, superblock, cache, device)? {
             return Ok(ino);
         }
     }
@@ -88,23 +76,14 @@ pub fn allocate_inode(
 
 pub fn free_block(
     block: BlockNum,
+    geom: &Ext2Geometry,
     superblock: &mut Superblock,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    block_size: u32,
 ) -> Result<(), Ext2Error> {
-    let group = GroupIdx(
-        (block
-            .raw()
-            .saturating_sub(superblock.first_data_block.raw()))
-            / superblock.blocks_per_group,
-    );
-    let bit = (block
-        .raw()
-        .saturating_sub(superblock.first_data_block.raw()))
-        % superblock.blocks_per_group;
+    let (group, bit) = geom.locate_block(block).ok_or(Ext2Error::InvalidBlock)?;
 
-    let mut desc = read_group_desc(group, superblock, cache, device, block_size)?;
+    let mut desc = read_group_desc(group, geom, cache, device)?;
     let bitmap_block = desc.block_bitmap;
 
     {
@@ -114,7 +93,7 @@ pub fn free_block(
     }
 
     desc.free_blocks_count = desc.free_blocks_count.saturating_add(1);
-    write_group_desc(group, &desc, superblock, cache, device, block_size)?;
+    write_group_desc(group, &desc, geom, cache, device)?;
     superblock.free_blocks_count = superblock.free_blocks_count.saturating_add(1);
 
     Ok(())
@@ -122,15 +101,14 @@ pub fn free_block(
 
 pub fn free_inode(
     ino: InodeNum,
+    geom: &Ext2Geometry,
     superblock: &mut Superblock,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    block_size: u32,
 ) -> Result<(), Ext2Error> {
-    let group = ino.block_group(superblock.inodes_per_group);
-    let bit = ino.local_index(superblock.inodes_per_group);
+    let (group, bit) = geom.locate_inode(ino).ok_or(Ext2Error::InvalidInode)?;
 
-    let mut desc = read_group_desc(group, superblock, cache, device, block_size)?;
+    let mut desc = read_group_desc(group, geom, cache, device)?;
     let bitmap_block = desc.inode_bitmap;
 
     {
@@ -140,7 +118,7 @@ pub fn free_inode(
     }
 
     desc.free_inodes_count = desc.free_inodes_count.saturating_add(1);
-    write_group_desc(group, &desc, superblock, cache, device, block_size)?;
+    write_group_desc(group, &desc, geom, cache, device)?;
     superblock.free_inodes_count = superblock.free_inodes_count.saturating_add(1);
 
     Ok(())
@@ -148,18 +126,18 @@ pub fn free_inode(
 
 fn try_alloc_block_in_group(
     group: GroupIdx,
+    geom: &Ext2Geometry,
     superblock: &mut Superblock,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    block_size: u32,
 ) -> Result<Option<BlockNum>, Ext2Error> {
-    let mut desc = read_group_desc(group, superblock, cache, device, block_size)?;
+    let mut desc = read_group_desc(group, geom, cache, device)?;
     if desc.free_blocks_count == 0 {
         return Ok(None);
     }
 
     let bitmap_block = desc.block_bitmap;
-    let bits_in_group = superblock.blocks_per_group;
+    let bits_in_group = geom.blocks_per_group();
 
     let bit = {
         let bmap = cache.get(bitmap_block, device)?;
@@ -175,29 +153,31 @@ fn try_alloc_block_in_group(
         bitmap_slice::set_bit(bmap.data_mut(), bit);
     }
 
+    let Some(block_num) = geom.block_of(group, bit as u32) else {
+        return Err(Ext2Error::InvalidBlock);
+    };
+
     desc.free_blocks_count = desc.free_blocks_count.saturating_sub(1);
-    write_group_desc(group, &desc, superblock, cache, device, block_size)?;
+    write_group_desc(group, &desc, geom, cache, device)?;
     superblock.free_blocks_count = superblock.free_blocks_count.saturating_sub(1);
 
-    let block_num =
-        group.raw() * superblock.blocks_per_group + bit as u32 + superblock.first_data_block.raw();
-    Ok(Some(BlockNum(block_num)))
+    Ok(Some(block_num))
 }
 
 fn try_alloc_inode_in_group(
     group: GroupIdx,
+    geom: &Ext2Geometry,
     superblock: &mut Superblock,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    block_size: u32,
 ) -> Result<Option<InodeNum>, Ext2Error> {
-    let mut desc = read_group_desc(group, superblock, cache, device, block_size)?;
+    let mut desc = read_group_desc(group, geom, cache, device)?;
     if desc.free_inodes_count == 0 {
         return Ok(None);
     }
 
     let bitmap_block = desc.inode_bitmap;
-    let bits_in_group = superblock.inodes_per_group;
+    let bits_in_group = geom.inodes_per_group();
     let start_bit = if group.raw() == 0 {
         superblock.first_ino.saturating_sub(1) as usize
     } else {
@@ -218,48 +198,46 @@ fn try_alloc_inode_in_group(
         bitmap_slice::set_bit(bmap.data_mut(), bit);
     }
 
+    let Some(inode_num) = geom.inode_of(group, bit as u32) else {
+        return Err(Ext2Error::InvalidInode);
+    };
+
     desc.free_inodes_count = desc.free_inodes_count.saturating_sub(1);
-    write_group_desc(group, &desc, superblock, cache, device, block_size)?;
+    write_group_desc(group, &desc, geom, cache, device)?;
     superblock.free_inodes_count = superblock.free_inodes_count.saturating_sub(1);
 
-    let inode_num = group.raw() * superblock.inodes_per_group + bit as u32 + 1;
-    Ok(Some(InodeNum(inode_num)))
+    Ok(Some(inode_num))
 }
 
-fn group_desc_offset(
+pub(crate) fn read_group_desc(
     group: GroupIdx,
-    _superblock: &Superblock,
-    block_size: u32,
-) -> (BlockNum, usize) {
-    let table_start = if block_size == 1024 { 2 } else { 1 };
-    let desc_per_block = block_size as usize / 32; // group desc is 32 bytes
-    let block_idx = group.raw() as usize / desc_per_block;
-    let within = (group.raw() as usize % desc_per_block) * 32;
-    (BlockNum(table_start + block_idx as u32), within)
-}
-
-fn read_group_desc(
-    group: GroupIdx,
-    superblock: &Superblock,
+    geom: &Ext2Geometry,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    block_size: u32,
 ) -> Result<GroupDesc, Ext2Error> {
-    let (block, offset) = group_desc_offset(group, superblock, block_size);
-    let blk = cache.get(block, device)?;
-    Ok(GroupDesc::parse(&blk.data()[offset..offset + 32]))
+    let loc = geom.group_desc_loc(group);
+    let blk = cache.get(loc.block(), device)?;
+    let window = blk
+        .window::<GROUP_DESC_SIZE>(loc.within())
+        .ok_or(Ext2Error::InvalidBlock)?;
+    let desc = GroupDesc::parse(window);
+    geom.validate_desc(group, &desc)?;
+    Ok(desc)
 }
 
-fn write_group_desc(
+pub(crate) fn write_group_desc(
     group: GroupIdx,
     desc: &GroupDesc,
-    superblock: &Superblock,
+    geom: &Ext2Geometry,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
-    block_size: u32,
 ) -> Result<(), Ext2Error> {
-    let (block, offset) = group_desc_offset(group, superblock, block_size);
-    let mut blk = cache.get(block, device)?;
-    desc.encode(&mut blk.data_mut()[offset..offset + 32]);
+    geom.validate_desc(group, desc)?;
+    let loc = geom.group_desc_loc(group);
+    let mut blk = cache.get(loc.block(), device)?;
+    let window = blk
+        .window_mut::<GROUP_DESC_SIZE>(loc.within())
+        .ok_or(Ext2Error::InvalidBlock)?;
+    desc.encode(window);
     Ok(())
 }

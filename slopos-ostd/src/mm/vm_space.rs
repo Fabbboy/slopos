@@ -62,7 +62,6 @@ const HIGHER_HALF_START: u64 = 0xFFFF_8000_0000_0000;
 /// every address space sees it immediately.
 pub struct VmSpace {
     pml4: Frame<PageTableMeta>,
-    pcid: Pcid,
     generation: AtomicU64,
     /// Opaque consumer-defined handle threaded through
     /// [`CursorUnmapHook`] callbacks. `0` ⇒ unset.
@@ -171,6 +170,20 @@ pub trait CursorUnmapHook: Send + Sync {
 
     /// Fired at the start of [`VmSpace::activate`].
     fn on_activate(&self, mm_ctx_handle: u64);
+
+    /// Choose the `(pcid, no_flush)` pair for a CR3 load of `mm_ctx_handle`.
+    ///
+    /// The consumer owns the per-CPU PCID binding, so it is the only thing
+    /// that can know whether the tag it hands back still holds this context's
+    /// translations. Returning `no_flush == true` asserts that it does; a
+    /// consumer that cannot prove it must return `false`, and one that has no
+    /// pool at all must return `None` so OSTD falls back to a flushing load
+    /// under the kernel PCID.
+    ///
+    /// `tlb_gen` is the address space's generation counter, bumped by every
+    /// page-table mutation. A slot cached at an older generation may hold
+    /// stale translations and must be flushed before it is reused.
+    fn select_cr3(&self, mm_ctx_handle: u64, tlb_gen: u64) -> Option<(u16, bool)>;
 }
 
 static CURSOR_UNMAP_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
@@ -214,21 +227,6 @@ pub fn reset_kernel_master_for_test() {
     KERNEL_MASTER_PML4.store(KERNEL_MASTER_UNINIT, Ordering::Release);
 }
 
-static NEXT_PCID: AtomicU64 = AtomicU64::new(1);
-
-// TODO(tech-debt): a monotonic counter masked to the architectural 12
-// bits aliases PCIDs after 4096 address spaces — needs a real ASID slot
-// scheduler.
-fn alloc_pcid() -> Pcid {
-    let raw = NEXT_PCID.fetch_add(1, Ordering::Relaxed);
-    Pcid::new((raw & 0x0FFF) as u16)
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn reset_pcid_counter_for_test() {
-    NEXT_PCID.store(1, Ordering::Release);
-}
-
 impl VmSpace {
     /// Allocate a fresh address space: a zeroed PML4 with kernel-half
     /// mappings copied from the registered kernel master.
@@ -256,7 +254,6 @@ impl VmSpace {
 
         Ok(Self {
             pml4,
-            pcid: alloc_pcid(),
             generation: AtomicU64::new(0),
             mm_ctx_handle: AtomicU64::new(0),
         })
@@ -280,9 +277,7 @@ impl VmSpace {
     ///    kernel-half mappings — `wrap_existing` does **not** copy
     ///    from `KERNEL_MASTER_PML4` (the wrapped frame typically
     ///    *is* the kernel master).
-    /// 4. `pcid` is appropriate for this address space ([`Pcid::KERNEL`]
-    ///    for the kernel master).
-    pub unsafe fn wrap_existing(pml4_phys: PhysAddr, pcid: Pcid) -> Result<Self, MapError> {
+    pub unsafe fn wrap_existing(pml4_phys: PhysAddr, _pcid: Pcid) -> Result<Self, MapError> {
         let pml4 = Frame::<PageTableMeta>::from_unused(
             pml4_phys,
             PageTableMeta {
@@ -293,7 +288,6 @@ impl VmSpace {
         .map_err(|_| MapError::PathCorrupt)?;
         Ok(Self {
             pml4,
-            pcid,
             generation: AtomicU64::new(0),
             mm_ctx_handle: AtomicU64::new(0),
         })
@@ -319,10 +313,6 @@ impl VmSpace {
 
     pub fn pml4_paddr(&self) -> PhysAddr {
         self.pml4.paddr()
-    }
-
-    pub fn pcid(&self) -> Pcid {
-        self.pcid
     }
 
     pub fn generation(&self) -> u64 {
@@ -387,8 +377,10 @@ impl VmSpace {
     /// sanctioned CR3 write path. Fires the registered
     /// [`CursorUnmapHook::on_activate`] callback, if any.
     pub unsafe fn activate(&self) {
-        if let Some(hook) = current_cursor_unmap_hook() {
-            hook.on_activate(self.mm_ctx_handle.load(Ordering::Acquire));
+        let ctx = self.mm_ctx_handle.load(Ordering::Acquire);
+        let hook = current_cursor_unmap_hook();
+        if let Some(hook) = hook {
+            hook.on_activate(ctx);
         }
         // NOFLUSH is architecturally legal only when `CR4.PCIDE` is
         // enabled; setting it on a platform that never enabled PCIDE
@@ -396,11 +388,26 @@ impl VmSpace {
         let pcide_enabled = (crate::cpu::x86_64::control_regs::read_cr4()
             & crate::cpu::x86_64::control_regs::Cr4Flags::PCIDE.bits())
             != 0;
+
+        // The PCID and the right to skip the flush are one decision, taken by
+        // whoever owns the per-CPU binding. A tag chosen without consulting it
+        // — a counter masked to 12 bits, say — aliases another address space
+        // every 4096 allocations, and NOFLUSH then keeps that address space's
+        // translations live under the new one.
+        let tlb_gen = self.generation.load(Ordering::Acquire);
+        let (pcid, no_flush) = match hook.and_then(|h| h.select_cr3(ctx, tlb_gen)) {
+            Some((raw, no_flush)) if pcide_enabled => (Pcid::new(raw), no_flush),
+            // No pool, or PCIDE off: PCID 0 with a flushing load is always
+            // correct, merely slower.
+            _ => (Pcid::KERNEL, false),
+        };
+
         // SAFETY: `self.pml4` is a live page-table frame whose
         // kernel-half indices were copied from the master, whose top
         // level does not change after `prepopulate_kernel_half`; the
-        // caller upholds the rest of `write_cr3_pcid`'s contract.
-        unsafe { write_cr3_pcid(self.pml4_paddr(), self.pcid, pcide_enabled) };
+        // caller upholds the rest of `write_cr3_pcid`'s contract, and
+        // `no_flush` was minted by the pool that owns the binding.
+        unsafe { write_cr3_pcid(self.pml4_paddr(), pcid, no_flush) };
     }
 
     /// Stash an opaque consumer-defined identifier for this address

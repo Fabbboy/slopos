@@ -1,6 +1,7 @@
 use super::Ext2Error;
 use super::cache::BlockCache;
 use super::ext2_alloc;
+use super::geometry::Ext2Geometry;
 use super::ondisk::{Inode, Superblock};
 use super::types::{BlockNum, FileBlock};
 use crate::blockdev::BlockDevice;
@@ -105,7 +106,7 @@ pub fn ensure_data_block(
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
     superblock: &mut Superblock,
-    block_size: u32,
+    geom: &Ext2Geometry,
 ) -> Result<(BlockNum, bool), Ext2Error> {
     let path = block_to_path(file_block, ptrs_per_block)?;
 
@@ -114,7 +115,7 @@ pub fn ensure_data_block(
         if inode.block[idx].is_valid() {
             return Ok((inode.block[idx], false));
         }
-        let new_block = ext2_alloc::allocate_block(superblock, cache, device, block_size)?;
+        let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
         drop(cache.get_zero_data(new_block, device)?);
         inode.block[idx] = new_block;
         return Ok((new_block, true));
@@ -122,7 +123,7 @@ pub fn ensure_data_block(
 
     let top_idx = path.offsets[0] as usize;
     if !inode.block[top_idx].is_valid() {
-        let new_block = ext2_alloc::allocate_block(superblock, cache, device, block_size)?;
+        let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
         drop(cache.get_zero(new_block, device)?);
         inode.block[top_idx] = new_block;
     }
@@ -136,7 +137,7 @@ pub fn ensure_data_block(
         if child.is_valid() {
             current_indirect = child;
         } else {
-            let new_block = ext2_alloc::allocate_block(superblock, cache, device, block_size)?;
+            let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
             drop(cache.get_zero(new_block, device)?);
             let mut parent = cache.get(current_indirect, device)?;
             write_ptr(parent.data_mut(), path.offsets[level], new_block);
@@ -154,7 +155,7 @@ pub fn ensure_data_block(
         return Ok((existing, false));
     }
 
-    let new_data = ext2_alloc::allocate_block(superblock, cache, device, block_size)?;
+    let new_data = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
     drop(cache.get_zero_data(new_data, device)?);
     let mut parent = cache.get(current_indirect, device)?;
     write_ptr(parent.data_mut(), data_idx, new_data);

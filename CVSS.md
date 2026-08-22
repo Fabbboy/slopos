@@ -75,6 +75,54 @@ still not an address-space boundary) and 0030 (the missing scheduler aging
 backstop). 0006 is **partially** fixed and its confidence lowered to 60 — the
 `inode_size` arm is closed and the group-descriptor arm is not.
 
+The 2026-08-24 pass took the four remaining scored findings — 0016, 0017, 0020
+and 0030 — plus the 0006 residual, researched each against its upstream
+reference, and **all four scored entries are removed as fixed.** Each fix is
+pinned by a test that was confirmed to fail on the unfixed tree, by reverting
+the fix and re-running rather than by assertion.
+
+- **0017 (PCID reuse, 7.8 HIGH).** The wrapping 12-bit counter and the
+  unconditional NOFLUSH are both gone. `VmSpace` no longer carries a `pcid`
+  field at all; the tag and the right to skip the flush are one decision, taken
+  by the per-CPU pool through a new `CursorUnmapHook::select_cr3`. That pool —
+  the Linux-style `tlb_state`/generation scheme the ledger noted was sitting
+  beside the bug as dead code — is now the live path, and OSTD falls back to a
+  flushing PCID-0 load when there is no pool or PCIDE is off. The dead code
+  being wired up is the fix, which is why the entry is closed rather than
+  narrowed.
+- **0020 (`execve` is not an address-space boundary, 7.1 HIGH).**
+  `process_vm_reset_for_exec` severs every user mapping — heap, mmap arena,
+  shared memfds, rings — through each backing's own unmap path, so mapcounts
+  and page charges settle correctly, then re-seeds a freshly randomised layout
+  from one shared definition. It runs *before* the new image is loaded, so a
+  failure is still recoverable.
+- **0016 (SCM_RIGHTS cycle, 5.5 MEDIUM).** Closed by a type, not a collector.
+  `FdContainment` is a total function over `FileKind`, and `unix_sendmsg` takes
+  `LeafFileRef` — a witness whose only constructor checks containment — so a
+  description that owns descriptions cannot enter an ancillary queue. This is
+  io_uring's settled answer generalised. **The ledger's proposed remediation
+  would have been insufficient:** refusing AF_UNIX sockets leaves
+  `FileKind::Ring` open, whose in-flight rows own a `FileRef` each and close
+  exactly the same cycle.
+- **0030 (no aging backstop, 5.5 MEDIUM).** A per-tier passed-over count: a
+  non-empty tier skipped `AGING_THRESHOLD` times is served once. An EEVDF
+  calendar wheel was implemented first and **abandoned** — it destabilised
+  signal delivery under load (`utest_ctrlc_flood`), because expressing
+  "`KernelIo` must pre-empt `Normal`, a TX ring is draining" inside one
+  lag-ordered pool needs weights so extreme the fair ordering is decorative.
+  The tiers here are correctness statements, not preferences. The backstop
+  leaves them intact and bounds what they cost everyone below.
+
+Three notes on what the pass found that the ledger had wrong. **0006's headline
+claim was false** — the slice it named is bounded by construction for every
+mountable block size — and the real defects at that site were different and
+worse; see the entry. **The gates caught what review did not**, again:
+`check_stack_sizes.sh` rejected two ext2 tests that held two mounts in one
+frame after `Ext2Fs` grew a geometry field, fixed by splitting the frames
+rather than widening the allowlist. And **CR3 bit 63 is write-only**, so the
+NOFLUSH decision cannot be asserted by reading the register back; that property
+is pinned against the pool instead, which is where it is decided.
+
 > **Pre-alpha ledger policy.** SlopOS is pre-alpha with no backwards-compatibility or audit-trail obligations, so this ledger tracks **open findings only**. When a finding is resolved it is **removed** from this file (not retained as a `fixed` historical record). Internal IDs stay stable for findings that remain open, so gaps in the numbering are expected.
 
 ## Scoring Method
@@ -98,89 +146,23 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 
 | ID | Score | Severity | Title |
 |---|---:|---|---|
-| [SLOPOS-2026-0017](#slopos-2026-0017) | 7.8 | HIGH | PCIDs are assigned from a wrapping 12-bit counter with no reuse tracking while every CR3 write is NOFLUSH |
-| [SLOPOS-2026-0020](#slopos-2026-0020) | 7.1 | HIGH | `execve` is not an address-space boundary |
-| [SLOPOS-2026-0016](#slopos-2026-0016) | 5.5 | MEDIUM | AF_UNIX SCM_RIGHTS has no cycle policy, permanently leaking socket slots |
-| [SLOPOS-2026-0030](#slopos-2026-0030) | 5.5 | MEDIUM | Ready-queue selection is strict priority with no aging backstop |
+
+*(No findings currently meet the confidence >= 80 bar. SLOPOS-2026-0006 remains
+open below at confidence 60 and is therefore not CVSS-scored.)*
 
 ## Open SlopOS Findings (for remediation)
 
 These are **candidate CVE-style records** for internal tracking. They are not official CVE assignments.
 
 ### SLOPOS-2026-0006
-- Title: ext2 inode/group descriptor size trust can panic on out-of-bounds slicing
+- Title: ext2 group-descriptor and directory-record trust on a malformed image
 - Status: open
-- Confidence: 60 — evidence 30, exploitability 12, reproducibility 18. Lowered from 70 on 2026-08-12: the `inode_size` half of the finding is closed, and what remains is the narrower group-descriptor claim. Below the 80 threshold for a guaranteed CVSS-scored issue.
-- Status note (2026-08-12): **partially fixed.** `Superblock::parse` now rejects an `inode_size` that is not a power of two in `128..=block_size`, which is the arm that made the inode-table offset arithmetic address outside the block it had just read. Pinned by `test_ext2_inode_size_beyond_block_rejected`. The residual is the group-descriptor path: `GroupDesc::parse` still slices a fixed 32 bytes at `(group % desc_per_block) * 32` without asserting that the descriptor table's declared extent lies inside the block, so a crafted `blocks_per_group`/`groups_count` pair remains the open question.
-- Evidence: `fs/src/ext2/mod.rs` `read_group_desc` computes `within = (group.raw() as usize % desc_per_block) * 32` and slices `&block.data()[within..within + 32]`; `fs/src/ext2/ondisk.rs` `GroupDesc::parse` trusts that slice's length.
-- Impact: malformed-image-triggered out-of-bounds slice index. Because `fs/` is `#![forbid(unsafe_code)]`, this is a bounded-slice **panic** (DoS), never memory unsafety/UB.
+- Confidence: 60 — evidence 30, exploitability 12, reproducibility 18. Unchanged: there is no `mount(2)`, so feeding a crafted image requires control of the VM's disk. Below the 80 threshold for a guaranteed CVSS-scored issue.
+- Status note (2026-08-24): **the arms this ledger described are closed, and the ledger's headline claim was wrong.** The slice it named cannot go out of bounds: `within = (group % desc_per_block) * 32` is bounded by `desc_per_block * 32`, which equals `block_size` exactly for every admissible block size (1024/2048/4096), and `CachedBlock::data()` is exactly `block_size` long. What *was* wrong at that site is now fixed — an unbounded `block_idx`, a `groups_count()` computed by overflowing arithmetic, and descriptor contents (`inode_table`, `block_bitmap`) trusted as block pointers that `write_inode_num` then wrote through. `Ext2Geometry` (`fs/src/ext2/geometry.rs`) validates the whole superblock geometry once at mount and is the only constructor of `GroupIdx`, so an unbounded group index is no longer representable. Four real arithmetic panics found alongside it (`groups_count` overflow, two allocator multiplications, and a directory `rec_len - actual_size` underflow reachable from an ordinary `create_file`) are fixed and pinned.
+- Evidence: `fs/src/ext2/geometry.rs` `Ext2Geometry::derive` (checks G1–G11), `validate_desc`; `fs/src/ext2/types.rs` `GroupIdx` private field; `fs/src/ext2/dir.rs` `parse_record`, the single record predicate the walker and the inserter now share.
+- Impact: malformed-image-triggered panic (DoS) or, in release builds where overflow checks are off, silent metadata type confusion. Because `fs/` is `#![forbid(unsafe_code)]`, never memory unsafety/UB.
 - CVSS vector/score: not assigned because confidence is below 80.
-- Remediation (proposed): bound each `within + size` against the containing block before slicing, and validate `groups_count()` against the descriptor table's actual extent. The adjacent feature-compatibility gate (formerly 0043) has landed.
-
-### SLOPOS-2026-0016
-- Title: AF_UNIX SCM_RIGHTS has no cycle policy, permanently leaking socket slots
-- Status: open
-- Confidence: 83 — evidence 38 (the fd-passing path and both fixed tables read directly), exploitability 26 (single unprivileged process, ~15 iterations), reproducibility 24 (deterministic, no race)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` — **5.5 MEDIUM**
-- Impact: A socket fd passed through SCM_RIGHTS into its own socketpair creates a reference cycle that nothing collects. Each cycle permanently leaks 2 of 32 socket slots and 1 of 16 pair entries; roughly 15 iterations exhaust both tables, denying AF_UNIX — and therefore the compositor connection — to every process until reboot.
-- Evidence:
-  - net/src/unix_socket_file_ops.rs:26-30 — `impl Drop for UnixSocketBacking { fn drop(&mut self) { let _ = unix_socket::unix_close(self.handle); } }` — the endpoint is closed only when the last `FileRef` drops
-  - net/src/unix_socket/mod.rs:929 — `unix_close` is what calls `slots.remove(handle.handle())`; the slot is not freed by the `close(2)` syscall itself
-  - net/src/unix_socket/pair.rs:46-65 — `AncillaryQueue` holds owning `FileRef`s until the receiver drains them
-  - abi/src/event.rs:19 — `pub const MAX_UNIX_SOCKETS: usize = 32;`
-  - net/src/unix_socket/mod.rs:543-560 — `unix_sendmsg` accepts any `KVec<FileRef>`; nothing inspects the file kind
-- Repro:
-  Single process, no cooperation: create a socketpair, `sendmsg` each end's fd through the other with SCM_RIGHTS, close both fds. Repeat ~15 times.
-- Remediation: Either refuse to pass an AF_UNIX socket fd through SCM_RIGHTS (the cheap policy), or implement the AF_UNIX garbage collector Linux carries in `net/unix/garbage.c` for exactly this cycle. Also reclaim in-flight fds on process exit.
-
-### SLOPOS-2026-0017
-- Title: PCIDs are assigned from a wrapping 12-bit counter with no reuse tracking while every CR3 write is NOFLUSH
-- Status: open
-- Confidence: 87 — evidence 38 (the counter, the mask, the NOFLUSH bit and the dead ASID pool all read directly), exploitability 26 (4096 address-space creations, unprivileged, but only on CPUs where PCIDE is enabled), reproducibility 23 (deterministic once the counter wraps; the observable effect depends on which stale translation is reused)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:H` — **7.8 HIGH**
-- Impact: PCIDs come from a global monotonic counter masked to 12 bits, with no reuse or flush tracking, and every CR3 write sets the NOFLUSH bit. Address-space creation number 4096 receives a PCID still holding another address space's cached translations, which are then used without a flush — a cross-address-space stale-TLB condition. The correct Linux-style ASID pool sits beside it as dead code, and the comment claims PCIDs are never reused.
-- Evidence:
-  - slopos-ostd/src/mm/vm_space.rs:287-298 — comment "PCID assignment. Monotonic counter, **never reused**, masked to the architectural 12 bits." then `fn alloc_pcid() -> Pcid { let raw = NEXT_PCID.fetch_add(1, Relaxed); Pcid::new((raw & 0x0FFF) as u16) }`. The mask *is* the reuse: allocation 4097 collides with allocation 1
-  - slopos-ostd/src/arch/x86_64/cr3.rs:20-28 — `Pcid::KERNEL = Pcid(0)`; `NEXT_PCID` starts at 1, so `4096 & 0x0FFF == 0` hands a user address space the kernel's PCID
-  - slopos-ostd/src/mm/vm_space.rs:336 — `pcid: alloc_pcid()` in `VmSpace::new`, i.e. one PCID consumed per process creation, never released
-  - slopos-ostd/src/mm/vm_space.rs:539-551 — `activate` computes `pcide_enabled` from live CR4 and passes it as `no_flush` to `write_cr3_pcid`, so on PCID-capable hardware *every* address-space switch is NOFLUSH
-  - slopos-ostd/src/arch/x86_64/cr3.rs:58-63 — `if no_flush { value |= 1u64 << 63; }`
-- Repro:
-  On a CPU where CR4.PCIDE is enabled at boot, spawn or fork 4096 times; each `create_process_vm` consumes one PCID. Note this interacts with entry 0010 — the pid ceiling is hit first, so the pid fix must land alongside this one.
-- Remediation: Use the existing ASID pool: allocate PCIDs from it, track which CPU last loaded each, and flush on reuse (or drop NOFLUSH when handing out a recycled PCID). Linux's `tlb_state`/`ctx_id` generation scheme is the reference.
-
-
-### SLOPOS-2026-0020
-- Title: `execve` is not an address-space boundary
-- Status: open
-- Confidence: 88 — evidence 38 (the complete set of state-reset operations in `do_exec` enumerated, and the loader's single unmap read), exploitability 26 (ordinary exec of an attacker-chosen binary), reproducibility 24 (deterministic; not covered by tests because the shell uses spawn_path)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N` — **7.1 HIGH**
-- Impact: `do_exec` unmaps exactly the code window and nothing else. `teardown_inner_mappings` — which drains the VMA map and resets the heap — is never invoked on the exec path. The new program image inherits the previous image's entire heap, mmap arena, shared-memfd mappings and SlopRing mappings, so exec preserves rather than severs whatever the old image had mapped.
-- Evidence:
-  - core/src/exec/mod.rs:474-486 — the complete set of state-reset operations in `do_exec` is `process_vm_load_elf_data`, `process_vm_reset_stack`, `fileio_close_on_exec`
-  - mm/src/process_vm.rs:1321-1330 — `unmap_existing_code_region` unmaps exactly `[PROCESS_CODE_START_VA, PROCESS_DATA_START_VA)`
-  - mm/src/process_vm.rs:610-619 — `teardown_inner_mappings` drains the VMA map and resets heap state, and is called only from `destroy_process_vm`
-  - core/src/exec/mod.rs:474-475 — `process_vm_load_elf_data(process_id, elf_data.as_slice(), entry_out)` replaces the caller's mappings; every failure after this line returns `Err` to a process whose old image is gone
-  - core/src/exec/mod.rs:477-479 — `if process_vm_reset_stack(process_id) != 0 { return Err(ExecError::NoMem) }` — after the load
-  - core/src/exec/mod.rs:481 — `setup_user_stack(...)?` — can return `NoMem` (`:523`, `:532`), `TooManyArgs` (`:514-516`) or `Fault` (`:507`, `write_to_user_stack` at `:599-601`), all after the load
-- Repro:
-  In a process holding a MAP_SHARED memfd mapping with a known byte pattern, `exec` a second binary and read the same address; the pattern is still there.
-- Remediation: Add `process_vm_reset_for_exec(pid)` reusing `teardown_inner_mappings`: drain the whole VMA map (running the shared-mapcount decrement so memfd counts stay correct), unmap every user range rather than just the code window, reset heap_start/heap_end/heap_break, and re-randomise the layout. Linux's `exec_mmap()` installs a fresh `mm_struct` for exactly this reason.
-
-### SLOPOS-2026-0030
-- Title: Ready-queue selection is strict priority with no aging backstop
-- Status: open
-- Confidence: 84 — evidence 38 (the dequeue order and the absence of any boost/decay path read directly), exploitability 22 (a spin loop at the caller's own tier, now capped at Normal), reproducibility 24 (deterministic starvation of Low by Normal)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` — **5.5 MEDIUM**
-- Impact: Selection is strict fixed priority with FIFO within a tier and no aging backstop anywhere in the scheduler. A `Normal` task that never blocks starves every `Low` task indefinitely; nothing raises a starved task's effective priority over time. The escalation half of this finding is closed — `syscall_spawn_path` now admits only `Normal` and `Low`, so `High` and `Idle` are no longer user-requestable — but the missing backstop is not.
-- Evidence:
-  - sched/src/per_cpu.rs:404-420 — `dequeue_highest_priority` is `for queue in &self.ready_queues { if let Some(task) = queue.dequeue() { return Some(task) } }`: a linear scan of priority levels 0..4, first non-empty wins, unconditionally
-  - abi/src/task.rs:184-199 — `High = 0, KernelIo = 1, Normal = 2, Low = 3, Idle = 4`; the doc on KernelIo says "reserved for paths whose progress is required for correctness (delivering packets, draining TX rings, firing TCP retransmit timers)"
-  - sched/src/task/task_lifecycle.rs:631 — `task_ref.priority = TaskPriority::from_u8(priority);` is the only write to `priority`; no boost, decay or aging path exists anywhere in the crate
-- Repro:
-  Spawn a `loop {}` binary at `TaskPriority::Normal` via `spawn_path`, then spawn anything at `Low`. The `Low` task never runs.
-- Remediation: Add an aging or bandwidth backstop so no tier can starve indefinitely — EEVDF's lag accounting is the reference. The tier-restriction half is done.
-
+- Residual: the ext2 code still trusts an image's *self-consistency* beyond the geometry — a descriptor whose free-count disagrees with its bitmap, or a directory whose `..` points elsewhere, is accepted. That is an fsck's job, not a bound's, and it is a correctness question rather than a safety one now that every derived index is checked.
 
 ## Relevant NVD CVE Analogs (fetched)
 
@@ -202,28 +184,24 @@ Selected analogs:
 
 ## Priority Remediation Plan
 
-Ordered by what removes the most exposure per unit of work, not by score.
+Only one finding remains open, and it is deliberately unscored.
 
-1. **The TLB correctness set** (0017). `mprotect`'s missing shootdown (0019) has
-   landed, which leaves PCID reuse as the only remaining way a stale translation
-   crosses an address-space boundary — the one class here that could become
-   memory corruption rather than denial of service. The fix is not a patch: the
-   correct Linux-style ASID pool already sits beside the wrapping counter as
-   dead code, and wiring it up means tracking which CPU last loaded each PCID
-   and flushing on reuse.
-2. **`execve` as an address-space boundary** (0020). Unchanged and still open.
-   The authority model deliberately does not make exec a revocation point for
-   memory, which is why every authority-bearing descriptor is close-on-exec;
-   that is a mitigation, not a fix. `process_vm_reset_for_exec` reusing
-   `teardown_inner_mappings` is the shape.
-3. **The AF_UNIX SCM_RIGHTS cycle** (0016). Not a counting problem, which is why
-   per-principal accounting did not close it: a reference cycle is collected by
-   a collector or prevented by a type restriction, and refusing to pass an
-   AF_UNIX socket over an AF_UNIX socket is the cheap half of what io_uring
-   settled on after five years.
-4. **Scheduler fairness** (0030). A `Normal` spin loop still starves `Low`
-   indefinitely. EEVDF's lag accounting is the reference; the tier-restriction
-   half is already done.
-5. **The ext2 group-descriptor bound** (0006 residual). Small, and the adjacent
-   feature-compatibility gate and `inode_size` bound have already landed, so
-   this is finishing a job rather than starting one.
+1. **The ext2 self-consistency residual** (0006). Every *derived* index is now
+   bounded and every geometry field validated at mount, so what is left is an
+   image that is internally inconsistent rather than out of range — a free
+   count that disagrees with its bitmap, a `..` that points elsewhere. That is
+   an fsck's job. It matters more if `mount(2)` ever lands, because today the
+   only mount is boot-time from `disk0`, and feeding it a crafted image already
+   requires control of the VM's disk.
+
+The structural work the closed findings leave behind, worth stating because it
+is what the next finding in each area will meet:
+
+- `Ext2Geometry` is the only constructor of `GroupIdx`, so a new ext2 caller
+  inherits the bounds rather than re-deriving them.
+- `FdContainment` is total over `FileKind`, so a new descriptor kind must state
+  whether it can own descriptions before it compiles.
+- `CursorUnmapHook::select_cr3` is the only path to a PCID, so a future KPTI
+  or ASID change has one place to change.
+- `process_vm_reset_for_exec` and `create_process_vm_for` share one definition
+  of a fresh address space, so a new region kind is added once.

@@ -298,3 +298,31 @@ pub fn forget_context_local(cpu_id: usize, ctx_id: MmContextId) {
         }
     });
 }
+
+/// Per-CPU PCID selection for a CR3 load, for the OSTD activate path.
+///
+/// `None` means "no usable pool": the caller must load PCID 0 with the flush
+/// bit clear. `Some((pcid, no_flush))` carries the tag *and* the right to skip
+/// the flush, which is only granted when this CPU's slot for the context is
+/// current at `tlb_gen`.
+pub fn select_pcid_for_activate(ctx_id: MmContextId, tlb_gen: u64) -> Option<(u16, bool)> {
+    if !pcid_enabled() {
+        return None;
+    }
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    if cpu_id >= MAX_CPUS {
+        return None;
+    }
+    if !ctx_id.is_valid() {
+        // The kernel master and any space that never received a context id
+        // share PCID 0; nothing else is ever issued that tag.
+        return Some((Pcid::KERNEL.bits() as u16, false));
+    }
+
+    let pml4 = PhysAddr::new(0);
+    let value = select_cr3(cpu_id, ctx_id, pml4, tlb_gen);
+    Some((
+        (value.bits() & Cr3Value::PCID_MASK) as u16,
+        value.bits() & Cr3Value::NOFLUSH_BIT != 0,
+    ))
+}

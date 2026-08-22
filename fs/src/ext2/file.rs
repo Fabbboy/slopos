@@ -1,6 +1,7 @@
 use super::Ext2Error;
 use super::blockmap;
 use super::cache::BlockCache;
+use super::geometry::Ext2Geometry;
 use super::ondisk::{Inode, Superblock};
 use super::types::{BlockNum, FileBlock};
 use crate::blockdev::BlockDevice;
@@ -55,6 +56,7 @@ pub fn write_file(
     ptrs_per_block: u32,
     block_size: u32,
     superblock: &mut Superblock,
+    geom: &Ext2Geometry,
 ) -> Result<usize, Ext2Error> {
     if !inode.is_regular_file() {
         return Err(Ext2Error::NotFile);
@@ -77,7 +79,7 @@ pub fn write_file(
             cache,
             device,
             superblock,
-            block_size,
+            geom,
         )?;
 
         let mut blk = cache.get_data(phys, device)?;

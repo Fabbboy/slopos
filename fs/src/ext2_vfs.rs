@@ -69,7 +69,8 @@ impl StaticExt2Vfs {
             superblock,
             block_size,
             inode_size,
-        );
+        )
+        .map_err(ext2_error_to_vfs)?;
         fs.set_superblock_dirty(cached.superblock_dirty);
         let result = f(&mut fs).map_err(ext2_error_to_vfs);
         let new_superblock = fs.superblock();
@@ -267,9 +268,10 @@ pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) ->
     // clean, so the damage is never repaired.
     if let Some(cached) = guard.as_mut() {
         let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
-        let mut fs = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is);
-        if fs.mark_dirty_on_disk().is_ok() {
-            cached.superblock = fs.superblock();
+        if let Ok(mut fs) = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is) {
+            if fs.mark_dirty_on_disk().is_ok() {
+                cached.superblock = fs.superblock();
+            }
         }
     }
     drop(guard);
@@ -304,7 +306,8 @@ pub fn ext2_vfs_sync() -> VfsResult<()> {
         superblock,
         block_size,
         inode_size,
-    );
+    )
+    .map_err(ext2_error_to_vfs)?;
     fs.set_superblock_dirty(cached.superblock_dirty);
     let result = fs.sync().map_err(ext2_error_to_vfs);
     let superblock_dirty = fs.superblock_dirty();
@@ -340,7 +343,9 @@ fn mark_filesystem_clean() {
         return;
     }
     let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
-    let mut fs = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is);
+    let Ok(mut fs) = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is) else {
+        return;
+    };
     if fs.mark_clean().is_ok() {
         cached.superblock = fs.superblock();
     }

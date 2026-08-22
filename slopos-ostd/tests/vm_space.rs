@@ -122,7 +122,6 @@ fn new_creates_fresh_pml4_with_zero_generation() {
     let space = VmSpace::new().expect("VmSpace::new");
     assert_eq!(space.generation(), 0);
     assert_ne!(space.pml4_paddr().as_u64(), 0);
-    assert_ne!(space.pcid(), Pcid::KERNEL);
 }
 
 #[test]
@@ -481,7 +480,6 @@ fn wrap_existing_round_trip() {
 
     let space = unsafe { VmSpace::wrap_existing(pml4_phys, Pcid::new(0)).unwrap() };
     assert_eq!(space.pml4_paddr(), pml4_phys);
-    assert_eq!(space.pcid(), Pcid::new(0));
 
     drop(space);
 
@@ -565,6 +563,11 @@ impl CursorUnmapHook for CountingUnmapHook {
         self.on_activate_calls.fetch_add(1, Ordering::Relaxed);
         self.last_activate_handle
             .store(mm_ctx_handle, Ordering::Relaxed);
+    }
+    fn select_cr3(&self, _mm_ctx_handle: u64, _tlb_gen: u64) -> Option<(u16, bool)> {
+        // No pool in the host harness: OSTD must fall back to a flushing
+        // kernel-PCID load.
+        None
     }
 }
 

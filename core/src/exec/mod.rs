@@ -26,7 +26,7 @@ use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm::{
     process_vm_get_stack_top, process_vm_get_vm_space, process_vm_load_elf_data,
-    process_vm_reset_stack, process_vm_write_user_bytes,
+    process_vm_reset_for_exec, process_vm_reset_stack, process_vm_write_user_bytes,
 };
 use slopos_ostd::klog_info;
 
@@ -474,6 +474,14 @@ pub fn do_exec(
     }
 
     let vm_process = table.process().ok_or(ExecError::NoMem)?;
+
+    // The address-space boundary. Everything the old image mapped — heap,
+    // mmap arena, shared memfds, rings — is severed here, before the new
+    // image exists, so no mapping outlives the program that made it.
+    if process_vm_reset_for_exec(vm_process) != 0 {
+        return Err(ExecError::NoMem);
+    }
+
     let exec_info = process_vm_load_elf_data(vm_process, elf_data.as_slice(), entry_out)
         .map_err(ExecError::from)?;
 

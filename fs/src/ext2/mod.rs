@@ -4,6 +4,7 @@ pub mod dir;
 #[path = "alloc.rs"]
 pub mod ext2_alloc;
 pub mod file;
+pub mod geometry;
 pub mod inode;
 pub mod ondisk;
 pub mod symlink;
@@ -11,6 +12,7 @@ pub mod time;
 pub mod types;
 
 use cache::BlockCache;
+use geometry::Ext2Geometry;
 use ondisk::{
     DIR_FT_DIR, DIR_FT_REG_FILE, DirEntry, EXT2_ERROR_FS, EXT2_VALID_FS, GroupDesc, Inode,
     MODE_DIRECTORY, MODE_FILE, Superblock,
@@ -54,6 +56,7 @@ pub type Ext2Inode = Inode;
 pub struct Ext2Fs<'a> {
     device: &'a dyn BlockDevice,
     superblock: Superblock,
+    geom: Ext2Geometry,
     cache: &'a mut BlockCache,
     block_size: u32,
     inode_size: u16,
@@ -89,18 +92,24 @@ impl<'a> Ext2Fs<'a> {
         superblock: Superblock,
         block_size: u32,
         inode_size: u16,
-    ) -> Self {
+    ) -> Result<Self, Ext2Error> {
         let read_only = superblock.requires_readonly();
-        Self {
+        let geom = Ext2Geometry::derive(&superblock)?;
+        Ok(Self {
             device,
             superblock,
+            geom,
             cache,
             block_size,
             inode_size,
             ptrs_per_block: block_size / 4,
             superblock_dirty: false,
             read_only,
-        }
+        })
+    }
+
+    pub fn geometry(&self) -> &Ext2Geometry {
+        &self.geom
     }
 
     pub fn is_read_only(&self) -> bool {
@@ -198,39 +207,49 @@ impl<'a> Ext2Fs<'a> {
         self.read_inode_num(InodeNum(ino))
     }
 
-    fn read_inode_num(&mut self, ino: InodeNum) -> Result<Inode, Ext2Error> {
-        if !ino.is_valid() || ino.raw() > self.superblock.inodes_count {
-            return Err(Ext2Error::InvalidInode);
-        }
-        let group = ino.block_group(self.superblock.inodes_per_group);
-        let local = ino.local_index(self.superblock.inodes_per_group);
+    /// Byte offset of an inode inside the image, proven to lie within the
+    /// group's inode table rather than derived from an unchecked descriptor.
+    fn inode_disk_offset(&mut self, ino: InodeNum) -> Result<(BlockNum, usize), Ext2Error> {
+        let (group, local) = self.geom.locate_inode(ino).ok_or(Ext2Error::InvalidInode)?;
         let desc = self.read_group_desc(group)?;
         if !desc.inode_table.is_valid() {
             return Err(Ext2Error::InvalidInode);
         }
         let byte_off = desc.inode_table.to_disk_offset(self.block_size).raw()
             + (local as u64 * self.inode_size as u64);
-        let blk_num = BlockNum((byte_off / self.block_size as u64) as u32);
+        let blk_raw = u32::try_from(byte_off / self.block_size as u64)
+            .map_err(|_| Ext2Error::InvalidInode)?;
+        let blk_num = self
+            .geom
+            .checked_block(blk_raw)
+            .ok_or(Ext2Error::InvalidInode)?;
         let within = (byte_off % self.block_size as u64) as usize;
+        if within + self.inode_size as usize > self.block_size as usize {
+            return Err(Ext2Error::InvalidInode);
+        }
+        Ok((blk_num, within))
+    }
+
+    fn read_inode_num(&mut self, ino: InodeNum) -> Result<Inode, Ext2Error> {
+        let (blk_num, within) = self.inode_disk_offset(ino)?;
+        let size = self.inode_size as usize;
         let block = self.cache.get(blk_num, self.device)?;
-        Ok(Inode::parse(
-            &block.data()[within..within + self.inode_size as usize],
-        ))
+        let data = block.data();
+        if within + size > data.len() {
+            return Err(Ext2Error::InvalidInode);
+        }
+        Ok(Inode::parse(&data[within..within + size]))
     }
 
     fn write_inode_num(&mut self, ino: InodeNum, inode: &Inode) -> Result<(), Ext2Error> {
-        if !ino.is_valid() || ino.raw() > self.superblock.inodes_count {
+        let (blk_num, within) = self.inode_disk_offset(ino)?;
+        let size = self.inode_size as usize;
+        let mut block = self.cache.get(blk_num, self.device)?;
+        let data = block.data_mut();
+        if within + size > data.len() {
             return Err(Ext2Error::InvalidInode);
         }
-        let group = ino.block_group(self.superblock.inodes_per_group);
-        let local = ino.local_index(self.superblock.inodes_per_group);
-        let desc = self.read_group_desc(group)?;
-        let byte_off = desc.inode_table.to_disk_offset(self.block_size).raw()
-            + (local as u64 * self.inode_size as u64);
-        let blk_num = BlockNum((byte_off / self.block_size as u64) as u32);
-        let within = (byte_off % self.block_size as u64) as usize;
-        let mut block = self.cache.get(blk_num, self.device)?;
-        inode.encode(&mut block.data_mut()[within..within + self.inode_size as usize]);
+        inode.encode(&mut data[within..within + size]);
         Ok(())
     }
 
@@ -266,6 +285,7 @@ impl<'a> Ext2Fs<'a> {
             self.ptrs_per_block,
             self.block_size,
             &mut self.superblock,
+            &self.geom,
         );
         self.write_inode_num(ino_num, &inode)?;
         if self.superblock.free_blocks_count != free_before {
@@ -376,12 +396,17 @@ impl<'a> Ext2Fs<'a> {
             return Err(Ext2Error::AlreadyExists);
         }
 
+        let parent_group = self
+            .geom
+            .locate_inode(parent_num)
+            .map(|(g, _)| g)
+            .ok_or(Ext2Error::InvalidInode)?;
         let new_ino = ext2_alloc::allocate_inode(
-            parent_num.block_group(self.superblock.inodes_per_group),
+            parent_group,
+            &self.geom,
             &mut self.superblock,
             &mut *self.cache,
             self.device,
-            self.block_size,
         )?;
 
         let mut new_inode = Inode {
@@ -405,10 +430,10 @@ impl<'a> Ext2Fs<'a> {
 
         if is_dir {
             let first_block = ext2_alloc::allocate_block(
+                &self.geom,
                 &mut self.superblock,
                 &mut *self.cache,
                 self.device,
-                self.block_size,
             )?;
             {
                 let mut blk = self.cache.get_zero(first_block, self.device)?;
@@ -443,6 +468,7 @@ impl<'a> Ext2Fs<'a> {
             self.ptrs_per_block,
             self.block_size,
             &mut self.superblock,
+            &self.geom,
         )?;
 
         if is_dir {
@@ -488,10 +514,10 @@ impl<'a> Ext2Fs<'a> {
         self.release_file_blocks(&target)?;
         ext2_alloc::free_inode(
             target_num,
+            &self.geom,
             &mut self.superblock,
             &mut *self.cache,
             self.device,
-            self.block_size,
         )?;
 
         let zeroed = Inode {
@@ -525,13 +551,7 @@ impl<'a> Ext2Fs<'a> {
     }
 
     fn read_group_desc(&mut self, group: GroupIdx) -> Result<GroupDesc, Ext2Error> {
-        let table_start: u32 = if self.block_size == 1024 { 2 } else { 1 };
-        let desc_per_block = self.block_size as usize / 32;
-        let block_idx = group.raw() as usize / desc_per_block;
-        let within = (group.raw() as usize % desc_per_block) * 32;
-        let blk_num = BlockNum(table_start + block_idx as u32);
-        let block = self.cache.get(blk_num, self.device)?;
-        Ok(GroupDesc::parse(&block.data()[within..within + 32]))
+        ext2_alloc::read_group_desc(group, &self.geom, self.cache, self.device)
     }
 
     /// Free every block an inode owns: the twelve direct ones and all three
@@ -543,10 +563,10 @@ impl<'a> Ext2Fs<'a> {
             if blk.is_valid() {
                 ext2_alloc::free_block(
                     *blk,
+                    &self.geom,
                     &mut self.superblock,
                     &mut *self.cache,
                     self.device,
-                    self.block_size,
                 )?;
             }
         }
@@ -577,10 +597,10 @@ impl<'a> Ext2Fs<'a> {
         for blk in freed.iter() {
             ext2_alloc::free_block(
                 *blk,
+                &self.geom,
                 &mut self.superblock,
                 &mut *self.cache,
                 self.device,
-                self.block_size,
             )?;
         }
 

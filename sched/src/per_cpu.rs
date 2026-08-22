@@ -25,6 +25,7 @@ pub fn fork_rr_counter_set(value: usize) {
 
 use super::task::{TaskRef, task_put};
 use super::task_struct::Task;
+use crate::fair;
 use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
 use slopos_ostd::sync::intrusive::{IntrusiveLinkedList, LinkError};
@@ -158,6 +159,9 @@ pub struct PriorityRunQueue {
     /// Owning CPU id, written once during `init`.
     cpu_id_atom: AtomicUsize,
     ready_queues: [ReadyQueue; NUM_PRIORITY_LEVELS],
+    /// Anti-starvation backstop. Guarded by `queue_lock`, which also
+    /// serialises the `ready_queues` it describes.
+    aging: KernelSync<fair::AgingState>,
     queue_lock: SpinLock<()>,
     pub enabled: AtomicBool,
     /// Default time slice in ticks, written once during `init`.
@@ -179,6 +183,7 @@ impl PriorityRunQueue {
         Self {
             cpu_id_atom: AtomicUsize::new(0),
             ready_queues: [EMPTY_QUEUE; NUM_PRIORITY_LEVELS],
+            aging: KernelSync::new(fair::AgingState::new()),
             queue_lock: SpinLock::new(
                 (),
                 lock_class!("PriorityRunQueue.queue_lock", LOCK_LEVEL_SCHEDULER),
@@ -227,6 +232,7 @@ impl PriorityRunQueue {
         self.idle_time.store(0, Ordering::Relaxed);
         self.total_yields.store(0, Ordering::Relaxed);
         self.schedule_calls.store(0, Ordering::Relaxed);
+        self.aging.reset();
         self.initialized.store(true, Ordering::Release);
         self.clear_remote_inbox_with_ref_release();
         self.inbox_count.store(0, Ordering::Relaxed);
@@ -364,8 +370,26 @@ impl PriorityRunQueue {
             return None;
         }
         let _guard = self.queue_lock.lock();
-        for queue in &self.ready_queues {
+
+        let mut non_empty = [false; fair::NUM_TIERS];
+        for (tier, queue) in self.ready_queues.iter().enumerate() {
+            if tier < fair::NUM_TIERS {
+                non_empty[tier] = !queue.is_empty();
+            }
+        }
+
+        // A tier that has been passed over its whole budget is served before
+        // the strict scan runs, which is the only thing that bounds its wait.
+        if let Some(tier) = self.aging.tier_owed(&non_empty)
+            && let Some(task) = self.ready_queues[tier].dequeue()
+        {
+            self.aging.note_dispatch(tier, &non_empty);
+            return Some(task);
+        }
+
+        for (tier, queue) in self.ready_queues.iter().enumerate() {
             if let Some(task) = queue.dequeue() {
+                self.aging.note_dispatch(tier, &non_empty);
                 return Some(task);
             }
         }

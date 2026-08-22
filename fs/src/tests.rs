@@ -25,7 +25,10 @@ macro_rules! mount_ext2 {
             Err(_) => return TestResult::Fail,
         };
         #[allow(unused_mut)]
-        let mut $fs = Ext2Fs::new(&$device, &mut $cache, sb, bs, is);
+        let mut $fs = match Ext2Fs::new(&$device, &mut $cache, sb, bs, is) {
+            Ok(v) => v,
+            Err(_) => return TestResult::Fail,
+        };
     };
 }
 
@@ -639,6 +642,160 @@ pub fn test_ext2_inode_size_beyond_block_rejected() -> TestResult {
     }
 }
 
+/// A group's block bitmap occupies exactly one block, so `blocks_per_group`
+/// cannot exceed the bits one block holds. Without the bound the allocator
+/// derives block numbers outside the group it just searched.
+pub fn test_ext2_blocks_per_group_beyond_bitmap_rejected() -> TestResult {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
+        return TestResult::Pass;
+    };
+    let sb_offset = 1024usize;
+    device.with_buffer_mut(|buf| {
+        let sb = &mut buf[sb_offset..sb_offset + 1024];
+        sb[32..36].copy_from_slice(&65_536u32.to_le_bytes());
+    });
+
+    match mount_geometry(&device) {
+        Err(Ext2Error::InvalidSuperblock) => TestResult::Pass,
+        other => slopos_testing::fail!("want InvalidSuperblock, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// `inodes_count` above what the groups can hold lets an in-range inode number
+/// divide into a group index past the descriptor table, which reads an
+/// arbitrary block as a group descriptor.
+pub fn test_ext2_inodes_count_beyond_group_capacity_rejected() -> TestResult {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
+        return TestResult::Pass;
+    };
+    let sb_offset = 1024usize;
+    device.with_buffer_mut(|buf| {
+        let sb = &mut buf[sb_offset..sb_offset + 1024];
+        sb[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+    });
+
+    match mount_geometry(&device) {
+        Err(Ext2Error::InvalidSuperblock) => TestResult::Pass,
+        other => slopos_testing::fail!("want InvalidSuperblock, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// `groups_count` was computed by an addition that overflows near `u32::MAX`;
+/// the descriptor table must be proven to fit inside the volume instead.
+pub fn test_ext2_group_desc_table_beyond_volume_rejected() -> TestResult {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
+        return TestResult::Pass;
+    };
+    let sb_offset = 1024usize;
+    device.with_buffer_mut(|buf| {
+        let sb = &mut buf[sb_offset..sb_offset + 1024];
+        sb[4..8].copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+        sb[32..36].copy_from_slice(&8u32.to_le_bytes());
+    });
+
+    match mount_geometry(&device) {
+        Err(Ext2Error::InvalidSuperblock) => TestResult::Pass,
+        other => slopos_testing::fail!("want InvalidSuperblock, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// `s_first_data_block` is 1 at 1 KiB blocks and 0 otherwise. The descriptor
+/// table's location is derived from it, so a wrong value points the table
+/// somewhere else entirely.
+pub fn test_ext2_wrong_first_data_block_rejected() -> TestResult {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
+        return TestResult::Pass;
+    };
+    let sb_offset = 1024usize;
+    device.with_buffer_mut(|buf| {
+        let sb = &mut buf[sb_offset..sb_offset + 1024];
+        sb[20..24].copy_from_slice(&7u32.to_le_bytes());
+    });
+
+    match mount_geometry(&device) {
+        Err(Ext2Error::InvalidSuperblock) => TestResult::Pass,
+        other => slopos_testing::fail!("want InvalidSuperblock, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// A group descriptor whose inode-table pointer lies outside the volume must
+/// be refused at read time: it is the pointer `write_inode_num` writes through.
+pub fn test_ext2_group_desc_pointer_outside_volume_refused() -> TestResult {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
+        return TestResult::Pass;
+    };
+    // The descriptor table sits at block 2 for a 1 KiB image; inode_table is
+    // the third le32 of descriptor 0.
+    device.with_buffer_mut(|buf| {
+        let gd = 2usize * 1024;
+        buf[gd + 8..gd + 12].copy_from_slice(&0x00FF_FFFFu32.to_le_bytes());
+    });
+
+    mount_ext2!(device, cache, fs);
+    match fs.read_inode(2) {
+        Err(Ext2Error::InvalidBlock) => TestResult::Pass,
+        other => slopos_testing::fail!("want InvalidBlock, got {:?}", other.map(|_| ())),
+    }
+}
+
+/// `rec_len=9` with `name_len=1` passes the directory walker's own check
+/// (9 >= 8, and 8+1 <= 9) while the inserter needs `dir_entry_size(1) = 12`.
+/// Subtracting the two underflowed, which is a panic in dev/tests and a wild
+/// slice index in release. Reachable from an ordinary create.
+pub fn test_ext2_dir_entry_rec_len_shorter_than_name_refused() -> TestResult {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
+        return TestResult::Pass;
+    };
+    device.with_buffer_mut(|buf| {
+        let dir = 6usize * 1024;
+        // A live record claiming a 1-byte name in a 12-byte slot, then shrunk
+        // to 9 bytes: individually legal to the walker, impossible to the
+        // inserter's own step arithmetic.
+        buf[dir + 4..dir + 6].copy_from_slice(&9u16.to_le_bytes());
+        buf[dir + 6] = 1;
+    });
+
+    mount_ext2!(device, cache, fs);
+    match fs.create_file(2, b"x") {
+        Err(Ext2Error::DirectoryFormat) => TestResult::Pass,
+        Err(other) => slopos_testing::fail!("want DirectoryFormat, got {:?}", other),
+        Ok(_) => slopos_testing::fail!("a malformed directory record must not be inserted into"),
+    }
+}
+
+/// The bound above must not reject an image carrying a *deleted* entry: a free
+/// record's `name_len` byte is stale and unconstrained, so only a live record's
+/// name is held to fitting inside `rec_len`.
+pub fn test_ext2_deleted_dir_entry_with_stale_name_len_accepted() -> TestResult {
+    let Some(device) = build_minimal_ext2_image(64, 32) else {
+        return TestResult::Pass;
+    };
+    device.with_buffer_mut(|buf| {
+        let dir = 6usize * 1024;
+        // Free the ".." record at offset 12 but leave a large stale name_len.
+        buf[dir + 12..dir + 16].copy_from_slice(&0u32.to_le_bytes());
+        buf[dir + 18] = 255;
+    });
+
+    mount_ext2!(device, cache, fs);
+    match fs.create_file(2, b"ok") {
+        Ok(_) => TestResult::Pass,
+        Err(other) => {
+            slopos_testing::fail!(
+                "a deleted entry's stale name_len must not fail: {:?}",
+                other
+            )
+        }
+    }
+}
+
+fn mount_geometry(
+    device: &dyn crate::blockdev::BlockDevice,
+) -> Result<crate::ext2::geometry::Ext2Geometry, Ext2Error> {
+    let (sb, _bs, _is) = Ext2Fs::mount_params(device)?;
+    crate::ext2::geometry::Ext2Geometry::derive(&sb)
+}
+
 pub fn test_ext2_invalid_superblock_magic() -> TestResult {
     let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
@@ -763,7 +920,10 @@ pub fn test_ext2_device_write_error_on_metadata() -> TestResult {
         Ok(c) => c,
         Err(_) => return TestResult::Fail,
     };
-    let mut fs = Ext2Fs::new(&failing, &mut cache, sb, bs, is);
+    let mut fs = match Ext2Fs::new(&failing, &mut cache, sb, bs, is) {
+        Ok(v) => v,
+        Err(_) => return TestResult::Fail,
+    };
 
     // Write-back caching: the mutations land in the cache and the create
     // succeeds; the device error surfaces only at `sync`.
@@ -848,34 +1008,10 @@ pub fn test_ext2_write_persists_across_handles() -> TestResult {
     };
 
     let payload = b"persisted-bytes";
-    {
-        mount_ext2!(device, _c1, fs);
-        let ino = match fs.resolve_path(b"/persist.txt") {
-            Ok(ino) => ino,
-            Err(_) => return TestResult::Fail,
-        };
-        if fs.write_file(ino, 0, payload).is_err() {
-            return TestResult::Fail;
-        }
-        if fs.sync().is_err() {
-            return TestResult::Fail;
-        }
-    }
-
-    mount_ext2!(device, _c2, fs2);
-    let ino = match fs2.resolve_path(b"/persist.txt") {
-        Ok(ino) => ino,
-        Err(_) => return TestResult::Fail,
-    };
-    let mut buf = [0u8; 32];
-    let read_len = match fs2.read_file(ino, 0, &mut buf) {
-        Ok(len) => len,
-        Err(_) => return TestResult::Fail,
-    };
-    if read_len != payload.len() || &buf[..read_len] != payload {
+    if write_then_sync(&device, b"/persist.txt", payload) == TestResult::Fail {
         return TestResult::Fail;
     }
-    TestResult::Pass
+    expect_file_contents(&device, b"/persist.txt", payload)
 }
 
 // Write-back semantics: a write only dirties the cache; the device is not
@@ -892,33 +1028,57 @@ pub fn test_ext2_writeback_is_deferred_until_sync() -> TestResult {
         return TestResult::Pass;
     };
 
-    {
-        mount_ext2!(device, _c1, fs);
-        let ino = match fs.resolve_path(b"/defer.txt") {
-            Ok(ino) => ino,
-            Err(_) => return TestResult::Fail,
-        };
-        if fs.write_file(ino, 0, b"NEW").is_err() {
-            return TestResult::Fail;
-        }
-        if fs.dirty_count() == 0 {
-            return TestResult::Fail;
-        }
-        // Dropped without syncing: the stack-local cache is discarded, which
-        // models a crash before writeback.
+    // Dropped without syncing: the stack-local cache is discarded, which
+    // models a crash before writeback.
+    if write_without_sync(&device, b"/defer.txt", b"NEW") == TestResult::Fail {
+        return TestResult::Fail;
     }
+    expect_file_contents(&device, b"/defer.txt", b"old")
+}
 
-    mount_ext2!(device, _c2, fs2);
-    let ino = match fs2.resolve_path(b"/defer.txt") {
-        Ok(ino) => ino,
-        Err(_) => return TestResult::Fail,
+/// Each mount lives in its own frame: two `Ext2Fs` plus two `BlockCache`
+/// handles in one frame sum past the 2 KiB stack cap.
+#[inline(never)]
+fn write_then_sync(device: &MemoryBlockDevice, path: &[u8], payload: &[u8]) -> TestResult {
+    mount_ext2!(*device, _c, fs);
+    let Ok(ino) = fs.resolve_path(path) else {
+        return TestResult::Fail;
     };
-    let mut buf = [0u8; 8];
-    let n = match fs2.read_file(ino, 0, &mut buf) {
-        Ok(n) => n,
-        Err(_) => return TestResult::Fail,
+    if fs.write_file(ino, 0, payload).is_err() {
+        return TestResult::Fail;
+    }
+    if fs.sync().is_err() {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+#[inline(never)]
+fn write_without_sync(device: &MemoryBlockDevice, path: &[u8], payload: &[u8]) -> TestResult {
+    mount_ext2!(*device, _c, fs);
+    let Ok(ino) = fs.resolve_path(path) else {
+        return TestResult::Fail;
     };
-    if &buf[..n] != b"old" {
+    if fs.write_file(ino, 0, payload).is_err() {
+        return TestResult::Fail;
+    }
+    if fs.dirty_count() == 0 {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+#[inline(never)]
+fn expect_file_contents(device: &MemoryBlockDevice, path: &[u8], want: &[u8]) -> TestResult {
+    mount_ext2!(*device, _c, fs);
+    let Ok(ino) = fs.resolve_path(path) else {
+        return TestResult::Fail;
+    };
+    let mut buf = [0u8; 32];
+    let Ok(n) = fs.read_file(ino, 0, &mut buf) else {
+        return TestResult::Fail;
+    };
+    if n != want.len() || &buf[..n] != want {
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -1295,6 +1455,13 @@ slopos_testing::stest!(name = test_ext2_inode_size_beyond_block_rejected);
 slopos_testing::stest!(name = test_ext2_invalid_superblock_magic);
 slopos_testing::stest!(name = test_ext2_unsupported_block_size);
 slopos_testing::stest!(name = test_ext2_zero_inodes_per_group_rejected);
+slopos_testing::stest!(name = test_ext2_blocks_per_group_beyond_bitmap_rejected);
+slopos_testing::stest!(name = test_ext2_inodes_count_beyond_group_capacity_rejected);
+slopos_testing::stest!(name = test_ext2_group_desc_table_beyond_volume_rejected);
+slopos_testing::stest!(name = test_ext2_wrong_first_data_block_rejected);
+slopos_testing::stest!(name = test_ext2_group_desc_pointer_outside_volume_refused);
+slopos_testing::stest!(name = test_ext2_dir_entry_rec_len_shorter_than_name_refused);
+slopos_testing::stest!(name = test_ext2_deleted_dir_entry_with_stale_name_len_accepted);
 slopos_testing::stest!(name = test_ext2_directory_format_error);
 slopos_testing::stest!(name = test_ext2_invalid_inode);
 slopos_testing::stest!(name = test_ext2_read_file_not_regular);

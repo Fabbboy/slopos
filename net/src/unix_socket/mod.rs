@@ -22,7 +22,7 @@ use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{KVec, KVecDeque};
 
 use pair::{PairSide, PairTable};
-use slopos_fs::FileRef;
+use slopos_fs::{FileRef, LeafFileRef};
 use slopos_ostd::process::AccountId;
 use slot::{MAX_BACKLOG, SlotState, UNIX_PATH_MAX, UnixSlot};
 
@@ -289,7 +289,7 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
 /// Thin wrapper around [`unix_sendmsg`], so the FIFO, ancillary-queue and
 /// peer-wake ordering invariants live in exactly one place.
 pub fn unix_send(handle: SocketHandle, data: &[u8]) -> i32 {
-    let mut no_files: KVec<FileRef> = KVec::new();
+    let mut no_files: KVec<LeafFileRef> = KVec::new();
     // No fds, so no custody is ever charged and the account is never read.
     unix_sendmsg(handle, data, &mut no_files, AccountId::NONE)
 }
@@ -482,10 +482,17 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
 /// into the peer's ancillary queue, and on any error return they stay in the
 /// caller's `KVec` and close when it drops them — no net lock is held there, so
 /// the possibly recursive file teardown is safe.
+/// Ancillary transfer takes [`LeafFileRef`]s, not bare [`FileRef`]s.
+///
+/// A description that owns other descriptions can be made part of a cycle no
+/// refcount collects: pass a socket into its own pair, or a ring holding an
+/// in-flight reference to that socket, and the slot is never freed. The
+/// witness type is what makes that unrepresentable here rather than checked at
+/// whichever call sites were remembered.
 pub fn unix_sendmsg(
     handle: SocketHandle,
     data: &[u8],
-    files: &mut KVec<FileRef>,
+    files: &mut KVec<LeafFileRef>,
     sender_account: AccountId,
 ) -> i32 {
     let Some(wq_idx) = handle.slot_for_wq() else {

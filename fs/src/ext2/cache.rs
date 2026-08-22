@@ -382,6 +382,28 @@ impl<'a> CachedBlock<'a> {
         &mut entry.frame.as_bytes_mut()[..bs]
     }
 
+    /// A fixed-size window into the block, or `None` if it does not fit.
+    ///
+    /// Parsers take the array rather than a slice, so a short or misplaced
+    /// window is a `None` at the caller instead of a length the parser trusts.
+    pub fn window<const N: usize>(&self, at: usize) -> Option<&[u8; N]> {
+        let data = self.data();
+        let end = at.checked_add(N)?;
+        if end > data.len() {
+            return None;
+        }
+        data[at..end].try_into().ok()
+    }
+
+    pub fn window_mut<const N: usize>(&mut self, at: usize) -> Option<&mut [u8; N]> {
+        let data = self.data_mut();
+        let end = at.checked_add(N)?;
+        if end > data.len() {
+            return None;
+        }
+        (&mut data[at..end]).try_into().ok()
+    }
+
     pub fn block_num(&self) -> BlockNum {
         self.cache.entries[self.slot].block
     }

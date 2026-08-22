@@ -1,12 +1,75 @@
 use super::Ext2Error;
 use super::blockmap;
 use super::cache::BlockCache;
+use super::geometry::Ext2Geometry;
 use super::ondisk::{
     DIR_ENTRY_HEADER_SIZE, DirEntry, Inode, Superblock, dir_entry_size, write_dir_entry,
 };
 use super::types::{FileBlock, InodeNum};
 use crate::blockdev::BlockDevice;
 use core::cmp;
+
+/// One record's header fields, accepted only if every consumer of the record
+/// can act on it.
+///
+/// The walker and the inserter disagreed about what "valid" meant: the walker
+/// admitted a record whose `rec_len` was merely `>= 8` and long enough for the
+/// name, while the inserter needed room for the *padded* entry size and
+/// subtracted the two. A record with `name_len=1, rec_len=9` satisfied the
+/// first and underflowed the second. One predicate, used by both.
+struct DirRecord {
+    inode: u32,
+    rec_len: usize,
+    name_len: usize,
+    file_type: u8,
+    /// Bytes this record actually needs; never greater than `rec_len`.
+    actual_size: usize,
+}
+
+fn parse_record(data: &[u8], cursor: usize, block_size: usize) -> Result<DirRecord, Ext2Error> {
+    if cursor + DIR_ENTRY_HEADER_SIZE > data.len() || cursor + DIR_ENTRY_HEADER_SIZE > block_size {
+        return Err(Ext2Error::DirectoryFormat);
+    }
+    let inode = u32::from_le_bytes([
+        data[cursor],
+        data[cursor + 1],
+        data[cursor + 2],
+        data[cursor + 3],
+    ]);
+    let rec_len = u16::from_le_bytes([data[cursor + 4], data[cursor + 5]]) as usize;
+    let name_len = data[cursor + 6] as usize;
+    let file_type = data[cursor + 7];
+
+    if rec_len < DIR_ENTRY_HEADER_SIZE || rec_len % 4 != 0 {
+        return Err(Ext2Error::DirectoryFormat);
+    }
+    let end = cursor
+        .checked_add(rec_len)
+        .ok_or(Ext2Error::DirectoryFormat)?;
+    if end > block_size || end > data.len() {
+        return Err(Ext2Error::DirectoryFormat);
+    }
+
+    // A free record's name_len byte is stale and unconstrained, so only a live
+    // record's name is held to fitting.
+    let actual_size = if inode != 0 {
+        let size = dir_entry_size(name_len);
+        if size > rec_len {
+            return Err(Ext2Error::DirectoryFormat);
+        }
+        size
+    } else {
+        DIR_ENTRY_HEADER_SIZE
+    };
+
+    Ok(DirRecord {
+        inode,
+        rec_len,
+        name_len,
+        file_type,
+        actual_size,
+    })
+}
 
 /// Iterate directory entries, calling `f` for each valid entry.
 /// Returns early if `f` returns `false`.
@@ -32,34 +95,20 @@ pub fn for_each_entry(
         let data = block.data();
         let mut cursor = 0usize;
         while cursor + DIR_ENTRY_HEADER_SIZE <= block_size as usize {
-            let entry_inode = u32::from_le_bytes([
-                data[cursor],
-                data[cursor + 1],
-                data[cursor + 2],
-                data[cursor + 3],
-            ]);
-            let rec_len = u16::from_le_bytes([data[cursor + 4], data[cursor + 5]]) as usize;
-            let name_len = data[cursor + 6] as usize;
-            let file_type = data[cursor + 7];
-            if rec_len < DIR_ENTRY_HEADER_SIZE || cursor + rec_len > block_size as usize {
-                return Err(Ext2Error::DirectoryFormat);
-            }
-            if entry_inode != 0 {
+            let record = parse_record(data, cursor, block_size as usize)?;
+            if record.inode != 0 {
                 let name_start = cursor + DIR_ENTRY_HEADER_SIZE;
-                let name_end = name_start + name_len;
-                if name_end > cursor + rec_len {
-                    return Err(Ext2Error::DirectoryFormat);
-                }
+                let name_end = name_start + record.name_len;
                 let entry = DirEntry {
-                    inode: InodeNum(entry_inode),
-                    file_type,
+                    inode: InodeNum(record.inode),
+                    file_type: record.file_type,
                     name: &data[name_start..name_end],
                 };
                 if !f(entry) {
                     return Ok(());
                 }
             }
-            cursor += rec_len;
+            cursor += record.rec_len;
         }
         offset += block_size;
     }
@@ -122,28 +171,23 @@ pub fn remove_dir_entry(
         let mut prev_cursor: Option<usize> = None;
 
         while cursor + DIR_ENTRY_HEADER_SIZE <= bs {
-            let entry_inode = u32::from_le_bytes([
-                data[cursor],
-                data[cursor + 1],
-                data[cursor + 2],
-                data[cursor + 3],
-            ]);
-            let rec_len = u16::from_le_bytes([data[cursor + 4], data[cursor + 5]]) as usize;
-            let name_len = data[cursor + 6] as usize;
+            let record = parse_record(data, cursor, bs)?;
+            let rec_len = record.rec_len;
 
-            if rec_len < DIR_ENTRY_HEADER_SIZE || cursor + rec_len > bs {
-                return Err(Ext2Error::DirectoryFormat);
-            }
-
-            if entry_inode != 0 {
+            if record.inode != 0 {
                 let name_start = cursor + DIR_ENTRY_HEADER_SIZE;
-                let name_end = name_start + cmp::min(name_len, rec_len - DIR_ENTRY_HEADER_SIZE);
+                let name_end =
+                    name_start + cmp::min(record.name_len, rec_len - DIR_ENTRY_HEADER_SIZE);
                 if &data[name_start..name_end] == name {
                     match prev_cursor {
                         Some(prev) => {
                             let prev_rec =
                                 u16::from_le_bytes([data[prev + 4], data[prev + 5]]) as usize;
-                            let new_rec = (prev_rec + rec_len) as u16;
+                            let merged = prev_rec + rec_len;
+                            // A merged record must still fit the block; a
+                            // u16 truncation here would corrupt the chain.
+                            let new_rec =
+                                u16::try_from(merged).map_err(|_| Ext2Error::DirectoryFormat)?;
                             data[prev + 4..prev + 6].copy_from_slice(&new_rec.to_le_bytes());
                         }
                         None => {
@@ -199,6 +243,7 @@ pub fn append_dir_entry(
     ptrs_per_block: u32,
     block_size: u32,
     superblock: &mut Superblock,
+    geom: &Ext2Geometry,
 ) -> Result<(), Ext2Error> {
     let needed = dir_entry_size(name.len());
     let bs = block_size as usize;
@@ -215,23 +260,10 @@ pub fn append_dir_entry(
         let mut cursor = 0usize;
 
         while cursor + DIR_ENTRY_HEADER_SIZE <= bs {
-            let rec_len = u16::from_le_bytes([data[cursor + 4], data[cursor + 5]]) as usize;
-            if rec_len < DIR_ENTRY_HEADER_SIZE || cursor + rec_len > bs {
-                return Err(Ext2Error::DirectoryFormat);
-            }
-            let entry_inode = u32::from_le_bytes([
-                data[cursor],
-                data[cursor + 1],
-                data[cursor + 2],
-                data[cursor + 3],
-            ]);
-            let name_len = data[cursor + 6] as usize;
-
-            let actual_size = if entry_inode != 0 {
-                dir_entry_size(name_len)
-            } else {
-                DIR_ENTRY_HEADER_SIZE
-            };
+            let record = parse_record(data, cursor, bs)?;
+            let rec_len = record.rec_len;
+            let entry_inode = record.inode;
+            let actual_size = record.actual_size;
             let slack = rec_len - actual_size;
 
             if slack >= needed {
@@ -271,7 +303,7 @@ pub fn append_dir_entry(
         cache,
         device,
         superblock,
-        block_size,
+        geom,
     )?;
     let new_block = blockmap::map_block(parent_inode, file_block, ptrs_per_block, cache, device)?;
 

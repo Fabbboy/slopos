@@ -4,6 +4,7 @@
 
 #[cfg(feature = "test-hooks")]
 pub mod context_tests;
+pub mod fair;
 pub mod fate_api;
 pub mod ffi_boundary;
 pub mod futex;

@@ -644,6 +644,168 @@ fn unmap_and_free_range_inner(
     Ok(freed)
 }
 
+/// Sever every user mapping the old program image left behind, then re-seed
+/// the address space as if it were freshly created.
+///
+/// `exec` replaces the program, so nothing the old image mapped may survive
+/// into the new one: not the heap, not the mmap arena, not a shared memfd, not
+/// a SlopRing. Unmapping only the code window leaves all of those addressable
+/// by a binary that never mapped them.
+///
+/// Runs before the new image is loaded, so a failure here is still
+/// recoverable — the caller has not yet destroyed anything the old program
+/// needs.
+pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
+    let slot = match find_slot_for_pid(process) {
+        Some(s) => s,
+        None => return -1,
+    };
+
+    let layout = aslr::randomize_process_layout(&DEFAULT_PROCESS_LAYOUT);
+
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id != process.id() {
+        return -1;
+    }
+
+    let key = slot_tlb_key(slot);
+    let inner = &mut *proc;
+
+    let regions =
+        match collect_overlapping_vmas(inner, 0, crate::memory_layout_defs::USER_SPACE_END_VA) {
+            Ok(v) => v,
+            Err(_) => return -1,
+        };
+
+    let abort_guard = AbortOnUnwind::new();
+    let mut vm_space_taken = match inner.vm_space.take() {
+        Some(v) => v,
+        None => {
+            abort_guard.disarm();
+            return -1;
+        }
+    };
+
+    // Each backing releases what it owns: anonymous frames go back to the
+    // buddy allocator, a shared memfd drops its mapcount, a ring drops its
+    // per-PTE reference.
+    for (start, end, region) in regions.iter() {
+        if let Err(err) = unmap_region_range_dir(&mut vm_space_taken, key, *start, *end, region) {
+            klog_info!("process_vm_reset_for_exec: unmap failed: {:?}", err.err);
+            inner.vm_space = Some(vm_space_taken);
+            abort_guard.disarm();
+            return -1;
+        }
+    }
+
+    inner.vma_map.drain(|start, end, region| {
+        dec_removed_shared_mapcount(start, end, region);
+    });
+    tlb::flush_all_for_process(key);
+
+    inner.vm_space = Some(vm_space_taken);
+
+    inner.code_start = layout.code_start;
+    inner.data_start = layout.data_start;
+    inner.heap_start = layout.heap_start;
+    inner.heap_end = layout.heap_start;
+    inner.heap_break = layout.heap_start;
+    inner.stack_start = layout.stack_top - layout.stack_size;
+    inner.stack_end = layout.stack_top;
+
+    let rc = seed_fresh_layout(inner, slot);
+    abort_guard.disarm();
+    rc
+}
+
+/// The three initial VMAs, the mapped stack and the null page — the single
+/// definition of what a fresh SlopOS address space looks like, so `exec` and
+/// process creation cannot drift apart.
+fn seed_fresh_layout(inner: &mut ProcessVm, slot: usize) -> c_int {
+    let code_s = inner.code_start;
+    let data_s = inner.data_start;
+    let heap_s = inner.heap_start;
+    let stack_s = inner.stack_start;
+    let stack_e = inner.stack_end;
+
+    let code_region = VmaRegion {
+        protection: Protection::RX,
+        backing: RegionBacking::Anonymous,
+        lazy: false,
+        cow: false,
+        user: true,
+        purpose: RegionPurpose::Code,
+    };
+    let data_region = VmaRegion {
+        protection: Protection::RW,
+        backing: RegionBacking::Anonymous,
+        lazy: false,
+        cow: false,
+        user: true,
+        purpose: RegionPurpose::Data,
+    };
+    let stack_region = VmaRegion {
+        protection: Protection::RW,
+        backing: RegionBacking::Anonymous,
+        lazy: false,
+        cow: false,
+        user: true,
+        purpose: RegionPurpose::Stack,
+    };
+
+    if add_vma_to_inner(inner, code_s, data_s, code_region) != 0
+        || add_vma_to_inner(inner, data_s, heap_s, data_region) != 0
+        || add_vma_to_inner(inner, stack_s, stack_e, stack_region) != 0
+    {
+        return -1;
+    }
+
+    let stack_flags_bits = VmaRegion {
+        protection: Protection::RW,
+        backing: RegionBacking::Anonymous,
+        lazy: false,
+        cow: false,
+        user: true,
+        purpose: RegionPurpose::Stack,
+    }
+    .to_page_flags()
+    .bits();
+
+    let vm_space_for_map = match inner.vm_space.as_mut() {
+        Some(v) => v,
+        None => return -1,
+    };
+    if map_user_range(vm_space_for_map, stack_s, stack_e, stack_flags_bits).is_err() {
+        return -1;
+    }
+
+    let vm_space_for_null = match inner.vm_space.as_mut() {
+        Some(v) => v,
+        None => return -1,
+    };
+    if map_user_range(
+        vm_space_for_null,
+        0,
+        PAGE_SIZE_4KB,
+        PageFlags::USER_RW.bits(),
+    )
+    .is_ok()
+    {
+        let null_region = VmaRegion {
+            protection: Protection::RW,
+            backing: RegionBacking::Anonymous,
+            lazy: false,
+            cow: false,
+            user: true,
+            purpose: RegionPurpose::General,
+        };
+        let _ = add_vma_to_inner(inner, 0, PAGE_SIZE_4KB, null_region);
+    }
+
+    let _ = slot;
+    0
+}
+
 /// The caller drops the slot's `KArc<VmSpace>`; the shootdown issued here is
 /// what makes the frames that drop releases safe to reuse.
 fn teardown_inner_mappings(inner: &mut ProcessVm, key: TlbProcessKey) {

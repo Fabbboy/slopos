@@ -212,6 +212,39 @@ impl FileRef {
     }
 }
 
+/// A [`FileRef`] proven to name a description that owns no other description.
+///
+/// The only constructor checks containment, so a value of this type *is* the
+/// proof. The ancillary-transfer path takes these rather than bare `FileRef`s,
+/// which makes "no cycle can be built through an ancillary queue" a property
+/// of the signature instead of a property of two call sites remembering to
+/// ask. Deliberately not `Clone` and exposing no `alias`: duplication goes
+/// back through `FileRef` and re-proves.
+pub struct LeafFileRef(FileRef);
+
+impl LeafFileRef {
+    /// `Err` hands the reference back, so a refused file drops at the caller
+    /// rather than under a net lock.
+    pub fn try_new(file: FileRef) -> Result<Self, FileRef> {
+        match slopos_abi::file_ops::file_kind_containment(file.kind()) {
+            slopos_abi::file_ops::FdContainment::Leaf => Ok(Self(file)),
+            slopos_abi::file_ops::FdContainment::Container => Err(file),
+        }
+    }
+
+    pub fn into_inner(self) -> FileRef {
+        self.0
+    }
+
+    pub fn kind(&self) -> FileKind {
+        self.0.kind()
+    }
+
+    pub fn ptr_eq(&self, other: &FileRef) -> bool {
+        self.0.ptr_eq(other)
+    }
+}
+
 /// Per-descriptor rights, stamped at creation and immutable thereafter.
 ///
 /// Rights live in the table **entry**, never in the token. `Handle::from_parts`

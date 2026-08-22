@@ -76,6 +76,40 @@ pub const fn file_kind_transferable(kind: FileKind) -> bool {
     }
 }
 
+/// Whether a description of this kind can itself own other descriptions.
+///
+/// A `Container` can be made part of a reference cycle by passing it through
+/// any queue that holds descriptions; a `Leaf` cannot, because it owns none.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FdContainment {
+    Leaf,
+    Container,
+}
+
+/// Deliberately total over the enum for the same reason as
+/// [`file_kind_transferable`]: a new `FileKind` must state its answer, and
+/// `Container` is the answer that has to be argued against rather than the one
+/// that happens by default.
+#[inline]
+pub const fn file_kind_containment(kind: FileKind) -> FdContainment {
+    match kind {
+        // An AF_UNIX pair owns two ancillary queues of file references.
+        // `FileKind` cannot separate AF_UNIX from AF_INET, so both answer
+        // conservatively.
+        FileKind::Socket => FdContainment::Container,
+        FileKind::Ring => FdContainment::Container,
+        FileKind::Regular
+        | FileKind::PipeRead
+        | FileKind::PipeWrite
+        | FileKind::Tty
+        | FileKind::Memfd
+        | FileKind::Pidfd
+        | FileKind::Signalfd
+        | FileKind::Netmon
+        | FileKind::Seat => FdContainment::Leaf,
+    }
+}
+
 // `trait FileBacking` lives in `slopos_ostd::process::quota`: its `Charged`
 // supertrait needs a feature gate this userland-visible crate may not name.
 

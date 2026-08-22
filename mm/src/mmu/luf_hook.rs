@@ -22,6 +22,10 @@ impl CursorUnmapHook for LufHook {
     fn on_activate(&self, mm_ctx_handle: u64) {
         luf::current_cpu_set_active_mm_ctx(mm_ctx_handle);
     }
+
+    fn select_cr3(&self, mm_ctx_handle: u64, tlb_gen: u64) -> Option<(u16, bool)> {
+        super::asid::select_pcid_for_activate(super::MmContextId::from_raw(mm_ctx_handle), tlb_gen)
+    }
 }
 
 /// The double reference is what `register_cursor_unmap_hook` expects.

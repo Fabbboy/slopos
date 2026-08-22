@@ -4122,10 +4122,14 @@ pub fn test_scm_rights_tty_balanced() -> TestResult {
     };
     let baseline = slopos_ostd::KArc::strong_count(&probe);
 
-    let mut files: slopos_ostd::KVec<slopos_fs::FileRef> =
+    let mut files: slopos_ostd::KVec<slopos_fs::LeafFileRef> =
         slopos_ostd::KVec::with_capacity(1).expect("files vec alloc");
     let alias = slopos_fs::fileio_clone_file_ref(pid, master_fd).expect("clone_file_ref failed");
-    let _ = files.push(alias);
+    let _ = files.push(
+        slopos_fs::LeafFileRef::try_new(alias)
+            .ok()
+            .expect("a memfd is a leaf"),
+    );
     let n = unix_socket::unix_sendmsg(srv, b"T", &mut files, slopos_ostd::process::quota::root());
     assert_test!(n == 1, "sendmsg returned {}", n);
     assert_eq_test!(
@@ -5577,10 +5581,14 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
     );
     assert_test!(mfd_fd >= 0, "memfd fd install failed");
 
-    let mut files: slopos_ostd::KVec<slopos_fs::FileRef> =
+    let mut files: slopos_ostd::KVec<slopos_fs::LeafFileRef> =
         slopos_ostd::KVec::with_capacity(1).expect("files vec alloc");
     let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("clone_file_ref failed");
-    let _ = files.push(alias);
+    let _ = files.push(
+        slopos_fs::LeafFileRef::try_new(alias)
+            .ok()
+            .expect("a memfd is a leaf"),
+    );
 
     let payload = b"ATOM";
     let n = unix_socket::unix_sendmsg(
@@ -5665,18 +5673,26 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
 
     const CAP: usize = 8;
     for _ in 0..CAP {
-        let mut one: slopos_ostd::KVec<slopos_fs::FileRef> =
+        let mut one: slopos_ostd::KVec<slopos_fs::LeafFileRef> =
             slopos_ostd::KVec::with_capacity(1).expect("fill vec alloc");
         let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("fill clone failed");
-        let _ = one.push(alias);
+        let _ = one.push(
+            slopos_fs::LeafFileRef::try_new(alias)
+                .ok()
+                .expect("a memfd is a leaf"),
+        );
         let n = unix_socket::unix_sendmsg(srv, &[], &mut one, slopos_ostd::process::quota::root());
         assert_test!(n >= 0, "fill push returned {}", n);
     }
 
-    let mut overflow: slopos_ostd::KVec<slopos_fs::FileRef> =
+    let mut overflow: slopos_ostd::KVec<slopos_fs::LeafFileRef> =
         slopos_ostd::KVec::with_capacity(1).expect("overflow vec alloc");
     let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("overflow clone failed");
-    let _ = overflow.push(alias);
+    let _ = overflow.push(
+        slopos_fs::LeafFileRef::try_new(alias)
+            .ok()
+            .expect("a memfd is a leaf"),
+    );
     let rc = unix_socket::unix_sendmsg(
         srv,
         b"X",
@@ -5756,10 +5772,14 @@ pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
         "ftruncate failed"
     );
 
-    let mut files: slopos_ostd::KVec<slopos_fs::FileRef> =
+    let mut files: slopos_ostd::KVec<slopos_fs::LeafFileRef> =
         slopos_ostd::KVec::with_capacity(1).expect("files vec alloc");
     let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("clone_file_ref failed");
-    let _ = files.push(alias);
+    let _ = files.push(
+        slopos_fs::LeafFileRef::try_new(alias)
+            .ok()
+            .expect("a memfd is a leaf"),
+    );
     let rc = unix_socket::unix_sendmsg(
         srv,
         b"DEAD",
@@ -5845,10 +5865,14 @@ pub fn test_quota_custody_charges_the_sender() -> TestResult {
     // Queued but not received: held by the connection pair alone.
     const SENT: u32 = 3;
     for _ in 0..SENT {
-        let mut one: slopos_ostd::KVec<slopos_fs::FileRef> =
+        let mut one: slopos_ostd::KVec<slopos_fs::LeafFileRef> =
             slopos_ostd::KVec::with_capacity(1).expect("vec alloc");
         let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("clone failed");
-        let _ = one.push(alias);
+        let _ = one.push(
+            slopos_fs::LeafFileRef::try_new(alias)
+                .ok()
+                .expect("a memfd is a leaf"),
+        );
         let n = unix_socket::unix_sendmsg(srv, &[], &mut one, account);
         assert_test!(n >= 0, "send returned {}", n);
     }
@@ -7399,4 +7423,75 @@ slopos_testing::stest!(
 slopos_testing::stest!(
     name = test_zombie_budget_is_enforced_per_parent,
     suite = syscall_core
+);
+
+/// An AF_UNIX socket fd must not travel through SCM_RIGHTS.
+///
+/// Passing a socket into its own pair builds a reference cycle nothing
+/// collects: the endpoint's slot is freed only when the last `FileRef` drops,
+/// and the queue holding that reference is owned by the endpoint itself. Each
+/// cycle permanently leaks socket slots until AF_UNIX — and therefore the
+/// compositor connection — is denied to every process.
+pub fn test_unix_scm_rights_refuses_socket_fd() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
+    let Some(pid) = task_find_by_id(task_id)
+        .and_then(|task| task.process())
+        .as_deref()
+        .and_then(FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => return fail!("could not create connected pair"),
+    };
+
+    let alias = slopos_fs::fileio_clone_file_ref(pid, cli_fd).expect("clone_file_ref failed");
+    let refused = slopos_fs::LeafFileRef::try_new(alias);
+    let is_refused = refused.is_err();
+    drop(refused.err());
+
+    let _ = srv_fd;
+    assert_test!(
+        is_refused,
+        "an AF_UNIX socket must not be accepted for ancillary transfer"
+    );
+    pass!()
+}
+
+/// The same refusal must cover a ring, which the socket-only rule misses.
+///
+/// A ring's in-flight rows own a `FileRef` each, so a ring passed over
+/// AF_UNIX while holding an in-flight reference to that same socket closes
+/// exactly the cycle the socket rule was written to prevent. This is the
+/// vector io_uring spent five years discovering.
+pub fn test_unix_scm_rights_refuses_ring_fd() -> TestResult {
+    use slopos_abi::file_ops::{FdContainment, FileKind, file_kind_containment};
+
+    assert_test!(
+        file_kind_containment(FileKind::Ring) == FdContainment::Container,
+        "a ring owns in-flight file references and must not be transferable"
+    );
+    assert_test!(
+        file_kind_containment(FileKind::Socket) == FdContainment::Container,
+        "a socket owns ancillary file references"
+    );
+    assert_test!(
+        file_kind_containment(FileKind::Memfd) == FdContainment::Leaf,
+        "a memfd owns no descriptions and must stay transferable"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_unix_scm_rights_refuses_socket_fd,
+    suite = syscall_net
+);
+slopos_testing::stest!(
+    name = test_unix_scm_rights_refuses_ring_fd,
+    suite = syscall_net
 );

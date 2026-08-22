@@ -142,13 +142,6 @@ impl Superblock {
             self.inode_size
         }
     }
-
-    pub fn groups_count(&self) -> u32 {
-        if self.blocks_per_group == 0 {
-            return 0;
-        }
-        (self.blocks_count + self.blocks_per_group - 1) / self.blocks_per_group
-    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -161,8 +154,11 @@ pub struct GroupDesc {
     pub used_dirs_count: u16,
 }
 
+/// On-disk size of one block group descriptor in ext2 rev 0/1.
+pub const GROUP_DESC_SIZE: usize = 32;
+
 impl GroupDesc {
-    pub fn parse(data: &[u8]) -> Self {
+    pub fn parse(data: &[u8; GROUP_DESC_SIZE]) -> Self {
         Self {
             block_bitmap: BlockNum(le32(data, 0)),
             inode_bitmap: BlockNum(le32(data, 4)),

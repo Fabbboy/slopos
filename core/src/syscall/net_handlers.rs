@@ -609,7 +609,7 @@ define_syscall!(syscall_sendmsg
 
     // Owned aliases of the fds being passed, each sharing the sender's open-file
     // description per POSIX fd-passing semantics; on error the vec drops them.
-    let mut files: slopos_ostd::KVec<slopos_fs::FileRef> =
+    let mut files: slopos_ostd::KVec<slopos_fs::LeafFileRef> =
         slopos_ostd::KVec::with_capacity(SCM_MAX_FDS).map_err(|_| Errno::ENOMEM)?;
 
     if msg.control_len >= core::mem::size_of::<CmsgHdr>() as u64 && msg.control != 0 {
@@ -635,7 +635,14 @@ define_syscall!(syscall_sendmsg
                 for &send_fd in fd_buf.iter().take(n_fds) {
                     let file = slopos_fs::fileio_clone_file_ref(process_id, send_fd)
                         .ok_or(Errno::EBADF)?;
-                    files.push(file).map_err(|_| Errno::ENOMEM)?;
+                    // A description that owns descriptions cannot travel this
+                    // way: passing one into a queue it can reach closes a
+                    // reference cycle nothing collects.
+                    let leaf = slopos_fs::LeafFileRef::try_new(file).map_err(|refused| {
+                        drop(refused);
+                        Errno::EOPNOTSUPP
+                    })?;
+                    files.push(leaf).map_err(|_| Errno::ENOMEM)?;
                 }
             }
         }

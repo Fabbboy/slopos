@@ -5,7 +5,7 @@
 //! [`PairHandle`].
 
 use slopos_abi::quota::CustodyAxis;
-use slopos_fs::FileRef;
+use slopos_fs::{FileRef, LeafFileRef};
 use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota::{Charge, try_charge};
 use slopos_ostd::{AllocError, KVec};
@@ -71,13 +71,14 @@ impl AncillaryQueue {
     /// the cap and the reservation — because `KVec::push` consumes its
     /// argument on failure, so a token built before a failing push would be
     /// lost with it.
-    pub(super) fn push(&mut self, file: FileRef, sender: AccountId) -> Result<(), FileRef> {
+    pub(super) fn push(&mut self, file: LeafFileRef, sender: AccountId) -> Result<(), LeafFileRef> {
         if self.entries.len() >= MAX_INFLIGHT_FDS {
             return Err(file);
         }
         let Ok(reservation) = try_charge::<CustodyAxis>(sender, 1) else {
             return Err(file);
         };
+        let file = file.into_inner();
         let alias = file.alias();
         if self
             .entries
@@ -87,7 +88,12 @@ impl AncillaryQueue {
             })
             .is_err()
         {
-            return Err(alias);
+            // The queue refused it, so the proof is still valid: hand the
+            // witness back rather than re-deriving it.
+            return Err(LeafFileRef::try_new(alias).unwrap_or_else(|f| {
+                drop(f);
+                unreachable!("a leaf reference cannot stop being a leaf")
+            }));
         }
         drop(alias);
         Ok(())
