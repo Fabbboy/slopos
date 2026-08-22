@@ -40,7 +40,7 @@ fn reject_bad_signature() -> Result<(), String> {
 fn packaged_wallpaper_metadata() -> Result<(), String> {
     let metadata = std::fs::metadata(WALLPAPER_PATH)
         .map_err(|e| format!("metadata({WALLPAPER_PATH}) failed: {e}"))?;
-    if metadata.len() == 137_503 {
+    if metadata.len() == 271 {
         Ok(())
     } else {
         Err(format!("metadata len {}", metadata.len()))
@@ -50,7 +50,7 @@ fn packaged_wallpaper_metadata() -> Result<(), String> {
 fn packaged_wallpaper_read() -> Result<(), String> {
     let bytes =
         std::fs::read(WALLPAPER_PATH).map_err(|e| format!("read({WALLPAPER_PATH}) failed: {e}"))?;
-    if bytes.len() == 137_503 && bytes.starts_with(b"\x89PNG\r\n\x1A\n") {
+    if bytes.len() == 271 && bytes.starts_with(b"\x89PNG\r\n\x1A\n") {
         Ok(())
     } else {
         Err(format!(
@@ -74,7 +74,7 @@ fn verify_wallpaper_checksum(bytes: &[u8]) -> Result<(), String> {
     let fnv = bytes.iter().fold(0u32, |acc, byte| {
         acc.wrapping_mul(16_777_619) ^ *byte as u32
     });
-    if sum == 16_996_841 && fnv == 498_651_577 {
+    if sum == 27_545 && fnv == 941_773_329 {
         Ok(())
     } else {
         Err(format!("checksum sum={sum} fnv={fnv}"))
@@ -87,8 +87,8 @@ fn decode_packaged_wallpaper_bytes() -> Result<(), String> {
     verify_wallpaper_checksum(&bytes)?;
     let image =
         slopos_image::decode_png(&bytes, DecodeOptions::default()).map_err(|e| format!("{e}"))?;
-    if image.width == 1536
-        && image.height == 1024
+    if image.width == 73
+        && image.height == 18
         && image.pixels.len() == image.width as usize * image.height as usize
     {
         Ok(())

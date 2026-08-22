@@ -18,6 +18,7 @@ use super::surface_cache::ClientSurfaceCache;
 
 const COLOR_WINDOW_PLACEHOLDER: Color32 = Color32::rgb(0x20, 0x20, 0x30);
 const DEFAULT_WALLPAPER: &str = "/usr/share/slopos/wallpapers/default.png";
+const WALLPAPER_SCREEN_DIVISOR: u32 = 3;
 
 /// Hardware cursor overlay dimensions (virtio-gpu mandates 64×64).
 pub const HW_CURSOR_DIM: u32 = 64;
@@ -120,15 +121,21 @@ impl WallpaperCache {
             self.cache.clear();
             return false;
         };
+        let (logo_w, logo_h) = slopos_gfx::image::integer_scale_to_fit(
+            source.width,
+            source.height,
+            width / WALLPAPER_SCREEN_DIVISOR,
+            height / WALLPAPER_SCREEN_DIVISOR,
+        );
         slopos_gfx::image::draw_image(
             &mut cache_buf,
             bitmap,
-            0,
-            0,
-            width as i32,
-            height as i32,
-            ImageFit::Cover,
-            ImageSampling::Bilinear,
+            (width as i32 - logo_w as i32) / 2,
+            (height as i32 - logo_h as i32) / 2,
+            logo_w as i32,
+            logo_h as i32,
+            ImageFit::Stretch,
+            ImageSampling::Nearest,
         );
 
         self.cache_width = width;

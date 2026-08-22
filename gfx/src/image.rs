@@ -126,6 +126,18 @@ pub fn draw_image_clipped<T: Canvas>(
     Some(clipped)
 }
 
+/// Largest whole-number magnification of `src` that fits in `max`, never
+/// below 1:1. Pixel art only survives integer scaling; pairing this with
+/// [`ImageFit::Stretch`] and [`ImageSampling::Nearest`] makes the blit's
+/// source-coordinate divide exact, so no row or column is doubled or dropped.
+pub fn integer_scale_to_fit(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if src_w == 0 || src_h == 0 {
+        return (0, 0);
+    }
+    let scale = (max_w / src_w).min(max_h / src_h).max(1);
+    (src_w * scale, src_h * scale)
+}
+
 #[derive(Clone, Copy)]
 struct Placement {
     x: i32,
@@ -322,6 +334,44 @@ fn intersect(a: &DamageRect, b: &DamageRect) -> Option<DamageRect> {
         y1: a.y1.min(b.y1),
     };
     rect.is_valid().then_some(rect)
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::integer_scale_to_fit;
+
+    #[test]
+    fn magnifies_by_whole_numbers_only() {
+        let (w, h) = integer_scale_to_fit(73, 18, 640, 360);
+        assert_eq!(w % 73, 0);
+        assert_eq!(h % 18, 0);
+        assert_eq!(w / 73, h / 18);
+    }
+
+    #[test]
+    fn stays_inside_the_budget() {
+        for (mw, mh) in [(640u32, 360u32), (426, 240), (266, 200), (213, 160)] {
+            let (w, h) = integer_scale_to_fit(73, 18, mw, mh);
+            assert!(w <= mw && h <= mh, "{w}x{h} exceeds {mw}x{mh}");
+        }
+    }
+
+    #[test]
+    fn takes_the_limiting_axis() {
+        assert_eq!(integer_scale_to_fit(10, 10, 100, 25), (20, 20));
+        assert_eq!(integer_scale_to_fit(10, 10, 25, 100), (20, 20));
+    }
+
+    #[test]
+    fn never_shrinks_below_native() {
+        assert_eq!(integer_scale_to_fit(73, 18, 40, 10), (73, 18));
+    }
+
+    #[test]
+    fn tolerates_an_empty_source() {
+        assert_eq!(integer_scale_to_fit(0, 0, 1920, 1080), (0, 0));
+        assert_eq!(integer_scale_to_fit(73, 0, 1920, 1080), (0, 0));
+    }
 }
 
 #[cfg(all(test, feature = "alloc"))]

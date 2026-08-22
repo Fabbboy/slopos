@@ -1213,9 +1213,9 @@ mod tests {
     fn decodes_bundled_palette_wallpaper() {
         let bytes = std::fs::read("../assets/logo.png").expect("asset");
         let image = decode_png(&bytes, DecodeOptions::default()).expect("decode bundled logo");
-        assert_eq!(image.width, 1536);
-        assert_eq!(image.height, 1024);
-        assert_eq!(image.pixels.len(), 1536 * 1024);
+        assert_eq!(image.width, 73);
+        assert_eq!(image.height, 18);
+        assert_eq!(image.pixels.len(), 73 * 18);
     }
 
     #[test]
