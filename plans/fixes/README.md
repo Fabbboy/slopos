@@ -15,5 +15,9 @@ Read them as the reasoning behind the change, not as the specification of what
 landed — implementation diverged where the tree disagreed with the plan, most
 significantly for `SLOPOS-2026-0030`, where the proposed EEVDF calendar wheel
 was implemented, found to destabilise signal delivery under load, and replaced
-with a per-tier aging backstop. The `CVSS.md` entry for each finding records
-what actually landed.
+with a per-tier aging backstop.
+
+All five findings are closed, so `CVSS.md` no longer carries their entries; it
+keeps only the sweep method and the invariants the fixes established. `git log
+-- CVSS.md` recovers the entries as they read before the fix, which is the
+accurate statement of what each defect was.
