@@ -517,6 +517,61 @@ fn send_shootdown_ipi_per_target(targets: impl IntoIterator<Item = usize>) {
     }
 }
 
+/// Reads state the target published on its way in, so it works even when the
+/// target takes no interrupts — the case that matters.
+fn describe_deaf_cpu(cpu_idx: usize) {
+    let mut any_held = false;
+    slopos_ostd::sync::for_each_held_lock_name_for_cpu(cpu_idx, |name| {
+        any_held = true;
+        klog_warn!("TLB: CPU {} holds lock '{}'", cpu_idx, name);
+    });
+    if !any_held {
+        klog_warn!("TLB: CPU {} holds no tracked lock", cpu_idx);
+    }
+
+    let mut hops = [slopos_ostd::watchdog::WaitHop {
+        cpu: 0,
+        seq: 0,
+        lock: 0,
+    }; slopos_ostd::watchdog::MAX_WAIT_HOPS];
+    let (len, end) = slopos_ostd::watchdog::wait_chain_snapshot(cpu_idx, &mut hops);
+    for hop in hops.iter().take(len) {
+        klog_warn!("TLB: CPU {} waits on lock {:#x}", hop.cpu, hop.lock);
+    }
+    klog_warn!("TLB: CPU {} wait chain ends {:?}", cpu_idx, end);
+}
+
+fn report_probe_rip(cpu_idx: usize) {
+    let Some(rip) = slopos_ostd::watchdog::probe_rip(cpu_idx) else {
+        klog_warn!("TLB: CPU {} never took a probe NMI", cpu_idx);
+        return;
+    };
+    match slopos_ostd::ksym::lookup(rip) {
+        Some(sym) => klog_warn!(
+            "TLB: CPU {} stopped at {:#x} <{}+{:#x}>",
+            cpu_idx,
+            rip,
+            sym.symbol,
+            sym.offset
+        ),
+        None => klog_warn!("TLB: CPU {} stopped at {:#x}", cpu_idx, rip),
+    }
+}
+
+/// An NMI is unmaskable, so a CPU that misses the budget is already inside one.
+fn wait_for_probe_answer(cpu_idx: usize) {
+    const PROBE_ANSWER_SPIN: u64 = 20_000_000;
+    for _ in 0..PROBE_ANSWER_SPIN {
+        if slopos_ostd::watchdog::probe_disposition(cpu_idx)
+            == slopos_ostd::watchdog::NmiDisposition::Unsolicited
+        {
+            return;
+        }
+        service_local_shootdown_queue();
+        cpu::pause();
+    }
+}
+
 fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize) -> TlbResult {
     // Runs with whatever IF the caller established and never force-enables:
     // callers legitimately hold IRQ-disabling SpinLocks across a flush.
@@ -551,19 +606,14 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
                         cpu_idx,
                         resends
                     );
-                    let mut held = [0u64; 8];
-                    let n = slopos_ostd::sync::held_lock_addrs(&mut held);
-                    if n > 0 {
+                    slopos_ostd::sync::for_each_held_lock_name(|name| {
                         klog_warn!(
-                            "TLB: initiator CPU {} held {} lock(s) during the wait: {:#x} {:#x} {:#x} {:#x}",
+                            "TLB: initiator CPU {} holds lock '{}' during the wait",
                             initiator_cpu,
-                            n,
-                            held[0],
-                            held[1],
-                            held[2],
-                            held[3],
+                            name
                         );
-                    }
+                    });
+                    describe_deaf_cpu(cpu_idx);
                     // Arm before sending, or the target classifies the NMI as
                     // unsolicited; a refused arm means a probe is already in
                     // flight.
@@ -572,10 +622,19 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
                         slopos_ostd::watchdog::NmiDisposition::TlbLadder,
                     ) {
                         match slopos_arch::pcr::apic_id_from_cpu_index(cpu_idx) {
-                            Some(apic_id) => slopos_arch::pcr::send_nmi_to_cpu(apic_id),
+                            Some(apic_id) => {
+                                slopos_arch::pcr::send_nmi_to_cpu(apic_id);
+                                wait_for_probe_answer(cpu_idx);
+                            }
                             None => slopos_ostd::watchdog::release_probe(cpu_idx),
                         }
+                    } else {
+                        klog_warn!(
+                            "TLB: CPU {} already had an NMI probe in flight; no fresh context",
+                            cpu_idx
+                        );
                     }
+                    report_probe_rip(cpu_idx);
                     result = Err(TlbShootdownTimeout { cpu_idx, resends });
                     break 'targets;
                 }

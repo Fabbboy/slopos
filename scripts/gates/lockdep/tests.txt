@@ -114,9 +114,13 @@ require-phase post-userland-tests
 # 2026-08-24: userland 192 -> 193. `dns_resolve_test` is the first utest to
 # take the resolver path, so `DNS_PENDING_QUERY` now registers in the userland
 # phase too. Deterministic — 193 on every run — so the cap is exact.
+#
+# 2026-08-23: kernel 183 -> 184, userland 193 -> 194. `fblog.PANIC_TAIL`
+# registers on the first recovered panic, which both phases reach; `boot` is
+# unchanged because nothing panics before the boot report. Deterministic.
 boot	classes	71
-post-kernel-tests	classes	183
-post-userland-tests	classes	193
+post-kernel-tests	classes	184
+post-userland-tests	classes	194
 
 # Edges and chains depend on which *orders* were observed, so they move with
 # scheduling. Each cap is the observed maximum plus that phase's spread, so

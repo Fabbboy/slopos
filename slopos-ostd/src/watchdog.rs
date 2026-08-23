@@ -101,6 +101,10 @@ struct CpuSlot {
     blocked_on: AtomicU32,
     /// Address of that lock. Printed, never dereferenced.
     waiting_on: AtomicU64,
+    /// `rip` the last NMI probe stopped this CPU at, or 0. The handler's own
+    /// emitters go straight to the UART, which a machine may not have, so the
+    /// answer is left where a normal-context reader can format it.
+    probe_rip: AtomicU64,
 }
 
 /// Longest wait-for chain the walker will follow. A real deadlock cycle is
@@ -128,6 +132,7 @@ impl CpuSlot {
             wait_seq: AtomicU64::new(0),
             blocked_on: AtomicU32::new(NO_CPU),
             waiting_on: AtomicU64::new(0),
+            probe_rip: AtomicU64::new(0),
         }
     }
 }
@@ -539,6 +544,19 @@ pub fn arm_probe(target: usize, disposition: NmiDisposition) -> bool {
             Ordering::Relaxed,
         )
         .is_ok()
+}
+
+/// Called from the NMI handler.
+pub fn note_probe_rip(cpu: usize, rip: u64) {
+    if let Some(slot) = SLOTS.get(cpu) {
+        slot.probe_rip.store(rip, Ordering::Release);
+    }
+}
+
+/// `None` if `cpu` never answered a probe.
+pub fn probe_rip(cpu: usize) -> Option<u64> {
+    let rip = SLOTS.get(cpu)?.probe_rip.load(Ordering::Acquire);
+    (rip != 0).then_some(rip)
 }
 
 /// What the NMI this CPU is taking was sent for.

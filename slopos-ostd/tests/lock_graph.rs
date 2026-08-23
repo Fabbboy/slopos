@@ -12,10 +12,11 @@ use slopos_ostd::lock_class;
 use slopos_ostd::sync::lock_graph::{
     ACQ_NONE, ACQ_RECURSIVE, LO_DUPOK, LOCK_LEVEL_ALLOCATOR, LOCK_LEVEL_REGISTRY,
     LOCK_LEVEL_RESOURCE, LockClassKey, LockdepMode, PushIrqState, class_collisions, class_count,
-    enable_lock_tracking, enter_fatal_bypass, fatal_bypassed, held_depth_mark, held_lock_count,
-    poison_unlock_all_held, poison_unlock_held_above, pop_lock, pop_misses, push_irq_state,
-    push_lock, push_lock_ex, register_class_for_test, report_only_violations, reset_for_test,
-    set_in_report_for_test, set_lockdep_mode, violation_reports,
+    enable_lock_tracking, enter_fatal_bypass, fatal_bypassed, for_each_held_lock_name,
+    for_each_held_lock_name_for_cpu, held_depth_mark, held_lock_count, poison_unlock_all_held,
+    poison_unlock_held_above, pop_lock, pop_misses, push_irq_state, push_lock, push_lock_ex,
+    register_class_for_test, report_only_violations, reset_for_test, set_in_report_for_test,
+    set_lockdep_mode, violation_reports,
 };
 
 /// Serialise every test that touches the global graph state: the class table,
@@ -660,4 +661,53 @@ fn report_reentrancy_records_without_checking() {
     }
     assert_eq!(held_lock_count(), 0);
     assert_eq!(pop_misses(), 0, "no release went unmatched");
+}
+
+/// The TLB shootdown timeout reports through these. A reporter that silently
+/// yields nothing costs a whole reproduction cycle to discover.
+#[test]
+fn held_lock_names_are_reported() {
+    let _gate = serial_gate();
+    setup();
+
+    let a = core::ptr::without_provenance::<()>(0x5001);
+    let b = core::ptr::without_provenance::<()>(0x6001);
+    let ka = lock_class!("held_name_a", LOCK_LEVEL_RESOURCE);
+    let kb = lock_class!("held_name_b", LOCK_LEVEL_REGISTRY);
+
+    unsafe {
+        push(a, ka);
+        push(b, kb);
+    }
+
+    let mut local = Vec::new();
+    for_each_held_lock_name(|name| local.push(name));
+    assert_eq!(local, ["held_name_a", "held_name_b"]);
+
+    // Read the way a peer CPU reads it during the timeout report.
+    let cpu = slopos_ostd::cpu::x86_64::pcr::get_current_cpu();
+    let mut remote = Vec::new();
+    for_each_held_lock_name_for_cpu(cpu, |name| remote.push(name));
+    assert_eq!(remote, local);
+
+    unsafe {
+        pop_lock(b);
+        pop_lock(a);
+    }
+
+    let mut after = Vec::new();
+    for_each_held_lock_name(|name| after.push(name));
+    assert!(after.is_empty(), "names outlived the locks: {after:?}");
+}
+
+/// The one case where reporting nothing is correct.
+#[test]
+fn held_lock_names_are_silent_without_tracking() {
+    let _gate = serial_gate();
+    reset_for_test();
+
+    let mut seen = 0usize;
+    for_each_held_lock_name(|_| seen += 1);
+    for_each_held_lock_name_for_cpu(0, |_| seen += 1);
+    assert_eq!(seen, 0);
 }

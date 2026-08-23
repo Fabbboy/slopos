@@ -99,6 +99,104 @@ pub fn ring_copy_tail(_out: &mut [u8]) -> usize {
     0
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LogChar {
+    Char(u8),
+    Newline,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EscapeState {
+    None,
+    Introducer,
+    Csi,
+}
+
+/// Drops the SGR sequences the ring carries from the console. The `[`
+/// introducer is itself inside the CSI final-byte range, so ending a sequence
+/// at the first byte in that range would print the parameters.
+pub fn for_each_log_char(tail: &[u8], mut emit: impl FnMut(LogChar)) {
+    let mut escape = EscapeState::None;
+    for &byte in tail {
+        match escape {
+            EscapeState::None => {}
+            EscapeState::Introducer => {
+                escape = if byte == b'[' {
+                    EscapeState::Csi
+                } else {
+                    EscapeState::None
+                };
+                continue;
+            }
+            EscapeState::Csi => {
+                if (0x40..=0x7e).contains(&byte) {
+                    escape = EscapeState::None;
+                }
+                continue;
+            }
+        }
+        match byte {
+            0x1b => escape = EscapeState::Introducer,
+            b'\n' => emit(LogChar::Newline),
+            b'\r' => {}
+            0x20..=0x7e => emit(LogChar::Char(byte)),
+            _ => {}
+        }
+    }
+}
+
+#[cfg(target_os = "none")]
+const PANIC_TAIL_BYTES: usize = 4096;
+
+#[cfg(target_os = "none")]
+struct PanicTail {
+    buf: [u8; PANIC_TAIL_BYTES],
+    len: usize,
+}
+
+#[cfg(target_os = "none")]
+static PANIC_TAIL: SpinLock<PanicTail> = SpinLock::new(
+    PanicTail {
+        buf: [0u8; PANIC_TAIL_BYTES],
+        len: 0,
+    },
+    lock_class!("fblog.PANIC_TAIL", LOCK_LEVEL_UNORDERED),
+);
+
+#[cfg(target_os = "none")]
+static PANIC_TAIL_TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// Must run before the panic writes its own report, which shares this capture
+/// path and would scroll out the lines that explain it. Both locks are
+/// `try_lock`, so a panicking CPU cannot wedge here.
+#[cfg(target_os = "none")]
+pub fn snapshot_tail_for_panic() {
+    if PANIC_TAIL_TAKEN.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let Some(mut tail) = PANIC_TAIL.try_lock() else {
+        return;
+    };
+    tail.len = ring_copy_tail(&mut tail.buf);
+}
+
+#[cfg(target_os = "none")]
+pub fn with_panic_tail(f: impl FnOnce(&[u8])) {
+    let Some(tail) = PANIC_TAIL.try_lock() else {
+        return;
+    };
+    let len = tail.len;
+    f(&tail.buf[..len]);
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn snapshot_tail_for_panic() {}
+
+#[cfg(not(target_os = "none"))]
+pub fn with_panic_tail(f: impl FnOnce(&[u8])) {
+    f(&[]);
+}
+
 /// The log is currently drawn on screen (renders + suppresses compositor flips).
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Set once the compositor presents its first frame — the boot phase is over,
@@ -189,4 +287,48 @@ pub fn handle_esc_press() -> bool {
         FORCE_FULL_PRESENT.store(true, Ordering::Relaxed);
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LogChar, for_each_log_char};
+
+    fn render(input: &[u8]) -> alloc::string::String {
+        let mut out = alloc::string::String::new();
+        for_each_log_char(input, |c| match c {
+            LogChar::Char(b) => out.push(b as char),
+            LogChar::Newline => out.push('\n'),
+        });
+        out
+    }
+
+    #[test]
+    fn plain_text_passes_through() {
+        assert_eq!(render(b"hello\nworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn carriage_returns_are_dropped() {
+        assert_eq!(render(b"a\r\nb"), "a\nb");
+    }
+
+    #[test]
+    fn sgr_sequences_are_consumed_whole() {
+        assert_eq!(render(b"\x1b[38;2;198;120;221mSLOP\x1b[0m"), "SLOP");
+    }
+
+    #[test]
+    fn two_byte_escapes_end_at_the_introducer() {
+        assert_eq!(render(b"a\x1bMb"), "ab");
+    }
+
+    #[test]
+    fn an_unterminated_sequence_swallows_the_rest() {
+        assert_eq!(render(b"ok\x1b[38;2;1"), "ok");
+    }
+
+    #[test]
+    fn control_bytes_are_dropped() {
+        assert_eq!(render(b"a\x07\x00b"), "ab");
+    }
 }

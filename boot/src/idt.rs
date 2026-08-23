@@ -294,6 +294,9 @@ fn nmi_emit_context(
         NmiDisposition, nmi_emit, nmi_emit_dec, nmi_emit_hex, nmi_emit_line,
     };
 
+    // Everything below goes to the UART, which a machine may not have.
+    slopos_ostd::watchdog::note_probe_rip(cpu_id, frame.rip);
+
     nmi_emit("NMI: cpu ");
     nmi_emit_dec(cpu_id as u64);
     nmi_emit(match disposition {

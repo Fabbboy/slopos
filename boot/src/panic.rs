@@ -73,6 +73,7 @@ fn panic_serial_write(s: &str) {
 /// overflowed in the one case this exists for, where the normal reporter would
 /// re-fault on it. Interrupts are masked first so no IRQ perturbs the halt.
 pub fn panic_abort_raw(msg: &'static str) -> ! {
+    slopos_ostd::fblog::snapshot_tail_for_panic();
     cpu::disable_interrupts();
     // Ordering validation off before anything below acquires a lock.
     slopos_ostd::sync::enter_fatal_bypass();
@@ -169,6 +170,10 @@ fn panic_dump_backtrace_from(rbp: u64) {
 
 /// Called by the kernel's `#[panic_handler]`.
 pub fn panic_handler_impl(info: &PanicInfo) -> ! {
+    // Before anything below writes to serial: the report shares the capture
+    // ring and would scroll out the lines leading up to here.
+    slopos_ostd::fblog::snapshot_tail_for_panic();
+
     let prior_in_flight = slopos_ostd::panic::panic_in_flight_enter();
 
     // Recovery is task-scoped: only a first-level panic at a recovery boundary

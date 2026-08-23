@@ -81,6 +81,81 @@ fn draw_symbol_text(ctx: &mut GraphicsContext, atlas: &GlyphAtlas, mut x: i32, y
     }
 }
 
+/// As many trailing log lines as fit between `y` and `limit_y`. The report says
+/// where the machine stopped; these say why, and on a machine with no serial
+/// port they exist nowhere else.
+fn draw_log_tail(
+    ctx: &mut GraphicsContext,
+    atlas: &GlyphAtlas,
+    tail: &[u8],
+    mut y: i32,
+    limit_y: i32,
+) -> i32 {
+    if tail.is_empty() {
+        return y;
+    }
+    let char_height = atlas.cell_height();
+    let char_width = atlas.cell_width();
+    let line_pitch = char_height + 2;
+
+    let header_room = char_height + 8;
+    if y + header_room + line_pitch > limit_y {
+        return y;
+    }
+    let max_lines = ((limit_y - y - header_room) / line_pitch).max(0) as usize;
+    if max_lines == 0 {
+        return y;
+    }
+
+    // The capture ends mid-stream, so the last byte is usually a newline.
+    let mut end = tail.len();
+    while end > 0 && (tail[end - 1] == b'\n' || tail[end - 1] == b'\r') {
+        end -= 1;
+    }
+    let mut start = end;
+    let mut lines = 0usize;
+    while start > 0 {
+        if tail[start - 1] == b'\n' {
+            lines += 1;
+            if lines == max_lines {
+                break;
+            }
+        }
+        start -= 1;
+    }
+
+    atlas.draw_bytes(
+        ctx,
+        40,
+        y,
+        b"Kernel log (oldest first):\0",
+        PANIC_HEADER_COLOR,
+        PANIC_BG_COLOR,
+    );
+    y += header_room;
+
+    let max_x = ctx.width() as i32 - 40;
+    let mut x = 60;
+    slopos_ostd::fblog::for_each_log_char(&tail[start..end], |unit| {
+        if y + char_height > limit_y {
+            return;
+        }
+        match unit {
+            slopos_ostd::fblog::LogChar::Newline => {
+                y += line_pitch;
+                x = 60;
+            }
+            slopos_ostd::fblog::LogChar::Char(byte) => {
+                if x + char_width <= max_x {
+                    atlas.draw_char(ctx, x, y, byte as u32, PANIC_FG_COLOR, PANIC_BG_COLOR);
+                    x += char_width;
+                }
+            }
+        }
+    });
+    y + line_pitch
+}
+
 pub fn display_panic_screen(
     message: Option<&str>,
     rip: Option<u64>,
@@ -235,10 +310,20 @@ pub fn display_panic_screen(
         }
     }
 
+    let prompt_y = height - 60;
+    slopos_ostd::fblog::with_panic_tail(|tail| {
+        draw_log_tail(
+            &mut ctx,
+            &atlas,
+            tail,
+            y + char_height,
+            prompt_y - char_height * 2,
+        );
+    });
+
     let prompt = b"Press ENTER to shutdown\0";
     let prompt_width = atlas.bytes_width(prompt);
     let prompt_x = (width - prompt_width) / 2;
-    let prompt_y = height - 60;
     atlas.draw_bytes(
         &mut ctx,
         prompt_x,

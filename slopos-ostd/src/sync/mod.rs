@@ -50,10 +50,11 @@ pub use lock_tracking::{
     LOCK_LEVEL_SCHEDULER, LOCK_LEVEL_UNORDERED, LockClassKey, LockdepMode, chain_count, chain_hits,
     chain_misses, class_collisions, class_count, class_info, class_slots_leaked, declare_order,
     declared_count, declared_observed, edge_count, enable_lock_tracking, enter_fatal_bypass,
-    fatal_bypassed, graph_overflowed, held_depth_max, held_depth_overflows, held_lock_addrs,
-    held_lock_addrs_for_cpu, held_lock_count, lockdep_mode, overflow_reported,
-    poison_unlock_all_held, report_only_violations, set_lockdep_mode, tracking_enabled,
-    validator_alive, violation_reports, violations_reported,
+    fatal_bypassed, for_each_held_lock_name, for_each_held_lock_name_for_cpu, graph_overflowed,
+    held_depth_max, held_depth_overflows, held_lock_addrs, held_lock_addrs_for_cpu,
+    held_lock_count, lockdep_mode, overflow_reported, poison_unlock_all_held,
+    report_only_violations, set_lockdep_mode, tracking_enabled, validator_alive, violation_reports,
+    violations_reported,
 };
 pub use mutex::{Mutex, MutexGuard};
 pub use once_lock::OnceLock;

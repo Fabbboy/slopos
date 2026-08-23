@@ -840,6 +840,60 @@ pub fn held_lock_addrs(out: &mut [u64]) -> usize {
     n
 }
 
+/// Names, not addresses: a bare-metal panic screen has no symbol table. Same
+/// benign-race caveat as [`held_lock_addrs`].
+pub fn for_each_held_lock_name(mut visit: impl FnMut(&'static str)) {
+    if !TRACKING_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let cpu = get_current_cpu();
+    // SAFETY: per-CPU slot; reads race only with this CPU's own push/pop, and a
+    // torn snapshot is acceptable for diagnostics.
+    let stack = unsafe { &*HELD[cpu].0.0.get() };
+    let n = (stack.depth.load(Ordering::Relaxed) as usize).min(MAX_HELD_LOCKS);
+    for entry in stack.entries.iter().take(n) {
+        if entry.class_idx == NONE_IDX {
+            visit("<untracked>");
+            continue;
+        }
+        let key = CLASSES.0[entry.class_idx as usize]
+            .key
+            .load(Ordering::Relaxed);
+        if key.is_null() {
+            visit("<unregistered>");
+            continue;
+        }
+        // SAFETY: `key` is published from a `&'static LockClassKey`.
+        visit(unsafe { &*key }.name());
+    }
+}
+
+/// Cross-CPU [`for_each_held_lock_name`]; the snapshot can tear.
+pub fn for_each_held_lock_name_for_cpu(cpu: usize, mut visit: impl FnMut(&'static str)) {
+    if !TRACKING_ENABLED.load(Ordering::Relaxed) || cpu >= MAX_CPUS {
+        return;
+    }
+    // SAFETY: read-only racy snapshot of another CPU's held stack; same
+    // diagnostics-only caveat as `held_lock_addrs_for_cpu`.
+    let stack = unsafe { &*HELD[cpu].0.0.get() };
+    let n = (stack.depth.load(Ordering::Relaxed) as usize).min(MAX_HELD_LOCKS);
+    for entry in stack.entries.iter().take(n) {
+        if entry.class_idx == NONE_IDX {
+            visit("<untracked>");
+            continue;
+        }
+        let key = CLASSES.0[entry.class_idx as usize]
+            .key
+            .load(Ordering::Relaxed);
+        if key.is_null() {
+            visit("<unregistered>");
+            continue;
+        }
+        // SAFETY: as in `for_each_held_lock_name`.
+        visit(unsafe { &*key }.name());
+    }
+}
+
 /// Cross-CPU variant of [`held_lock_addrs`] for post-mortem dumps. The target
 /// CPU may be mid push/pop, so the snapshot can tear.
 pub fn held_lock_addrs_for_cpu(cpu: usize, out: &mut [u64]) -> usize {
