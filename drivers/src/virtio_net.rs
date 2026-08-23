@@ -1351,6 +1351,9 @@ pub fn dns_rx_clear() {
 pub fn dns_rx_wait(timeout_ms: u32) -> bool {
     let start = slopos_kernel_services::clock::uptime_ms();
     loop {
+        // A reply committed to the used ring while the netpoll kthread is not
+        // scheduled is collected by nothing else before the timeout expires.
+        virtnet_force_napi_poll();
         if DNS_RX_EVENT.try_consume() {
             return true;
         }
