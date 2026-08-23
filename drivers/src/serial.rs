@@ -2,7 +2,7 @@
 //! and the safe `slopos_ostd::io::UartRegs` register window.
 
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use slopos_arch::cpu;
 use slopos_ostd::io::UartRegs;
 use slopos_ostd::io::port_consts::{
@@ -13,6 +13,7 @@ use slopos_ostd::io::port_consts::{
     UART_MCR_AUX2 as MCR_AUX2, UART_MCR_DTR as MCR_DTR, UART_MCR_RTS as MCR_RTS,
 };
 use slopos_ostd::io::raw_port::Port;
+use slopos_ostd::klog_info;
 use slopos_ostd::lock_class;
 use slopos_ostd::ring_buffer::RingBuffer;
 use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
@@ -30,6 +31,9 @@ pub enum UartType {
 
 #[derive(Debug, Clone, Copy)]
 pub struct UartCapabilities {
+    /// An unclaimed x86 I/O port reads `0xFF` everywhere, and `0xFF` has
+    /// `LSR_DATA_READY` set — so a naive receive loop never finishes.
+    pub present: bool,
     pub uart_type: UartType,
     pub has_fifo: bool,
     pub fifo_working: bool,
@@ -46,6 +50,21 @@ static SERIAL: SpinLock<SerialPort> = SpinLock::new(
 );
 const BUF_SIZE: usize = 256;
 
+static SERIAL_PRESENT: AtomicBool = AtomicBool::new(true);
+
+/// The drain runs under the per-TTY lock with interrupts disabled, so its cost
+/// is a window in which this CPU answers no IPI, a TLB shootdown included.
+const POLL_RECEIVE_BUDGET: usize = BUF_SIZE;
+
+const SCRATCH_PROBE_A: u8 = 0xAA;
+const SCRATCH_PROBE_B: u8 = 0x55;
+
+/// A scratch register that echoes settles it; an 8250/16450 has none, so its
+/// status registers decide.
+pub(crate) fn uart_is_present(scratch_echoed: bool, lsr: u8, iir: u8) -> bool {
+    scratch_echoed || lsr != 0xFF || iir != 0xFF
+}
+
 type SerialBuffer = RingBuffer<u8, BUF_SIZE>;
 
 static INPUT_BUFFER: SpinLock<SerialBuffer> = SpinLock::new(
@@ -56,7 +75,13 @@ static INPUT_BUFFER: SpinLock<SerialBuffer> = SpinLock::new(
 pub fn init() {
     let mut port = SERIAL.lock();
     port.init();
+    let present = port.capabilities().present;
     drop(port);
+
+    SERIAL_PRESENT.store(present, Ordering::Relaxed);
+    if !present {
+        klog_info!("SERIAL: no UART at COM1; console input disabled");
+    }
 
     slopos_ostd::klog::klog_register_backend(serial_klog_backend);
 }
@@ -213,10 +238,12 @@ pub(crate) fn serial_console_step(
 }
 
 pub fn serial_poll_receive(base: u16) {
-    use core::sync::atomic::Ordering;
+    if !SERIAL_PRESENT.load(Ordering::Relaxed) {
+        return;
+    }
 
     let regs = UartRegs::new(Port::<u8>::new(base));
-    loop {
+    for _ in 0..POLL_RECEIVE_BUDGET {
         // One read: LSR's error bits are cleared by reading it, so the break
         // flag has to be taken from the same read that reports the byte.
         let lsr = regs.read_lsr();
@@ -278,6 +305,7 @@ impl SerialPort {
         Self {
             regs: UartRegs::new(base),
             caps: UartCapabilities {
+                present: true,
                 uart_type: UartType::Unknown,
                 has_fifo: false,
                 fifo_working: false,
@@ -286,7 +314,28 @@ impl SerialPort {
         }
     }
 
+    fn probe_present(&mut self) -> bool {
+        let mut scratch_echoed = false;
+        for probe in [SCRATCH_PROBE_A, SCRATCH_PROBE_B] {
+            self.regs.write_scr(probe);
+            if self.regs.read_scr() == probe {
+                scratch_echoed = true;
+            }
+        }
+        uart_is_present(scratch_echoed, self.regs.read_lsr(), self.regs.read_iir())
+    }
+
     fn detect_uart(&mut self) -> UartCapabilities {
+        if !self.probe_present() {
+            return UartCapabilities {
+                present: false,
+                uart_type: UartType::Unknown,
+                has_fifo: false,
+                fifo_working: false,
+                fifo_size: 0,
+            };
+        }
+
         self.regs
             .write_fcr(FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX);
 
@@ -301,6 +350,7 @@ impl SerialPort {
 
         if !has_fifo {
             return UartCapabilities {
+                present: true,
                 uart_type: UartType::Uart16450,
                 has_fifo: false,
                 fifo_working: false,
@@ -321,6 +371,7 @@ impl SerialPort {
         };
 
         UartCapabilities {
+            present: true,
             uart_type,
             has_fifo: true,
             fifo_working,
@@ -330,6 +381,9 @@ impl SerialPort {
 
     fn init(&mut self) {
         self.caps = self.detect_uart();
+        if !self.caps.present {
+            return;
+        }
 
         self.regs.write_ier(0x00);
         self.regs.write_lcr(LCR_DLAB);

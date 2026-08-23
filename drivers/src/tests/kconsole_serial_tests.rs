@@ -8,7 +8,7 @@
 //! make QEMU's stdio serial produce a break.
 
 use slopos_testing::TestResult;
-use slopos_testing::fail;
+use slopos_testing::{assert_test, fail};
 
 use crate::serial::{SerialAction, serial_console_step};
 
@@ -126,4 +126,52 @@ slopos_testing::stest!(
 slopos_testing::stest!(
     name = test_kcon_serial_repeated_breaks_arm_once,
     suite = kconsole
+);
+
+// An unclaimed x86 I/O port reads `0xFF` everywhere, which sets
+// `LSR_DATA_READY` — so an unguarded receive loop never finishes.
+
+pub fn test_uart_absent_when_every_register_floats() -> TestResult {
+    assert_test!(
+        !crate::serial::uart_is_present(false, 0xFF, 0xFF),
+        "an all-0xFF port must read as absent"
+    );
+    TestResult::Pass
+}
+
+pub fn test_uart_present_when_scratch_echoes() -> TestResult {
+    assert_test!(
+        crate::serial::uart_is_present(true, 0xFF, 0xFF),
+        "a scratch register that echoes settles it"
+    );
+    TestResult::Pass
+}
+
+pub fn test_uart_without_scratch_is_present() -> TestResult {
+    assert_test!(
+        crate::serial::uart_is_present(false, 0x60, 0xC1),
+        "a UART with no scratch register must not read as absent"
+    );
+    assert_test!(
+        crate::serial::uart_is_present(false, 0x60, 0xFF),
+        "a sane LSR alone is enough"
+    );
+    assert_test!(
+        crate::serial::uart_is_present(false, 0xFF, 0xC1),
+        "a sane IIR alone is enough"
+    );
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_uart_absent_when_every_register_floats,
+    suite = kconsole_serial
+);
+slopos_testing::stest!(
+    name = test_uart_present_when_scratch_echoes,
+    suite = kconsole_serial
+);
+slopos_testing::stest!(
+    name = test_uart_without_scratch_is_present,
+    suite = kconsole_serial
 );
