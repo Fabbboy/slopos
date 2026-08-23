@@ -949,7 +949,7 @@ pub fn virtnet_wake_napi() {
 /// per-queue IRQ handler arms. After each burst it peeks the used ring and
 /// re-arms if the IRQ landed inside the drain-to-park window (lost wakeup).
 fn napi_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'static>) {
-    use slopos_ostd::sync::kernel_io_task::{Deadline, KthreadWait, yield_with_deadline};
+    use slopos_ostd::sync::kernel_io_task::{KthreadWait, yield_now};
     loop {
         let waited = NAPI_WAKER.wait(&token);
         if waited == KthreadWait::Stop {
@@ -967,7 +967,7 @@ fn napi_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'st
 
         if processed >= NAPI_CONTEXT.budget() {
             NAPI_WAKER.rearm();
-            yield_with_deadline(&token, Deadline::Immediate);
+            yield_now(&token);
         }
     }
     NAPI_WAKER.stop().note_exited();
@@ -988,7 +988,7 @@ fn has_pending_rx() -> bool {
 /// not charged for `net_timer_process`. Runs at [`TaskPriority::KernelIo`] so
 /// ARP aging, TCP retransmit and delayed-ACK fire on time under user load.
 fn net_timer_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'static>) {
-    use slopos_ostd::sync::kernel_io_task::{Deadline, KthreadWait, yield_with_deadline};
+    use slopos_ostd::sync::kernel_io_task::{KthreadWait, yield_now};
     const NET_TIMER_PERIOD_MS: u32 = 50;
     loop {
         if TIMER_WAKER.wait_timeout_ms(&token, NET_TIMER_PERIOD_MS) == KthreadWait::Stop {
@@ -1000,7 +1000,7 @@ fn net_timer_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToke
         // status register needs the driver lock and acting on a transition
         // needs four more plus an allocation, none of which a hard IRQ may do.
         poll_carrier();
-        yield_with_deadline(&token, Deadline::Immediate);
+        yield_now(&token);
     }
     TIMER_WAKER.stop().note_exited();
 }
@@ -1204,7 +1204,6 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         return Err(PciProbeError::OutOfMemory);
     }
 
-    slopos_net::napi::register_kick(virtnet_force_napi_poll);
     slopos_net::napi::register_wake_napi(virtnet_wake_napi);
     static NET_DRIVER_SVC: NetDriverServices = NetDriverServices {
         virtio_net_ipv4_addr,
@@ -1222,8 +1221,7 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
     };
     register_net_driver_services(&NET_DRIVER_SVC);
 
-    slopos_ostd::sync::kernel_io_task::register_kernel_io_stop(NAPI_WAKER.stop());
-    if let Err(err) = slopos_ostd::spawn_kernel_io!("netpoll", napi_thread_entry) {
+    if let Err(err) = slopos_ostd::spawn_kernel_io!(NAPI_WAKER.stop(), napi_thread_entry) {
         klog_info!(
             "virtio-net: failed to spawn netpoll kernel thread ({:?})",
             err
@@ -1231,8 +1229,7 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         DEVICE_CLAIMED.reset();
         return Err(PciProbeError::OutOfMemory);
     }
-    slopos_ostd::sync::kernel_io_task::register_kernel_io_stop(TIMER_WAKER.stop());
-    if let Err(err) = slopos_ostd::spawn_kernel_io!("net-timer", net_timer_thread_entry) {
+    if let Err(err) = slopos_ostd::spawn_kernel_io!(TIMER_WAKER.stop(), net_timer_thread_entry) {
         klog_info!(
             "virtio-net: failed to spawn net-timer kernel thread ({:?})",
             err
@@ -1348,24 +1345,10 @@ pub fn dns_rx_clear() {
     buf.len = 0;
 }
 
+/// The edge is latched by `dns_intercept_response` on the netpoll kthread's own
+/// drain, so this needs no drain of its own.
 pub fn dns_rx_wait(timeout_ms: u32) -> bool {
-    let start = slopos_kernel_services::clock::uptime_ms();
-    loop {
-        // TODO(tech-debt): compensates for the netpoll kthread vanishing from
-        // the task registry during the userland phase; the IRQ fires and the
-        // reply is in the used ring, but nothing drains it. Same unresolved
-        // cause as the drain in `net/src/socket.rs`.
-        virtnet_force_napi_poll();
-        if DNS_RX_EVENT.try_consume() {
-            return true;
-        }
-        let elapsed = slopos_kernel_services::clock::uptime_ms() - start;
-        if elapsed >= timeout_ms as u64 {
-            return false;
-        }
-        let remaining = (timeout_ms as u64 - elapsed) as u32;
-        slopos_kernel_services::driver_runtime::sleep_current_task_ms(remaining.min(20));
-    }
+    DNS_RX_EVENT.wait_timeout_ms(timeout_ms)
 }
 
 pub fn dns_rx_read(out: &mut [u8]) -> usize {

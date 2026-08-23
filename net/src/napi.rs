@@ -34,29 +34,13 @@ impl NapiContext {
 }
 
 // The wait-predicate purity gate (`scripts/check_wait_predicate_purity.sh`)
-// forbids calling either NAPI dispatch function inside a
+// forbids calling the NAPI dispatch function inside a
 // `wait_event{,_timeout,_until}` closure — predicates must observe state, not
 // side-effect.
-
-/// Stored as a raw pointer so the static is const-constructible.
-static NAPI_KICK_FN: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-
-/// The registered function must drain the NIC RX ring inline
-/// (`virtnet_force_napi_poll` or equivalent).
-pub fn register_kick(f: fn()) {
-    NAPI_KICK_FN.store(slopos_ostd::util::fn_ptr::encode(f), Ordering::Release);
-}
-
-/// Run a NAPI burst synchronously on the caller's CPU; a no-op until a driver
-/// registers. Lets a task waking from a syscall wait observe the most recent
-/// committed used-ring state without waiting for the kthread.
-#[inline]
-pub fn kick() {
-    let ptr = NAPI_KICK_FN.load(Ordering::Acquire);
-    if let Some(f) = slopos_ostd::util::fn_ptr::decode(ptr) {
-        f();
-    }
-}
+//
+// There is deliberately no synchronous-drain counterpart to `wake_napi`: a
+// caller that drains on its own behalf is compensating for the netpoll kthread
+// not running.
 
 static NAPI_WAKE_FN: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 

@@ -5,11 +5,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_ostd::lock_class;
 
 use slopos_ostd::handle::Handle;
-use slopos_ostd::klog_debug;
 use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::task::{task_existence_park, task_existence_release};
 use slopos_ostd::{KArc, KVec, KWeak};
+use slopos_ostd::{klog_debug, klog_info};
 
 use super::{INVALID_TASK_ID, MAX_TASKS, Task, TaskStatus, task_put};
 use crate::exit_info::ExitInfo;
@@ -316,6 +316,10 @@ impl TaskManagerInner {
         }
     }
 
+    pub(super) fn registry_len(&self) -> usize {
+        self.registry.len()
+    }
+
     pub(super) fn iter_tasks(&self) -> impl Iterator<Item = TaskRef> + '_ {
         self.registry.iter().map(|(_, task)| task)
     }
@@ -497,45 +501,61 @@ pub(crate) fn task_reap(id: u32) -> bool {
     reap_task_registration(id)
 }
 
-/// Initialize the registry. Reinitialization is a test-fixture operation:
-/// preserve CPU idle tasks, retire every other registration, and keep the
-/// monotonic ID source advancing so IDs are never reused across resets.
-pub fn init_task_manager() -> c_int {
+/// Idempotent: a second call must not disturb a machine that has been running
+/// kernel-I/O threads since the drivers phase.
+pub fn ensure_task_manager_initialized() -> c_int {
     if !ensure_registry_allocated() {
         return -1;
     }
-    let was_initialized = with_task_manager(|mgr| mgr.initialized);
-    if !was_initialized {
-        with_task_manager(|mgr| mgr.initialized = true);
-        TASK_MANAGER.clear_poison();
-        // Ensure, not reset: kernel-I/O kthreads are already parked on
-        // deadlines by the time this runs, and wiping the queue would unarm
-        // them.
-        if !crate::sleep::ensure_sleep_queue_allocated() {
-            return -1;
-        }
+    if with_task_manager(|mgr| mgr.initialized) {
         return 0;
+    }
+    with_task_manager(|mgr| mgr.initialized = true);
+    TASK_MANAGER.clear_poison();
+    if !crate::sleep::ensure_sleep_queue_allocated() {
+        return -1;
+    }
+    0
+}
+
+/// Test-fixture only, and gated on a freeze token rather than a comment: this
+/// wipes the sleep queue, and a frozen thread holds no deadline to lose. The
+/// monotonic ID source keeps advancing across resets.
+pub fn task_registry_reset(freeze: &crate::task::KernelIoFreeze) -> c_int {
+    if ensure_task_manager_initialized() != 0 {
+        return -1;
+    }
+    if !freeze.is_complete() {
+        klog_info!("task_registry_reset: resetting while a kernel-I/O thread is still running");
     }
 
     let mut retire = match KVec::with_capacity(MAX_TASKS) {
         Ok(ids) => ids,
         Err(_) => return -1,
     };
-    with_task_manager(|mgr| {
+    // Off-lock: the stop registry and the task registry share a lock level.
+    let kernel_io = slopos_ostd::sync::kernel_io_task::kernel_io_task_ids();
+    let overflowed = with_task_manager(|mgr| {
         for (id, task) in mgr.registry.iter() {
-            if crate::per_cpu::is_idle_task(slopos_ostd::task::TaskAddr::of(&task)) {
+            if crate::task::is_infrastructure_task(&task, &kernel_io) {
                 klog_debug!(
-                    "init_task_manager: preserving idle task {} ('{}')",
+                    "task_registry_reset: preserving {} ('{}')",
                     id,
                     bytes_as_str(&task.name)
                 );
             } else if retire.push(id).is_err() {
-                return false;
+                return true;
             }
         }
-        true
+        false
     });
+    if overflowed {
+        klog_info!("task_registry_reset: retire list overflowed; registry not fully reset");
+    }
+    // Named, not counted: an unexplained disappearance from the registry is
+    // the shape of bug that costs days.
     for id in retire.iter() {
+        klog_debug!("task_registry_reset: retiring task {}", id);
         force_reap_registration(*id);
     }
     with_task_manager(|mgr| {
@@ -544,10 +564,9 @@ pub fn init_task_manager() -> c_int {
         mgr.tasks_created = 0;
         mgr.tasks_terminated = 0;
         mgr.num_tasks = mgr.registry.len() as u32;
-        mgr.initialized = true;
     });
     TASK_MANAGER.clear_poison();
-    crate::sleep::init_sleep_queue();
+    crate::sleep::reset_sleep_queue_preserving_kernel_io();
     // Retiring the previous generation may have parked their final references;
     // drain so a fixture never starts with the previous run's corpses.
     super::task_graveyard_drain();

@@ -1,16 +1,22 @@
-//! `KernelIoToken` — compile-time witness that the holder runs at
-//! `TaskPriority::KernelIo`, the tier above `Normal` reserved for kernel I/O
-//! kthreads (NAPI, net-timer, deferred driver work).
+//! `KernelIoToken` — witness that the holder runs at `TaskPriority::KernelIo`.
+//! Every deschedule that can last passes a point where a stop or freeze is seen.
 //!
-//! The tier is kernel-only: the syscall boundary rejects a user-supplied
-//! `KernelIo` priority with `EINVAL`, and a plain `task::spawn` at it is
-//! refused by the scheduler-side validator (`SpawnError::PriorityReserved`),
-//! leaving [`spawn_kernel_io!`] as the only way in. A token holder's only
-//! sleep API is [`yield_with_deadline`], so every deschedule names a
-//! [`Deadline`] — "sleep indefinitely" stays available but is explicit.
+//! A freeze parks each thread on its stop queue holding no sleep-queue entry and
+//! no runqueue slot: the one state a scheduler reset cannot damage, which is
+//! what lets the test fixture reset around these threads instead of killing
+//! them. The bounded wait for the acks lives in `sched`.
 
-use crate::sync::lock_tracking::LOCK_LEVEL_REGISTRY;
 use core::marker::PhantomData;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+
+use slopos_abi::task::{INVALID_TASK_ID, TaskPriority};
+
+use crate::sync::BspToken;
+use crate::sync::lock_graph::LockClassKey;
+use crate::sync::lock_tracking::LOCK_LEVEL_REGISTRY;
+use crate::sync::spin::SpinLock;
+use crate::sync::wait_queue::{WaitAbort, WaitQueue};
+use crate::task::{SpawnError, SpawnedTaskId};
 
 /// Witness type carried by every `KernelIo`-priority kthread.
 ///
@@ -41,39 +47,15 @@ impl<'cpu> KernelIoToken<'cpu> {
     }
 }
 
-/// Sleep deadline for [`yield_with_deadline`]; every `KernelIo` task must name
-/// one when descheduling.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Deadline {
-    Immediate,
-    /// Wake no later than `ms` milliseconds from now. Resolution is bounded by
-    /// the LAPIC tick (10 ms by default) plus the tickless-idle one-shot.
-    AtMs(u32),
-    /// Sleep until explicitly woken. Consumes no sleep-queue entry; the wake
-    /// path runs the predicate and unblocks.
-    Indefinite,
-}
-
-/// The only sleep API available to a [`KernelIoToken`] holder. `_token` is
-/// taken by reference so one witness can drive many yields in a kthread loop.
+/// Skips the stop and freeze probes, and sound because it does not block.
 #[inline]
-pub fn yield_with_deadline<'cpu>(_token: &KernelIoToken<'cpu>, deadline: Deadline) {
+pub fn yield_now(_token: &KernelIoToken<'_>) {
     if let Some(yield_fn) = current_yield_backend() {
-        yield_fn(deadline);
+        yield_fn();
     }
-    // With no backend registered (pre-boot, or a test fixture without a
-    // scheduler) the yield is a no-op, matching `WaitQueue`'s pre-runtime
-    // contract.
 }
 
-use core::sync::atomic::{AtomicPtr, Ordering};
-
-use crate::sync::BspToken;
-
-/// Function-pointer backend for [`yield_with_deadline`], registered from
-/// outside slopos-ostd at boot (`sched::runtime`) so the trusted core does not
-/// depend on the scheduler crate.
-pub type YieldBackend = fn(Deadline);
+pub type YieldBackend = fn();
 
 static YIELD_BACKEND: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -104,67 +86,80 @@ pub fn reset_yield_backend_for_test() {
     YIELD_BACKEND.store(core::ptr::null_mut(), Ordering::Release);
 }
 
-/// Spawn a `KernelIo`-priority kthread.
-///
-/// `name` is a `'static` string baked into the binary; `entry` is a
-/// `fn(KernelIoToken<'static>)`. The macro generates a hidden `fn()`
-/// trampoline that constructs the token and calls `entry`, then dispatches to
-/// [`crate::task::spawn`] at [`slopos_abi::task::TaskPriority::KernelIo`].
-///
-/// Example:
-/// ```ignore
-/// use slopos_ostd::sync::kernel_io_task::{KernelIoToken, Deadline, yield_with_deadline};
-/// use slopos_ostd::spawn_kernel_io;
-///
-/// fn napi_thread_entry(token: KernelIoToken<'static>) {
-///     loop {
-///         NAPI_WAKER.wait();
-///         run_napi_burst();
-///         yield_with_deadline(&token, Deadline::Immediate);
-///     }
-/// }
-///
-/// spawn_kernel_io!("netpoll", napi_thread_entry).expect("spawn");
-/// ```
-///
-/// That trampoline is the only path that instantiates a [`KernelIoToken`];
-/// direct constructor calls fail the grep gate
-/// `scripts/check_wait_predicate_purity.sh`.
-#[macro_export]
-macro_rules! spawn_kernel_io {
-    ($name:expr, $entry:path $(,)?) => {{
-        fn __slopos_kernel_io_trampoline() {
-            // The trampoline is only reachable from a task slot the scheduler
-            // validated as KernelIo priority: this macro is its sole emitter
-            // and always pairs it with the priority argument below.
-            let token =
-                $crate::sync::kernel_io_task::KernelIoToken::<'static>::__new_for_trampoline_only();
-            $entry(token);
-        }
+/// A count, not a flag: the first of two overlapping freezes to release must
+/// not thaw the second holder's threads.
+static FREEZE_DEPTH: AtomicU32 = AtomicU32::new(0);
 
-        $crate::task::spawn(
-            $name,
-            __slopos_kernel_io_trampoline,
-            ::slopos_abi::task::TaskPriority::KernelIo.as_u8(),
-        )
-    }};
+/// Names *which* freeze a thread's ack is for. A bare bool is ABA-able: a
+/// thread preempted before clearing it lets the next freeze read a stale ack.
+static FREEZE_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+#[inline]
+pub fn kernel_io_freeze_requested() -> bool {
+    FREEZE_DEPTH.load(Ordering::Acquire) != 0
 }
 
-use crate::sync::lock_graph::LockClassKey;
-use crate::sync::spin::SpinLock;
-use crate::sync::wait_queue::WaitQueue;
-use core::sync::atomic::AtomicBool;
+#[inline]
+fn current_freeze_epoch() -> u64 {
+    FREEZE_EPOCH.load(Ordering::Acquire)
+}
+
+/// Broadcasting on the 0 → 1 edge only keeps a nested freeze from handing every
+/// already-parked thread back to the scheduler.
+pub fn request_kernel_io_freeze() {
+    if FREEZE_DEPTH.fetch_add(1, Ordering::AcqRel) == 0 {
+        FREEZE_EPOCH.fetch_add(1, Ordering::AcqRel);
+        wake_every_registered_stop();
+    }
+}
+
+/// Saturating: an unbalanced release that wrapped to `u32::MAX` would discard
+/// every work wake for the rest of the boot.
+pub fn release_kernel_io_freeze() {
+    let mut depth = FREEZE_DEPTH.load(Ordering::Acquire);
+    loop {
+        if depth == 0 {
+            debug_assert!(false, "kernel-io freeze released more times than held");
+            return;
+        }
+        match FREEZE_DEPTH.compare_exchange_weak(
+            depth,
+            depth - 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(observed) => depth = observed,
+        }
+    }
+    if depth == 1 {
+        wake_every_registered_stop();
+    }
+}
+
+/// Panic path only: a test that panics mid-freeze must not leave the threads
+/// parked for the rest of the boot.
+pub fn clear_kernel_io_freeze_after_panic() {
+    if FREEZE_DEPTH.swap(0, Ordering::AcqRel) != 0 {
+        wake_every_registered_stop();
+    }
+}
 
 /// Cooperative stop signal for one kernel-I/O thread.
 ///
 /// Kernel tasks take no signals and are not killable: they need a stop they
 /// can *finish* on — the ext2 flusher's last act is a full sync, which a kill
-/// would discard. The queue lives inside the signal so the park and the
-/// stop-wake cannot drift onto two different queues.
+/// would discard. The queue lives inside the signal so the park, the stop-wake
+/// and the freeze gate cannot drift onto separate queues.
 pub struct KernelIoStop {
     name: &'static str,
     requested: AtomicBool,
     exited: AtomicBool,
+    /// Freeze epoch this thread is parked for, or 0 when it is off the gate.
+    frozen_epoch: AtomicU64,
+    /// A stalled kthread is otherwise indistinguishable from an idle one.
+    laps: AtomicU64,
+    task_id: AtomicU32,
     wq: WaitQueue,
 }
 
@@ -176,6 +171,9 @@ impl KernelIoStop {
             name,
             requested: AtomicBool::new(false),
             exited: AtomicBool::new(false),
+            frozen_epoch: AtomicU64::new(0),
+            laps: AtomicU64::new(0),
+            task_id: AtomicU32::new(INVALID_TASK_ID),
             wq: WaitQueue::new(class),
         }
     }
@@ -185,25 +183,37 @@ impl KernelIoStop {
         self.name
     }
 
-    /// The queue the thread parks on; producers wake it to hand over work.
-    #[inline]
-    pub const fn queue(&self) -> &WaitQueue {
-        &self.wq
-    }
-
     #[inline]
     pub fn requested(&self) -> bool {
         self.requested.load(Ordering::Acquire)
     }
 
     /// Ask the thread to stop, and wake it: the flag alone leaves a parked
-    /// thread that never re-evaluates it.
+    /// thread that never re-evaluates it. Wakes through a freeze, which a stop
+    /// outranks.
     pub fn request(&self) {
         self.requested.store(true, Ordering::Release);
         let _ = self.wq.wake_all();
     }
 
-    /// Called by the thread once its loop has ended and its final work is done.
+    /// Skipped under a freeze: the caller's armed edge is the durable state and
+    /// this is only a nudge.
+    #[inline]
+    pub fn wake_for_work(&self) {
+        if kernel_io_freeze_requested() {
+            return;
+        }
+        let _ = self.wq.wake_all();
+    }
+
+    #[inline]
+    pub fn wake_one_for_work(&self) {
+        if kernel_io_freeze_requested() {
+            return;
+        }
+        let _ = self.wq.wake_one();
+    }
+
     #[inline]
     pub fn note_exited(&self) {
         self.exited.store(true, Ordering::Release);
@@ -212,6 +222,33 @@ impl KernelIoStop {
     #[inline]
     pub fn has_exited(&self) -> bool {
         self.exited.load(Ordering::Acquire)
+    }
+
+    /// For the freeze *now held*; a stale stamp reads false.
+    #[inline]
+    pub fn is_frozen(&self) -> bool {
+        let stamped = self.frozen_epoch.load(Ordering::Acquire);
+        stamped != 0 && stamped == current_freeze_epoch()
+    }
+
+    #[inline]
+    pub fn laps(&self) -> u64 {
+        self.laps.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn task_id(&self) -> u32 {
+        self.task_id.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    fn bind_task(&self, task_id: u32) {
+        self.task_id.store(task_id, Ordering::Release);
+    }
+
+    #[inline]
+    fn note_lap(&self) {
+        self.laps.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -228,50 +265,104 @@ pub enum KthreadWait {
 }
 
 impl KernelIoToken<'_> {
-    /// Park until `condition` holds or a stop is requested.
-    ///
-    /// The stop probe is folded into the predicate so a `request` issued
-    /// between the caller's last check and the park is not lost.
+    /// The stop and freeze probes sit ahead of `condition`, so it is not
+    /// evaluated under either: observing predicates only.
     pub fn park<F: FnMut() -> bool>(&self, stop: &KernelIoStop, mut condition: F) -> KthreadWait {
-        if stop.requested() {
-            return KthreadWait::Stop;
+        loop {
+            if stop.requested() {
+                return KthreadWait::Stop;
+            }
+            let outcome = stop
+                .wq
+                .wait_event(|| stop.requested() || kernel_io_freeze_requested() || condition());
+            stop.note_lap();
+            match Self::classify(stop, outcome) {
+                ParkOutcome::Settled(wait) => return wait,
+                ParkOutcome::Freeze => {
+                    if !hold_frozen(stop) {
+                        return KthreadWait::Timeout;
+                    }
+                }
+            }
         }
-        let outcome = stop.wq.wait_event(|| stop.requested() || condition());
-        Self::classify(stop, outcome.is_ok())
     }
 
-    /// Park until `condition` holds, a stop is requested, or `timeout_ms`
-    /// elapses.
+    /// A freeze restarts the timeout: a thread that spent it parked did no work.
     pub fn park_timeout<F: FnMut() -> bool>(
         &self,
         stop: &KernelIoStop,
         mut condition: F,
         timeout_ms: u64,
     ) -> KthreadWait {
-        if stop.requested() {
-            return KthreadWait::Stop;
+        loop {
+            if stop.requested() {
+                return KthreadWait::Stop;
+            }
+            let outcome = stop.wq.wait_event_timeout(
+                || stop.requested() || kernel_io_freeze_requested() || condition(),
+                timeout_ms,
+            );
+            stop.note_lap();
+            match Self::classify(stop, outcome) {
+                ParkOutcome::Settled(wait) => return wait,
+                ParkOutcome::Freeze => {
+                    if !hold_frozen(stop) {
+                        return KthreadWait::Timeout;
+                    }
+                }
+            }
         }
-        let outcome = stop
-            .wq
-            .wait_event_timeout(|| stop.requested() || condition(), timeout_ms);
-        Self::classify(stop, outcome.is_ok())
     }
 
     #[inline]
-    fn classify(stop: &KernelIoStop, satisfied: bool) -> KthreadWait {
+    fn classify(stop: &KernelIoStop, outcome: Result<(), WaitAbort>) -> ParkOutcome {
         if stop.requested() {
-            KthreadWait::Stop
-        } else if satisfied {
-            KthreadWait::Ready
-        } else {
-            KthreadWait::Timeout
+            return ParkOutcome::Settled(KthreadWait::Stop);
         }
+        // A kernel task exits by returning, and `Stop` is the only outcome that
+        // says so; `Timeout` would spin with the abort still pending.
+        if matches!(outcome, Err(WaitAbort::Killed)) {
+            return ParkOutcome::Settled(KthreadWait::Stop);
+        }
+        // Ahead of the error check, or a `park_timeout` expiring as a freeze is
+        // raised runs a round of its body inside the holder's window.
+        if kernel_io_freeze_requested() {
+            return ParkOutcome::Freeze;
+        }
+        if outcome.is_err() {
+            return ParkOutcome::Settled(KthreadWait::Timeout);
+        }
+        ParkOutcome::Settled(KthreadWait::Ready)
     }
 }
 
-/// A fixed array rather than a linker registry: the set is small and known at
-/// boot, and a registry would add a `link.ld` section for four entries.
-const MAX_KERNEL_IO_STOPS: usize = 8;
+enum ParkOutcome {
+    Settled(KthreadWait),
+    Freeze,
+}
+
+/// Unbounded even under `park_timeout`: holding no sleep-queue entry and no
+/// runqueue slot leaves a scheduler reset nothing to destroy. Re-stamps because
+/// a freeze can end and a new one begin while parked. `false` means no runtime.
+fn hold_frozen(stop: &KernelIoStop) -> bool {
+    let outcome = loop {
+        let epoch = current_freeze_epoch();
+        if stop.requested() || !kernel_io_freeze_requested() {
+            break Ok(());
+        }
+        stop.frozen_epoch.store(epoch, Ordering::Release);
+        let outcome = stop.wq.wait_event(|| {
+            stop.requested() || !kernel_io_freeze_requested() || current_freeze_epoch() != epoch
+        });
+        if outcome.is_err() {
+            break outcome;
+        }
+    };
+    stop.frozen_epoch.store(0, Ordering::Release);
+    !matches!(outcome, Err(WaitAbort::NoRuntime))
+}
+
+pub const MAX_KERNEL_IO_STOPS: usize = 8;
 
 struct StopRegistry {
     entries: [Option<&'static KernelIoStop>; MAX_KERNEL_IO_STOPS],
@@ -286,35 +377,87 @@ static STOP_REGISTRY: SpinLock<StopRegistry> = SpinLock::new(
     crate::lock_class!("STOP_REGISTRY", LOCK_LEVEL_REGISTRY),
 );
 
-/// Make `stop` visible to [`request_kernel_io_stop_all`]; a thread that never
-/// registers cannot be asked to stop.
-pub fn register_kernel_io_stop(stop: &'static KernelIoStop) {
+/// Snapshot so a broadcast runs with the lock released: `wake_all` reaches the
+/// scheduler.
+fn registered_stops() -> [Option<&'static KernelIoStop>; MAX_KERNEL_IO_STOPS] {
+    let registry = STOP_REGISTRY.lock();
+    let mut copy: [Option<&'static KernelIoStop>; MAX_KERNEL_IO_STOPS] =
+        [None; MAX_KERNEL_IO_STOPS];
+    copy[..registry.count].copy_from_slice(&registry.entries[..registry.count]);
+    copy
+}
+
+fn wake_every_registered_stop() {
+    for stop in registered_stops().iter().flatten() {
+        let _ = stop.wq.wake_all();
+    }
+}
+
+fn register_kernel_io_stop(stop: &'static KernelIoStop) -> bool {
     let mut registry = STOP_REGISTRY.lock();
+    // A retried spawn hands back the same `'static` stop.
+    if registry.entries[..registry.count]
+        .iter()
+        .flatten()
+        .any(|entry| core::ptr::eq(*entry, stop))
+    {
+        return true;
+    }
     if registry.count >= MAX_KERNEL_IO_STOPS {
-        crate::klog_info!(
-            "kernel-io: stop registry full, '{}' cannot be stopped",
-            stop.name()
-        );
-        return;
+        return false;
     }
     let idx = registry.count;
     registry.entries[idx] = Some(stop);
     registry.count += 1;
+    true
 }
 
-/// Ask every registered kernel-I/O thread to stop, in reverse registration
-/// order so a later thread that feeds an earlier one drains first.
-///
-/// Only asks: the bounded wait belongs to the caller, because waiting needs a
-/// scheduler and this crate sits below it.
+/// Registers the stop before spawning, so no thread reaches its first park
+/// unreachable by the broadcasts.
+#[doc(hidden)]
+pub fn __spawn_kernel_io(
+    stop: &'static KernelIoStop,
+    entry: crate::task::KernelThreadEntry,
+) -> Result<SpawnedTaskId, SpawnError> {
+    if !register_kernel_io_stop(stop) {
+        crate::klog_info!(
+            "kernel-io: stop registry full, refusing to spawn '{}'",
+            stop.name()
+        );
+        return Err(SpawnError::StopRegistryFull);
+    }
+    match crate::task::spawn_at_priority(stop.name(), entry, TaskPriority::KernelIo) {
+        Ok(id) => {
+            stop.bind_task(id.as_u32());
+            Ok(id)
+        }
+        Err(err) => {
+            stop.note_exited();
+            Err(err)
+        }
+    }
+}
+
+/// Spawn a `KernelIo` kthread bound to `stop`, which carries its name. The stop
+/// is not optional: a thread without one can be neither stopped at shutdown nor
+/// frozen for a test scope, and both failures are silent.
+#[macro_export]
+macro_rules! spawn_kernel_io {
+    ($stop:expr, $entry:path $(,)?) => {{
+        fn __slopos_kernel_io_trampoline() {
+            let token =
+                $crate::sync::kernel_io_task::KernelIoToken::<'static>::__new_for_trampoline_only();
+            $entry(token);
+        }
+
+        $crate::sync::kernel_io_task::__spawn_kernel_io($stop, __slopos_kernel_io_trampoline)
+    }};
+}
+
+/// Reverse registration order, so a thread that feeds an earlier one drains
+/// first. Only asks: the bounded wait needs a scheduler.
 pub fn request_kernel_io_stop_all() -> usize {
-    let stops = {
-        let registry = STOP_REGISTRY.lock();
-        let mut copy: [Option<&'static KernelIoStop>; MAX_KERNEL_IO_STOPS] =
-            [None; MAX_KERNEL_IO_STOPS];
-        copy[..registry.count].copy_from_slice(&registry.entries[..registry.count]);
-        copy
-    };
+    let stops = registered_stops();
     let mut asked = 0usize;
     for stop in stops.iter().rev().flatten() {
         stop.request();
@@ -323,8 +466,6 @@ pub fn request_kernel_io_stop_all() -> usize {
     asked
 }
 
-/// Registered kernel-I/O threads that have not yet reported finishing; zero
-/// means every one of them ran its own exit path.
 pub fn kernel_io_stops_pending() -> usize {
     let registry = STOP_REGISTRY.lock();
     registry.entries[..registry.count]
@@ -334,13 +475,77 @@ pub fn kernel_io_stops_pending() -> usize {
         .count()
 }
 
-/// Names of the kernel-I/O threads that have not finished, for the shutdown
-/// report.
+pub fn kernel_io_unfrozen_pending() -> usize {
+    let registry = STOP_REGISTRY.lock();
+    registry.entries[..registry.count]
+        .iter()
+        .flatten()
+        .filter(|stop| !stop.has_exited() && !stop.is_frozen())
+        .count()
+}
+
 pub fn for_each_unstopped_kernel_io(mut report: impl FnMut(&'static str)) {
     let registry = STOP_REGISTRY.lock();
     for stop in registry.entries[..registry.count].iter().flatten() {
         if !stop.has_exited() {
             report(stop.name());
         }
+    }
+}
+
+pub fn for_each_unfrozen_kernel_io(mut report: impl FnMut(&'static str)) {
+    let registry = STOP_REGISTRY.lock();
+    for stop in registry.entries[..registry.count].iter().flatten() {
+        if !stop.has_exited() && !stop.is_frozen() {
+            report(stop.name());
+        }
+    }
+}
+
+/// Snapshotted in one pass so a caller can test membership under its own lock.
+/// This, not a priority comparison, is what "infrastructure" means: preserved
+/// exactly when also freezable and stoppable.
+pub struct KernelIoTaskIds {
+    ids: [u32; MAX_KERNEL_IO_STOPS],
+    len: usize,
+}
+
+impl KernelIoTaskIds {
+    #[inline]
+    pub const fn empty() -> Self {
+        Self {
+            ids: [INVALID_TASK_ID; MAX_KERNEL_IO_STOPS],
+            len: 0,
+        }
+    }
+
+    #[inline]
+    pub fn contains(&self, task_id: u32) -> bool {
+        task_id != INVALID_TASK_ID && self.ids[..self.len].contains(&task_id)
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+pub fn kernel_io_task_ids() -> KernelIoTaskIds {
+    let mut ids = [INVALID_TASK_ID; MAX_KERNEL_IO_STOPS];
+    let mut len = 0usize;
+    for stop in registered_stops().iter().flatten() {
+        let id = stop.task_id();
+        if id != INVALID_TASK_ID {
+            ids[len] = id;
+            len += 1;
+        }
+    }
+    KernelIoTaskIds { ids, len }
+}
+
+pub fn for_each_kernel_io_stop(mut visit: impl FnMut(&'static KernelIoStop)) {
+    let stops = registered_stops();
+    for stop in stops.iter().flatten() {
+        visit(stop);
     }
 }

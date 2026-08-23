@@ -6,8 +6,8 @@ use slopos_sched::scheduler::{
     init_scheduler, scheduler_enable, scheduler_is_enabled, scheduler_shutdown,
 };
 use slopos_sched::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskPriority, TaskStatus, init_task_manager,
-    task_create, task_find_by_id, task_shutdown_all, task_terminate,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskPriority, TaskStatus, freeze_kernel_io_all,
+    task_create, task_find_by_id, task_registry_reset, task_shutdown_population, task_terminate,
 };
 use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::{TestResult, assert_eq_test, assert_test};
@@ -29,6 +29,11 @@ impl ShutdownFixture {
 }
 
 extern "C" fn dummy_task_fn(_arg: *mut c_void) {}
+
+fn reset_registry() -> i32 {
+    let freeze = freeze_kernel_io_all();
+    task_registry_reset(&freeze)
+}
 
 fn create_n_tasks(n: usize) -> usize {
     let mut created = 0;
@@ -170,13 +175,13 @@ pub fn test_task_shutdown_all_terminates() -> TestResult {
     let created = create_n_tasks(10);
     assert_test!(created > 0, "failed to create any tasks");
 
-    let _result = task_shutdown_all();
+    let _result = task_shutdown_population();
     TestResult::Pass
 }
 
 pub fn test_task_shutdown_all_empty() -> TestResult {
     let _fixture = ShutdownFixture::new();
-    let _result = task_shutdown_all();
+    let _result = task_shutdown_population();
     TestResult::Pass
 }
 
@@ -192,9 +197,9 @@ pub fn test_task_shutdown_all_idempotent() -> TestResult {
     );
     assert_test!(task_id != INVALID_TASK_ID);
 
-    let _r1 = task_shutdown_all();
-    let _r2 = task_shutdown_all();
-    let _r3 = task_shutdown_all();
+    let _r1 = task_shutdown_population();
+    let _r2 = task_shutdown_population();
+    let _r3 = task_shutdown_population();
     TestResult::Pass
 }
 
@@ -212,7 +217,7 @@ pub fn test_shutdown_sequence_ordering() -> TestResult {
     );
     assert_test!(task_id != INVALID_TASK_ID);
 
-    let _result = task_shutdown_all();
+    let _result = task_shutdown_population();
     scheduler_shutdown();
     TestResult::Pass
 }
@@ -220,16 +225,19 @@ pub fn test_shutdown_sequence_ordering() -> TestResult {
 pub fn test_shutdown_from_clean_state() -> TestResult {
     let _fixture = ShutdownFixture::new();
     scheduler_shutdown();
-    let _result = task_shutdown_all();
+    let _result = task_shutdown_population();
     TestResult::Pass
 }
 
 pub fn test_shutdown_partial_init() -> TestResult {
-    task_shutdown_all();
-    let _ = init_task_manager();
-    // Deliberately skips init_scheduler.
+    let _fixture = ShutdownFixture::new();
+
+    task_shutdown_population();
+    let _ = reset_registry();
+    // Deliberately skips the second init_scheduler: a shutdown over that
+    // half-configured state must still be safe.
     scheduler_shutdown();
-    task_shutdown_all();
+    task_shutdown_population();
     TestResult::Pass
 }
 
@@ -258,7 +266,7 @@ pub fn test_shutdown_many_tasks() -> TestResult {
     let created = create_n_tasks(50);
     assert_test!(created > 0);
 
-    let _result = task_shutdown_all();
+    let _result = task_shutdown_population();
     TestResult::Pass
 }
 
@@ -283,7 +291,7 @@ pub fn test_shutdown_mixed_priorities() -> TestResult {
         assert_test!(task_id != INVALID_TASK_ID);
     }
 
-    let _result = task_shutdown_all();
+    let _result = task_shutdown_population();
     TestResult::Pass
 }
 
@@ -300,7 +308,7 @@ pub fn test_task_shutdown_skips_current() -> TestResult {
         );
     }
 
-    let _result = task_shutdown_all();
+    let _result = task_shutdown_population();
     TestResult::Pass
 }
 
@@ -308,9 +316,9 @@ pub fn test_scheduler_reinit_after_shutdown() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
     scheduler_shutdown();
-    task_shutdown_all();
+    task_shutdown_population();
 
-    assert_eq_test!(init_task_manager(), 0, "reinit task manager failed");
+    assert_eq_test!(reset_registry(), 0, "registry reset failed");
     assert_eq_test!(init_scheduler(), 0, "reinit scheduler failed");
 
     let task_id = task_create(
@@ -373,12 +381,14 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
     const TASKS_PER_CYCLE: usize = 5;
     const ALLOCS_PER_CYCLE: usize = 8;
 
-    task_shutdown_all();
+    let _fixture = ShutdownFixture::new();
+
+    task_shutdown_population();
     scheduler_shutdown();
 
     for cycle in 0..CYCLES {
         assert_test!(
-            init_task_manager() == 0 && init_scheduler() == 0,
+            reset_registry() == 0 && init_scheduler() == 0,
             "cycle {} init failed",
             cycle
         );
@@ -410,7 +420,7 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
             page_addrs[i] = phys.as_u64();
         }
 
-        let _result = task_shutdown_all();
+        let _result = task_shutdown_population();
         scheduler_shutdown();
 
         for ptr in heap_ptrs.iter() {
@@ -479,7 +489,7 @@ pub fn test_shutdown_scheduler_alive_during_task_teardown() -> TestResult {
     let created = create_n_tasks(5);
     assert_test!(created > 0, "failed to create tasks");
 
-    let _result = task_shutdown_all();
+    let _result = task_shutdown_population();
     assert_test!(
         scheduler_is_enabled() != 0,
         "scheduler must remain enabled after task_shutdown_all"

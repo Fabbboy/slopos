@@ -60,6 +60,7 @@ pub use fpu_owner::{
     fpu_owner_yield_after_save, fpu_state_valid,
 };
 pub use handles::{DLinkProvider, LinkProvider};
+pub(crate) use spawner::spawn_at_priority;
 pub use spawner::{
     KernelThreadEntry, KernelThreadSpawner, SpawnError, SpawnedTaskId,
     current_kernel_thread_spawner, register_kernel_thread_spawner, spawn,

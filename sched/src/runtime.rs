@@ -149,22 +149,8 @@ pub fn kernel_thread_spawner_handle() -> &'static &'static dyn KernelThreadSpawn
     &KERNEL_THREAD_SPAWNER_DYN
 }
 
-/// Production backend for `kernel_io_task::yield_with_deadline`, which defers
-/// to a boot-registered impl so the trusted core does not link the scheduler.
-fn kernel_io_yield_impl(deadline: slopos_ostd::sync::kernel_io_task::Deadline) {
-    use slopos_ostd::sync::kernel_io_task::Deadline;
-    match deadline {
-        Deadline::Immediate => r#yield(),
-        Deadline::AtMs(ms) => {
-            super::sleep::block_current_task_with_timeout(ms);
-        }
-        Deadline::Indefinite => {
-            // A far-future deadline rather than none: `Indefinite` is normally
-            // driven by a `wait_event` predicate, and a forgotten wake must not
-            // wedge the task permanently.
-            super::sleep::block_current_task_with_timeout(u32::MAX);
-        }
-    }
+fn kernel_io_yield_impl() {
+    r#yield();
 }
 
 /// Stable BSS singleton for the [`YieldBackend`] registration.

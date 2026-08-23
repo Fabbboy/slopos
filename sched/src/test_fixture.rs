@@ -39,6 +39,8 @@ fn ensure_panic_cleanup_registered() {
 
 fn panic_clear_test_scope() {
     slopos_hermetic::clear_test_scope_after_panic();
+    // Or a panic mid-freeze parks every kernel-I/O thread for the rest of boot.
+    slopos_ostd::sync::kernel_io_task::clear_kernel_io_freeze_after_panic();
 }
 
 use super::per_cpu::{
@@ -46,12 +48,15 @@ use super::per_cpu::{
     with_cpu_scheduler,
 };
 use super::scheduler::{init_scheduler, scheduler_shutdown};
-use super::task::{init_task_manager, task_shutdown_all};
+use super::task::{
+    KernelIoFreeze, freeze_kernel_io_all, task_registry_reset, task_shutdown_population,
+};
 
 /// RAII scope guard for kernel tests that mutate scheduler / task state. Embed
 /// it as a fixture field; do not implement Drop on the wrapper — the scope's
 /// Drop handles teardown.
 pub struct KernelTestScope {
+    kernel_io_freeze: Option<KernelIoFreeze>,
     aps_paused: Option<ApPauseToken>,
     captured: KVec<(&'static HermeticVTable, core::ptr::NonNull<()>)>,
     boot_ctx: Option<BootCtx<'static, TestInit>>,
@@ -60,15 +65,15 @@ pub struct KernelTestScope {
 }
 
 impl KernelTestScope {
-    /// Enter the scope: snapshot kernel-wide state via the hermetic
-    /// registry, pause APs, and reinitialise the task manager +
-    /// scheduler so the test starts from a clean slate.
+    /// Enter the scope: freeze the kernel-I/O threads, snapshot kernel-wide
+    /// state via the hermetic registry, pause APs, and reset the task
+    /// population + scheduler so the test starts from a clean slate.
     ///
     /// Panics if:
     /// - a previous scope is still alive (BootCtx slot empty),
     /// - the APs will not park, since the scope's whole contract is that
     ///   they cannot race the test body,
-    /// - `init_task_manager` or `init_scheduler` returns non-zero,
+    /// - `task_registry_reset` or `init_scheduler` returns non-zero,
     /// - the registry has a dependency cycle,
     /// - snapshot allocation fails.
     pub fn enter() -> Self {
@@ -77,12 +82,16 @@ impl KernelTestScope {
         // First, so a concurrent scope is rejected before any state is mutated.
         let boot_ctx = slopos_hermetic::take_for_test();
 
+        // Before the AP pause: a thread parks on its gate under its own power.
+        let kernel_io_freeze = freeze_kernel_io_all();
+
         // Every snapshot below reads kernel-wide state an AP is free to mutate,
         // so a scope entered over running APs would report results from a run
         // it did not control.
         let aps_paused = match pause_all_aps() {
             Ok(token) => token,
             Err(err) => {
+                drop(kernel_io_freeze);
                 slopos_hermetic::return_after_test(boot_ctx);
                 panic!("KernelTestScope: AP pause failed: {:?}", err);
             }
@@ -103,6 +112,7 @@ impl KernelTestScope {
             Err(e) => {
                 klog_info!("KernelTestScope: registry topo_order failed: {:?}", e);
                 resume_all_aps_if_not_nested(aps_paused);
+                drop(kernel_io_freeze);
                 slopos_hermetic::return_after_test(boot_ctx);
                 panic!("KernelTestScope: registry topo_order failed");
             }
@@ -118,6 +128,7 @@ impl KernelTestScope {
                 klog_info!("KernelTestScope: snapshot OOM for state {}", label);
                 run_restore_phase_drain(&mut partial);
                 resume_all_aps_if_not_nested(aps_paused);
+                drop(kernel_io_freeze);
                 slopos_hermetic::return_after_test(boot_ctx);
                 panic!("KernelTestScope: snapshot OOM");
             }
@@ -130,12 +141,12 @@ impl KernelTestScope {
             slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut (),
         );
 
-        task_shutdown_all();
+        task_shutdown_population();
         scheduler_shutdown();
 
         let mut reset_failure: Option<&'static str> = None;
-        if init_task_manager() != 0 {
-            reset_failure = Some("init_task_manager");
+        if task_registry_reset(&kernel_io_freeze) != 0 {
+            reset_failure = Some("task_registry_reset");
         } else if init_scheduler() != 0 {
             reset_failure = Some("init_scheduler");
         }
@@ -144,6 +155,7 @@ impl KernelTestScope {
             klog_info!("KernelTestScope: {} failed", stage);
             run_restore_phase_drain(&mut captured);
             resume_all_aps_if_not_nested(aps_paused);
+            drop(kernel_io_freeze);
             slopos_hermetic::return_after_test(boot_ctx);
             panic!("KernelTestScope: {} failed", stage);
         }
@@ -161,6 +173,7 @@ impl KernelTestScope {
             if let Some(cpu) = missing_cpu {
                 run_restore_phase_drain(&mut captured);
                 resume_all_aps_if_not_nested(aps_paused);
+                drop(kernel_io_freeze);
                 slopos_hermetic::return_after_test(boot_ctx);
                 panic!(
                     "KernelTestScope: per-CPU scheduler {} missing after init",
@@ -170,6 +183,7 @@ impl KernelTestScope {
         }
 
         Self {
+            kernel_io_freeze: Some(kernel_io_freeze),
             aps_paused: Some(aps_paused),
             captured,
             boot_ctx: Some(boot_ctx),
@@ -196,7 +210,7 @@ impl KernelTestScope {
 
 impl Drop for KernelTestScope {
     fn drop(&mut self) {
-        task_shutdown_all();
+        task_shutdown_population();
         scheduler_shutdown();
         clear_all_cpu_queues();
 
@@ -209,5 +223,7 @@ impl Drop for KernelTestScope {
         if let Some(token) = self.aps_paused.take() {
             resume_all_aps_if_not_nested(token);
         }
+
+        drop(self.kernel_io_freeze.take());
     }
 }

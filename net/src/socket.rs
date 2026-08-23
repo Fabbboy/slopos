@@ -884,19 +884,11 @@ fn wait_socket_event<F: FnMut() -> bool>(
     if slopos_kernel_services::driver_runtime::has_pending_signal() {
         return SockWait::Signal;
     }
-    let mut predicate = || {
-        // TODO(tech-debt): synchronous drain compensating for un-root-caused
-        // virtio-net MSI-X IRQ-delivery gaps — the netpoll kthread should be
-        // the sole RX cadence. Allowlisted in
-        // `scripts/check_wait_predicate_purity.sh`.
-        crate::napi::kick();
-        pred()
-    };
     let sub = BUS.subscribe(ev);
     let observed = if timeout_ms > 0 {
-        sub.wait_event_interruptible_timeout(&mut predicate, timeout_ms)
+        sub.wait_event_interruptible_timeout(&mut pred, timeout_ms)
     } else {
-        sub.wait_event_interruptible(&mut predicate)
+        sub.wait_event_interruptible(&mut pred)
     };
     match observed {
         Ok(()) => SockWait::Ready,
@@ -1744,7 +1736,6 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         }
 
         slopos_kernel_services::driver_runtime::sleep_current_task_ms(50);
-        crate::napi::kick();
     }
 }
 
@@ -2536,10 +2527,6 @@ fn tcp_recv_loop(
                     SockWait::Timeout => return errno_i32(ERRNO_EAGAIN) as i64,
                     SockWait::Signal => return errno_i32(ERRNO_EINTR) as i64,
                 }
-                // Sync-drain on the recv task's CPU so the post-wait ring read
-                // observes the most recent committed used-ring state; the
-                // driver kthread's drain can lag the woken user task.
-                crate::napi::kick();
             }
             Err(e) => return map_tcp_err_i64(e),
         }
@@ -2675,10 +2662,6 @@ pub fn socket_close(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_poll_readable(sock_idx: u32) -> u32 {
-    // Sync-drain so the readiness probe observes the most recent committed
-    // used-ring state: `select`/`poll` demand a fresh-edge sample every call.
-    crate::napi::kick();
-
     let (state, is_datagram, tcp_idx, has_dgram_data) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {

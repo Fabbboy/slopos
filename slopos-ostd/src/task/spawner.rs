@@ -6,6 +6,8 @@
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
+use slopos_abi::task::TaskPriority;
+
 use crate::sync::BspToken;
 
 /// Bare kernel-thread entry point: a plain `fn`, because every call site uses
@@ -23,6 +25,8 @@ pub enum SpawnError {
     OutOfMemory,
     /// The newly-created task could not be installed on a runqueue.
     ScheduleFailed,
+    PriorityReserved,
+    StopRegistryFull,
 }
 
 /// Implementors are required to be `Sync` so the static handle slot can be
@@ -95,15 +99,30 @@ pub fn current_kernel_thread_spawner() -> Option<&'static dyn KernelThreadSpawne
 /// [`KernelThreadSpawner`].
 ///
 /// The scheduler keeps a fixed-length copy of `name` on the task struct.
+///
+/// `KernelIo` and `Idle` are refused: each has a spawn surface that installs
+/// the bookkeeping its tier depends on.
 pub fn spawn(
     name: &'static str,
     entry: KernelThreadEntry,
-    priority: u8,
+    priority: TaskPriority,
+) -> Result<SpawnedTaskId, SpawnError> {
+    if matches!(priority, TaskPriority::KernelIo | TaskPriority::Idle) {
+        return Err(SpawnError::PriorityReserved);
+    }
+    spawn_at_priority(name, entry, priority)
+}
+
+/// For `__spawn_kernel_io`, which has already registered the thread's stop.
+pub(crate) fn spawn_at_priority(
+    name: &'static str,
+    entry: KernelThreadEntry,
+    priority: TaskPriority,
 ) -> Result<SpawnedTaskId, SpawnError> {
     let Some(spawner) = current_kernel_thread_spawner() else {
         return Err(SpawnError::NotInitialised);
     };
-    spawner.spawn(name, entry, priority)
+    spawner.spawn(name, entry, priority.as_u8())
 }
 
 /// Test-only hook letting a host test binary re-install a fresh spawner.

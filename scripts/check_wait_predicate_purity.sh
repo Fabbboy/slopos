@@ -19,11 +19,8 @@
 # / `wait_event_until` opener. A hit that resolves to a wait-predicate
 # context fails the gate.
 #
-# Allowlist is empty: Phase 2 retired the last transitional kick and
-# the production data path now relies entirely on the IRQ-driven
-# threaded-NAPI cadence. Any new allowlist entry must come with a
-# documented incident and an exit plan — the gate exists to keep
-# regressions from drifting back in unnoticed.
+# The allowlist is empty and meant to stay that way. `napi::kick` is
+# not a function this tree has; the pattern is the tripwire.
 
 set -euo pipefail
 
@@ -37,19 +34,10 @@ gate_parse_args check_wait_predicate_purity "$@"
 # a wait predicate. Each entry must carry a documented incident
 # reference and a removal condition.
 #
-# `net/src/socket.rs::wait_socket_event` — the predicate calls
-# `napi::kick()` as a synchronous drain because the virtio-net MSI-X
-# delivery path shows post-probe IRQ-delivery gaps that have not yet
-# been root-caused. The IRQ-driven kthread parks on `NAPI_WAKER` and
-# wakes on `arm_and_wake`; we observe the wake fires reliably during
-# probe (DHCP / ARP-scan IRQs) but is intermittent afterward. The
-# kick keeps the user-task wake-up path correct on top of that;
-# remove this allowlist entry once the driver fix lands and the
-# end-to-end test (`userland/src/bin/tests/curl_e2e_test.rs`) passes
-# without it.
-ALLOWLIST=(
-    "net/src/socket.rs"
-)
+# Empty. An entry here says a predicate drains the NIC itself, which
+# only helps when the netpoll kthread is not running — a marker for a
+# bug elsewhere, where the fix belongs.
+ALLOWLIST=()
 
 PATTERNS=(
     "napi::kick"
@@ -252,15 +240,16 @@ fn g() {
 }
 FIXTURE
 
-    # The incident allowlist covers pass 1 only; pass 2 must still fire on
-    # the same file.
-    cat > "$(gate_fixture net/src/socket.rs)" <<'FIXTURE'
+    # No production entry to exercise, so the self-test supplies its own.
+    # Pass 1 must honour it, pass 2 must ignore it.
+    cat > "$(gate_fixture net/src/allowlisted_fixture.rs)" <<'FIXTURE'
 fn allowlisted() { let _ = q.wait_event(|| { crate::napi::kick(); true }); }
 fn not_allowlisted_for_epoch() {
     let _guard = NET_EPOCH.enter();
     let x = m.lock();
 }
 FIXTURE
+    ALLOWLIST=("net/src/allowlisted_fixture.rs")
 
     # The 20-line lookback *is* the gate; both bounds are pinned here.
     cat > "$(gate_fixture net/src/negatives.rs)" <<'FIXTURE'
@@ -306,6 +295,8 @@ fn outside_the_kernel_dirs() { let _ = q.wait_event(|| { force_napi_poll(); true
 FIXTURE
 
     GATE_FINDINGS="$(run_scan "$GATE_FIXTURE_ROOT" "${KERNEL_DIRS[@]}")"
+
+    ALLOWLIST=()
 
     gate_expect 1 4 "kick, wake_napi, force_napi_poll and a sleep inside the three wait_event spellings"
     gate_expect 2 5 "lock, sleep, yield and wait inside an Epoch scope, plus the allowlisted file which pass 2 does not exempt"

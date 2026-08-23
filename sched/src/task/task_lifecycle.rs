@@ -9,6 +9,7 @@ use slopos_ostd::process::{
     AccountId, PROCESS_HANDLE_NONE, Process, ProcessId, process_retire, process_spawn,
 };
 use slopos_ostd::string::bytes_as_str;
+use slopos_ostd::sync::kernel_io_task::KernelIoTaskIds;
 use slopos_ostd::task::ops::{
     TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_CHARGES, TASK_EXIT_CLEANUP_RESOURCES,
     TASK_EXIT_CLEANUP_VM,
@@ -1124,8 +1125,31 @@ pub fn cleanup_current_task_after_switch(task: &TaskRef) {
     let _ = task_reap(resolved_id);
 }
 
+/// Every reset that bounds the task population steps over these, since nothing
+/// respawns one. Keyed on the stop registry, not `TaskPriority::KernelIo`:
+/// preservation and reachability must be the same set.
 #[inline]
-fn should_collect_for_shutdown(task: &Task, current: Option<slopos_ostd::task::TaskAddr>) -> bool {
+pub fn is_infrastructure_task(task: &Task, kernel_io: &KernelIoTaskIds) -> bool {
+    if crate::per_cpu::is_idle_task(slopos_ostd::task::TaskAddr::of(task)) {
+        return true;
+    }
+    kernel_io.contains(task.task_id)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShutdownScope {
+    Population,
+    /// Power-off only, after `stop_kernel_io_tasks`.
+    Terminal,
+}
+
+#[inline]
+fn should_collect_for_shutdown(
+    task: &Task,
+    current: Option<slopos_ostd::task::TaskAddr>,
+    scope: ShutdownScope,
+    kernel_io: &KernelIoTaskIds,
+) -> bool {
     if task.status() == TaskStatus::Invalid {
         return false;
     }
@@ -1135,21 +1159,43 @@ fn should_collect_for_shutdown(task: &Task, current: Option<slopos_ostd::task::T
     if crate::per_cpu::is_idle_task(slopos_ostd::task::TaskAddr::of(task)) {
         return false;
     }
+    if scope == ShutdownScope::Population && is_infrastructure_task(task, kernel_io) {
+        return false;
+    }
     task.task_id != INVALID_TASK_ID
 }
 
 fn collect_shutdown_task_ids(
     current: Option<slopos_ostd::task::TaskAddr>,
+    scope: ShutdownScope,
 ) -> slopos_ostd::KVec<u32> {
-    with_task_manager(|mgr| {
-        let mut ids: slopos_ostd::KVec<u32> = slopos_ostd::KVec::new();
-        for task in mgr.iter_tasks() {
-            if should_collect_for_shutdown(&task, current) {
-                let _ = ids.push(task.task_id);
+    // Reserved off-lock: `TASK_MANAGER` is a cli-spinlock, and truncating on
+    // overflow would drop a task from the sweep silently.
+    let kernel_io = slopos_ostd::sync::kernel_io_task::kernel_io_task_ids();
+    let mut capacity = with_task_manager(|mgr| mgr.registry_len()).max(1);
+    loop {
+        let Ok(mut ids) = slopos_ostd::KVec::<u32>::with_capacity(capacity) else {
+            klog_info!("SCHED: shutdown sweep could not reserve its id buffer");
+            return slopos_ostd::KVec::new();
+        };
+        let seen = with_task_manager(|mgr| {
+            let mut seen = 0usize;
+            for task in mgr.iter_tasks() {
+                if !should_collect_for_shutdown(&task, current, scope, &kernel_io) {
+                    continue;
+                }
+                seen += 1;
+                if seen <= capacity {
+                    let _ = ids.push(task.task_id);
+                }
             }
+            seen
+        });
+        if seen <= capacity {
+            return ids;
         }
-        ids
-    })
+        capacity = seen;
+    }
 }
 
 fn terminate_task_ids(task_ids: &slopos_ostd::KVec<u32>) -> c_int {
@@ -1175,6 +1221,70 @@ fn refresh_num_tasks_after_shutdown() {
         }
         mgr.num_tasks = preserved;
     });
+}
+
+/// The wait is an optimisation, not a safety property: the threads survive a
+/// reset either way. Measured arrival is under 2 ms.
+const KERNEL_IO_FREEZE_MS: u64 = 50;
+
+/// Suppressed, and — if `is_complete` — parked holding no sleep-queue entry and
+/// no runqueue slot.
+#[must_use = "dropping the token immediately thaws the threads it froze"]
+pub struct KernelIoFreeze {
+    complete: bool,
+    _not_send: core::marker::PhantomData<*mut ()>,
+}
+
+impl KernelIoFreeze {
+    #[inline]
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+}
+
+/// Must run while every CPU is still scheduling, so callers that also pause APs
+/// take the freeze first and release it last.
+pub fn freeze_kernel_io_all() -> KernelIoFreeze {
+    use slopos_ostd::sync::kernel_io_task::{
+        for_each_unfrozen_kernel_io, kernel_io_unfrozen_pending, request_kernel_io_freeze,
+    };
+
+    request_kernel_io_freeze();
+
+    let deadline =
+        slopos_kernel_services::platform::get_time_ms().saturating_add(KERNEL_IO_FREEZE_MS);
+    let mut complete = true;
+    while kernel_io_unfrozen_pending() > 0 {
+        if slopos_kernel_services::platform::get_time_ms() >= deadline {
+            for_each_unfrozen_kernel_io(|name| {
+                klog_info!("SCHED: kernel-io task '{}' did not freeze in time", name);
+            });
+            complete = false;
+            break;
+        }
+        poll_backoff();
+    }
+
+    KernelIoFreeze {
+        complete,
+        _not_send: core::marker::PhantomData,
+    }
+}
+
+/// The clock spin matters: during the kernel test phase the BSP has no idle
+/// task, so `yield_` returns without switching.
+fn poll_backoff() {
+    crate::scheduler::yield_();
+    let until = slopos_kernel_services::platform::get_time_ms().saturating_add(1);
+    while slopos_kernel_services::platform::get_time_ms() < until {
+        core::hint::spin_loop();
+    }
+}
+
+impl Drop for KernelIoFreeze {
+    fn drop(&mut self) {
+        slopos_ostd::sync::kernel_io_task::release_kernel_io_freeze();
+    }
 }
 
 /// How long shutdown gives the kernel-I/O threads to finish. A thread that has
@@ -1212,7 +1322,17 @@ pub fn stop_kernel_io_tasks() {
     });
 }
 
+pub fn task_shutdown_population() -> c_int {
+    task_shutdown(ShutdownScope::Population)
+}
+
+/// Power-off only, and only after [`stop_kernel_io_tasks`]: a thread torn down
+/// here never reached its own exit path.
 pub fn task_shutdown_all() -> c_int {
+    task_shutdown(ShutdownScope::Terminal)
+}
+
+fn task_shutdown(scope: ShutdownScope) -> c_int {
     // A pause that cannot be taken is stepped over rather than propagated:
     // refusing to tear tasks down would leave the machine up with no way
     // forward.
@@ -1226,7 +1346,8 @@ pub fn task_shutdown_all() -> c_int {
             None
         }
     };
-    let tasks_to_terminate = collect_shutdown_task_ids(slopos_ostd::task::TaskAddr::current());
+    let tasks_to_terminate =
+        collect_shutdown_task_ids(slopos_ostd::task::TaskAddr::current(), scope);
     let result = terminate_task_ids(&tasks_to_terminate);
 
     crate::per_cpu::clear_all_cpu_queues();

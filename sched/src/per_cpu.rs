@@ -42,6 +42,8 @@ const NUM_PRIORITY_LEVELS: usize = 5;
 /// it without OSTD reaching into `core/`.
 pub use slopos_ostd::task::link_roles::ReadyQueueRole;
 
+use slopos_ostd::sync::kernel_io_task::{KernelIoTaskIds, MAX_KERNEL_IO_STOPS};
+
 /// Per-priority FIFO of ready tasks.
 struct ReadyQueue {
     list: KernelSync<IntrusiveLinkedList<Task, ReadyQueueRole>>,
@@ -54,13 +56,34 @@ impl ReadyQueue {
         }
     }
 
-    /// Drop every linked task, releasing each one's parked owning reference.
-    fn clear_with_ref_release(&self) {
+    /// Registered kernel-I/O threads are re-linked: the reference dropped here
+    /// is the *owning* one, so the caller could not put it back.
+    fn clear_with_ref_release(&self, kernel_io: &KernelIoTaskIds) {
+        let mut preserved: [Option<NonNull<Task>>; MAX_KERNEL_IO_STOPS] =
+            [None; MAX_KERNEL_IO_STOPS];
+        let mut kept = 0usize;
         while let Some(node) = self.list.pop() {
             let task = TaskRef::from_placement(node);
+            if kept < preserved.len() && kernel_io.contains(task.task_id) {
+                // Re-linking here would push onto the list this loop drains.
+                preserved[kept] = Some(node);
+                kept += 1;
+                core::mem::forget(task);
+                continue;
+            }
             let _ = task
                 .sched_placement_compare_exchange(SchedPlacement::ReadyQueue, SchedPlacement::None);
             task_put(task);
+        }
+        for node in preserved[..kept].iter().flatten() {
+            if self.list.push(*node).is_err() {
+                let task = TaskRef::from_placement(*node);
+                let _ = task.sched_placement_compare_exchange(
+                    SchedPlacement::ReadyQueue,
+                    SchedPlacement::None,
+                );
+                task_put(task);
+            }
         }
     }
 
@@ -220,10 +243,11 @@ impl PriorityRunQueue {
     /// task is enqueued onto it; idempotent, so test-fixture re-init shares
     /// this path.
     pub fn init(&self, cpu_id: usize) {
+        let kernel_io = slopos_ostd::sync::kernel_io_task::kernel_io_task_ids();
         self.cpu_id_atom.store(cpu_id, Ordering::Relaxed);
         self.time_slice_atom.store(10, Ordering::Relaxed);
         for queue in &self.ready_queues {
-            queue.clear_with_ref_release();
+            queue.clear_with_ref_release(&kernel_io);
         }
         self.enabled.store(false, Ordering::Relaxed);
         self.total_switches.store(0, Ordering::Relaxed);
@@ -1218,9 +1242,16 @@ pub fn clear_cpu_queues(cpu_id: usize) {
     let Some(sched) = cpu_scheduler(cpu_id) else {
         return;
     };
+    // Before the queue lock: the stop registry is the same lock level.
+    let kernel_io = slopos_ostd::sync::kernel_io_task::kernel_io_task_ids();
+    // Drained, not discarded: a pending wake for a preserved thread must land
+    // in the ready queue the retention below understands.
+    if !kernel_io.is_empty() {
+        sched.drain_remote_inbox();
+    }
     let _guard = sched.queue_lock.lock();
     for queue in &sched.ready_queues {
-        queue.clear_with_ref_release();
+        queue.clear_with_ref_release(&kernel_io);
     }
     drop(_guard);
     sched.clear_remote_inbox_with_ref_release();

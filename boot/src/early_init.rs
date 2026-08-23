@@ -824,7 +824,7 @@ pub fn kernel_main_impl() {
     if slopos_ostd::boot_flags::has_flag(slopos_ostd::boot_flags::BOOT_FLAG_PANIC_RECOVER_SMOKE) {
         RECOVER_SMOKE_DROP_RAN.store(false, Ordering::Release);
         RECOVER_SMOKE_TASK_ID.store(u32::MAX, Ordering::Release);
-        let priority = slopos_sched::task::TaskPriority::Normal.as_u8();
+        let priority = slopos_sched::task::TaskPriority::Normal;
         let smoke_task =
             slopos_ostd::task::spawn("panic-recover-smoke", panic_recover_smoke_task, priority);
         let Ok(smoke_task) = smoke_task else {

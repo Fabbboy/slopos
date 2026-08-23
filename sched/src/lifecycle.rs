@@ -41,7 +41,7 @@ pub fn get_scheduler_stats() -> SchedulerStats {
 pub fn boot_step_task_manager_init(
     _ctx: &mut slopos_hermetic::BootCtx<'_, slopos_hermetic::BspInit>,
 ) -> i32 {
-    crate::task::init_task_manager()
+    crate::task::ensure_task_manager_initialized()
 }
 
 pub fn boot_step_scheduler_init(

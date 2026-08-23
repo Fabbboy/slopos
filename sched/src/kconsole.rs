@@ -5,7 +5,7 @@ use slopos_ostd::kconsole::{KCMD_INFORMATIONAL, KConsole};
 use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::{kline, ksymline};
 
-use crate::task::{Task, TaskStatus, task_for_each_active, task_slot_census};
+use crate::task::{Task, TaskStatus, task_find_by_id, task_for_each_active, task_slot_census};
 
 /// Deep enough to name the blocking primitive and its caller, shallow enough
 /// that a machine with many blocked tasks still fits the line budget.
@@ -33,6 +33,14 @@ slopos_ostd::kcommand! {
     help = "scheduler counters, per-CPU and total",
     flags = KCMD_INFORMATIONAL,
     run = run_sched,
+}
+
+slopos_ostd::kcommand! {
+    name = kthreads,
+    key = b'i',
+    help = "kernel-I/O service threads: task, state, laps",
+    flags = KCMD_INFORMATIONAL,
+    run = run_kthreads,
 }
 
 slopos_ostd::kcommand! {
@@ -191,5 +199,50 @@ fn dump_one(kc: &mut KConsole<'_>, t: &Task) {
     );
     for entry in entries.iter().take(captured.max(0) as usize) {
         ksymline!(kc, entry.return_address, "      ");
+    }
+}
+
+fn run_kthreads(kc: &mut KConsole<'_>) {
+    let mut seen = 0u32;
+    slopos_ostd::sync::kernel_io_task::for_each_kernel_io_stop(|stop| {
+        if kc.budget_left() == 0 {
+            return;
+        }
+        seen += 1;
+        let id = stop.task_id();
+        let state = if stop.has_exited() {
+            "exited"
+        } else if stop.requested() {
+            "stopping"
+        } else if stop.is_frozen() {
+            "frozen"
+        } else {
+            "running"
+        };
+        match task_find_by_id(id) {
+            Some(task) => kline!(
+                kc,
+                "  {:<14} task {:<6} {:<8} {:?} laps={}",
+                stop.name(),
+                id,
+                state,
+                task.status(),
+                stop.laps()
+            ),
+            None => kline!(
+                kc,
+                "  {:<14} task {:<6} {:<8} UNREGISTERED laps={}",
+                stop.name(),
+                id,
+                state,
+                stop.laps()
+            ),
+        }
+    });
+    if seen == 0 {
+        kline!(kc, "  no kernel-I/O threads registered");
+    }
+    if slopos_ostd::sync::kernel_io_task::kernel_io_freeze_requested() {
+        kline!(kc, "  a freeze is held: none of these will be dispatched");
     }
 }

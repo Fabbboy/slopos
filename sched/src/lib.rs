@@ -9,6 +9,8 @@ pub mod fate_api;
 pub mod ffi_boundary;
 pub mod futex;
 pub mod kconsole;
+#[cfg(feature = "test-hooks")]
+pub mod kernel_io_tests;
 pub mod lifecycle;
 pub mod per_cpu;
 pub mod quota_console;

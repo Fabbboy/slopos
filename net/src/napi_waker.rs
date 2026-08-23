@@ -44,14 +44,12 @@ impl NapiWaker {
             .is_ok()
     }
 
-    /// **IRQ-safe.** Arm the edge and wake every parked task; the `Release`
-    /// store pairs with the `Acquire` consume in the [`wait`] predicate. With
-    /// no waiter parked the edge stays set and the next [`wait`] returns
-    /// immediately.
+    /// **IRQ-safe.** With no waiter — or under a freeze, which `wake_for_work`
+    /// declines to disturb — the edge stays set and the next wait returns.
     #[inline]
     pub fn arm_and_wake(&self) {
         self.armed.store(true, Ordering::Release);
-        let _ = self.stop.queue().wake_all();
+        self.stop.wake_for_work();
     }
 
     /// Park the calling kthread until an [`arm_and_wake`] runs or a stop is

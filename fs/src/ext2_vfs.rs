@@ -97,7 +97,7 @@ impl StaticExt2Vfs {
 fn note_dirty(dirty: usize) {
     DIRTY_PENDING.store(dirty, Ordering::Relaxed);
     if dirty >= FLUSH_EAGER_THRESHOLD {
-        FLUSH_STOP.queue().wake_one();
+        FLUSH_STOP.wake_one_for_work();
     }
 }
 
@@ -355,8 +355,7 @@ fn start_flusher() {
     if !FLUSH_THREAD_STARTED.init_once() {
         return;
     }
-    slopos_ostd::sync::kernel_io_task::register_kernel_io_stop(&FLUSH_STOP);
-    if slopos_ostd::spawn_kernel_io!("ext2-flush", ext2_flusher_entry).is_err() {
+    if slopos_ostd::spawn_kernel_io!(&FLUSH_STOP, ext2_flusher_entry).is_err() {
         // Roll back so a later mount can retry the spawn; eviction, `sync` and
         // shutdown still persist without it.
         FLUSH_THREAD_STARTED.reset();

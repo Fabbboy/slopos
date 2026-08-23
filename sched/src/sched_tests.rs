@@ -6010,7 +6010,7 @@ pub fn test_bootstrap_task_ptr_rejects_interior_addresses() -> TestResult {
 /// allocator does not rewind across a fixture reset.
 ///
 /// Every id-keyed subsystem is safe only because a stale id resolves to
-/// nothing; nothing else checks `init_task_manager`'s monotonicity promise.
+/// nothing; nothing else checks `task_registry_reset`'s monotonicity promise.
 pub fn test_task_ids_are_never_reused() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -6065,10 +6065,12 @@ pub fn test_task_ids_are_never_reused() -> TestResult {
         }
     }
 
-    // A fixture reset retires every non-idle registration; the monotonic id
-    // source must survive it.
-    if crate::task::init_task_manager() != 0 {
-        klog_info!("SCHED_TEST: init_task_manager failed");
+    // The monotonic id source must survive a fixture reset.
+    let freeze = crate::task::freeze_kernel_io_all();
+    let reset = crate::task::task_registry_reset(&freeze);
+    drop(freeze);
+    if reset != 0 {
+        klog_info!("SCHED_TEST: task_registry_reset failed");
         return TestResult::Fail;
     }
     let after_reset = task_create(
@@ -6182,6 +6184,11 @@ pub fn test_ap_pause_timeout_is_reported_and_rolled_back() -> TestResult {
         klog_info!("SCHED_TEST: entered with an AP pause already held");
         return TestResult::Fail;
     }
+
+    // `set_executing_task(true)` below is a lie about CPU 1, which its own
+    // dispatch loop clears whenever it runs. Park the kernel-I/O threads so
+    // nothing is dispatched there while the lie must hold.
+    let _freeze = crate::task::freeze_kernel_io_all();
 
     const ATTEMPTS: usize = 3;
     const HELD_CPU: usize = 1;

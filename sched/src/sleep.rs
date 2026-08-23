@@ -4,6 +4,7 @@ use slopos_ostd::lock_class;
 
 use slopos_abi::task::BlockReason;
 use slopos_ostd::KVec;
+use slopos_ostd::sync::kernel_io_task::KernelIoTaskIds;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use super::scheduler::{
@@ -65,7 +66,10 @@ impl SleepQueue {
         }
     }
 
-    fn init_or_reset(&mut self) -> Result<(), ()> {
+    /// Keeps the deadlines registered kernel-I/O threads own: those are the
+    /// *only* wake source some have — net-timer is woken by nothing but its own
+    /// 50 ms park — and a wiped one leaves it `Blocked` forever.
+    fn reset_preserving(&mut self, kernel_io: &KernelIoTaskIds) -> Result<(), ()> {
         if self.entries.is_empty() {
             if self.entries.try_reserve_exact(MAX_TASKS).is_err() {
                 return Err(());
@@ -75,15 +79,30 @@ impl SleepQueue {
                     return Err(());
                 }
             }
-        } else {
-            for entry in self.entries.iter_mut() {
-                *entry = SleepEntry::empty();
-            }
+            self.active_count = 0;
+            self.active_high_water = 0;
+            SLEEP_ACTIVE_COUNT.store(0, Ordering::Release);
+            return Ok(());
         }
-        self.active_count = 0;
-        self.active_high_water = 0;
-        SLEEP_ACTIVE_COUNT.store(0, Ordering::Release);
+
+        let mut kept = 0u32;
+        let mut high_water = 0u32;
+        for (idx, entry) in self.entries.iter_mut().enumerate() {
+            if entry.active && kernel_io.contains(entry.task_id) {
+                kept += 1;
+                high_water = (idx as u32) + 1;
+                continue;
+            }
+            *entry = SleepEntry::empty();
+        }
+        self.active_count = kept;
+        self.active_high_water = high_water;
+        SLEEP_ACTIVE_COUNT.store(kept, Ordering::Release);
         Ok(())
+    }
+
+    fn init_or_reset(&mut self) -> Result<(), ()> {
+        self.reset_preserving(&KernelIoTaskIds::empty())
     }
 
     fn scan_bound(&self) -> usize {
@@ -499,8 +518,14 @@ fn task_name_str(task: &super::task::Task) -> &str {
     core::str::from_utf8(task.name_bytes()).unwrap_or("?")
 }
 
+/// Snapshot before the queue lock: the stop registry is the same lock level.
 pub fn reset_sleep_queue() {
-    SLEEP_QUEUE.lock().init_or_reset().ok();
+    let kernel_io = slopos_ostd::sync::kernel_io_task::kernel_io_task_ids();
+    SLEEP_QUEUE.lock().reset_preserving(&kernel_io).ok();
+}
+
+pub fn reset_sleep_queue_preserving_kernel_io() {
+    reset_sleep_queue();
 }
 
 pub fn cancel_sleep(task_id: u32) {

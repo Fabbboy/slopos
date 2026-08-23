@@ -14,9 +14,7 @@ use slopos_ostd::lock_class;
 
 use slopos_acpi::aml::{self, AcpiI2cHid, HhdmHost};
 use slopos_acpi::tables::AcpiTables;
-use slopos_ostd::sync::kernel_io_task::{
-    Deadline, KernelIoStop, KernelIoToken, KthreadWait, yield_with_deadline,
-};
+use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
 use slopos_ostd::{KArc, klog_info, klog_warn};
 
@@ -127,7 +125,7 @@ pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bo
     if try_interrupt_mode(&found, force_poll) {
         return;
     }
-    match slopos_ostd::spawn_kernel_io!("touchpad-poll", poll_thread) {
+    match slopos_ostd::spawn_kernel_io!(&POLL_STOP, poll_thread) {
         Ok(_) => klog_info!("touchpad: ready (polling every {}ms)", POLL_MS),
         Err(e) => klog_warn!("touchpad: failed to spawn poll thread: {:?}", e),
     }
@@ -158,10 +156,9 @@ impl TouchpadWaker {
     const fn stop(&self) -> &KernelIoStop {
         &self.stop
     }
-    /// IRQ-context: arm the edge and wake the drain thread.
     fn arm_and_wake(&self) {
         self.armed.store(true, Ordering::Release);
-        let _ = self.stop.queue().wake_all();
+        self.stop.wake_for_work();
     }
     /// Park until armed or a stop is requested; consumes one edge.
     fn wait(&self, token: &KernelIoToken<'_>) -> KthreadWait {
@@ -174,6 +171,11 @@ impl TouchpadWaker {
 }
 
 static TOUCHPAD_WAKER: TouchpadWaker = TouchpadWaker::new();
+
+static POLL_STOP: KernelIoStop = KernelIoStop::new(
+    "touchpad-poll",
+    lock_class!("TOUCHPAD_POLL_STOP.waiters", LOCK_LEVEL_RESOURCE),
+);
 
 /// Returns `true` if interrupt-driven input was engaged.
 fn try_interrupt_mode(found: &AcpiI2cHid, force_poll: bool) -> bool {
@@ -200,8 +202,7 @@ fn try_interrupt_mode(found: &AcpiI2cHid, force_poll: bool) -> bool {
         );
         return false;
     }
-    slopos_ostd::sync::kernel_io_task::register_kernel_io_stop(TOUCHPAD_WAKER.stop());
-    if let Err(e) = slopos_ostd::spawn_kernel_io!("touchpad-irq", irq_thread) {
+    if let Err(e) = slopos_ostd::spawn_kernel_io!(TOUCHPAD_WAKER.stop(), irq_thread) {
         klog_warn!("touchpad: failed to spawn irq thread: {:?}; polling", e);
         return false;
     }
@@ -388,9 +389,13 @@ fn poll_thread(token: KernelIoToken<'static>) {
                 );
             }
         }
-        // Deschedule between polls: a spin loop would pin a core.
-        yield_with_deadline(&token, Deadline::AtMs(POLL_MS));
+        // A park rather than a bare sleep, so the wait is also where a stop or
+        // a freeze is observed.
+        if token.park_timeout(&POLL_STOP, || false, POLL_MS as u64) == KthreadWait::Stop {
+            break;
+        }
     }
+    POLL_STOP.note_exited();
 }
 
 /// Intel client PCHs place I²C 0–3 at device `0x15` and 4–5 at `0x19`.
