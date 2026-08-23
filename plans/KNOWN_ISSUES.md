@@ -1,6 +1,6 @@
 # SlopOS Known Issues
 
-Last updated: 2026-08-08
+Last updated: 2026-08-23
 
 
 ---
@@ -42,6 +42,56 @@ shape.
 Fixes for the first two: bound the `on_cpu` spin, re-enqueueing rather than
 spinning past a threshold; and record the owning CPU on the task so
 `unschedule_task` takes one lock instead of `n`. Neither is scheduled work.
+
+---
+
+## Aging-backstop and kernel-io-freeze tests fail when vCPUs are oversubscribed
+
+**Status**: Open (test-harness assumption, no kernel impact observed)
+**Severity**: Low
+**Component**: `sched/src/sched_tests.rs:7183`, `sched/src/task/task_lifecycle.rs:1228`
+
+`test_low_priority_is_not_starved_by_busy_normal` fails intermittently in CI with
+`SCHED: kernel-io task 'netpoll' did not freeze in time` immediately before it.
+The CI runner is `blacksmith-4vcpu` and the test ISO boots `QEMU_SMP=4`, so the
+four guest vCPUs contend for four host cores; a vCPU descheduled by the *host*
+mid-test looks to the guest like a CPU that stopped making progress.
+
+Pre-existing, and not caused by the sleep-queue clock change: reproduced on
+unmodified `develop` (commit before `f4db028b`) in **4 of 6 runs** under
+`taskset -c 0-3` plus 24 spinning host processes, with the same `netpoll` freeze
+warning. Without host contention it does not reproduce — 24 clean runs, 12 on
+each side of that commit, all green. Other tests fail in the same runs
+(`tcp_data_tests::test_recv_delayed_ack_*`, `test_remote_inbox_drops_non_ready_tasks`,
+`test_effective_load_accuracy`), which is the signature of a scheduling
+assumption rather than of one broken test.
+
+Both assertions assume the guest owns its CPUs:
+
+- **The aging backstop's bound.** `AGING_THRESHOLD` (`sched/src/fair.rs:33`)
+  bounds the wait in *dispatches*, and the test dequeues in a loop expecting the
+  `Low` tier to be served within `4 * AGING_THRESHOLD` rounds. A vCPU stolen by
+  the host mid-loop breaks that accounting.
+- **`freeze_kernel_io_all`'s 50 ms budget** (`KERNEL_IO_FREEZE_MS`,
+  `task_lifecycle.rs:1228`) waits on wall-clock HPET time for every kernel-I/O
+  thread to acknowledge. A `netpoll` vCPU that is not scheduled by the host
+  cannot acknowledge, however healthy the guest is.
+
+The freeze budget is worth re-measuring specifically. It was chosen while sleep
+deadlines expired `cpu_count` times early, so a parked kthread noticed a freeze
+request up to `cpu_count`x sooner than it asked to; `f4db028b` made those parks
+last their full requested duration, which is correct but consumes margin the
+50 ms was measured against. No failure has been attributed to that, and the
+reproduction above predates the commit — recorded so the next occurrence is read
+against it rather than rediscovered.
+
+The fix is to make both bounds robust to a descheduled vCPU rather than to widen
+them: the aging test should drive the runqueue without depending on wall-clock
+progress, and the freeze wait should distinguish "thread is not running" from
+"thread is wedged". Neither is scheduled work.
+
+Repro: `taskset -c 0-3 builddir/run_tests --raw --no-color` with
+`for j in $(seq 1 24); do while :; do :; done & done` running.
 
 ---
 
