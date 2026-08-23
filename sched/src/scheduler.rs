@@ -24,41 +24,24 @@ static ONESHOT_ARMED: [AtomicBool; slopos_arch::MAX_CPUS] = {
 /// Must match `boot/src/boot_drivers.rs::LAPIC_TIMER_PERIOD_MS`.
 const LAPIC_TIMER_PERIOD_MS: u32 = 10;
 
-/// Rounds up: waking one tick early busy-loops.
-#[inline]
-fn ticks_to_ms_ceil(delta_ticks: u64) -> u32 {
-    let freq = platform::timer_frequency() as u64;
-    if freq == 0 {
-        return 0;
-    }
-    // Saturating: an already-past deadline arrives here as a near-`u64::MAX`
-    // delta and must pin to the clamp below rather than overflow.
-    let ms = delta_ticks.saturating_mul(1000).saturating_add(freq - 1) / freq;
-    if ms > u32::MAX as u64 {
-        u32::MAX
-    } else {
-        ms as u32
-    }
-}
-
 /// Arm a LAPIC one-shot for the soonest sleep-queue deadline that falls inside
 /// the current periodic tick window, so a 1 ms sleep wakes at 1 ms rather than
 /// at the next 10 ms boundary. Idempotent; the next ISR restores periodic mode.
 pub fn arm_tickless_idle_if_due() {
-    let now = platform::timer_ticks();
-    let Some(deadline) = sleep_queue_next_deadline_ticks(now) else {
+    let now = super::sleep::sleep_queue_now_ms();
+    let Some(deadline) = sleep_queue_next_deadline_ms(now) else {
         return;
     };
     let delta = deadline.wrapping_sub(now);
-    // An already-due deadline lands in the upper (past) half of the tick space;
+    // An already-due deadline lands in the upper (past) half of the ms space;
     // the next periodic tick wakes it, so skip arming.
     if delta == 0 || delta >= (1u64 << 63) {
         return;
     }
-    let ms_until = ticks_to_ms_ceil(delta);
-    if ms_until == 0 || ms_until >= LAPIC_TIMER_PERIOD_MS {
+    if delta >= LAPIC_TIMER_PERIOD_MS as u64 {
         return;
     }
+    let ms_until = delta as u32;
     if platform::timer_program_next_wakeup_ms(ms_until) {
         let cpu_id = slopos_arch::pcr::get_current_cpu();
         if cpu_id < slopos_arch::MAX_CPUS {
@@ -90,7 +73,7 @@ pub use super::runtime::{
     scheduler_register_idle_wakeup_callback,
 };
 pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_current_task_ms};
-use super::sleep::{sleep_queue_next_deadline_ticks, wake_due_sleepers};
+use super::sleep::{sleep_queue_next_deadline_ms, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
     TASK_FLAG_USER_MODE, Task, TaskPriority, TaskRef, TaskStatus, task_record_context_switch,
@@ -1760,8 +1743,8 @@ pub fn scheduler_is_preemption_enabled() -> c_int {
 }
 
 pub fn scheduler_timer_tick() {
-    // Unconditional: an unrelated IRQ arriving before our one-shot must still
-    // restore periodic mode.
+    // Only the LAPIC timer vector reaches here, so this is the one-shot's own
+    // ISR: it fired, and the CPU is back to needing a periodic tick.
     restore_periodic_if_armed();
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
@@ -1808,7 +1791,7 @@ pub fn scheduler_timer_tick() {
         sched.drain_remote_inbox();
     });
 
-    wake_due_sleepers(platform::timer_ticks());
+    wake_due_sleepers(super::sleep::sleep_queue_now_ms());
 
     if SCHEDULER_ENABLED.load(Ordering::Acquire) == 0
         || PREEMPTION_ENABLED.load(Ordering::Acquire) == 0

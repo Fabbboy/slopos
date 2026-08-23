@@ -16,10 +16,17 @@ use super::task::{
 };
 use slopos_kernel_services::platform;
 
+/// Not `platform::timer_ticks()`: every CPU's timer ISR bumps that one global,
+/// so it runs at `cpu_count` times the frequency `timer_frequency()` reports.
+#[inline]
+fn now_ms() -> u64 {
+    slopos_kernel_services::clock::monotonic_ns() / 1_000_000
+}
+
 #[derive(Copy, Clone)]
 struct SleepEntry {
     task_id: u32,
-    wake_tick: u64,
+    wake_ms: u64,
     /// Arm generation, bumped on every `upsert`. Timer-path removal is
     /// generation-checked, so a wake against one park cannot delete the entry
     /// of a later park re-armed on another CPU.
@@ -35,7 +42,7 @@ impl SleepEntry {
     const fn empty() -> Self {
         Self {
             task_id: INVALID_TASK_ID,
-            wake_tick: 0,
+            wake_ms: 0,
             generation: 0,
             misses: 0,
             active: false,
@@ -109,14 +116,14 @@ impl SleepQueue {
         (self.active_high_water as usize).min(self.entries.len())
     }
 
-    fn upsert(&mut self, task_id: u32, wake_tick: u64) -> bool {
+    fn upsert(&mut self, task_id: u32, wake_ms: u64) -> bool {
         let generation = self.generation_counter;
         self.generation_counter = self.generation_counter.wrapping_add(1);
         let scan = self.scan_bound();
         let mut free_idx = None;
         for (idx, entry) in self.entries[..scan].iter_mut().enumerate() {
             if entry.active && entry.task_id == task_id {
-                entry.wake_tick = wake_tick;
+                entry.wake_ms = wake_ms;
                 entry.generation = generation;
                 entry.misses = 0;
                 return true;
@@ -132,7 +139,7 @@ impl SleepQueue {
         }
         self.entries[idx] = SleepEntry {
             task_id,
-            wake_tick,
+            wake_ms,
             generation,
             misses: 0,
             active: true,
@@ -163,7 +170,7 @@ impl SleepQueue {
     /// scrubs it. Peeking is what makes wakes at-least-once — a wake that lands
     /// in the sleeper's commit window retries on the next tick instead of being
     /// lost with the popped entry.
-    fn collect_due(&self, now_tick: u64, out: &mut [(u32, u64)]) -> usize {
+    fn collect_due(&self, now: u64, out: &mut [(u32, u64)]) -> usize {
         if self.active_count == 0 {
             return 0;
         }
@@ -173,7 +180,7 @@ impl SleepQueue {
             if n >= out.len() {
                 break;
             }
-            if entry.active && tick_reached(now_tick, entry.wake_tick) {
+            if entry.active && deadline_reached(now, entry.wake_ms) {
                 out[n] = (entry.task_id, entry.generation);
                 n += 1;
             }
@@ -210,13 +217,13 @@ impl SleepQueue {
         false
     }
 
-    /// Earliest still-unfired wake deadline (tick units), or `None` if no task
-    /// is sleeping. The tickless-idle path programs a one-shot LAPIC timer from
-    /// this so a 1 ms sleep is not rounded up to the next periodic tick.
+    /// Earliest still-unfired wake deadline (monotonic ms), or `None` if no
+    /// task is sleeping. The tickless-idle path programs a one-shot LAPIC timer
+    /// from this so a 1 ms sleep is not rounded up to the next periodic tick.
     ///
     /// O(active_high_water); callers should observe [`SLEEP_ACTIVE_COUNT`]
     /// lock-free first and only take the lock if non-zero.
-    fn earliest_deadline(&self, now_tick: u64) -> Option<u64> {
+    fn earliest_deadline(&self, now: u64) -> Option<u64> {
         if self.active_count == 0 {
             return None;
         }
@@ -226,14 +233,14 @@ impl SleepQueue {
             if !entry.active {
                 continue;
             }
-            let candidate = entry.wake_tick;
+            let candidate = entry.wake_ms;
             best = match best {
                 None => Some(candidate),
                 Some(b) => {
                     // Smallest forward distance wins; `wrapping_sub` makes an
                     // already-past deadline compare near zero, which is right.
-                    let d_b = b.wrapping_sub(now_tick);
-                    let d_c = candidate.wrapping_sub(now_tick);
+                    let d_b = b.wrapping_sub(now);
+                    let d_c = candidate.wrapping_sub(now);
                     if d_c < d_b { Some(candidate) } else { Some(b) }
                 }
             };
@@ -263,18 +270,8 @@ pub fn init_sleep_queue() -> c_int {
 }
 
 #[inline]
-fn tick_reached(now_tick: u64, deadline_tick: u64) -> bool {
-    now_tick.wrapping_sub(deadline_tick) < (1u64 << 63)
-}
-
-fn ms_to_sleep_ticks(ms: u32) -> u64 {
-    let freq = platform::timer_frequency() as u64;
-    if freq == 0 {
-        return 1;
-    }
-
-    let ticks = (ms as u64).saturating_mul(freq).saturating_add(999) / 1000;
-    ticks.max(1)
+fn deadline_reached(now: u64, deadline: u64) -> bool {
+    now.wrapping_sub(deadline) < (1u64 << 63)
 }
 
 /// Outcome of a timer-path wake attempt: only a conclusive outcome may remove
@@ -319,23 +316,27 @@ fn wake_sleeping_task(task_id: u32) -> WakeVerdict {
     WakeVerdict::Delivered
 }
 
-/// Soonest pending wake deadline, in the same tick domain as
-/// `slopos_kernel_services::platform::timer_ticks()`, or `None` when no task is
-/// sleeping. O(1) while [`SLEEP_ACTIVE_COUNT`] is zero, otherwise
-/// O(active_high_water) under the queue lock.
-pub fn sleep_queue_next_deadline_ticks(now_tick: u64) -> Option<u64> {
+/// Soonest pending wake deadline in monotonic milliseconds ([`now_ms`]), or
+/// `None` when no task is sleeping. O(1) while [`SLEEP_ACTIVE_COUNT`] is zero,
+/// otherwise O(active_high_water) under the queue lock.
+pub fn sleep_queue_next_deadline_ms(now: u64) -> Option<u64> {
     if SLEEP_ACTIVE_COUNT.load(Ordering::Acquire) == 0 {
         return None;
     }
-    SLEEP_QUEUE.lock().earliest_deadline(now_tick)
+    SLEEP_QUEUE.lock().earliest_deadline(now)
+}
+
+#[inline]
+pub fn sleep_queue_now_ms() -> u64 {
+    now_ms()
 }
 
 /// Wake every sleeper whose deadline has passed. Runs on every CPU's timer
 /// tick, so it returns without touching `SLEEP_QUEUE` while nothing sleeps.
-pub fn wake_due_sleepers(now_tick: u64) {
+pub fn wake_due_sleepers(now: u64) {
     // Ahead of the fast-path return: a count desync (atomic 0, entries live)
     // would otherwise silence this function, and the sweep, forever.
-    strand_sweep(now_tick);
+    strand_sweep(now);
     if SLEEP_ACTIVE_COUNT.load(Ordering::Acquire) == 0 {
         return;
     }
@@ -349,7 +350,7 @@ pub fn wake_due_sleepers(now_tick: u64) {
     let mut due = [(INVALID_TASK_ID, 0u64); 16];
     let n = {
         let queue = SLEEP_QUEUE.lock();
-        queue.collect_due(now_tick, &mut due)
+        queue.collect_due(now, &mut due)
     };
     for &(task_id, generation) in &due[..n] {
         match wake_sleeping_task(task_id) {
@@ -383,19 +384,22 @@ fn strand_log_ok() -> bool {
         .is_ok()
 }
 
+const STRAND_SWEEP_INTERVAL_MS: u64 = 1000;
+const STRAND_OVERDUE_MS: u64 = 1000;
+
 /// Scan for tasks stranded by a lost sleep wake: Blocked-on-Sleep with no armed
 /// entry, an overdue entry, a Ready task with no scheduler placement, and
-/// sleep-queue count desync. Tick context; ~1 Hz via the tick-spacing gate.
-fn strand_sweep(now_tick: u64) {
+/// sleep-queue count desync. Tick context; ~1 Hz via the spacing gate.
+fn strand_sweep(now: u64) {
     if !STRAND_SWEEP_ARMED.load(Ordering::Acquire) {
         return;
     }
     let last = STRAND_LAST_SWEEP.load(Ordering::Relaxed);
-    if now_tick.wrapping_sub(last) < 400 {
+    if now.wrapping_sub(last) < STRAND_SWEEP_INTERVAL_MS {
         return;
     }
     if STRAND_LAST_SWEEP
-        .compare_exchange(last, now_tick, Ordering::AcqRel, Ordering::Relaxed)
+        .compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed)
         .is_err()
     {
         return;
@@ -420,10 +424,10 @@ fn strand_sweep(now_tick: u64) {
         );
     }
 
-    super::task::task_for_each_active(|task| strand_sweep_task(task, now_tick));
+    super::task::task_for_each_active(|task| strand_sweep_task(task, now));
 }
 
-fn strand_sweep_task(task: &super::task::Task, now_tick: u64) {
+fn strand_sweep_task(task: &super::task::Task, now: u64) {
     if task.status() == TaskStatus::Invalid || task.is_exited() {
         return;
     }
@@ -438,19 +442,19 @@ fn strand_sweep_task(task: &super::task::Task, now_tick: u64) {
             queue.entries[..scan]
                 .iter()
                 .find(|entry| entry.active && entry.task_id == task_id)
-                .map(|entry| entry.wake_tick)
+                .map(|entry| entry.wake_ms)
         };
         match entry {
             None if task.sched_placement() == slopos_ostd::task::SchedPlacement::None => {
                 class = 1;
             }
             None => {}
-            Some(wake_tick)
-                if now_tick.wrapping_sub(wake_tick) < (1 << 63)
-                    && now_tick.wrapping_sub(wake_tick) > 400 =>
+            Some(wake_ms)
+                if now.wrapping_sub(wake_ms) < (1 << 63)
+                    && now.wrapping_sub(wake_ms) > STRAND_OVERDUE_MS =>
             {
                 class = 2;
-                detail = wake_tick;
+                detail = wake_ms;
             }
             _ => {}
         }
@@ -477,7 +481,7 @@ fn strand_sweep_task(task: &super::task::Task, now_tick: u64) {
             "STRAND: task {} '{}' Blocked(Sleep) NO ENTRY now={} placement={:?}",
             task_id,
             task_name_str(task),
-            now_tick,
+            now,
             task.sched_placement()
         ),
         2 => slopos_ostd::klog_info!(
@@ -485,7 +489,7 @@ fn strand_sweep_task(task: &super::task::Task, now_tick: u64) {
             task_id,
             task_name_str(task),
             detail,
-            now_tick
+            now
         ),
         _ => slopos_ostd::klog_info!(
             "STRAND: task {} '{}' Ready with placement=None (publish lost)",
@@ -549,9 +553,8 @@ pub fn arm_blocked_timeout(task_id: u32, timeout_ms: u32) -> bool {
     if task_id == INVALID_TASK_ID {
         return false;
     }
-    let now_tick = platform::timer_ticks();
-    let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(timeout_ms));
-    if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
+    let wake_ms = now_ms().wrapping_add(timeout_ms as u64);
+    if !SLEEP_QUEUE.lock().upsert(task_id, wake_ms) {
         return false;
     }
     // Stamped only once the entry is in, keeping `Blocked(Sleep) ⇔ a deadline
@@ -619,8 +622,7 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
 
     let task_id = current.id();
 
-    let now_tick = platform::timer_ticks();
-    let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(ms));
+    let wake_ms = now_ms().wrapping_add(ms as u64);
 
     // See `block_current_task_with_timeout` for why CAS precedes upsert.
     let rc = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> c_int {
@@ -637,7 +639,7 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
             }
             return -1;
         }
-        if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
+        if !SLEEP_QUEUE.lock().upsert(task_id, wake_ms) {
             let _ = super::task::task_try_transition_from(
                 task_id,
                 TaskStatus::Blocked,
@@ -682,8 +684,7 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
 
     let task_id = current.id();
 
-    let now_tick = platform::timer_ticks();
-    let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(timeout_ms));
+    let wake_ms = now_ms().wrapping_add(timeout_ms as u64);
 
     // CAS Running→Blocked must precede the upsert. The other order lets a peer
     // CPU's tick collect our entry while we are still Running, drop the wake
@@ -702,7 +703,7 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
             }
             return true;
         }
-        if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
+        if !SLEEP_QUEUE.lock().upsert(task_id, wake_ms) {
             let _ = super::task::task_try_transition_from(
                 task_id,
                 TaskStatus::Blocked,
@@ -723,8 +724,8 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
 }
 
 #[cfg(feature = "test-hooks")]
-pub(crate) fn test_insert_sleep_entry(task_id: u32, wake_tick: u64) -> bool {
-    SLEEP_QUEUE.lock().upsert(task_id, wake_tick)
+pub(crate) fn test_insert_sleep_entry(task_id: u32, wake_ms: u64) -> bool {
+    SLEEP_QUEUE.lock().upsert(task_id, wake_ms)
 }
 
 #[cfg(feature = "test-hooks")]

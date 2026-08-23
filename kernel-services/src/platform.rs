@@ -10,8 +10,8 @@ slopos_service_core::define_service! {
         timer_disable_irq();
         /// Arm a **one-shot** LAPIC timer to fire after `ms` milliseconds, so
         /// the tickless-idle path wakes on a sleep deadline rather than the
-        /// next periodic boundary. The next ISR — armed or unrelated —
-        /// restores periodic mode via [`timer_restore_periodic`].
+        /// next periodic boundary. Its own ISR restores periodic mode via
+        /// [`timer_restore_periodic`].
         timer_program_next_wakeup_ms(ms: u32) -> bool;
         /// Re-arm the LAPIC timer in periodic mode at the default preempt-tick
         /// interval. Idempotent.

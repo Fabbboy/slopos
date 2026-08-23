@@ -59,8 +59,8 @@ pub fn handle_rx(handle: &DeviceHandle, pkt: PacketBuf) {
     let our_ip = get_our_ip();
 
     // RFC 826: opportunistically update the cache if the sender is already known.
-    let current_tick = slopos_kernel_services::platform::timer_ticks();
-    let update_action = NEIGHBOR_CACHE.insert_or_update(dev, sender_ip, sender_mac, current_tick);
+    let current_ms = slopos_kernel_services::clock::monotonic_ns() / 1_000_000;
+    let update_action = NEIGHBOR_CACHE.insert_or_update(dev, sender_ip, sender_mac, current_ms);
     execute_neighbor_action(handle, update_action);
 
     match oper {

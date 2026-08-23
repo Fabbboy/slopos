@@ -5520,12 +5520,69 @@ fn test_kernel_io_priority_renumber() -> TestResult {
 /// idle loop skips arming a one-shot LAPIC.
 fn test_sleep_queue_next_deadline_none_when_empty() -> TestResult {
     let _fix = SchedFixture::new();
-    let now = slopos_kernel_services::platform::timer_ticks();
-    match super::sleep::sleep_queue_next_deadline_ticks(now) {
+    let now = super::sleep::sleep_queue_now_ms();
+    match super::sleep::sleep_queue_next_deadline_ms(now) {
         None => TestResult::Pass,
         Some(_) => TestResult::Fail,
     }
 }
+
+/// A sleep deadline must not scale with the number of online CPUs.
+///
+/// The sleep queue used to key on `platform::timer_ticks()`, a single global
+/// counter incremented by *every* CPU's LAPIC ISR, while converting via
+/// `timer_frequency()` = 100. At N CPUs it advanced at N*100 Hz, so every
+/// deadline expired N times early — a 200 ms sleep returned in 66 ms on a
+/// 4-CPU boot. Deadlines are wall-clock milliseconds now, so this holds
+/// regardless of CPU count.
+fn test_sleep_deadline_is_wall_clock_not_cpu_scaled() -> TestResult {
+    let _fix = SchedFixture::new();
+
+    let before = slopos_kernel_services::clock::monotonic_ns() / 1_000_000;
+    let now = super::sleep::sleep_queue_now_ms();
+    let after = slopos_kernel_services::clock::monotonic_ns() / 1_000_000;
+
+    if now < before || now > after {
+        klog_info!(
+            "SCHED_TEST: sleep clock {} outside monotonic window [{}, {}]",
+            now,
+            before,
+            after
+        );
+        return TestResult::Fail;
+    }
+
+    super::sleep::reset_sleep_queue();
+    const TIMEOUT_MS: u32 = 500;
+    let armed_at = super::sleep::sleep_queue_now_ms();
+    if !super::sleep::test_insert_sleep_entry(909_090, armed_at.wrapping_add(TIMEOUT_MS as u64)) {
+        super::sleep::reset_sleep_queue();
+        klog_info!("SCHED_TEST: could not insert probe entry");
+        return TestResult::Fail;
+    }
+    let deadline = super::sleep::sleep_queue_next_deadline_ms(armed_at);
+    super::sleep::reset_sleep_queue();
+
+    let Some(deadline) = deadline else {
+        klog_info!("SCHED_TEST: no deadline reported for an armed entry");
+        return TestResult::Fail;
+    };
+    let delta = deadline.wrapping_sub(armed_at);
+    if delta != TIMEOUT_MS as u64 {
+        klog_info!(
+            "SCHED_TEST: {} ms timeout produced a {} ms deadline delta",
+            TIMEOUT_MS,
+            delta
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+slopos_testing::stest!(
+    name = test_sleep_deadline_is_wall_clock_not_cpu_scaled,
+    suite = sched_core
+);
 
 /// Pins the inner ABI of `KernelIoToken::__new_for_trampoline_only`, the only
 /// witness constructor.

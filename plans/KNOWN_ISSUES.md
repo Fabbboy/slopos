@@ -45,32 +45,6 @@ spinning past a threshold; and record the owning CPU on the task so
 
 ---
 
-## Tickless idle never arms, and advertises a wake it does not deliver
-
-**Status**: Open (unreachable code, not a regression)
-**Severity**: Low (the 100 Hz periodic tick is what actually runs)
-**Component**: `sched/src/scheduler.rs` (`arm_tickless_idle_if_due`, `restore_periodic_if_armed`)
-
-`arm_tickless_idle_if_due` converts the next sleep-queue deadline to milliseconds
-and returns early unless it is *under* the 10 ms periodic period. The sleep queue
-counts in timer ticks and `platform::timer_frequency()` is 100 on every path, so
-one tick converts to exactly 10 ms and the `>=` returns. `delta == 0` returns
-earlier. There is no reachable input that reaches
-`timer_program_next_wakeup_ms`, so `ONESHOT_ARMED` is never set and
-`restore_periodic_if_armed` always takes its false branch.
-
-Two claims rest on it and are false today: the doc comment promising a
-`KernelIo` task that sleeps 1 ms wakes at 1 ms, and the comment at
-`scheduler_timer_tick`'s head saying an unrelated IRQ restores periodic mode —
-`scheduler_timer_tick` is reached only from the LAPIC timer vector.
-
-The honest fix is a sub-10 ms unit for the sleep queue, not patching the
-comparison. Sequence it **after** the lockup detector: the detector's eligibility
-model assumes a CPU either ticks at a flat 100 Hz or is marked not-armed, and a
-real one-shot path would need to bump the heartbeat from the one-shot ISR too.
-
----
-
 ## `slopos-ostd` host tests flake on interrupt-state assertions
 
 **Status**: Open (test-harness only, no kernel impact)

@@ -43,13 +43,13 @@ pub enum NeighborState {
     },
     Reachable {
         mac: MacAddr,
-        confirmed_tick: u64,
+        confirmed_ms: u64,
     },
     /// Aged past [`REACHABLE_TIME_MS`]; the MAC is still usable but triggers a
     /// re-probe on next use.
     Stale {
         mac: MacAddr,
-        last_used_tick: u64,
+        last_used_ms: u64,
     },
     /// No ARP reply after [`MAX_RETRIES`] retransmissions; packets for this
     /// address are dropped.
@@ -245,7 +245,7 @@ impl NeighborCache {
     /// Copy the cache into `out`, returning `(written, total)`.
     pub fn snapshot(&self, dev: Option<DevIndex>, out: &mut [NeighborSnapshot]) -> (usize, usize) {
         // Sampled before the lock: the ages only need to be approximate.
-        let now = current_tick_approx();
+        let now = current_time_ms();
         let inner = self.inner.lock();
         let mut total = 0usize;
         let mut written = 0usize;
@@ -259,30 +259,24 @@ impl NeighborCache {
             if written >= out.len() {
                 continue;
             }
-            let (mac, state, queued, since_tick) = match &entry.state {
+            let (mac, state, queued, since_ms) = match &entry.state {
                 NeighborState::Incomplete { pending, .. } => (
                     MacAddr::ZERO,
                     slopos_abi::net::NET_NEIGH_INCOMPLETE,
                     pending.len() as u32,
                     None,
                 ),
-                NeighborState::Reachable {
-                    mac,
-                    confirmed_tick,
-                } => (
+                NeighborState::Reachable { mac, confirmed_ms } => (
                     *mac,
                     slopos_abi::net::NET_NEIGH_REACHABLE,
                     0,
-                    Some(*confirmed_tick),
+                    Some(*confirmed_ms),
                 ),
-                NeighborState::Stale {
-                    mac,
-                    last_used_tick,
-                } => (
+                NeighborState::Stale { mac, last_used_ms } => (
                     *mac,
                     slopos_abi::net::NET_NEIGH_STALE,
                     0,
-                    Some(*last_used_tick),
+                    Some(*last_used_ms),
                 ),
                 NeighborState::Failed => {
                     (MacAddr::ZERO, slopos_abi::net::NET_NEIGH_FAILED, 0, None)
@@ -294,7 +288,7 @@ impl NeighborCache {
                 mac,
                 state,
                 queued_pkts: queued,
-                confirmed_ms_ago: since_tick.map_or(0, |t| ticks_to_ms(now.saturating_sub(t))),
+                confirmed_ms_ago: since_ms.map_or(0, |t| ms_span_to_u32(now.saturating_sub(t))),
             };
             written += 1;
         }
@@ -339,7 +333,7 @@ impl NeighborCache {
         dev: DevIndex,
         ip: Ipv4Addr,
         mac: MacAddr,
-        current_tick: u64,
+        current_ms: u64,
     ) -> NeighborAction {
         let mut inner = self.inner.lock();
 
@@ -369,7 +363,7 @@ impl NeighborCache {
 
             entry.state = NeighborState::Reachable {
                 mac,
-                confirmed_tick: current_tick,
+                confirmed_ms: current_ms,
             };
 
             let token =
@@ -400,7 +394,7 @@ impl NeighborCache {
                 ip,
                 state: NeighborState::Reachable {
                     mac,
-                    confirmed_tick: current_tick,
+                    confirmed_ms: current_ms,
                 },
                 timer_token: Some(token),
                 entry_id,
@@ -439,12 +433,9 @@ impl NeighborCache {
                         action: None,
                     }
                 }
-                NeighborState::Stale {
-                    mac,
-                    last_used_tick,
-                } => {
+                NeighborState::Stale { mac, last_used_ms } => {
                     let mac_copy = *mac;
-                    *last_used_tick = current_tick_approx();
+                    *last_used_ms = current_time_ms();
 
                     if let Some(token) = entry.timer_token.take() {
                         NET_TIMER_WHEEL.cancel(token);
@@ -533,7 +524,7 @@ impl NeighborCache {
                 );
                 entry.state = NeighborState::Stale {
                     mac,
-                    last_used_tick: current_tick_approx(),
+                    last_used_ms: current_time_ms(),
                 };
                 entry.timer_token = None;
             }
@@ -629,8 +620,8 @@ impl NeighborCache {
         for (i, entry) in inner.entries.iter().enumerate() {
             let (priority, age) = match &entry.state {
                 NeighborState::Failed => (4, u64::MAX),
-                NeighborState::Stale { last_used_tick, .. } => (3, *last_used_tick),
-                NeighborState::Reachable { confirmed_tick, .. } => (2, *confirmed_tick),
+                NeighborState::Stale { last_used_ms, .. } => (3, *last_used_ms),
+                NeighborState::Reachable { confirmed_ms, .. } => (2, *confirmed_ms),
                 NeighborState::Incomplete { .. } => (1, 0),
             };
 
@@ -672,20 +663,12 @@ pub enum ResolveOutcome {
     Failed(NetError),
 }
 
-fn current_tick_approx() -> u64 {
-    slopos_kernel_services::platform::timer_ticks()
+/// Not `platform::timer_ticks()`: every CPU's timer ISR bumps that one global,
+/// so it runs at `cpu_count` times the frequency `timer_frequency()` reports.
+fn current_time_ms() -> u64 {
+    slopos_kernel_services::clock::monotonic_ns() / 1_000_000
 }
 
-/// Convert a tick span to milliseconds, saturating at `u32::MAX`; answers 0
-/// while the timer frequency is not yet known.
-fn ticks_to_ms(ticks: u64) -> u32 {
-    let freq = slopos_kernel_services::platform::timer_frequency() as u64;
-    if freq == 0 {
-        return 0;
-    }
-    ticks
-        .saturating_mul(1000)
-        .checked_div(freq)
-        .unwrap_or(0)
-        .min(u32::MAX as u64) as u32
+fn ms_span_to_u32(ms: u64) -> u32 {
+    ms.min(u32::MAX as u64) as u32
 }

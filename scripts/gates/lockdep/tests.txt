@@ -134,9 +134,14 @@ post-userland-tests	classes	194
 # values.
 #
 # edges  measured: boot 43, kernel 148-152, userland 181-185
+#
+# Re-measured over the same 24 runs as the chain caps below. Boot is exactly 43
+# on every run; the test phases measured kernel 153-160 and userland 196-202
+# across both develop and the change, so userland was within 3 of its cap.
+# Same convention: observed maximum plus the phase's spread.
 boot	edges	49
-post-kernel-tests	edges	161
-post-userland-tests	edges	205
+post-kernel-tests	edges	168
+post-userland-tests	edges	208
 
 # 2026-08-24: kernel 351 -> 359, userland 404 -> 409. Two new kernel test
 # modules (`tests_exec_boundary`, `tests_pcid`) create and tear down address
@@ -156,6 +161,23 @@ post-userland-tests	edges	205
 # the cap keeps the phase's previously recorded 7-chain spread above it rather
 # than sitting on the observation, since a cap set to a single sample of a
 # scheduling-dependent quantity fails on ordinary interleaving.
+#
+# Re-measured over 24 runs (12 on the sleep-queue change, 12 on unmodified
+# develop) when the sleep queue moved from the global tick counter to the HPET
+# millisecond clock. The two distributions are the same:
+#
+#            kernel chains   userland chains   userland edges
+#   develop      351-359         403-412          196-200
+#   change       351-360         404-413          197-202
+#
+# No lock was added or removed and no acquire order changed: the class counts
+# are identical (71/184/194) on all 24 runs, which is the check that would move
+# had this been a real ordering change. The caps were simply sitting on their
+# measured maxima with no spread left — unmodified develop reaches 412 against
+# a 409 cap — so this is the suite outgrowing a cap that was last measured at
+# 2972 planned tests and now runs 3003. Caps restored to the file's stated
+# convention of observed maximum plus the phase's spread: kernel 360+9, userland
+# 413+9.
 boot	chains	112
-post-kernel-tests	chains	359
-post-userland-tests	chains	409
+post-kernel-tests	chains	369
+post-userland-tests	chains	422
