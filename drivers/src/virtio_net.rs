@@ -1351,8 +1351,10 @@ pub fn dns_rx_clear() {
 pub fn dns_rx_wait(timeout_ms: u32) -> bool {
     let start = slopos_kernel_services::clock::uptime_ms();
     loop {
-        // A reply committed to the used ring while the netpoll kthread is not
-        // scheduled is collected by nothing else before the timeout expires.
+        // TODO(tech-debt): compensates for the netpoll kthread vanishing from
+        // the task registry during the userland phase; the IRQ fires and the
+        // reply is in the used ring, but nothing drains it. Same unresolved
+        // cause as the drain in `net/src/socket.rs`.
         virtnet_force_napi_poll();
         if DNS_RX_EVENT.try_consume() {
             return true;
