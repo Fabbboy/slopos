@@ -62,12 +62,10 @@ pub fn test_lapic_timer_recalibration_consistent() -> TestResult {
         return TestResult::Skipped;
     }
 
-    // Best of N rather than a wider tolerance: a calibration window the host
-    // steals is a spoiled measurement, and the assertion should stay tight on a
-    // clean one.
+    // Ticks counted across an HPET window, so steal can only read *low* — wall
+    // time advances while ticks go unobserved. Largest of N is least spoiled.
     const ROUNDS: usize = 5;
     let mut recalibrated = 0u64;
-    let mut diff = u64::MAX;
     for _ in 0..ROUNDS {
         // Safe at runtime: one-shot masked mode, no interrupts fire.
         let sample = apic::timer::calibrate();
@@ -75,21 +73,17 @@ pub fn test_lapic_timer_recalibration_consistent() -> TestResult {
             klog_info!("LAPIC_TIMER_TEST: BUG - re-calibration returned 0");
             return TestResult::Fail;
         }
-        let sample_diff = sample.abs_diff(original);
-        if sample_diff < diff {
-            diff = sample_diff;
-            recalibrated = sample;
-        }
+        recalibrated = recalibrated.max(sample);
     }
 
+    // `original` is one boot-time window that may itself have read low, which
+    // is indistinguishable from a faster LAPIC; only downward drift is evidence.
     let tolerance = original / 7; // ~14.3%
-
-    if diff > tolerance {
+    if original.saturating_sub(recalibrated) > tolerance {
         klog_info!(
-            "LAPIC_TIMER_TEST: BUG - re-calibration drifted too much (original={}, recalibrated={}, diff={}, tolerance={})",
+            "LAPIC_TIMER_TEST: BUG - re-calibration drifted too much (original={}, recalibrated={}, tolerance={})",
             original,
             recalibrated,
-            diff,
             tolerance,
         );
         return TestResult::Fail;

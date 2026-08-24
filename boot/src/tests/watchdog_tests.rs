@@ -230,16 +230,17 @@ pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
     };
 
     let oops_before = slopos_ostd::panic_recovery::oops_count();
-    let watcher_beats_before = pcr::heartbeat_for_cpu(watcher);
     let flags = slopos_arch::cpu::save_flags_cli();
     hpet::delay_ms(150);
     slopos_arch::cpu::restore_flags(flags);
 
     watchdog::set_miss_threshold(original);
 
-    // The watcher samples from its own timer tick, so a host that descheduled
-    // *it* leaves us unobserved and the run proves nothing either way.
-    if pcr::heartbeat_for_cpu(watcher).wrapping_sub(watcher_beats_before) < 3 {
+    // What the watcher observed, not how many ticks it took: a descheduled
+    // watcher bursts its ticks afterwards, satisfying any count over the window.
+    let observed =
+        matches!(watchdog::max_stall(watcher), Some((t, samples)) if t == cpu && samples >= 3);
+    if !observed {
         return TestResult::Skipped;
     }
 
