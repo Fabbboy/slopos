@@ -285,15 +285,21 @@ pub fn reset_all() {
 mod tests {
     use super::*;
 
-    /// The host test binary shares one process, so each test starts from a
-    /// known-free arbiter rather than whatever ran before it.
-    fn fresh() {
+    /// The reset alone is not enough: `SEATS` is process-global and a peer
+    /// test's `acquire` lands between this one's reset and its assertion.
+    #[must_use = "dropping the guard immediately lets a peer test race this one"]
+    fn fresh() -> std::sync::MutexGuard<'static, ()> {
+        static SEAT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = SEAT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         reset_all();
+        guard
     }
 
     #[test]
     fn a_free_seat_is_granted() {
-        fresh();
+        let _seat_guard = fresh();
         let grant = acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7)
             .expect("a free seat is available");
         assert_eq!(grant.task_id(), 7);
@@ -304,7 +310,7 @@ mod tests {
 
     #[test]
     fn an_equal_rank_request_is_refused_while_held() {
-        fresh();
+        let _seat_guard = fresh();
         let first = acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7).expect("free");
         assert_eq!(
             acquire(SeatKind::Screen, SeatId::CompositorPrimary, 8),
@@ -316,7 +322,7 @@ mod tests {
 
     #[test]
     fn virtcon_outranks_the_compositor() {
-        fresh();
+        let _seat_guard = fresh();
         let comp = acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7).expect("free");
         let virtcon =
             acquire(SeatKind::Screen, SeatId::Virtcon, 9).expect("the kernel log always wins");
@@ -328,7 +334,7 @@ mod tests {
 
     #[test]
     fn the_compositor_cannot_take_the_screen_back_from_virtcon() {
-        fresh();
+        let _seat_guard = fresh();
         acquire(SeatKind::Screen, SeatId::Virtcon, 9).expect("free");
         assert_eq!(
             acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7),
@@ -338,7 +344,7 @@ mod tests {
 
     #[test]
     fn re_acquiring_your_own_seat_is_idempotent() {
-        fresh();
+        let _seat_guard = fresh();
         let first = acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7).expect("free");
         let second = acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7)
             .expect("the holder may re-acquire");
@@ -351,7 +357,7 @@ mod tests {
 
     #[test]
     fn revocation_frees_every_seat_the_task_held() {
-        fresh();
+        let _seat_guard = fresh();
         let screen = acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7).expect("free");
         let input = acquire(SeatKind::InputSink, SeatId::CompositorPrimary, 7).expect("free");
         revoke_for_task(7);
@@ -363,7 +369,7 @@ mod tests {
 
     #[test]
     fn revocation_names_only_the_holder() {
-        fresh();
+        let _seat_guard = fresh();
         let grant = acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7).expect("free");
         revoke_for_task(8);
         assert!(
@@ -378,7 +384,7 @@ mod tests {
     /// validate against the new occupant.
     #[test]
     fn a_recycled_task_id_does_not_revive_a_stale_grant() {
-        fresh();
+        let _seat_guard = fresh();
         let stale = acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7).expect("free");
         revoke_for_task(7);
         let reborn = acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7)
@@ -392,7 +398,7 @@ mod tests {
 
     #[test]
     fn the_two_kinds_are_independent() {
-        fresh();
+        let _seat_guard = fresh();
         acquire(SeatKind::Screen, SeatId::CompositorPrimary, 7).expect("free");
         let input = acquire(SeatKind::InputSink, SeatId::CompositorPrimary, 8)
             .expect("a different resource is a different seat");
@@ -403,7 +409,7 @@ mod tests {
 
     #[test]
     fn task_id_zero_is_never_a_holder() {
-        fresh();
+        let _seat_guard = fresh();
         assert_eq!(
             acquire(SeatKind::Screen, SeatId::CompositorPrimary, 0),
             Err(SeatError::Busy),

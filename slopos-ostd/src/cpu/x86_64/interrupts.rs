@@ -1,18 +1,65 @@
 //! Interrupt flag management: sti, cli, irqsave/irqrestore.
 //!
-//! On host builds (`cfg(not(target_os = "none"))`, including Miri) a single
-//! static `AtomicU64` stands in for RFLAGS, so `IrqDisabled::with` still
-//! exercises its protocol there.
+//! Off the kernel target (userland, host tests, Miri) a shadow stands in for
+//! RFLAGS, so `IrqDisabled::with` still exercises its protocol there.
+//!
+//! Under `cfg(test)` that shadow is thread-local, because RFLAGS is per-CPU and
+//! `cargo test` runs on parallel threads: one static lets one test's `cli` be
+//! read as another's interrupt state.
 
 #[allow(unused_imports)]
 use core::arch::asm;
 
-#[cfg(not(target_os = "none"))]
+#[cfg(all(not(target_os = "none"), not(test)))]
 use core::sync::atomic::{AtomicU64, Ordering};
 
-/// Host-only RFLAGS shadow, starting with IF set as a running CPU has it.
-#[cfg(not(target_os = "none"))]
+#[cfg(all(not(target_os = "none"), not(test)))]
 static MOCK_RFLAGS: AtomicU64 = AtomicU64::new(1u64 << 9);
+
+#[cfg(test)]
+std::thread_local! {
+    /// Starts with IF set, as a running CPU has it.
+    static MOCK_RFLAGS: core::cell::Cell<u64> = const { core::cell::Cell::new(1u64 << 9) };
+}
+
+#[cfg(not(target_os = "none"))]
+#[inline(always)]
+fn mock_rflags_get() -> u64 {
+    #[cfg(test)]
+    {
+        MOCK_RFLAGS.with(|f| f.get())
+    }
+    #[cfg(not(test))]
+    {
+        MOCK_RFLAGS.load(Ordering::Relaxed)
+    }
+}
+
+/// Returns the value from before the update.
+#[cfg(not(target_os = "none"))]
+#[inline(always)]
+fn mock_rflags_update(set_if: bool) -> u64 {
+    #[cfg(test)]
+    {
+        MOCK_RFLAGS.with(|f| {
+            let prior = f.get();
+            f.set(if set_if {
+                prior | RFLAGS_IF
+            } else {
+                prior & !RFLAGS_IF
+            });
+            prior
+        })
+    }
+    #[cfg(not(test))]
+    {
+        if set_if {
+            MOCK_RFLAGS.fetch_or(RFLAGS_IF, Ordering::Relaxed)
+        } else {
+            MOCK_RFLAGS.fetch_and(!RFLAGS_IF, Ordering::Relaxed)
+        }
+    }
+}
 
 const RFLAGS_IF: u64 = 1u64 << 9;
 
@@ -24,7 +71,7 @@ pub fn enable_interrupts() {
     }
     #[cfg(not(target_os = "none"))]
     {
-        MOCK_RFLAGS.fetch_or(RFLAGS_IF, Ordering::Relaxed);
+        let _ = mock_rflags_update(true);
     }
 }
 
@@ -36,7 +83,7 @@ pub fn disable_interrupts() {
     }
     #[cfg(not(target_os = "none"))]
     {
-        MOCK_RFLAGS.fetch_and(!RFLAGS_IF, Ordering::Relaxed);
+        let _ = mock_rflags_update(false);
     }
 }
 
@@ -59,8 +106,7 @@ pub fn save_flags_cli() -> u64 {
     }
     #[cfg(not(target_os = "none"))]
     {
-        let prior = MOCK_RFLAGS.fetch_and(!RFLAGS_IF, Ordering::Relaxed);
-        prior
+        mock_rflags_update(false)
     }
 }
 
@@ -86,7 +132,7 @@ pub fn read_rflags() -> u64 {
     }
     #[cfg(not(target_os = "none"))]
     {
-        MOCK_RFLAGS.load(Ordering::Relaxed)
+        mock_rflags_get()
     }
 }
 

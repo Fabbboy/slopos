@@ -17,6 +17,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
+// `cfg(test)` only, so neither the kernel nor userland links it.
+#[cfg(test)]
+extern crate std;
 // Self-alias so `#[derive(Pod)]` / `#[derive(Zeroable)]` expansions, which name
 // `::slopos_ostd::…`, resolve inside this crate itself.
 extern crate self as slopos_ostd;
