@@ -75,6 +75,16 @@ fn panic_serial_write(s: &str) {
 pub fn panic_abort_raw(msg: &'static str) -> ! {
     slopos_ostd::fblog::snapshot_tail_for_panic();
     cpu::disable_interrupts();
+    // Published before the bypass below, which force-releases locks a peer
+    // takes at once: Release/Acquire only, so this narrows the window in which
+    // it still believes this CPU can answer rather than closing it.
+    let dying_cpu = slopos_arch::get_current_cpu();
+    slopos_mm::tlb::force_ack_local_shootdowns(dying_cpu);
+    slopos_mm::tlb::notify_cpu_offline();
+    slopos_arch::pcr::mark_cpu_offline(dying_cpu);
+    slopos_sched::per_cpu::abandon_dispatch_for_dying_cpu(dying_cpu);
+    slopos_ostd::panic::mark_cpu_stopped();
+    slopos_ostd::panic::mark_fatal_abort();
     // Ordering validation off before anything below acquires a lock.
     slopos_ostd::sync::enter_fatal_bypass();
     // Best-effort ownership so a concurrent panic on a peer cannot interleave.

@@ -6293,6 +6293,103 @@ pub fn test_ap_pause_timeout_is_reported_and_rolled_back() -> TestResult {
     TestResult::Pass
 }
 
+/// An AP that died mid-dispatch never clears its own executing flag, so a pause
+/// that waits on it waits forever. The flag stays set for the whole attempt
+/// here, so a pass proves the pause stepped over the offline CPU rather than
+/// the AP happening to park.
+pub fn test_ap_pause_ignores_an_offline_ap() -> TestResult {
+    if slopos_arch::pcr::get_cpu_count() < 2 {
+        klog_info!("SCHED_TEST: uniprocessor boot has no AP to take offline");
+        return TestResult::Skipped;
+    }
+    if crate::per_cpu::ap_pause_depth() != 0 {
+        klog_info!("SCHED_TEST: entered with an AP pause already held");
+        return TestResult::Fail;
+    }
+
+    const HELD_CPU: usize = 1;
+    let _freeze = crate::task::freeze_kernel_io_all();
+
+    if crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.set_executing_task(true))
+        .is_none()
+    {
+        klog_info!("SCHED_TEST: CPU {} has no per-CPU scheduler", HELD_CPU);
+        return TestResult::Fail;
+    }
+    slopos_arch::pcr::mark_cpu_offline(HELD_CPU);
+
+    let outcome = crate::per_cpu::pause_all_aps();
+    let still_executing =
+        crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.is_executing_task());
+
+    slopos_arch::pcr::mark_cpu_online(HELD_CPU);
+    crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.set_executing_task(false));
+
+    match outcome {
+        Ok(token) => crate::per_cpu::resume_all_aps_if_not_nested(token),
+        Err(err) => {
+            klog_info!("SCHED_TEST: pause waited on an offline AP: {:?}", err);
+            return TestResult::Fail;
+        }
+    }
+
+    if still_executing != Some(true) {
+        klog_info!(
+            "SCHED_TEST: CPU {} parked itself; the pause was not proven to step over an offline AP",
+            HELD_CPU
+        );
+        return TestResult::Fail;
+    }
+
+    let leftover_depth = crate::per_cpu::ap_pause_depth();
+    if leftover_depth != 0 || crate::per_cpu::are_aps_paused() {
+        klog_info!("SCHED_TEST: pause left depth {} behind", leftover_depth);
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// The one store the dying-CPU cascade hinges on.
+pub fn test_abandon_dispatch_for_dying_cpu_clears_the_flag() -> TestResult {
+    if slopos_arch::pcr::get_cpu_count() < 2 {
+        klog_info!("SCHED_TEST: uniprocessor boot has no AP to abandon");
+        return TestResult::Skipped;
+    }
+
+    const HELD_CPU: usize = 1;
+    let _freeze = crate::task::freeze_kernel_io_all();
+
+    if crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.set_executing_task(true))
+        .is_none()
+    {
+        klog_info!("SCHED_TEST: CPU {} has no per-CPU scheduler", HELD_CPU);
+        return TestResult::Fail;
+    }
+
+    crate::per_cpu::abandon_dispatch_for_dying_cpu(HELD_CPU);
+    let cleared = crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.is_executing_task());
+
+    if cleared != Some(false) {
+        crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.set_executing_task(false));
+        klog_info!(
+            "SCHED_TEST: dispatch flag still {:?} after abandon",
+            cleared
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_ap_pause_ignores_an_offline_ap,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_abandon_dispatch_for_dying_cpu_clears_the_flag,
+    suite = sched_core
+);
 slopos_testing::stest!(
     name = test_ap_pause_nests_on_a_depth_count,
     suite = sched_core

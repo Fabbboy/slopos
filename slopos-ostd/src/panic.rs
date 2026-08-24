@@ -25,6 +25,26 @@ pub fn stopped_cpu_count() -> u32 {
     STOPPED_CPUS.load(Ordering::Acquire)
 }
 
+/// Set by any path that halts a CPU for good. Distinct from the oops counter,
+/// which a *recovered* panic also bumps, so that counter cannot attribute a
+/// latched lock-validator bypass to a fatal abort.
+static FATAL_ABORTS: AtomicU32 = AtomicU32::new(0);
+
+#[inline]
+pub fn mark_fatal_abort() {
+    FATAL_ABORTS.fetch_add(1, Ordering::SeqCst);
+}
+
+#[inline]
+pub fn fatal_abort_observed() -> bool {
+    FATAL_ABORTS.load(Ordering::Acquire) != 0
+}
+
+#[inline]
+pub fn fatal_abort_count() -> u32 {
+    FATAL_ABORTS.load(Ordering::Acquire)
+}
+
 /// Format a stashed `PanicInfo`'s location + message into `out`.
 ///
 /// `info_ptr` is the panicking `&PanicInfo` stashed before the emergency-stack

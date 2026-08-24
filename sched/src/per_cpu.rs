@@ -798,6 +798,16 @@ pub fn with_cpu_scheduler<R>(cpu_id: usize, f: impl FnOnce(&PriorityRunQueue) ->
     Some(f(sched))
 }
 
+/// Release `cpu_id`'s dispatch flag on its behalf, from that CPU's own
+/// non-returning abort path.
+///
+/// Deliberately leaves the task `cpu_id` was running alone: that drop must run
+/// on the task's own stack, interrupts enabled and no lock held (I3), none of
+/// which this context can provide.
+pub fn abandon_dispatch_for_dying_cpu(cpu_id: usize) {
+    let _ = with_cpu_scheduler(cpu_id, |sched| sched.set_executing_task(false));
+}
+
 pub fn enqueue_task_on_cpu(cpu_id: usize, task: &TaskRef) -> i32 {
     if cpu_id >= MAX_CPUS {
         return -1;
@@ -1148,7 +1158,16 @@ pub fn pause_all_aps() -> Result<ApPauseToken, ApPauseError> {
     core::sync::atomic::fence(Ordering::SeqCst);
 
     match wait_for_aps_to_park(slopos_arch::pcr::get_cpu_count()) {
-        Ok(()) => Ok(ApPauseToken { _private: () }),
+        Ok(()) => {
+            let skipped = SKIPPED_OFFLINE_APS.load(Ordering::Relaxed);
+            if skipped != 0 && SKIPPED_OFFLINE_REPORTED.enter() {
+                klog_info!(
+                    "SCHED: AP pause stepped over {} offline AP(s) still flagged as executing",
+                    skipped
+                );
+            }
+            Ok(ApPauseToken { _private: () })
+        }
         Err(err) => {
             release_ap_pause_depth();
             Err(err)
@@ -1156,9 +1175,20 @@ pub fn pause_all_aps() -> Result<ApPauseToken, ApPauseError> {
     }
 }
 
+static SKIPPED_OFFLINE_APS: AtomicU32 = AtomicU32::new(0);
+static SKIPPED_OFFLINE_REPORTED: slopos_ostd::sync::StateFlag = slopos_ostd::sync::StateFlag::new();
+
 fn executing_ap(cpu_count: usize) -> Option<usize> {
-    (1..cpu_count)
-        .find(|&cpu_id| with_cpu_scheduler(cpu_id, |sched| sched.is_executing_task()) == Some(true))
+    (1..cpu_count).find(|&cpu_id| {
+        let executing = with_cpu_scheduler(cpu_id, |sched| sched.is_executing_task()) == Some(true);
+        // Only that AP can clear its own flag, so waiting on an offline one is a
+        // wait that cannot end.
+        if executing && !slopos_arch::pcr::is_cpu_online(cpu_id) {
+            SKIPPED_OFFLINE_APS.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        executing
+    })
 }
 
 fn wait_for_aps_to_park(cpu_count: usize) -> Result<(), ApPauseError> {

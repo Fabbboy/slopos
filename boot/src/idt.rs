@@ -255,6 +255,10 @@ fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
         // We are about to halt, so a non-panicking initiator would spin forever
         // on an ack we will never deliver. Set-only — never clears an ack.
         slopos_mm::tlb::force_ack_local_shootdowns(cpu_id);
+        slopos_mm::tlb::notify_cpu_offline();
+        slopos_arch::pcr::mark_cpu_offline(cpu_id);
+        slopos_sched::per_cpu::abandon_dispatch_for_dying_cpu(cpu_id);
+        slopos_ostd::panic::mark_fatal_abort();
         slopos_ostd::sync::panic_recovery::poison_all_held_locks_no_halt();
         slopos_ostd::panic::mark_cpu_stopped();
         slopos_arch::cpu::disable_interrupts();
@@ -331,6 +335,15 @@ fn nmi_emit_context(
 /// way out rather than diagnostics.
 fn nmi_die(cpu_id: usize, frame: &slopos_arch::InterruptFrame) -> ! {
     use slopos_ostd::watchdog::{nmi_emit, nmi_emit_dec, nmi_emit_hex, nmi_emit_line};
+
+    // Ahead of the backtrace walk below, which can fault and never return.
+    // `force_ack` is not redundant with `notify_cpu_offline`: that one only
+    // removes this CPU from future target selection, leaving a shootdown
+    // already in flight to burn its re-sends into a panic.
+    slopos_mm::tlb::force_ack_local_shootdowns(cpu_id);
+    slopos_mm::tlb::notify_cpu_offline();
+    slopos_arch::pcr::mark_cpu_offline(cpu_id);
+    slopos_sched::per_cpu::abandon_dispatch_for_dying_cpu(cpu_id);
 
     // Each frame is [saved_rbp][return_addr]. The per-read validation cannot
     // prove rbp lies inside the interrupted task's stack, so a fault can still

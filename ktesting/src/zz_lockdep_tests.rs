@@ -24,6 +24,17 @@ fn lockdep_ab_ba_is_detected() -> TestResult {
     if validator_deliberately_off() {
         return TestResult::Skipped;
     }
+    // A fatal abort force-releases held locks, so the validator is off by
+    // design from that point and no cycle it fails to catch is evidence. A
+    // bypass with no abort behind it still fails below, which is the case this
+    // tripwire exists for.
+    if lock_graph::fatal_bypassed() && slopos_ostd::panic::fatal_abort_observed() {
+        slopos_ostd::klog_info!(
+            "LOCKDEP: skipping A/B-B/A self-test — {} fatal abort(s) latched the bypass",
+            slopos_ostd::panic::fatal_abort_count()
+        );
+        return TestResult::Skipped;
+    }
     assert_test!(
         lock_graph::validator_alive(),
         "validator is not alive (tracking={} overflow={} bypass={} mode={:?}) — \
