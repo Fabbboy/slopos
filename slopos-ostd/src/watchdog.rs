@@ -37,7 +37,11 @@ const FATAL_MULTIPLE_CYCLE: u32 = 1;
 const NO_CPU: u32 = u32::MAX;
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
-static PANIC_ENABLED: AtomicBool = AtomicBool::new(true);
+const PANIC_OVERRIDE_UNSET: u32 = 0;
+const PANIC_OVERRIDE_ON: u32 = 1;
+const PANIC_OVERRIDE_OFF: u32 = 2;
+
+static PANIC_OVERRIDE: AtomicU32 = AtomicU32::new(PANIC_OVERRIDE_UNSET);
 static MISS_THRESHOLD: AtomicU32 = AtomicU32::new(DEFAULT_MISS_THRESHOLD);
 
 /// What a CPU should do about the NMI it is taking.
@@ -178,7 +182,30 @@ pub fn miss_threshold() -> u32 {
 /// Whether a sustained breach may take the machine down
 /// (`watchdog.panic=on|off`).
 pub fn set_panic_enabled(enabled: bool) {
-    PANIC_ENABLED.store(enabled, Ordering::Release);
+    PANIC_OVERRIDE.store(
+        if enabled {
+            PANIC_OVERRIDE_ON
+        } else {
+            PANIC_OVERRIDE_OFF
+        },
+        Ordering::Release,
+    );
+}
+
+pub fn clear_panic_override() {
+    PANIC_OVERRIDE.store(PANIC_OVERRIDE_UNSET, Ordering::Release);
+}
+
+/// A watcher cannot tell a target the host descheduled from one that is wedged:
+/// both stop bumping their heartbeat. Under a hypervisor the sustained breach is
+/// therefore not evidence, and taking the machine down on it aborts a healthy
+/// kernel. `watchdog.panic=` overrides in both directions.
+pub fn fatal_escalation_permitted() -> bool {
+    match PANIC_OVERRIDE.load(Ordering::Acquire) {
+        PANIC_OVERRIDE_ON => true,
+        PANIC_OVERRIDE_OFF => false,
+        _ => !crate::arch::x86_64::cpuid::hypervisor_present(),
+    }
 }
 
 /// Record that this CPU has made progress.
@@ -331,7 +358,7 @@ fn report_stalled_cpu(me: usize, target: usize, stale: u32) {
     } else {
         FATAL_MULTIPLE
     });
-    let disposition = if PANIC_ENABLED.load(Ordering::Acquire) && stale >= fatal_at {
+    let disposition = if fatal_escalation_permitted() && stale >= fatal_at {
         NmiDisposition::Fatal
     } else {
         NmiDisposition::Report
@@ -350,6 +377,11 @@ fn report_stalled_cpu(me: usize, target: usize, stale: u32) {
     nmi_emit(" samples (watcher cpu ");
     nmi_emit_dec(me as u64);
     nmi_emit_line(")");
+    // A suppressed abort must be visible, or the next reader concludes the
+    // detector is broken.
+    if stale >= fatal_at && disposition != NmiDisposition::Fatal {
+        nmi_emit_line("WATCHDOG:   fatal escalation suppressed (hypervisor)");
+    }
     dump_wait_chain(target);
 
     match pcr::apic_id_from_cpu_index(target) {

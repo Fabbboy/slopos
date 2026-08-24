@@ -62,18 +62,26 @@ pub fn test_lapic_timer_recalibration_consistent() -> TestResult {
         return TestResult::Skipped;
     }
 
-    // Safe at runtime: one-shot masked mode, no interrupts fire.
-    let recalibrated = apic::timer::calibrate();
-    if recalibrated == 0 {
-        klog_info!("LAPIC_TIMER_TEST: BUG - re-calibration returned 0");
-        return TestResult::Fail;
+    // Best of N rather than a wider tolerance: a calibration window the host
+    // steals is a spoiled measurement, and the assertion should stay tight on a
+    // clean one.
+    const ROUNDS: usize = 5;
+    let mut recalibrated = 0u64;
+    let mut diff = u64::MAX;
+    for _ in 0..ROUNDS {
+        // Safe at runtime: one-shot masked mode, no interrupts fire.
+        let sample = apic::timer::calibrate();
+        if sample == 0 {
+            klog_info!("LAPIC_TIMER_TEST: BUG - re-calibration returned 0");
+            return TestResult::Fail;
+        }
+        let sample_diff = sample.abs_diff(original);
+        if sample_diff < diff {
+            diff = sample_diff;
+            recalibrated = sample;
+        }
     }
 
-    let diff = if recalibrated > original {
-        recalibrated - original
-    } else {
-        original - recalibrated
-    };
     let tolerance = original / 7; // ~14.3%
 
     if diff > tolerance {

@@ -47,6 +47,15 @@ pub const CPUID_FEAT_ECX_RDRAND: u32 = 1 << 30;
 /// OS has enabled XSAVE via CR4.OSXSAVE; when set, userland can execute XGETBV.
 pub const CPUID_FEAT_ECX_OSXSAVE: u32 = 1 << 27;
 
+/// CPUID.1:ECX[31] is architecturally reserved-zero on a physical CPU; every
+/// mainstream hypervisor sets it to announce itself.
+pub const CPUID_FEAT_ECX_HYPERVISOR: u32 = 1 << 31;
+
+pub fn hypervisor_present() -> bool {
+    let (_, _, ecx, _) = cpuid(CPUID_LEAF_FEATURES);
+    (ecx & CPUID_FEAT_ECX_HYPERVISOR) != 0
+}
+
 pub const CPUID_SEXT_EBX_SMEP: u32 = 1 << 7;
 
 pub const CPUID_SEXT_EBX_INVPCID: u32 = 1 << 10;

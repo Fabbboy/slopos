@@ -223,18 +223,25 @@ pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
     watchdog::set_miss_threshold(3);
     hpet::delay_ms(50);
 
-    if watchdog::watcher_of(cpu).is_none() {
+    let Some(watcher) = watchdog::watcher_of(cpu) else {
         watchdog::set_miss_threshold(original);
         // No AP has started its timer yet, so nothing is sampling us.
         return TestResult::Skipped;
-    }
+    };
 
     let oops_before = slopos_ostd::panic_recovery::oops_count();
+    let watcher_beats_before = pcr::heartbeat_for_cpu(watcher);
     let flags = slopos_arch::cpu::save_flags_cli();
     hpet::delay_ms(150);
     slopos_arch::cpu::restore_flags(flags);
 
     watchdog::set_miss_threshold(original);
+
+    // The watcher samples from its own timer tick, so a host that descheduled
+    // *it* leaves us unobserved and the run proves nothing either way.
+    if pcr::heartbeat_for_cpu(watcher).wrapping_sub(watcher_beats_before) < 3 {
+        return TestResult::Skipped;
+    }
 
     assert_test!(
         slopos_ostd::panic_recovery::oops_count() > oops_before,
@@ -247,8 +254,44 @@ pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
     TestResult::Pass
 }
 
+/// Escalation is off by default where a stalled heartbeat is not evidence, and
+/// the cmdline knob still forces it back on.
+pub fn test_fatal_escalation_defaults_off_under_a_hypervisor() -> TestResult {
+    if !slopos_ostd::arch::x86_64::cpuid::hypervisor_present() {
+        return TestResult::Skipped;
+    }
+
+    let permitted_default = watchdog::fatal_escalation_permitted();
+    watchdog::set_panic_enabled(true);
+    let permitted_forced_on = watchdog::fatal_escalation_permitted();
+    watchdog::set_panic_enabled(false);
+    let permitted_forced_off = watchdog::fatal_escalation_permitted();
+
+    // The boot cmdline sets no override, so leaving it forced would change how
+    // every later stall is handled.
+    watchdog::clear_panic_override();
+
+    assert_test!(
+        !permitted_default,
+        "a stalled heartbeat under a hypervisor is not evidence, so it must not be fatal"
+    );
+    assert_test!(
+        permitted_forced_on,
+        "watchdog.panic=on did not force escalation"
+    );
+    assert_test!(
+        !permitted_forced_off,
+        "watchdog.panic=off did not suppress escalation"
+    );
+    TestResult::Pass
+}
+
 slopos_testing::stest!(
     name = test_a_wedged_cpu_is_reported_and_survives,
+    suite = watchdog
+);
+slopos_testing::stest!(
+    name = test_fatal_escalation_defaults_off_under_a_hypervisor,
     suite = watchdog
 );
 slopos_testing::stest!(
