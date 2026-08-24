@@ -1176,6 +1176,11 @@ pub fn pause_all_aps() -> Result<ApPauseToken, ApPauseError> {
 }
 
 static SKIPPED_OFFLINE_APS: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(feature = "test-hooks")]
+pub fn skipped_offline_ap_count() -> u32 {
+    SKIPPED_OFFLINE_APS.load(Ordering::Relaxed)
+}
 static SKIPPED_OFFLINE_REPORTED: slopos_ostd::sync::StateFlag = slopos_ostd::sync::StateFlag::new();
 
 fn executing_ap(cpu_count: usize) -> Option<usize> {

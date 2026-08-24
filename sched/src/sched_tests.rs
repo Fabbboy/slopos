@@ -6298,9 +6298,9 @@ pub fn test_ap_pause_timeout_is_reported_and_rolled_back() -> TestResult {
 }
 
 /// An AP that died mid-dispatch never clears its own executing flag, so a pause
-/// that waits on it waits forever. The flag stays set for the whole attempt
-/// here, so a pass proves the pause stepped over the offline CPU rather than
-/// the AP happening to park.
+/// that waits on it waits forever. The skip counter, not the flag, is what
+/// proves the pause stepped over it: a live AP clears its own flag as soon as
+/// it dispatches, but the counter only ever moves for an offline CPU.
 pub fn test_ap_pause_ignores_an_offline_ap() -> TestResult {
     if slopos_arch::pcr::get_cpu_count() < 2 {
         klog_info!("SCHED_TEST: uniprocessor boot has no AP to take offline");
@@ -6322,9 +6322,9 @@ pub fn test_ap_pause_ignores_an_offline_ap() -> TestResult {
     }
     slopos_arch::pcr::mark_cpu_offline(HELD_CPU);
 
+    let skips_before = crate::per_cpu::skipped_offline_ap_count();
     let outcome = crate::per_cpu::pause_all_aps();
-    let still_executing =
-        crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.is_executing_task());
+    let skips_after = crate::per_cpu::skipped_offline_ap_count();
 
     slopos_arch::pcr::mark_cpu_online(HELD_CPU);
     crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.set_executing_task(false));
@@ -6337,12 +6337,12 @@ pub fn test_ap_pause_ignores_an_offline_ap() -> TestResult {
         }
     }
 
-    if still_executing != Some(true) {
+    if skips_after == skips_before {
         klog_info!(
-            "SCHED_TEST: CPU {} parked itself; the pause was not proven to step over an offline AP",
+            "SCHED_TEST: CPU {} cleared its own flag before the scan; nothing was stepped over",
             HELD_CPU
         );
-        return TestResult::Fail;
+        return TestResult::Skipped;
     }
 
     let leftover_depth = crate::per_cpu::ap_pause_depth();

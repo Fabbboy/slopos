@@ -1328,10 +1328,10 @@ fn snapshot_freeze_window(laps: &mut [u64; MAX_KERNEL_IO_STOPS]) -> usize {
     pending
 }
 
-/// A lap is bumped once per wake, and requesting a freeze wakes every
-/// registered thread. So a thread whose laps moved ran and declined the gate,
-/// which is a finding; one whose laps did not move never ran, which says
-/// nothing about the guest's health.
+/// A lap is bumped once per wake. Laps unchanged proves the thread took no CPU
+/// at all, which says nothing about the guest's health. Laps moved is weaker
+/// than it looks — an ordinary work wake bumps one too — so it is reported as
+/// an observation rather than treated as a wedge.
 fn report_freeze_stalled(laps_before: &[u64; MAX_KERNEL_IO_STOPS]) -> FreezeOutcome {
     let mut ran = 0usize;
     let mut never_ran = 0usize;
@@ -1342,7 +1342,7 @@ fn report_freeze_stalled(laps_before: &[u64; MAX_KERNEL_IO_STOPS]) -> FreezeOutc
         {
             ran += 1;
             klog_info!(
-                "SCHED: kernel-io task '{}' ran for {} ms without reaching the freeze gate",
+                "SCHED: kernel-io task '{}' woke during a {} ms freeze window without reaching the gate",
                 name,
                 KERNEL_IO_FREEZE_WINDOW_MS
             );
