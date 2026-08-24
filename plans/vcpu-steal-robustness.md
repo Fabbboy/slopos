@@ -11,9 +11,21 @@ vCPUs are oversubscribed"*.
 
 ## 0. Status — what has landed
 
-The two changes that made the reproduction green are **done**. Section 1's
-failure analysis is history, not a plan; sections 2 onwards are the remaining
-work, renumbered so **Stage 1 is the next thing to build**.
+**Read this before doing anything from this file.**
+
+The two changes that made the reproduction green are **implemented and
+committed**. Take the tree as already containing them.
+
+**There are exactly two remaining work items: §4 (Stage 1 of 2) and §5
+(Stage 2 of 2).** Nothing else in this document is a task:
+
+- §1-§3 are history and reasoning. §3 describes code that is **already in the
+  tree** — do not re-apply it.
+- §6 is a finding that deliberately requires **no code change**.
+- §7 is explicitly **not planned**; it has a stated trigger that has not fired.
+
+Neither remaining stage is load-bearing for correctness — the reproduction is
+green at 4/4 contended runs. Do not treat them as outstanding breakage.
 
 | Landed | Commit | Effect |
 |---|---|---|
@@ -42,11 +54,24 @@ the stall window is satisfied by a descheduled watcher bursting its ticks
 (`max_stall`). And closest-of-N calibration selects the sample nearest a
 baseline that may itself be spoiled — steal can only make a calibration read
 *low*, so the correct form is largest-of-N compared only on downward drift.
-Sections 3 and 4 below are superseded on those two points.
+§3b records both corrections.
 
 What is left is **wall-clock inflation under contention**, which fails no test:
 the kernel phase completes green, but tty tests inflate (14 ms → 78 s) and the
-userland phase can exhaust the harness budget.
+userland phase can exhaust the harness budget. That inflation is lock-holder
+preemption — a *host* scheduling artefact, not guest lock contention — and §6
+explains why it needs no kernel fix.
+
+### One separate bug this work split out, tracked here so it is not lost
+
+The **`poll(2)` lost wake** (`drivers/src/tty/poll.rs:149`, in-tree TODO) is a
+genuine correctness defect on the real userland path: a wake landing between
+enqueue and the block CAS is lost, so a poll that should return immediately
+sleeps out the full 100 ms. §6 *disproves* it as the cause of the 78 s test, but
+the bug itself is real and is arguably higher value than either remaining stage
+here, because it affects userland rather than test timing. **It is out of scope
+for this plan** and wants its own iteration: one `wait_event_timeout` whose
+predicate re-checks readiness after enqueue, not N queues.
 
 ---
 
@@ -157,12 +182,12 @@ and a graceful-degradation path for TCG, for `-cpu max`, and for real hardware.
 That is a meaningful new `unsafe` surface in `slopos-ostd` and a new pinned
 allocation, in service of one diagnostic.
 
-**Decision: do not build it.** §4 gets the same
+**Decision: do not build it.** §3b gets the same
 *decision* from one CPUID bit at zero cost. Steal time is recorded in §8 as
-the optional upgrade that would turn §4's blunt "never escalate under a
+the optional upgrade that would turn §3b's blunt "never escalate under a
 hypervisor" into a precise "escalate under a hypervisor only when steal time
 proves the target actually got CPU". If it is ever built, its best consumer is
-**not** the watchdog but §5's AP-pause classifier, where "the target got
+**not** the watchdog but §4's AP-pause classifier, where "the target got
 0 ns of CPU during this window" is a direct answer to the exact question.
 
 ### What in-tree signals actually distinguish "not scheduled" from "wedged"?
@@ -171,7 +196,7 @@ The brief asks for these to be evaluated against the code. They were.
 
 | Candidate | Verdict |
 |---|---|
-| **HPET** (`slopos_kernel_services::clock::monotonic_ns`) | Steal-*immune* as a clock — it is host wall time and keeps advancing regardless. That makes it the right thing to bound a *wait* with (§5). It says nothing about whether the target ran. |
+| **HPET** (`slopos_kernel_services::clock::monotonic_ns`) | Steal-*immune* as a clock — it is host wall time and keeps advancing regardless. That makes it the right thing to bound a *wait* with (§4). It says nothing about whether the target ran. |
 | **TSC delta, self-reported** | **Useless here.** The TSC keeps counting while a vCPU is descheduled — KVM does not stop it — so a large TSC delta is equally consistent with "wedged for 4 s" and "descheduled for 4 s". Discard. |
 | **Retired-instruction count** (PMU fixed counter 0, `INST_RETIRED.ANY`) | **Genuinely discriminating**: a descheduled vCPU retires zero, a vCPU spinning with `IF=0` retires billions — which is precisely the case the watchdog most wants to catch. But it needs per-CPU PMU MSR setup, a vPMU the host may not expose, and the same degradation matrix as steal time. Named, not built. |
 | **A self-reported "I am at a poll point" counter** | The kernel **already has one**: `ProcessorControlRegion::heartbeat`, bumped from the timer tick (`watchdog.rs:tick`). The signal is not the problem. |
@@ -184,11 +209,11 @@ That last row is the crux, and the brief asks for it to be argued explicitly:
 
 So perfecting the detection is not available at acceptable cost. The plan
 therefore makes the **consequence proportionate** instead: report rather than
-abort (§4, landed), bound the wait on wall time and retry rather than panic on
-first failure (§5), and — above all — make one dead CPU cost one test rather
-than thirty-three (§3, landed).
+abort (§3b, landed), bound the wait on wall time and retry rather than panic on
+first failure (§4), and — above all — make one dead CPU cost one test rather
+than thirty-three (§3a, landed).
 
-The heartbeat does buy one useful *partial* discriminator, used in §5 as
+The heartbeat does buy one useful *partial* discriminator, used in §4 as
 a timeout classifier rather than as a gate: if the target's heartbeat advanced
 during the wait, the target is running and is refusing to park (a real bug);
 if it did not advance, the target is either stolen or wedged (report both, blame
@@ -196,361 +221,83 @@ neither). That is honest about what it can and cannot tell.
 
 ---
 
-## 3. LANDED (`80b8ce4e`) — a dead CPU must not hold the AP pause hostage
+## 3. Implemented — the two fixes that made the reproduction green
 
-> Kept for the reasoning and the invariant it protects. Implemented; see §0.
+**This section is history. Nothing in it is a work item; do not re-apply it.**
+The code described here is in the tree as of `8fec5938`. It is kept because the
+*reasoning* is what a future reader needs when touching these paths — the
+step-by-step diffs that were here have been removed so they cannot be mistaken
+for instructions.
 
-**Highest value. Do this first and alone.** It converts an unbounded permanent
-cascade into at most one failed test, and it is a correctness fix on real
-hardware too.
+### 3a. A dead CPU must not hold the AP pause hostage (`80b8ce4e`)
 
-Two halves: a dying CPU must *publish* that it is going down, and the AP-pause
-predicate must *honour* that.
+A CPU taking the fatal watchdog NMI halted inside the handler with its
+scheduler's `executing_task` still set. Only the owning CPU clears that flag, so
+`pause_all_aps` waited on a CPU that would never run again, and every later
+`KernelTestScope::enter` panicked.
 
-### 1a. Publish "this CPU is going down"
+The fix, in `boot/src/idt.rs` (`nmi_die` and the peer-stop branch) and
+`boot/src/panic.rs` (`panic_abort_raw`): a dying CPU force-acks its outstanding
+TLB shootdowns, leaves the shootdown target set, marks itself offline and
+releases its dispatch flag, all before the backtrace walk that can fault and
+never return. `executing_ap` in `sched/src/per_cpu.rs` skips an offline AP, so
+either half alone breaks the cascade.
 
-The requirement from the NMI handler is severe: interrupts off, inside a
-non-returning NMI, no lock, no allocation, one plain atomic store. The kernel
-already has exactly that primitive and already uses it on the sibling path.
+Three properties worth preserving if this is ever touched:
 
-`slopos_arch::pcr::mark_cpu_offline(cpu_id)`
-(`slopos-ostd/src/cpu/x86_64/pcr.rs:1267`) is a single
-`AtomicBool::store(false, Release)` into the target's own PCR. `boot/src/idt.rs:438`
-already calls it from the `SHUTDOWN_VECTOR` handler, with a comment that states
-the exact rationale:
+- **`force_ack_local_shootdowns` is not redundant with `notify_cpu_offline`.**
+  The latter only removes the CPU from *future* target selection; a shootdown
+  already in `wait_for_acks` would still burn 256 re-sends into a panic.
+- **`mark_cpu_offline` is load-bearing beyond the AP pause.** `synchronize_rcu`
+  gates on `is_cpu_online`, and `test_fixture.rs` calls it immediately after the
+  pause — without the offline publication the hang would simply move there.
+- **The publication is Release/Acquire only**, against a poison walk that
+  force-releases locks a peer takes at once. It narrows the window rather than
+  ordering the two events; do not read it as a proved happens-before.
 
-> This CPU never runs again, so it must leave the sets that assume an answer:
-> the TLB ladder would wait on its ack, the lockup detector on a tick that
-> never comes.
+`abandon_dispatch_for_dying_cpu` is safe from a non-returning NMI with
+interrupts off because `with_cpu_scheduler` is a bounds check plus a raw index
+(`snapshot_for_cpu` takes no `PreemptGuard`) and `set_executing_task` is one
+atomic store. It deliberately leaves the dying CPU's task reference alone: that
+drop must run on the task's own stack (**I3**).
 
-The fatal-NMI path never got the same treatment. Add it, in three places.
+### 3b. The watchdog must not abort a healthy kernel (`317de749`, `0d9e8419`)
 
-**`boot/src/idt.rs`, `nmi_die()` (~line 332).** Before the backtrace walk, at
-the very top of the function — the walk can fault, and publishing must not
-depend on surviving it:
-
-```rust
-fn nmi_die(cpu_id: usize, frame: &slopos_arch::InterruptFrame) -> ! {
-    // This CPU halts below and never clears any flag again; every set that
-    // waits on an answer from it must be told before the reporting begins.
-    slopos_mm::tlb::notify_cpu_offline();
-    slopos_arch::pcr::mark_cpu_offline(cpu_id);
-    slopos_sched::per_cpu::abandon_local_dispatch(cpu_id);
-    …
-```
-
-**`boot/src/idt.rs`, `nmi_handler()`'s peer-stop branch (~line 253).** It
-already calls `force_ack_local_shootdowns` for the TLB set; extend it to the
-same three:
-
-```rust
-    slopos_mm::tlb::force_ack_local_shootdowns(cpu_id);
-    slopos_mm::tlb::notify_cpu_offline();
-    slopos_arch::pcr::mark_cpu_offline(cpu_id);
-    slopos_sched::per_cpu::abandon_local_dispatch(cpu_id);
-    slopos_ostd::sync::panic_recovery::poison_all_held_locks_no_halt();
-```
-
-**`boot/src/panic.rs`, `panic_abort_raw()` (~line 74).** The generic
-last-resort abort ends in `halt_loop()`, so the same reasoning applies:
-
-```rust
-pub fn panic_abort_raw(msg: &'static str) -> ! {
-    slopos_ostd::fblog::snapshot_tail_for_panic();
-    cpu::disable_interrupts();
-    slopos_arch::pcr::mark_cpu_offline(slopos_arch::get_current_cpu());
-    slopos_ostd::sync::enter_fatal_bypass();
-    …
-```
-
-`abandon_local_dispatch` is the new, deliberately tiny surface in
-`sched/src/per_cpu.rs`. It is one store — the direct reconciliation of the
-stuck flag, so the fix does not rest solely on the online bit:
-
-```rust
-/// Release the dispatch flag on behalf of a CPU that is halting and will never
-/// clear it itself. One store: the only legal caller is that CPU's own
-/// non-returning abort path, with interrupts off.
-pub fn abandon_local_dispatch(cpu_id: usize) {
-    let _ = with_cpu_scheduler(cpu_id, |sched| sched.set_executing_task(false));
-}
-```
-
-**Ordering note that matters:** `mark_cpu_offline` must precede
-`enter_fatal_bypass` and the poison walk in every one of these, because the
-poison walk takes the slow path and can be long; a peer polling in between
-should already see the CPU as gone.
-
-**Uncertainty, flagged:** `panic_abort_raw` is also reached on the ordinary
-whole-machine fatal path, where the caller is often the BSP and the machine is
-going down anyway. Marking the BSP offline there is harmless (nothing later
-consults `online` on a machine in `halt_loop`), but it is a behaviour change on
-a path that is hard to test. If review prefers, restrict the `panic.rs` change
-to the case where at least one peer is still running
-(`slopos_ostd::panic::stopped_cpu_count() < get_pcr_count() - 1`); I judge the
-unconditional form simpler and equally safe, but it is the one call here I would
-want a second opinion on.
-
-### 1b. Honour it in the AP-pause predicate
-
-`sched/src/per_cpu.rs:1160`:
-
-```rust
-fn executing_ap(cpu_count: usize) -> Option<usize> {
-    (1..cpu_count).find(|&cpu_id| {
-        // An offline AP runs no task, and only that AP could ever clear its own
-        // dispatch flag — waiting on one is a wait that cannot end.
-        slopos_arch::pcr::is_cpu_online(cpu_id)
-            && with_cpu_scheduler(cpu_id, |sched| sched.is_executing_task()) == Some(true)
-    })
-}
-```
-
-`is_cpu_online` is already used throughout this file (`:925`, `:930`, `:1044`),
-so this adds no import and no dependency.
-
-Note this is **belt and braces** with `abandon_local_dispatch`: either alone
-fixes the observed cascade. Both are worth having, because they fail
-independently — 1a's store can be missed by a path nobody added it to, and 1b's
-`online` bit can lag if a CPU dies somewhere with no offline publication at all.
-
-### 1c. Report, do not silently absorb
-
-`pause_all_aps` should say when it stepped over a dead AP, once, not per call.
-Add to `sched/src/per_cpu.rs` a `static SKIPPED_OFFLINE_AP: StateFlag` and log
-on first observation only, at the point `wait_for_aps_to_park` first finds an
-online-but-executing set that excludes an offline-and-executing CPU. Cheap, and
-it means the log names the real event instead of leaving it inferable only from
-a missing timeout.
-
-### 1d. The lockdep bypass latch
-
-`enter_fatal_bypass()` is global, and one dying CPU latches it for the
-survivors. That is arguably *correct* — the poison walk force-released locks, so
-the graph genuinely is no longer trustworthy — so the fix is not to un-latch it.
-The fix is that `ktesting/src/zz_lockdep_tests.rs:27` should not report `Fail`
-for a bypass it can attribute to a fatal abort.
-
-The attribution needs an **exact** signal. `oops_count() > 0` is **not** one and
-must not be used: `ts1.log` records `oops 1..3` at 13 s, during ordinary passing
-tests, long before anything fatal — a recovered task-scoped panic bumps it too.
-Gating on it would skip this test in green runs and silently retire the
-tripwire.
-
-§3a already touches every abort path, so put a dedicated one-line flag
-there. In `slopos-ostd/src/panic.rs`, beside the existing `STOPPED_CPUS`:
-
-```rust
-/// Set by any path that halts a CPU for good. Distinct from the oops counter,
-/// which a *recovered* panic also bumps.
-static FATAL_ABORTS: AtomicU32 = AtomicU32::new(0);
-
-#[inline]
-pub fn mark_fatal_abort() {
-    FATAL_ABORTS.fetch_add(1, Ordering::SeqCst);
-}
-
-#[inline]
-pub fn fatal_abort_observed() -> bool {
-    FATAL_ABORTS.load(Ordering::Acquire) != 0
-}
-```
-
-Called from the same three sites as `mark_cpu_offline` in §3. Then:
-
-```rust
-    if lock_graph::fatal_bypassed() && slopos_ostd::panic::fatal_abort_observed() {
-        // A fatal abort force-released locks; the graph is untrustworthy by
-        // design and the cycle detector cannot fire. Nothing here can be proved.
-        return TestResult::Skipped;
-    }
-    assert_test!(lock_graph::validator_alive(), …);
-```
-
-The tripwire is preserved exactly: a bypass latched with **no** fatal abort
-still fails, which is the case the assertion was written for.
-
-### LANDED: tests added
-
-- `sched/src/sched_tests.rs::test_ap_pause_ignores_an_offline_ap` — mark CPU 1
-  offline, `set_executing_task(true)`, assert `pause_all_aps()` returns `Ok` and
-  leaves depth 0 after release. The mirror image of the existing
-  `test_ap_pause_timeout_is_reported_and_rolled_back` (`:6235`), which must keep
-  timing out because its held CPU is genuinely **online**. Restore state via the
-  existing `PerCpuOnlineBits` hermetic entry (`sched/src/test_hermetic.rs:21`),
-  which already snapshots and restores the online bitmap.
-- `sched/src/sched_tests.rs::test_abandon_local_dispatch_clears_the_flag` —
-  set the flag, call `abandon_local_dispatch`, assert cleared. Trivial, but it
-  is the one store the whole cascade hinges on.
-
-### LANDED: gate impact
-
-- `check_test_count.sh`: +2 tests → baseline rises. Re-measure with
-  `TEST_COUNT_BASELINE=0 scripts/check_test_count.sh`, never guess.
-- `check_lockdep_headroom.sh`: **no new lock, no new acquire order.** Expect no
-  movement; if it moves, that is a finding, not a number to raise.
-- `check_unsafe_outside_ostd.sh`: all of 1a/1b/1c is safe code in `boot`/`sched`
-  calling existing safe OSTD surfaces. Must stay clean.
-- `check_stack_sizes.sh`: `nmi_die` gains three calls and no locals. Neutral.
-
----
-
-## 4. LANDED (`317de749`, `0d9e8419`) — the watchdog must not abort a healthy kernel
-
-> Kept for the reasoning. Implemented; see §0 for the two guards that were
-> corrected during implementation and are superseded below.
-
-`slopos-ostd/src/watchdog.rs` opens with a premise that is **false**:
+`slopos-ostd/src/watchdog.rs` opened with a premise that is false under
+*partial* oversubscription:
 
 > A host that stalls the target stalls the watcher identically.
 
-Under *partial* oversubscription it is exactly wrong: the host descheduled
-vCPU 1 while vCPU 0 kept running, which is how the watcher reached 800 samples.
-The samples-not-wall-clock design was chosen to be steal-immune and is not.
+The host descheduled vCPU 1 while vCPU 0 kept running, so the watcher reached
+800 unchanged samples against a healthy CPU and escalated to a fatal NMI.
 
-Per §2 the detection cannot be made correct without a host signal. So fix the
-consequence.
+Per §2 the detection cannot be made correct without a host signal, so the
+*consequence* was made proportionate instead: `Report` still fires, still NMIs
+the target for its registers and still records the stall in the end-of-phase
+maximum, but it no longer takes the machine down where the sample count is not
+evidence. `PANIC_ENABLED` became a three-state override so `watchdog.panic=on`
+forces escalation back on. Bare metal is unaffected — CPUID.1:ECX[31] reads zero
+there, so the default is unchanged.
 
-### The decision
+**The two test guards were wrong on the first attempt and are worth not
+repeating.** Both shipped in `317de749`, still failed 2-in-3 contended runs, and
+were replaced in `0d9e8419`:
 
-Escalation from `Report` to `Fatal` earns its keep in exactly one scenario: on
-a machine with no supervising harness, a truly wedged CPU should abort loudly
-rather than hang silently forever. Under a hypervisor, three things are true at
-once: the guest cannot distinguish steal from wedge; a harness with a wall
-timeout and a silence watchdog is already supervising; and the escalation's
-observed effect was to abort a healthy kernel. The trade is not close.
+- Counting the *watcher's* ticks across the stall window proves the watcher ran,
+  not that it ever looked: a descheduled watcher delivers its ticks in a burst
+  once the host runs it again, satisfying any count. Ask what it actually
+  observed (`watchdog::max_stall`) instead.
+- Closest-of-N calibration selects the sample nearest a baseline that may itself
+  be spoiled. Calibration counts LAPIC ticks across an HPET window, so steal can
+  only make a read come out *low*; take the largest of N and assert only on
+  downward drift.
 
-**Default `Fatal` escalation off when the kernel can see it is virtualised;
-keep the existing cmdline knob authoritative in both directions.**
-
-`slopos-ostd/src/arch/x86_64/cpuid.rs`:
-
-```rust
-/// CPUID.1:ECX[31] is architecturally reserved-zero on physical CPUs; every
-/// mainstream hypervisor sets it to advertise its presence.
-pub const CPUID_FEAT_ECX_HYPERVISOR: u32 = 1 << 31;
-
-pub fn hypervisor_present() -> bool {
-    cpuid(CPUID_LEAF_FEATURES).2 & CPUID_FEAT_ECX_HYPERVISOR != 0
-}
-```
-
-One CPUID read, no MSR, no allocation, works under KVM and TCG alike, and reads
-`false` on bare metal. (Interface fact from the Intel SDM's reserved-bit
-definition plus the hypervisor-present convention — not derived from any
-implementation.)
-
-`slopos-ostd/src/watchdog.rs`:
-
-```rust
-/// Escalation is a *decision*, so it is one testable function rather than an
-/// expression inside the report path.
-///
-/// A watcher cannot distinguish a target the host descheduled from one that is
-/// wedged: both stop bumping their heartbeat. Under a hypervisor the sustained
-/// breach is therefore not evidence, and taking the machine down on it aborted
-/// a healthy kernel. `watchdog.panic=` overrides in both directions.
-pub fn fatal_escalation_permitted() -> bool {
-    match PANIC_OVERRIDE.load(Ordering::Acquire) {
-        OVERRIDE_ON => true,
-        OVERRIDE_OFF => false,
-        _ => !crate::arch::x86_64::cpuid::hypervisor_present(),
-    }
-}
-```
-
-`PANIC_ENABLED: AtomicBool` becomes a three-state `PANIC_OVERRIDE: AtomicU32`
-(`Unset`/`On`/`Off`) so that `watchdog.panic=on` can force escalation *back* on
-under a hypervisor — which is what the stage-2 test needs in order to prove the
-escalation still works at all. `boot/src/early_init.rs:637-641` already parses
-both spellings; the two arms just store the new sentinels.
-
-`report_stalled_cpu` then reads:
-
-```rust
-    let disposition = if fatal_escalation_permitted() && stale >= fatal_at {
-        NmiDisposition::Fatal
-    } else {
-        NmiDisposition::Report
-    };
-```
-
-### What a non-fatal-but-still-useful report looks like
-
-`Report` already does the right things and they are kept: it names the target,
-the sample count and the watcher; it dumps the wait-for chain
-(`dump_wait_chain`); it NMIs the target so the target dumps its own registers,
-symbolised through `ksym::lookup`; and it doubles `next_report` so a long
-legitimate section logs a handful of lines rather than one per tick. Two
-additions:
-
-1. **State the classification.** When escalation was permitted and the threshold
-   was crossed, emit `WATCHDOG:   fatal escalation suppressed (hypervisor)` once
-   per target. A suppressed abort must be visible, or the next reader concludes
-   the detector is broken.
-2. **Keep the evidence.** `max_stall` / `report_max_stalls` already survive to
-   the end-of-phase summary. A run whose CPU stalled for 800 samples and did
-   *not* die still reports the 800 there, so the ratchet-style evidence is not
-   lost by declining to abort.
-
-### A bonus this fixes
-
-`boot/src/tests/watchdog_tests.rs:212 test_a_wedged_cpu_is_reported_and_survives`
-is on a knife-edge today, and it is one of the failures in `c1-1.log`. It sets
-`miss_threshold(3)`, so `fatal_at = 3 * FATAL_MULTIPLE = 15`, then stalls with
-`IF=0` for 150 ms. Reports fire at `stale` = 3, 6, 12, 24 (`next_report`
-doubles), so the run survives only because the stall ends after ~15 samples and
-before the report at 24 — which *would* be `>= 15` and therefore **fatal**. The
-margin is about 120 ms. With §4 landed the test can no longer take the machine
-down under QEMU at all.
-
-Its *observed* failure is the other direction — `"a CPU that stopped ticking for
-150 ms was never reported"`, i.e. the **watcher's** vCPU was also descheduled
-and never sampled. That needs its own steal-immune guard, and the heartbeat
-supplies one because it is the watcher's own self-report:
-
-```rust
-    let watcher = watchdog::watcher_of(cpu)…;
-    let watcher_beats_before = pcr::heartbeat_for_cpu(watcher);
-    …stall…
-    if pcr::heartbeat_for_cpu(watcher).wrapping_sub(watcher_beats_before) < 3 {
-        // The watcher took fewer ticks than the threshold needs, so it never
-        // sampled us; the run proves nothing either way.
-        return TestResult::Skipped;
-    }
-```
-
-`test_lapic_timer_recalibration_consistent`
-(`drivers/src/tests/apic_timer_tests.rs:308`, the other `c1-1.log` failure) is
-the same shape: a LAPIC-vs-HPET ratio is meaningless when the host steals the
-vCPU mid-window. Fix it by taking the **best of N** calibration windows rather
-than by widening the tolerance — a stolen window is a spoiled measurement, and
-the assertion should still be tight on a clean one.
-
-### LANDED: tests added
-
-- `slopos-ostd` host test (`cargo test -p slopos-ostd`) on
-  `fatal_escalation_permitted`'s override precedence — pure decision function,
-  no QEMU. Drive the three override states directly.
-- `boot/src/tests/watchdog_tests.rs::test_fatal_escalation_defaults_off_under_a_hypervisor`
-  — under QEMU `hypervisor_present()` is always true, so assert
-  `!fatal_escalation_permitted()` with the override unset, and assert it flips
-  with the override forced on. `Skipped` when `!hypervisor_present()`.
-- Amend `test_a_wedged_cpu_is_reported_and_survives` with the watcher-heartbeat
-  guard above.
-
-### LANDED: gate impact
-
-- `check_safe_contract_surface.sh`: baseline **0**. `hypervisor_present` and
-  `fatal_escalation_permitted` are pure reads with no caller obligation, so
-  neither may carry a `# Safety` section. Must stay 0.
-- `check_unsafe_expansion.sh`: `cpuid()` is already an allowlisted `unsafe`
-  site inside OSTD; the new constant and wrapper add no `unsafe`.
-- `check_test_count.sh`: +2 → re-measure.
+Neither tolerance was widened, and that is the point: a bound that is loosened
+to absorb a spoiled measurement has stopped being a bound.
 
 ---
 
-## 5. Stage 1 (next) — bound the AP pause on wall time, and classify its failures
+## 4. Stage 1 of 2 (next) — bound the AP pause on wall time, and classify its failures
 
 `sched/src/per_cpu.rs:1102`:
 
@@ -562,15 +309,15 @@ The budget is measured in the **waiter's** retired instructions, which have no
 relation to whether the target got any CPU at all. A descheduled vCPU burns the
 entire budget having executed nothing.
 
-### 1a. Wall-clock deadline
+### 4a. Wall-clock deadline
 
 `sched` already depends on `slopos-kernel-services` and `sched/src/sleep.rs:23`
 already calls `slopos_kernel_services::clock::monotonic_ns()`, so this adds no
 dependency and no lockdep class.
 
 ```rust
-/// Wall-clock budget for the pause wait. Measured, not chosen: see §1e.
-const AP_PAUSE_BUDGET_NS: u64 = /* measured; see §1e */;
+/// Wall-clock budget for the pause wait. Measured, not chosen: see §4e.
+const AP_PAUSE_BUDGET_NS: u64 = /* measured; see §4e */;
 
 /// Retained only for the pre-clock window: `monotonic_ns` returns 0 until the
 /// platform clock is wired, and `task_shutdown` can reach here before that.
@@ -625,7 +372,7 @@ so `[u64; MAX_CPUS]` is exactly 2048 bytes — `check_stack_sizes.sh`'s entire
 2 KiB cap, before a single other local. Record one `u64` for the CPU first
 observed executing, as above.
 
-### 1b. Classify the failure: stolen/dead vs. genuinely refusing to park
+### 4b. Classify the failure: stolen/dead vs. genuinely refusing to park
 
 ```rust
 pub enum ApPauseError {
@@ -652,9 +399,9 @@ fn classify_pause_failure(cpu_id: usize, beat_before: u64) -> ApPauseError {
 This is the honest half-answer from §2, and it is genuinely useful: `NotParking`
 is always a bug worth chasing, `NotRunning` never is on its own.
 
-### 1c. Does the AP need to acknowledge? Yes — as evidence, not as the gate
+### 4c. Does the AP need to acknowledge? Yes — as evidence, not as the gate
 
-Today the BSP *infers* parking from `is_executing_task()`, and §3 exists
+Today the BSP *infers* parking from `is_executing_task()`, and §3a exists
 because that flag can be stale. A handshake cannot be stale: an ack requires the
 AP to have executed code *after* the request.
 
@@ -680,7 +427,7 @@ acks immediately before it parks:
 `pause_all_aps` bumps a global `AP_PAUSE_GENERATION` before the SeqCst fence it
 already issues, and the wait's success condition becomes: for every AP that is
 online, *either* it has acked the current generation *or* it is not executing.
-An offline AP is excluded, exactly as in §3b. The existing
+An offline AP is excluded, exactly as in §3a. The existing
 `nudge_aps_to_poll_point` already delivers the reschedule IPI that wakes an AP
 parked in `sti_hlt_cli_atomic`, so an idle AP can ack too.
 
@@ -691,7 +438,7 @@ path. Keeping `!executing` as the fast success condition and the ack as the
 corroborating signal keeps the common case at its current cost while making
 `NotParking` vs `NotRunning` provable rather than inferred.
 
-### 1d. Proportionate consequence at the call site
+### 4d. Proportionate consequence at the call site
 
 `sched/src/test_fixture.rs:91` panics on first failure. Retry instead — the AP
 may simply not have been scheduled yet, and the pause depth is already rolled
@@ -710,13 +457,13 @@ and on final failure panic with the classified error, so the log says *why*:
 entire contract is that APs cannot race the test body; running the body anyway
 would report a result from a run it did not control, which is worse than a
 failure. Panicking **one** test is correct. The defect was that it panicked
-thirty-two, and §3 has already done that.
+thirty-two, and §3a has already done that.
 
 `sched/src/task/task_lifecycle.rs:1339` (`task_shutdown`) already steps over a
 failed pause deliberately and correctly; it only needs its `match` arm widened
 to the two new variants.
 
-### 1e. How to measure `AP_PAUSE_BUDGET_NS`
+### 4e. How to measure `AP_PAUSE_BUDGET_NS`
 
 **Do not guess it.** Follow the tree's measured-and-tracked style:
 
@@ -763,7 +510,7 @@ already tens of milliseconds, stop and investigate — that is a second bug.**
 
 ---
 
-## 6. Stage 2 — the harness must recognise a halted kernel
+## 5. Stage 2 of 2 — the harness must recognise a halted kernel
 
 After `System halted.` the run burned 134 s (potentially 670 s) before exiting.
 Harness-side, Go, no kernel risk, and it turns a 6-minute diagnosis into ~30 s.
@@ -858,7 +605,7 @@ None. No kernel change, no ratchet.
 
 ---
 
-## 7. Stage 3 — the per-test time inflation is *not* the lost-wake bug
+## 6. Finding, not a stage — the per-test time inflation is *not* the lost-wake bug
 
 The brief asks whether `drivers/src/tty/poll.rs:149`'s in-tree TODO —
 
@@ -898,7 +645,7 @@ with push count.
 - The inflation is a **consequence of the same steal**, not a separate kernel
   bug, and it needs no kernel fix. No test asserts on wall-clock duration; only
   `OVER_TIME` marking (informational) and the harness wall budget care, and
-  §6 addresses the latter.
+  §5 addresses the latter.
 - The **lost-wake bug is real and separate**. It is a correctness defect on the
   real `poll(2)` path — a poll that should return immediately instead sleeps up
   to 100 ms — and it deserves its own iteration: replace the N-queue register /
@@ -918,9 +665,9 @@ contended lock across vCPUs and would vanish, while a lost wake would not.
 
 ---
 
-## 8. Optional follow-up — steal time, if the landed suppression proves insufficient
+## 7. Not planned — steal time, only if the landed suppression proves insufficient
 
-Only if the landed suppression (§4) turns out to hide a real wedge that
+Only if the landed suppression (§3b) turns out to hide a real wedge that
 mattered. Build it in `slopos-ostd`, and wire it to the **AP-pause classifier**
 first, the watchdog second.
 
@@ -934,29 +681,29 @@ first, the watchdog second.
   steal_ns }` when the target's steal counter advanced by ~the whole wait
   window. That is a *proof*, not an inference, and it is the only thing that
   would let the fatal escalation be re-enabled under a hypervisor honestly.
-- Must degrade to §4's landed behaviour when the leaf is absent (TCG, `-cpu max`,
+- Must degrade to §3b's landed behaviour when the leaf is absent (TCG, `-cpu max`,
   bare metal). The absence path is the one to test first, because it is the one
   CI might silently take.
 
 ---
 
-## 9. Ordering and acceptance
+## 8. Ordering and acceptance
 
-| Stage | Change | Value | Risk |
-|---|---|---|---|
-| ~~done~~ | Dead CPU publishes offline; AP pause honours it; lockdep test attributes the bypass | **One stolen vCPU costs 1 test, not 33.** Also a real-hardware correctness fix | — |
-| ~~done~~ | No fatal escalation where a stalled heartbeat is not evidence | Stops aborting a healthy kernel; fixes two knife-edge tests | — |
-| **1** | AP pause on an HPET deadline; ack handshake; classified failure; bounded retry | Removes the last instruction-count bound; makes failures diagnosable | Medium |
-| **2** | Harness recognises the abort banner and tightens its silence budget | 6-minute diagnosis → ~30 s | Low |
-| **3** | *No kernel change.* Records the inflation as LHP; splits the lost-wake bug out | Prevents a wrong fix | None |
+| Stage | § | Change | Value | Risk |
+|---|---|---|---|---|
+| ~~done~~ | §3a | Dead CPU publishes offline; AP pause honours it; lockdep test attributes the bypass | **One stolen vCPU costs 1 test, not 33.** Also a real-hardware correctness fix | — |
+| ~~done~~ | §3b | No fatal escalation where a stalled heartbeat is not evidence | Stops aborting a healthy kernel; fixes two knife-edge tests | — |
+| **1 of 2** | §4 | AP pause on an HPET deadline; ack handshake; classified failure; bounded retry | Removes the last instruction-count bound; makes failures diagnosable | Medium |
+| **2 of 2** | §5 | Harness recognises the abort banner and tightens its silence budget | 6-minute diagnosis → ~30 s | Low |
 
-Land them as separate commits.
+That is the whole remaining sequence. §6 and §7 are **not** rows in this table
+because neither is a change: §6 is a finding whose entire value is preventing a
+wrong fix, and §7 has a trigger that has not fired.
 
-None of the three is load-bearing for correctness: the reproduction is already
-green (§0). Stage 1 removes the last instruction-count bound, which is a real
-latent bug on a slow or heavily loaded machine even though nothing currently
-fails on it. Stage 2 is pure harness ergonomics. Stage 3 is a finding, not a
-change.
+Land the two as separate commits. Either may be skipped indefinitely without
+risk — neither is load-bearing for correctness now the reproduction is green.
+Stage 1 removes a real latent bug (an iteration-count bound that nothing
+currently trips); Stage 2 is pure harness ergonomics.
 
 Per-stage acceptance, in addition to the standard pre-commit sequence in
 `AGENTS.md`:
@@ -980,7 +727,7 @@ Per-stage acceptance, in addition to the standard pre-commit sequence in
   and a commit-message line naming what added the delta. Never hand-edit
   `scripts/gates/**`.
 
-## 10. Open questions
+## 9. Open questions
 
 1. ~~**`panic_abort_raw` marking the caller offline unconditionally.**~~
    **Resolved, shipped unconditional.** The proposed conditional predicate had
@@ -990,15 +737,15 @@ Per-stage acceptance, in addition to the standard pre-commit sequence in
    a machine that is going down entirely is inert — every consumer reads offline
    as "do not wait on it", which is what a CPU entering `halt_loop` wants.
 2. **Whether the ack handshake should ever become the gate** rather than
-   corroboration (§5.1c). Keeping `!executing` as the fast path preserves
+   corroboration (§4c). Keeping `!executing` as the fast path preserves
    current cost; making the ack mandatory is stricter but adds an IPI round trip
    to the test suite's hottest fixture path. I chose cost; it is a judgement
    call and reversible.
-3. **`AP_PAUSE_BUDGET_NS`'s value is unmeasured.** The procedure is in §1e and
+3. **`AP_PAUSE_BUDGET_NS`'s value is unmeasured.** The procedure is in §4e and
    must be run before the constant is written. A measured maximum in the tens of
    milliseconds should halt the work and be investigated as a separate defect.
 4. **The 78 s attribution to lock-holder preemption is inference, not
-   measurement** (§7). The elimination of the lost-wake path is conclusive; the
+   measurement** (§6). The elimination of the lost-wake path is conclusive; the
    positive attribution is not. `QEMU_SMP=1` is the cheap confirmation.
 5. **Skipping `lockdep_ab_ba_is_detected` on an attributable bypass** (§3).
    Shipped, but it is the one change here that trades a tripwire away. The flag
