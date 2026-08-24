@@ -3,10 +3,6 @@
 Making the kernel's liveness bounds robust when the *host* stops running a
 guest vCPU. Written against `273ed3ba`; rebaselined against `8fec5938`.
 
-Supersedes the "fix is not scheduled work" note in the
-`KNOWN_ISSUES.md` entry *"Aging-backstop and kernel-io-freeze tests fail when
-vCPUs are oversubscribed"*.
-
 ---
 
 ## 0. Status — what has landed
@@ -31,6 +27,8 @@ green at 4/4 contended runs. Do not treat them as outstanding breakage.
 |---|---|---|
 | A dying CPU publishes offline, force-acks its shootdowns and releases its dispatch flag; `executing_ap` skips an offline AP; `lockdep_ab_ba_is_detected` attributes a fatal-abort bypass | `80b8ce4e` | One stolen vCPU costs at most one test instead of 33 |
 | No fatal watchdog escalation where a stalled heartbeat is not evidence (three-state `watchdog.panic=` override); two tests stop reading host steal as kernel misbehaviour | `317de749`, `0d9e8419` | A healthy kernel is no longer aborted |
+| Host-test mocks of per-CPU state made per-thread | `658923ef` | `cargo test` stops racing itself; 0 failures in 60 runs |
+| The kernel-I/O freeze wait classifies its give-up instead of timing out | this commit | A thread that never ran is no longer reported as wedged |
 
 Measured against the reproduction in §1:
 

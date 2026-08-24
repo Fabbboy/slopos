@@ -9,7 +9,7 @@ use slopos_ostd::process::{
     AccountId, PROCESS_HANDLE_NONE, Process, ProcessId, process_retire, process_spawn,
 };
 use slopos_ostd::string::bytes_as_str;
-use slopos_ostd::sync::kernel_io_task::KernelIoTaskIds;
+use slopos_ostd::sync::kernel_io_task::{KernelIoTaskIds, MAX_KERNEL_IO_STOPS};
 use slopos_ostd::task::ops::{
     TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_CHARGES, TASK_EXIT_CLEANUP_RESOURCES,
     TASK_EXIT_CLEANUP_VM,
@@ -1223,22 +1223,47 @@ fn refresh_num_tasks_after_shutdown() {
     });
 }
 
+/// Window a freeze waits without any thread reaching the gate before it gives
+/// up. Not a total budget: a window in which some thread froze is replaced by a
+/// fresh one, so a slow guest is bounded by arrivals rather than by wall time.
 /// The wait is an optimisation, not a safety property: the threads survive a
 /// reset either way. Measured arrival is under 2 ms.
-const KERNEL_IO_FREEZE_MS: u64 = 50;
+const KERNEL_IO_FREEZE_WINDOW_MS: u64 = 50;
+
+/// A window is only replaced when a thread reaches the gate, and within one
+/// held freeze a frozen thread stays frozen, so the pending count never rises
+/// and at most `MAX_KERNEL_IO_STOPS` replacements can happen.
+const KERNEL_IO_FREEZE_CAP_MS: u64 = KERNEL_IO_FREEZE_WINDOW_MS * MAX_KERNEL_IO_STOPS as u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreezeOutcome {
+    Complete,
+    /// A thread ran during the window and still did not reach the gate.
+    Stalled,
+    /// Threads were still arriving when the absolute cap expired.
+    Capped,
+    /// No unfrozen thread ran at all: its CPU is not executing it, which a
+    /// guest cannot distinguish from a host that descheduled the vCPU.
+    NeverScheduled,
+}
 
 /// Suppressed, and — if `is_complete` — parked holding no sleep-queue entry and
 /// no runqueue slot.
 #[must_use = "dropping the token immediately thaws the threads it froze"]
 pub struct KernelIoFreeze {
-    complete: bool,
+    outcome: FreezeOutcome,
     _not_send: core::marker::PhantomData<*mut ()>,
 }
 
 impl KernelIoFreeze {
     #[inline]
     pub fn is_complete(&self) -> bool {
-        self.complete
+        self.outcome == FreezeOutcome::Complete
+    }
+
+    #[inline]
+    pub fn outcome(&self) -> FreezeOutcome {
+        self.outcome
     }
 }
 
@@ -1246,28 +1271,93 @@ impl KernelIoFreeze {
 /// take the freeze first and release it last.
 pub fn freeze_kernel_io_all() -> KernelIoFreeze {
     use slopos_ostd::sync::kernel_io_task::{
-        for_each_unfrozen_kernel_io, kernel_io_unfrozen_pending, request_kernel_io_freeze,
+        FreezeWait, freeze_wait_verdict, kernel_io_unfrozen_pending, request_kernel_io_freeze,
     };
 
     request_kernel_io_freeze();
 
-    let deadline =
-        slopos_kernel_services::platform::get_time_ms().saturating_add(KERNEL_IO_FREEZE_MS);
-    let mut complete = true;
-    while kernel_io_unfrozen_pending() > 0 {
-        if slopos_kernel_services::platform::get_time_ms() >= deadline {
-            for_each_unfrozen_kernel_io(|name| {
-                klog_info!("SCHED: kernel-io task '{}' did not freeze in time", name);
-            });
-            complete = false;
-            break;
+    let start_ms = slopos_kernel_services::platform::get_time_ms();
+    let mut window_start_ms = start_ms;
+    let mut laps_at_window_start = [0u64; MAX_KERNEL_IO_STOPS];
+    let mut pending_at_window_start = snapshot_freeze_window(&mut laps_at_window_start);
+
+    let outcome = loop {
+        let now = slopos_kernel_services::platform::get_time_ms();
+        match freeze_wait_verdict(
+            kernel_io_unfrozen_pending(),
+            pending_at_window_start,
+            now.saturating_sub(window_start_ms),
+            now.saturating_sub(start_ms),
+            KERNEL_IO_FREEZE_WINDOW_MS,
+            KERNEL_IO_FREEZE_CAP_MS,
+        ) {
+            FreezeWait::Done => break FreezeOutcome::Complete,
+            FreezeWait::Poll => poll_backoff(),
+            FreezeWait::Extend => {
+                window_start_ms = now;
+                pending_at_window_start = snapshot_freeze_window(&mut laps_at_window_start);
+                poll_backoff();
+            }
+            FreezeWait::GiveUpStalled => break report_freeze_stalled(&laps_at_window_start),
+            FreezeWait::GiveUpCapped => {
+                klog_info!(
+                    "SCHED: kernel-io freeze hit its {} ms cap with {} thread(s) unfrozen",
+                    KERNEL_IO_FREEZE_CAP_MS,
+                    kernel_io_unfrozen_pending()
+                );
+                break FreezeOutcome::Capped;
+            }
         }
-        poll_backoff();
-    }
+    };
 
     KernelIoFreeze {
-        complete,
+        outcome,
         _not_send: core::marker::PhantomData,
+    }
+}
+
+fn snapshot_freeze_window(laps: &mut [u64; MAX_KERNEL_IO_STOPS]) -> usize {
+    laps.fill(0);
+    let mut pending = 0usize;
+    slopos_ostd::sync::kernel_io_task::for_each_unfrozen_kernel_io_detail(|slot, _name, lap| {
+        if let Some(cell) = laps.get_mut(slot) {
+            *cell = lap;
+        }
+        pending += 1;
+    });
+    pending
+}
+
+/// A lap is bumped once per wake, and requesting a freeze wakes every
+/// registered thread. So a thread whose laps moved ran and declined the gate,
+/// which is a finding; one whose laps did not move never ran, which says
+/// nothing about the guest's health.
+fn report_freeze_stalled(laps_before: &[u64; MAX_KERNEL_IO_STOPS]) -> FreezeOutcome {
+    let mut ran = 0usize;
+    let mut never_ran = 0usize;
+    slopos_ostd::sync::kernel_io_task::for_each_unfrozen_kernel_io_detail(|slot, name, lap_now| {
+        if laps_before
+            .get(slot)
+            .is_some_and(|before| lap_now != *before)
+        {
+            ran += 1;
+            klog_info!(
+                "SCHED: kernel-io task '{}' ran for {} ms without reaching the freeze gate",
+                name,
+                KERNEL_IO_FREEZE_WINDOW_MS
+            );
+        } else {
+            never_ran += 1;
+            klog_debug!(
+                "SCHED: kernel-io task '{}' was not scheduled during the freeze window",
+                name
+            );
+        }
+    });
+    if ran == 0 && never_ran > 0 {
+        FreezeOutcome::NeverScheduled
+    } else {
+        FreezeOutcome::Stalled
     }
 }
 

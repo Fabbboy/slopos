@@ -42,6 +42,10 @@ impl SchedFixture {
             _scope: KernelTestScope::enter(),
         }
     }
+
+    pub fn kernel_io_is_frozen(&self) -> bool {
+        self._scope.kernel_io_is_frozen()
+    }
 }
 
 use crate::test_fixture::dummy_task_entry;
@@ -7281,7 +7285,7 @@ pub fn test_low_priority_is_not_starved_by_busy_normal() -> TestResult {
     use crate::fair::AGING_THRESHOLD;
     use crate::per_cpu::with_local_scheduler;
 
-    let _fixture = SchedFixture::new();
+    let fixture = SchedFixture::new();
 
     let normal_id = task_create(
         b"BusyNormal\0".as_ptr() as *const c_char,
@@ -7312,6 +7316,13 @@ pub fn test_low_priority_is_not_starved_by_busy_normal() -> TestResult {
     // Under strict priority alone, `Low` is never chosen.
     schedule_task(&low);
     schedule_task(&normal);
+
+    // An unfrozen kernel-I/O thread is runnable privileged work, and
+    // `tier_owed` disables aging entirely while a privileged tier has any.
+    if !fixture.kernel_io_is_frozen() {
+        klog_info!("SCHED_TEST: a kernel-io thread stayed runnable; aging is suppressed by design");
+        return TestResult::Skipped;
+    }
 
     let mut low_ran_at: Option<usize> = None;
     let rounds = (AGING_THRESHOLD as usize) * 4;

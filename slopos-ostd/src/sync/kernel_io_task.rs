@@ -502,6 +502,57 @@ pub fn for_each_unfrozen_kernel_io(mut report: impl FnMut(&'static str)) {
     }
 }
 
+/// `slot` indexes the append-only registry, so it is stable across calls and
+/// usable as a key for a lap snapshot.
+pub fn for_each_unfrozen_kernel_io_detail(mut report: impl FnMut(usize, &'static str, u64)) {
+    let registry = STOP_REGISTRY.lock();
+    for (slot, stop) in registry.entries[..registry.count].iter().enumerate() {
+        let Some(stop) = stop else { continue };
+        if !stop.has_exited() && !stop.is_frozen() {
+            report(slot, stop.name(), stop.laps());
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreezeWait {
+    Done,
+    Poll,
+    /// The window closed with threads still arriving: start a fresh one.
+    Extend,
+    /// A whole window passed and not one thread reached the gate.
+    GiveUpStalled,
+    /// Threads were still arriving at the absolute cap.
+    GiveUpCapped,
+}
+
+/// Pure so the wait's policy is testable without a clock or a registry.
+///
+/// Arm order is load-bearing: completion outranks the cap, and the cap outranks
+/// a window that has not closed.
+pub const fn freeze_wait_verdict(
+    pending_now: usize,
+    pending_at_window_start: usize,
+    window_elapsed_ms: u64,
+    total_elapsed_ms: u64,
+    window_ms: u64,
+    cap_ms: u64,
+) -> FreezeWait {
+    if pending_now == 0 {
+        return FreezeWait::Done;
+    }
+    if total_elapsed_ms >= cap_ms {
+        return FreezeWait::GiveUpCapped;
+    }
+    if window_elapsed_ms < window_ms {
+        return FreezeWait::Poll;
+    }
+    if pending_now < pending_at_window_start {
+        return FreezeWait::Extend;
+    }
+    FreezeWait::GiveUpStalled
+}
+
 /// Snapshotted in one pass so a caller can test membership under its own lock.
 /// This, not a priority comparison, is what "infrastructure" means: preserved
 /// exactly when also freezable and stoppable.

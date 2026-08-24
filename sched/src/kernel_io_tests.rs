@@ -157,6 +157,23 @@ pub fn test_infrastructure_is_keyed_on_the_stop_registry() -> TestResult {
     TestResult::Pass
 }
 
+/// A woken thread still has to be dispatched to reach the gate, so a loaded
+/// host can keep one Ready for a whole window. `Stalled` is the outcome that
+/// would mean the classifier called a thread wedged after watching it run.
+pub fn test_kernel_io_freeze_never_reports_a_thread_it_did_not_watch_run() -> TestResult {
+    use crate::task::FreezeOutcome;
+
+    let freeze = freeze_kernel_io_all();
+    let outcome = freeze.outcome();
+    drop(freeze);
+
+    assert_test!(
+        outcome != FreezeOutcome::Stalled,
+        "freeze blamed a thread for stalling on an uncontended guest"
+    );
+    TestResult::Pass
+}
+
 pub fn test_kernel_io_freeze_nests() -> TestResult {
     assert_test!(
         !kernel_io_freeze_requested(),
@@ -244,6 +261,10 @@ slopos_testing::stest!(
     suite = kernel_io
 );
 slopos_testing::stest!(name = test_kernel_io_freeze_nests, suite = kernel_io);
+slopos_testing::stest!(
+    name = test_kernel_io_freeze_never_reports_a_thread_it_did_not_watch_run,
+    suite = kernel_io
+);
 slopos_testing::stest!(
     name = test_kernel_io_threads_run_after_a_test_scope,
     suite = kernel_io

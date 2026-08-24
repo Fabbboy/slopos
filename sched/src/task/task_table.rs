@@ -525,8 +525,14 @@ pub fn task_registry_reset(freeze: &crate::task::KernelIoFreeze) -> c_int {
     if ensure_task_manager_initialized() != 0 {
         return -1;
     }
-    if !freeze.is_complete() {
-        klog_info!("task_registry_reset: resetting while a kernel-I/O thread is still running");
+    match freeze.outcome() {
+        crate::task::FreezeOutcome::Complete => {}
+        crate::task::FreezeOutcome::NeverScheduled => {
+            klog_debug!("task_registry_reset: a kernel-I/O thread took no CPU during the freeze")
+        }
+        _ => {
+            klog_info!("task_registry_reset: resetting while a kernel-I/O thread is still running")
+        }
     }
 
     let mut retire = match KVec::with_capacity(MAX_TASKS) {

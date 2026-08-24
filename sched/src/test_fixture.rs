@@ -65,6 +65,15 @@ pub struct KernelTestScope {
 }
 
 impl KernelTestScope {
+    /// Whether every kernel-I/O thread reached the freeze gate. A test of
+    /// scheduler ordering must consult this: an unfrozen thread is runnable
+    /// privileged work, which disables the aging backstop.
+    pub fn kernel_io_is_frozen(&self) -> bool {
+        self.kernel_io_freeze
+            .as_ref()
+            .is_some_and(KernelIoFreeze::is_complete)
+    }
+
     /// Enter the scope: freeze the kernel-I/O threads, snapshot kernel-wide
     /// state via the hermetic registry, pause APs, and reset the task
     /// population + scheduler so the test starts from a clean slate.
