@@ -88,7 +88,16 @@ against it rather than rediscovered.
 The fix is to make both bounds robust to a descheduled vCPU rather than to widen
 them: the aging test should drive the runqueue without depending on wall-clock
 progress, and the freeze wait should distinguish "thread is not running" from
-"thread is wedged". Neither is scheduled work.
+"thread is wedged".
+
+`vcpu-steal-robustness.md` is the implementation plan. Stages 1-2 have landed
+(`80b8ce4e`, `317de749`, `0d9e8419`) and addressed a larger finding from the
+same reproduction: the 33 failures were one stolen vCPU plus deterministic
+fallout, because a CPU taking the watchdog's fatal NMI halted with
+`executing_task` still set and only that CPU could ever clear it, so every later
+`pause_all_aps` timed out. That part was a real-hardware invariant bug, not a
+virtualisation one. The contended reproduction now runs 4/4 green; what remains
+below is the wall-clock inflation, not a failure.
 
 Repro: `taskset -c 0-3 builddir/run_tests --raw --no-color` with
 `for j in $(seq 1 24); do while :; do :; done & done` running.
