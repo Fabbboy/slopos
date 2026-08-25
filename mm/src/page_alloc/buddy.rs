@@ -60,37 +60,25 @@ const QUARANTINE_ADVANCE_FRAMES: u32 = 1024;
 /// release pass holds the allocator's cli-lock.
 const QUARANTINE_RELEASE_BATCH: u32 = 64;
 
-/// Release budget charged against every quarantining free, in **pages** — the
-/// unit `quarantine_release_some` counts, not blocks.
+/// Release budget charged against every quarantining free, in pages not blocks.
 const QUARANTINE_RELEASE_PER_FREE: u32 = 8;
 
 /// Written under the buddy lock, read from the timer tick — which must not take
 /// the allocator's lock 100 times a second to ask a yes/no question.
 pub(super) static QUARANTINE_FRAMES: AtomicU32 = AtomicU32::new(0);
 
-/// Free-list growth accumulated over *every* rotation, for
-/// [`BuddyAllocator::rotate_spliced_pages`]. A test cannot read the rotation
-/// that matters from a return value: the rotations that move a parked frame
-/// along run inside [`crate::mmu::quiesce`]'s epoch closure, not in the
-/// test's own call.
 #[cfg(feature = "test-hooks")]
 static ROTATE_SPLICED_PAGES: AtomicU32 = AtomicU32::new(0);
 
-/// Where the buddy accounts one frame, for [`BuddyAllocator::frame_accounting`].
+/// Where the buddy accounts one frame.
 #[cfg(feature = "test-hooks")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameAccounting {
-    /// Outside the frame table entirely.
     Untracked,
-    /// Handed to a caller, who owes a free.
     HandedOut,
-    /// In a per-CPU magazine — the allocator's, not a caller's.
     Cached,
-    /// Parked awaiting a TLB quiesce.
     Quarantined,
-    /// On a free list.
     Free,
-    /// Reserved at boot, or retired from the supply.
     Withheld,
 }
 
@@ -364,13 +352,10 @@ impl BuddyInner {
     }
 
     /// Close one epoch: `draining` joins the releasable backlog, `incoming`
-    /// takes its place. Splices nothing — a splice is O(blocks × free-list
-    /// length), and this runs from whichever CPU's timer interrupt observes
-    /// the last ack.
+    /// takes its place.
     ///
-    /// The return is that claim measured: free-list growth, which a splice
-    /// necessarily moves and nothing else can move while this `&mut self`
-    /// runs.
+    /// Splices nothing — a splice is O(blocks × free-list length), and this
+    /// runs from whichever CPU's timer interrupt observes the last ack.
     fn quarantine_rotate(&mut self, table: &RawTable<PageFrame>) -> u32 {
         let free_before = self.free_frames;
         let releasable = Self::quarantine_concat(
@@ -392,15 +377,8 @@ impl BuddyInner {
         grew
     }
 
-    /// Splice blocks from the releasable backlog into the free lists until
-    /// `limit` **pages** have been released.
-    ///
-    /// Pages, not blocks, because that is what `Reclaimable::reclaim` is
-    /// specified in and what every caller budgets in. A block is indivisible
-    /// here, so the last one may carry the total past `limit` — by less than
-    /// one block, and never by refusing to release at all: a budget that could
-    /// decline the head block would report zero forever while
-    /// `reclaimable_pages` kept saying there was work.
+    /// Splice up to `limit` pages from the releasable backlog into the free
+    /// lists.
     fn quarantine_release_some(&mut self, table: &RawTable<PageFrame>, limit: u32) -> u32 {
         let mut released = 0u32;
         while released < limit {
@@ -797,11 +775,7 @@ impl BuddyAllocator {
     /// Snapshot `(total, free, allocated)`. `free` folds in the PCP cached
     /// frames and `allocated` subtracts them, so the two still sum to a
     /// stable total.
-    ///
-    /// The cache total is read under the lock because every path that moves a
-    /// frame out of a magazine and into the free lists does both halves under
-    /// it; read outside, a peer's drain lands in `free_frames` while the frame
-    /// is still counted as cached, and the sum exceeds `total_frames`.
+    /// Cached frames are counted under the lock, or a peer's drain double-counts.
     pub fn stats(&self) -> (u32, u32, u32) {
         let inner = self.inner.lock();
         let pcp_cached = pcp::total_cached();
@@ -820,18 +794,11 @@ impl BuddyAllocator {
         pcp::snapshot(cpu)
     }
 
-    /// Test hook: pages every rotation so far has spliced back into the free
-    /// lists. Wraps; a caller takes differences.
     #[cfg(feature = "test-hooks")]
     pub fn rotate_spliced_pages(&self) -> u32 {
         ROTATE_SPLICED_PAGES.load(Ordering::Relaxed)
     }
 
-    /// Test hook: how the buddy currently accounts one frame.
-    ///
-    /// Lets a test assert what its *own* allocation and free did to the frame
-    /// it holds, which no other CPU can move — unlike the free and allocated
-    /// counts, which every CPU writes.
     #[cfg(feature = "test-hooks")]
     pub fn frame_accounting(&self, phys_addr: PhysAddr) -> FrameAccounting {
         self.with_locked(|inner, table| {
@@ -1087,8 +1054,7 @@ impl BuddyAllocator {
     }
 
     /// Promote the proven-safe batch into the releasable backlog. O(1); the
-    /// splicing is [`Self::quarantine_release_some`]'s job, so the frames this
-    /// reports releasing are none.
+    /// splicing is [`Self::quarantine_release_some`]'s job.
     pub fn quarantine_rotate(&self) -> u32 {
         self.with_locked(|inner, table| inner.quarantine_rotate(table))
     }

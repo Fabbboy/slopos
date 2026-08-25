@@ -643,9 +643,7 @@ fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: 
         return -1;
     }
 
-    // Conclusive, not a failure: the hold owns the task and publishes it on
-    // release, which is exactly what `wake_blocked_task`'s totality contract
-    // asks a publisher to guarantee.
+    // Conclusive, not a failure: the hold owns the task and publishes it on release.
     if crate::task::kernel_io_hold_claim(body, from) {
         return 0;
     }
@@ -673,8 +671,7 @@ fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: 
             // whatever handle it carried.
             SchedPlacement::Migrating => sched.enqueue_migrated_borrowed(task),
             SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake => 0,
-            // A nascent task holds no reservation to transfer into a queue, and
-            // no reservation is ever taken *from* a held one.
+            // A nascent task holds no reservation to transfer into a queue.
             SchedPlacement::Nascent | SchedPlacement::Held => -1,
         });
 
@@ -866,8 +863,7 @@ pub fn task_apply_affinity(task: &TaskRef, new_affinity: u32) {
                 send_reschedule_ipi(last_cpu);
             }
         }
-        // The release re-runs `select_target_cpu`, so a held task needs no
-        // repatriation here.
+        // The release re-runs `select_target_cpu`, so a held task needs no repatriation.
         SchedPlacement::None
         | SchedPlacement::Waking
         | SchedPlacement::RemoteWake
@@ -1582,7 +1578,7 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
             | SchedPlacement::Migrating
             | SchedPlacement::Held => {
                 // Scheduler ownership already exists: the state CAS alone makes
-                // the existing queue/inbox/migration/hold owner runnable again.
+                // the existing queue/inbox/migration owner runnable again.
                 if task_transition_from(body, TaskStatus::Blocked, TaskStatus::Ready) {
                     return 0;
                 }

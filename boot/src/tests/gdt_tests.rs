@@ -15,17 +15,14 @@ use crate::gdt::{gdt_init, gdt_set_ist, gdt_set_kernel_rsp0, syscall_msr_init};
 use crate::idt::{IdtEntry, idt_get_gate};
 use crate::ist_stacks::{IST_STACK_COUNT, stack_bounds_for_cpu};
 
-/// Probe stack top `n`, taken from `cpu`'s live IST stacks: `cli` masks only the
-/// IRQ-routed slots, so an installed probe still has to be guard-paged and
-/// inside the SafeStack IST region.
+/// `cli` masks only the IRQ-routed slots, so a probe must be a real stack.
 fn probe_stack_top(cpu: usize, n: usize) -> KernelStackTop<'static> {
     let (_guard_start, _guard_end, _stack_base, top) =
         stack_bounds_for_cpu(cpu, n % IST_STACK_COUNT);
     KernelStackTop::from_kernel_va(top - 16 * (n / IST_STACK_COUNT) as u64)
 }
 
-/// Slot `i` is probed with slot `i+1`'s stack, so a write landing one TSS entry
-/// over is a mismatch rather than a coincidence.
+/// Slot `i` takes slot `i+1`'s stack, so an off-by-one write is a mismatch.
 fn ist_probe_top(cpu: usize, slot: IstSlot) -> KernelStackTop<'static> {
     probe_stack_top(cpu, slot.as_tss_offset() + 1)
 }
@@ -40,8 +37,7 @@ fn live_tss_base() -> Option<u64> {
     Some(tss_base)
 }
 
-/// IST1..IST7 are seven 8-byte entries at TSS64 offset 36; neither they nor
-/// `rsp0` at offset 4 are 8-aligned, hence the byte-array helper.
+/// TSS64: IST1..IST7 are unaligned 8-byte entries at offset 36.
 fn live_tss_ist(tss_base: u64, slot: IstSlot) -> u64 {
     u64::from_le_bytes(ts_gdt::read_bytes_at::<8>(
         tss_base + 36 + slot.as_tss_offset() as u64 * 8,
@@ -174,9 +170,7 @@ struct Rsp0Probe {
     tss_restored: u64,
 }
 
-/// One install-and-restore round trip of the live RSP0. `RSP0` is loaded only
-/// on a ring transition, which a kernel-mode window cannot take; the mask is
-/// what keeps the install and the restore adjacent.
+/// The mask keeps the install and the restore adjacent.
 fn probe_kernel_rsp0() -> Option<Rsp0Probe> {
     let tss_base = live_tss_base()?;
     let probe = probe_stack_top(get_current_cpu(), RSP0_PROBE_INDEX).as_u64();
@@ -196,8 +190,6 @@ fn probe_kernel_rsp0() -> Option<Rsp0Probe> {
     })
 }
 
-/// The value handed to `gdt_set_kernel_rsp0` reaches the live TSS, and the
-/// PCR's `kernel_rsp` and that TSS field name one stack rather than two.
 pub fn test_gdt_set_kernel_rsp0_valid() -> TestResult {
     let Some(observed) = probe_kernel_rsp0() else {
         klog_info!("GDT_TEST: BUG - no TSS loaded, or the BSP PCR is uninitialised");
@@ -219,16 +211,7 @@ pub fn test_gdt_set_kernel_rsp0_valid() -> TestResult {
     TestResult::Pass
 }
 
-/// The setter has no validator, so whatever is installed is taken as a stack by
-/// the next ring transition. One test rather than three: null, a user address
-/// and a misaligned value are the same invariant read three ways, and split
-/// across tests none of them could fail without the others.
-///
-/// Alignment is the part that is not implied by the other two: the CPU pushes
-/// the interrupt frame in 8-byte units from whatever `RSP0` names, so a
-/// truncated or off-by-one write lands mid-frame rather than nowhere. Eight,
-/// not sixteen — the ABI's 16-byte requirement is a function-call boundary
-/// property, and the live value is legitimately 8-aligned.
+/// Eight-byte, not sixteen: the CPU pushes the interrupt frame in 8-byte units.
 pub fn test_gdt_kernel_rsp0_is_a_usable_stack_top() -> TestResult {
     const KERNEL_HALF: u64 = 0xFFFF_8000_0000_0000;
     let Some(rsp0) = live_rsp0() else {
@@ -256,7 +239,6 @@ const IST_SLOTS: [IstSlot; 7] = [
     IstSlot::Reserved7,
 ];
 
-/// Each IST slot takes the stack it was given, in its own TSS entry.
 pub fn test_gdt_set_ist_valid_indices() -> TestResult {
     let mut scope = KernelTestScope::enter();
     let cpu = get_current_cpu();
@@ -268,10 +250,7 @@ pub fn test_gdt_set_ist_valid_indices() -> TestResult {
     let observed = IrqDisabled::with(|irq| {
         let saved = ts_pcr::bsp_ist_snapshot(irq)?;
         let mut installed = [0u64; 7];
-        // Reverse: the permutation is `slot i takes stack i+1`, so writing
-        // forward leaves each just-written slot transiently holding the boot
-        // value of the next, not-yet-written one — an alias between two
-        // vectors `cli` does not mask.
+        // Reverse: writing forward transiently aliases two unmasked vectors.
         for slot in IST_SLOTS.iter().rev() {
             let top = ist_probe_top(cpu, *slot);
             scope.with_boot(|ctx| gdt_set_ist(ctx, *slot, top));

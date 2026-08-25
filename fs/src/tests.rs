@@ -32,9 +32,7 @@ macro_rules! mount_ext2 {
     };
 }
 
-/// Mount the builtin filesystems. Idempotent in the VFS itself, so every test
-/// that touches a path calls this rather than depending on whichever test the
-/// lex order happens to run first.
+// Idempotent, so no test has to depend on the lex order that put it first.
 fn ensure_vfs_ready() -> bool {
     if vfs_init_builtin_filesystems().is_err() {
         klog_info!("VFS_TEST: failed to initialize VFS");
@@ -98,8 +96,6 @@ pub fn test_vfs_file_roundtrip() -> TestResult {
     TestResult::Pass
 }
 
-/// A private directory: the entry under test can then only be missing because
-/// `readdir` omitted it, never because leftovers pushed it past the buffer.
 pub fn test_vfs_list() -> TestResult {
     klog_info!("VFS_TEST: list directory");
     if !ensure_vfs_ready() {
@@ -143,8 +139,7 @@ pub fn test_vfs_cd_into_listed_dirs() -> TestResult {
     if !ensure_vfs_ready() {
         return TestResult::Fail;
     }
-    // Its own directory in the root, so the sweep below is never vacuous
-    // whatever else has or has not run.
+    // Its own root directory, so the sweep below is never vacuous.
     const FIXTURE: &str = "vfs_cd_test";
     let _ = vfs_mkdir(b"/vfs_cd_test");
 

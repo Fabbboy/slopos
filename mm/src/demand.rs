@@ -76,8 +76,7 @@ pub fn handle_demand_fault(
         return Ok(());
     }
 
-    // Ahead of the allocation rather than after it: a retry storm that reached
-    // `ostd_map_4kb_user` would churn the buddy and run reclaim once per round.
+    // Before the allocation: a retry storm past it would churn the buddy and reclaim.
     if !vm_space_is_exclusive(vm_space) {
         return Err(MmError::Retry);
     }

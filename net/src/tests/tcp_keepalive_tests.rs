@@ -19,9 +19,7 @@ const KEEPALIVE_INTERVAL_MS: u64 = 75 * 1_000;
 const IDLE_ADVANCE_MS: u64 = KEEPALIVE_IDLE_MS + 1;
 const INTERVAL_ADVANCE_MS: u64 = KEEPALIVE_INTERVAL_MS + 1;
 
-/// Each test enters its scope on the mock clock pinned here, so every keepalive
-/// deadline is expressed in mock time and a later `MockClock::advance` can
-/// cross it.
+/// Pins keepalive deadlines to mock time so `MockClock::advance` can cross them.
 const MOCK_START_MS: u64 = 1;
 
 fn connect_and_establish(
@@ -57,14 +55,8 @@ fn connect_and_establish(
     Ok((sock, tcp_id))
 }
 
-/// Advance the mock clock by `advance_ms` and dispatch the keepalives that
-/// become due, returning this connection's outcome if one of them was its:
-/// `Some(Some(seg))` for a probe, `Some(None)` if the connection was released,
-/// `None` if no keepalive of its own was due.
-///
-/// Every popped keepalive is dispatched before returning, because
-/// `dispatch_due` removes what it hands back and an early return would discard
-/// the rest.
+/// Every popped keepalive must be dispatched before returning: `dispatch_due`
+/// removes what it hands back, so an early return would discard the rest.
 fn dispatch_next_keepalive_for_conn(
     scope: &NetTestScope,
     tcp_id: ConnId,

@@ -685,13 +685,8 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
         tid,
     ) {
         slopos_mm::page_fault::FaultOutcome::Resolved => true,
-        // Nothing was mapped: #PF is a fault, so the IRET frame still names the
-        // faulting instruction and it re-executes. The flag is left pending
-        // rather than acted on — this handler runs on an IST stack, which
-        // `scheduler_handoff_on_trap_exit` refuses to switch away from — so
-        // what actually lets the reference holder run is the next timer
-        // interrupt, whose trap exit does hand off. Each retry round is a full
-        // user-mode round trip, so the loop is preemptible throughout.
+        // #PF is a fault, so the instruction re-executes on IRET; the flag stays
+        // pending because this IST stack refuses a trap-exit hand-off.
         slopos_mm::page_fault::FaultOutcome::Retry => {
             scheduler_request_reschedule(RescheduleReason::InterruptWake);
             true

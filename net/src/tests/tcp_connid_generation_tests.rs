@@ -5,11 +5,8 @@
 //! drives that reuse deterministically: install, release, install into the same
 //! slot, then act with the first id.
 //!
-//! Every test holds a [`NetTestScope`]: the slots, generations and stale-lookup
-//! counter below are global table state the live ingress and net-timer threads
-//! mutate too. `reset()` stays inside the scope, which clears the table before
-//! it gates ingress, so a frame already in flight can still install after that
-//! clear.
+//! Every test holds a [`NetTestScope`]: the table is global state the live
+//! ingress and net-timer threads mutate too.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};

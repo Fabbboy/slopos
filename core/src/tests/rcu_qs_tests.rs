@@ -7,10 +7,6 @@
 //! either can land in the middle of one, and a report from inside a reader frees
 //! the object that reader is still dereferencing.
 //! `rcu_note_qs_from_interrupt` is the guarded variant those two sites use.
-//!
-//! Those same two sites are also why every observation below is taken with
-//! interrupts masked: they call the function under test on this very CPU, so an
-//! unmasked sample pair counts their reports as well as the test's own.
 
 use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
 use slopos_ostd::sync::{rcu_note_qs_from_interrupt, rcu_qs_counter, rcu_read_lock};
@@ -22,10 +18,8 @@ use slopos_testing::assert_test;
 /// against a variant that always declined; the positive control below is the
 /// other side of that.
 pub fn test_rcu_interrupt_qs_declines_inside_a_reader() -> TestResult {
-    // Inside the mask, with the reads it indexes: `rcu_note_qs` increments the
-    // slot of whichever CPU is *live*, so a `cpu` read before the window names
-    // a slot the report need not have touched, and the exact-count assertions
-    // below would be measuring a different CPU than the one that reported.
+    // Inside the mask, with the reads it indexes: a `cpu` read before the window can name a
+    // slot the report never touched.
     let (reported, advance) = IrqDisabled::with(|_irq| {
         let cpu = slopos_arch::pcr::get_current_cpu();
         let guard = rcu_read_lock();

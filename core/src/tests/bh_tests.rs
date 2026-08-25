@@ -4,12 +4,6 @@
 //! reaches the allocator underneath it, and one that re-enters itself recurses
 //! against a 4 KiB stack. None of that is visible from the producer side, which
 //! only ever sets a byte.
-//!
-//! The counters are per-CPU and `SpinLock::lock` masks this CPU's interrupts,
-//! so a window opened inside the critical section admits neither a peer CPU's
-//! drain nor this CPU's own timer tick. That is what lets the deltas below be
-//! exact rather than bounds, and it is why each snapshot is taken after the
-//! lock rather than before it.
 
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::bh;
@@ -20,10 +14,7 @@ use slopos_testing::fail;
 static PROBE_LOCK: SpinLock<u32> = SpinLock::new(0, lock_class!("BH_TEST", LOCK_LEVEL_RESOURCE));
 
 /// The deferred work frees memory, and the buddy's reuse path is exactly where
-/// a caller's own lock would meet it. What is pinned is that the call declines
-/// instead of draining, not which predicate refused it: `SpinLock` masks
-/// interrupts too, so no caller can hold a tracked lock and leave the
-/// interrupt-enable test the one that still passes.
+/// a caller's own lock would meet it.
 pub fn test_bh_declines_under_a_held_lock() -> TestResult {
     let guard = PROBE_LOCK.lock();
     let declines_before = bh::declined_context();
@@ -92,13 +83,7 @@ pub fn test_bh_raise_does_not_run_work_inline() -> TestResult {
 
 /// The only drain point a lock-taking kernel thread that never returns to
 /// userland reaches. Firing on the guard's own drop rests on `SpinLockGuard`
-/// restoring the caller's interrupt flag and then releasing its preemption
-/// guard last.
-///
-/// The count can only be read once that flag is back on, so a tick landing in
-/// the handful of instructions before the read could drain and stand in for an
-/// unlock that failed to. Repeating the sequence demands that coincidence on
-/// every round instead of once.
+/// restoring the caller's interrupt flag and releasing its preemption guard last.
 pub fn test_bh_runs_at_the_outermost_unlock() -> TestResult {
     const UNLOCK_ROUNDS: u64 = 8;
 
@@ -114,9 +99,7 @@ pub fn test_bh_runs_at_the_outermost_unlock() -> TestResult {
 
     let drains = bh::drains();
     if drains < before + UNLOCK_ROUNDS {
-        // `bh::drains()` is per-CPU and the two reads are not pinned to one, so
-        // the difference can be negative here — on the path whose job is to
-        // report the failure, where an overflow panic would take the run down.
+        // `bh::drains()` is per-CPU and the two reads are not pinned to one, so this can wrap.
         return fail!(
             "only {} of {} outermost unlocks reached the drain",
             drains.wrapping_sub(before),
@@ -130,23 +113,9 @@ pub fn test_bh_runs_at_the_outermost_unlock() -> TestResult {
 /// this same hook. Without the claim each would start a nested drain from the
 /// destructor of the guard the outer one is standing on, and a callback that
 /// re-raised would make that recursion unbounded.
-///
-/// The claim is taken by hand because no drain callback is reachable from a
-/// test: inside the drain's own preemption guard a nested release never fires
-/// the hook at all, so the claim is only ever consulted from the relaxed phase,
-/// which runs in exactly the state reconstructed here — preemption on,
-/// interrupts on, no lock held. Holding it across the same unlock
-/// [`test_bh_runs_at_the_outermost_unlock`] shows does drain leaves the claim as
-/// the only difference between the two.
 pub fn test_bh_is_not_re_entered() -> TestResult {
-    // `bh_active` is the live per-CPU claim, and the swap is gs-relative. The
-    // window below has interrupts and preemption on, so a migration would leave
-    // the claiming CPU marked as draining for the rest of the boot — its RCU
-    // callback invocation and graveyard drain stopped, silently. The restore is
-    // gs-relative too, so it lands on whichever CPU the test ended up on and
-    // cannot reach the stranded one: the check below reports that strand, it
-    // does not repair it. The kernel phase does not migrate today; this makes
-    // that a test failure rather than an assumption.
+    // The claim and its restore are both gs-relative: a migration across this window would
+    // strand the claiming CPU marked as draining, which the check below reports but cannot undo.
     let claimed_on = slopos_arch::pcr::get_current_cpu();
     let claimed_before = slopos_arch::pcr::bh_active_swap(true);
 

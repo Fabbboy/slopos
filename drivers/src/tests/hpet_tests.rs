@@ -3,8 +3,7 @@ use slopos_testing::TestResult;
 
 use crate::hpet;
 
-/// Being descheduled stretches any single measurement without the delay having
-/// been wrong, so the shortest of several rounds is the durable statistic.
+// A deschedule stretches any single measurement, so only the shortest round counts.
 const TIMING_ROUNDS: usize = 5;
 
 pub fn test_hpet_nanoseconds_zero() -> TestResult {
@@ -138,8 +137,6 @@ pub fn test_hpet_counter_monotonic() -> TestResult {
     TestResult::Pass
 }
 
-/// Measured on the HPET, the clock `delay_ms` itself waits on: the TSC keeps
-/// counting through a vCPU deschedule, so it answers for the host.
 pub fn test_hpet_delay_accuracy() -> TestResult {
     if !hpet::is_available() {
         klog_info!("HPET_TEST: SKIP - HPET not initialized");
@@ -200,8 +197,7 @@ pub fn test_hpet_delay_zero() -> TestResult {
         shortest = shortest.min(hpet::read_counter().wrapping_sub(start));
     }
 
-    // 1 ms is the shortest wait `delay_ms` can express, so anything it spends
-    // on a zero request is a wait it invented.
+    // 1 ms is the shortest wait `delay_ms` can express.
     if shortest >= one_ms {
         klog_info!(
             "HPET_TEST: BUG - delay_ms(0) waited {} ticks, a whole millisecond being {}",

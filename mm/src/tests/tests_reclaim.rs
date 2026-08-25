@@ -1,14 +1,7 @@
 //! Reclaim: bounding holding time, not just acquisition.
 //!
-//! Pins the three properties that make the tier trustworthy: it actually frees
-//! pages, it refuses rather than blocks when it cannot, and it stops asking at
-//! its budget.
-//!
-//! Nothing here may assert on the size of a pool. A frame this file parked is
-//! its own until two epoch closures make it releasable; from that instant it
-//! is anyone's, because every idle CPU's bottom half splices 64 pages off the
-//! releasable backlog (`sched::runtime`). What stays this file's own is the
-//! accounting of a specific frame, and the reclaim tier's own call counts.
+//! Nothing here may assert on pool sizes: once two epoch closures make a
+//! parked frame releasable, any idle CPU's bottom half may splice it away.
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::frame::FrameAllocOptions;
@@ -22,9 +15,7 @@ use crate::page_alloc::{
     quarantine_reclaim_asks, reclaim_probe_zero_asks,
 };
 
-/// Allocate a frame and free it into the quarantine's incoming list. Release
-/// reaches a block only two epoch closures after it is parked, so until then no
-/// peer can move it.
+/// No peer can move a parked block until two epoch closures later.
 fn park_a_frame() -> Option<PhysAddr> {
     quiesce::note_deferred_unmap();
     let pa = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
@@ -45,8 +36,6 @@ pub fn test_reclaim_registrants_report_without_freeing() -> TestResult {
         names += 1;
     });
     assert_test!(names > 0, "no reclaimer is registered");
-    // Every zero-ask assertion below reads a counter only this registrant can
-    // move, so a probe the walk does not reach would make all of them vacuous.
     assert_test!(
         saw_probe,
         "the reclaim probe is not in the registry walk -- nothing downstream \
@@ -78,20 +67,6 @@ pub fn test_reclaim_registrants_report_without_freeing() -> TestResult {
     pass!()
 }
 
-/// `run(0)` reaches no registrant, `run(1)` asks the first one once, and
-/// nobody behind it is asked for what is left of a budget already met.
-///
-/// Not a page bound, and not the total either. The only pool holding anything
-/// during a test — the quarantine — is the first one asked, so a `run` that
-/// dropped its budget checks altogether returns exactly what a correct one
-/// returns. No arithmetic on `freed` can see the difference; two ask counters
-/// can, one per side of the guard.
-///
-/// Frames are parked first to give the ask something to do. Whether it still
-/// finds them is not asserted and does not need to be: from the closure that
-/// makes them releasable they are anyone's — every idle CPU's bottom half
-/// splices 64 pages off that backlog (`sched::runtime`) — and both counts read
-/// the same either way.
 pub fn test_reclaim_run_respects_its_bound() -> TestResult {
     let before = quarantine_reclaim_asks();
     assert_test!(reclaim::run(0) == 0, "run(0) freed pages");
@@ -103,8 +78,8 @@ pub fn test_reclaim_run_respects_its_bound() -> TestResult {
             return fail!("witness frame allocation");
         }
     }
-    // Two closures carry the batch from `incoming` through `draining` into the
-    // releasable backlog, the only list reclaim splices from.
+    // Two closures carry a batch into the releasable backlog, the only list
+    // reclaim splices from.
     for _ in 0..2 {
         if quiesce::force_close_epoch_for_test().is_none() {
             return fail!("no epoch closed under a full set of acks");
@@ -122,11 +97,6 @@ pub fn test_reclaim_run_respects_its_bound() -> TestResult {
         freed
     );
 
-    // The count above cannot see the registrants *behind* the quarantine: a
-    // `run` that dropped its per-registrant guard still asks the quarantine
-    // exactly once, then walks on to everyone else in the same pass. What that
-    // walk hands them is what is left of a budget already met -- zero -- which
-    // a correct `run` never asks anyone for.
     let zero_asks = reclaim_probe_zero_asks();
     assert_test!(
         zero_asks == 0,
@@ -137,11 +107,6 @@ pub fn test_reclaim_run_respects_its_bound() -> TestResult {
     pass!()
 }
 
-/// Reclaim releases what it reports.
-///
-/// Deliberately asserts nothing against the buddy's free count, nor against a
-/// re-read of the reclaimers' own report: a reclaimed page goes to the TLB
-/// quarantine first, and the pool it sits in is one every CPU adds to.
 pub fn test_reclaim_returns_pages_to_the_buddy() -> TestResult {
     let Some(witness) = park_a_frame() else {
         return fail!("witness frame allocation");
@@ -154,18 +119,16 @@ pub fn test_reclaim_returns_pages_to_the_buddy() -> TestResult {
         parked
     );
 
-    // Two closures carry a parked block from `incoming` through `draining`
-    // into the releasable backlog, which is the only list reclaim splices from.
+    // Two closures carry a parked block into the releasable backlog, the only
+    // list reclaim splices from.
     for _ in 0..2 {
         if quiesce::force_close_epoch_for_test().is_none() {
             return fail!("no epoch closed under a full set of acks");
         }
     }
 
-    // One page per pass: `run` hands every registrant what is left of the
-    // request, and the quarantine's splice holds the buddy's interrupts-off
-    // lock for as many blocks as it is asked for. The witness sits behind
-    // whatever peers parked after it, which is what the passes are for.
+    // One page per pass: the quarantine's splice holds the buddy's
+    // interrupts-off lock for as many blocks as it is asked for.
     const RELEASE_PASSES: u32 = 256;
 
     let mut freed_total = 0u32;

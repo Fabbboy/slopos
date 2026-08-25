@@ -172,9 +172,7 @@ fn lockdep_pool_headroom() -> TestResult {
     if validator_deliberately_off() {
         return TestResult::Skipped;
     }
-    // `class_count` is slots consumed and `registered_class_count` is
-    // declaration sites; the fill checks below want the former and the floor
-    // wants the latter.
+    // `class_count` is slots consumed; `registered_class_count` is declaration sites.
     let slots = lock_graph::class_count();
     let leaked = lock_graph::class_slots_leaked() as usize;
     let (c, e, ch) = (
@@ -216,10 +214,6 @@ fn lockdep_pool_headroom() -> TestResult {
         "only {} classes registered — the validator is not measuring anything",
         c
     );
-    // The two counters are maintained by one function on two paths; a caller
-    // reading either one has to be able to reconstruct the other, and a
-    // reported class count that has quietly gone back to counting slots shows
-    // up here rather than as an unexplained ratchet bump three commits later.
     assert_test!(
         c + leaked == slots,
         "{} registered classes + {} leaked slots != {} consumed — the two \

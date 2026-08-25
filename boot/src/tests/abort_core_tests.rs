@@ -92,17 +92,12 @@ pub fn test_emergency_guard_classifier() -> TestResult {
     TestResult::Pass
 }
 
-/// On a private election, not the machine's: claiming that one tells the IDT's
-/// NMI stop and the TLB ack wait that a fatal panic is in flight.
+/// On a private election: claiming the machine's would tell the IDT's NMI stop
+/// that a fatal panic is in flight.
 pub fn test_panic_owner_election() -> TestResult {
     use slopos_ostd::panic::{PanicOwner, panic_owner_claimed, panic_owner_is};
 
-    // A round trip through the free functions, not a health check: what has to
-    // be pinned is that each one reaches the machine's own election, and a read
-    // that merely looks reasonable passes just as well when the delegation is
-    // wired to the wrong static. The election is unclaimed outside a panic, so
-    // this claims it, observes it through the accessors, and releases it —
-    // with nothing between the claim and the reset that can panic.
+    // Nothing between the claim and the reset may panic.
     assert_test!(
         !panic_owner_claimed(),
         "the machine's fatal-panic election is claimed outside a panic"

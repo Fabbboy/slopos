@@ -45,19 +45,9 @@ static RELAXED_DRAIN: AtomicUsize = AtomicUsize::new(0);
 /// indefinitely; what is left over stays pending for the next point.
 const MAX_BH_PASSES: u32 = 8;
 
-/// What the point did on one CPU. Every predicate counted here is a fact about
-/// the calling CPU alone, so a machine-wide total would let one CPU's ordinary
-/// drain pass as evidence about another's.
 struct BhCounters {
-    /// Declines whose cause is the calling context rather than re-entrancy. A
-    /// drain site whose preconditions quietly stopped holding shows up here
-    /// rather than as a growing backlog.
     declined_context: AtomicU64,
-    /// Declines because this CPU was already draining. Expected and large —
-    /// every unlock inside a drain lands here — so it is counted apart.
     declined_reentrant: AtomicU64,
-    /// Completed drains, so a caller can tell "the point was reached" from
-    /// "there was nothing to do".
     drains: AtomicU64,
 }
 
@@ -71,12 +61,7 @@ impl BhCounters {
     }
 }
 
-/// Indexed directly rather than through [`crate::sync::CpuLocal`], whose
-/// pinning guard's drop *is* the release hook this module hangs off: an
-/// increment site would re-enter [`run_pending_slow`] from that destructor and
-/// recurse against the 4 KiB stack. Losing the pin costs nothing here — a
-/// relaxed increment landing on the previous CPU's slot after a migration is
-/// still a diagnostic counter.
+/// Not [`crate::sync::CpuLocal`]: its pin guard's drop is the very hook this module hangs off.
 static BH_COUNTERS: [CacheAligned<BhCounters>; pcr::MAX_CPUS] =
     [const { CacheAligned(BhCounters::new()) }; pcr::MAX_CPUS];
 
@@ -195,15 +180,13 @@ fn run_pending_slow() {
     }
 }
 
-/// Declines on the calling CPU whose cause was the calling context rather than
-/// re-entrancy.
+/// Calling-CPU declines whose cause was the context rather than re-entrancy.
 #[inline]
 pub fn declined_context() -> u64 {
     counters().map_or(0, |c| c.declined_context.load(Ordering::Relaxed))
 }
 
-/// Declines on the calling CPU because it was already inside a drain. Expected
-/// to be large.
+/// Calling-CPU declines because it was already inside a drain. Expected to be large.
 #[inline]
 pub fn declined_reentrant() -> u64 {
     counters().map_or(0, |c| c.declined_reentrant.load(Ordering::Relaxed))

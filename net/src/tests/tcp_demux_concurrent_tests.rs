@@ -3,10 +3,8 @@
 //! `stest!` runs each test on one CPU, so install/release races are covered
 //! only through deterministic interleavings, not real concurrency.
 //!
-//! Every test that reads the table holds a [`NetTestScope`]: `find`,
-//! `port_in_use` and the active-slot snapshot are global state the live ingress
-//! and net-timer threads mutate too. The epoch test asserts only on its own
-//! drop counter and takes none.
+//! Every test that reads the table holds a [`NetTestScope`]: it is global state
+//! the live ingress and net-timer threads mutate too.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -157,8 +155,6 @@ pub fn test_demux_install_release_cycle_consistency() -> TestResult {
     pass!()
 }
 
-/// How many of `ids` the table still lists as active. The snapshot array is
-/// this function's frame, not its caller's.
 fn active_among(ids: &[Option<ConnId>]) -> usize {
     let mut live = [None; table::TOTAL_PCB_SLOTS];
     let n = table::snapshot_shard_conn_ids(&mut live);
@@ -191,9 +187,7 @@ pub fn test_demux_active_count_matches_installs() -> TestResult {
             Err(_) => return fail!("install failed"),
         }
     }
-    // The generation in a ConnId makes this count the test's own connections
-    // rather than the slots they occupy, so a concurrent install elsewhere in
-    // the table is neither counted nor mistaken for one of these.
+    // The generation in a ConnId counts the test's own connections, not slots.
     assert_eq_test!(active_among(&ids), 4, "after 4 installs");
 
     for id in ids.iter().flatten() {
@@ -250,9 +244,8 @@ pub fn test_epoch_defer_runs_after_grace_period() -> TestResult {
 
     NET_EPOCH.defer_kbox::<DropProbe>(boxed);
 
-    // A grace period elapsing and the callback having been invoked are two
-    // separate facts; `rcu_barrier` is the one that reports the second, and it
-    // drives the drain itself rather than waiting on an idle peer.
+    // `rcu_barrier` reports the callback having run; `wait` only reports the
+    // grace period.
     NET_EPOCH.wait();
     slopos_ostd::sync::rcu::rcu_barrier();
 

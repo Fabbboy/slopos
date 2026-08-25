@@ -22,15 +22,7 @@ use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 /// Bit shift for the AVL software-bits field (PTE bits 9..=11); legacy
 /// [`PageFlags::COW`] sits at bit 9, the low bit of `PageProperty::software`.
 const SOFTWARE_BITS_SHIFT: u32 = 9;
-/// Only two of this helper's callers can retry — the demand and COW fault
-/// paths, which return `MmError::Retry` and re-execute the faulting
-/// instruction. The other eight are syscall paths (`fork`'s COW marking,
-/// `mmap`, `brk`, `mprotect`, `munmap`) where a `WouldBlock` is a spurious
-/// failure with no recovery, so for them the spin is the only recourse there
-/// is. Both fault paths probe `vm_space_is_exclusive` and return `Retry`
-/// before doing any work, so a reader already outstanding costs them nothing;
-/// one minted between that probe and the spin below still costs the full
-/// budget, with interrupts masked by the per-process lock.
+/// Only the fault paths can retry a `WouldBlock`; for syscalls the spin is all there is.
 const VM_SPACE_MUT_SPINS: usize = 1_000_000;
 
 /// Convert a legacy `PageFlags` bitfield (passed as `u64`) into an OSTD
@@ -83,27 +75,16 @@ pub fn property_to_page_flags(prop: PageProperty) -> PageFlags {
     PageFlags::from_bits_truncate(bits)
 }
 
-/// Advisory: `KArc::get_mut` is the authoritative check. Callers use it to
-/// bail before doing work a `WouldBlock` would have to undo.
+/// Advisory; `KArc::get_mut` is the authoritative check.
 #[inline]
 pub(crate) fn vm_space_is_exclusive(vm_space: &KArc<VmSpace>) -> bool {
     KArc::strong_count(vm_space) == 1 && KArc::weak_count(vm_space) == 0
 }
 
-/// Spins taken in [`vm_space_get_mut`], per CPU.
-///
-/// The fault paths' exclusivity probe exists to keep this at zero: a probe
-/// pushed back inside one dispatch arm still returns `Retry` from the other,
-/// because the spin ends in `WouldBlock` and that maps to the same value. The
-/// count is what tells the two apart. Per-CPU so a peer's syscall spinning on
-/// its own address space does not read back as this one having spun.
 #[cfg(feature = "test-hooks")]
 static VM_SPACE_MUT_SPINS_TAKEN: [core::sync::atomic::AtomicU64; slopos_arch::pcr::MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; slopos_arch::pcr::MAX_CPUS];
 
-/// Test hook: spins `cpu` has taken waiting for exclusive access to an address
-/// space. Wraps; a caller takes differences, and must pin itself to `cpu` for
-/// the window it measures.
 #[cfg(feature = "test-hooks")]
 pub(crate) fn vm_space_mut_spins_taken(cpu: usize) -> u64 {
     VM_SPACE_MUT_SPINS_TAKEN
@@ -128,9 +109,6 @@ fn vm_space_get_mut(vm_space: &mut KArc<VmSpace>) -> Result<&mut VmSpace, MapErr
     KArc::get_mut(vm_space).ok_or(MapError::WouldBlock)
 }
 
-/// Attributed to the CPU that ran the spin, because that is the CPU reading
-/// `get_current_cpu` here. A reader looking for zero on its own slot therefore
-/// cannot be moved off it by a peer, whatever the peer is doing.
 #[cfg(feature = "test-hooks")]
 #[inline]
 fn record_spins(spins: usize) {
@@ -186,13 +164,8 @@ pub fn ostd_map_4kb_user(
 }
 
 /// Unmap the 4 KiB user leaf at `va` and map `pa` in its place on one cursor.
-/// `CursorMut::unmap` does not advance, so both operations land on the same
-/// entry and no window exists in which the address is unmapped and the caller
-/// has already returned.
-/// The displaced frame comes back rather than being dropped here: `unmap` only
-/// flushes this CPU's TLB, so releasing the last reference inline would return
-/// the page to the allocator while a peer CPU still caches the old translation.
-/// The caller must hold it until after a cross-CPU shootdown of `va`.
+/// `unmap` flushes only this CPU, so the caller holds the displaced frame until
+/// after a cross-CPU shootdown of `va`.
 #[must_use = "dropping the displaced frame before the TLB shootdown frees a page a peer may still translate"]
 pub fn ostd_replace_4kb_user(
     vm_space: &mut KArc<VmSpace>,
@@ -204,12 +177,7 @@ pub fn ostd_replace_4kb_user(
     let vs = vm_space_get_mut(vm_space)?;
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
-    // Unmap before the wrap, so no fallible step between them can drop a
-    // `UFrame` over `pa` and free a page the caller also frees. The mirror
-    // hazard — an error after the unmap dropping `displaced` before a
-    // shootdown — is inert for the only caller, `cow::resolve_multi_ref`,
-    // which reaches here precisely because the old page's reference count is
-    // above one.
+    // Unmap before the wrap: a fallible step between could free a page the caller frees.
     let displaced = cursor.unmap::<Size4Kb, AnonymousMeta>()?;
     let frame = UFrame::<AnonymousMeta>::wrap_user_paddr(Paddr::new(pa.as_u64()))
         .map_err(|_| MapError::PathCorrupt)?;

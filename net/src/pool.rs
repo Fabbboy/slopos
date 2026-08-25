@@ -47,9 +47,7 @@ pub static PACKET_POOL: PacketPool =
     PacketPool::new(lock_class!("PACKET_POOL", LOCK_LEVEL_RESOURCE));
 
 impl PacketPool {
-    /// An empty, uninitialised pool. The class comes from the caller so a
-    /// scratch pool a test builds is a different lockdep class from the global
-    /// one, and neither teaches the other an ordering.
+    /// Caller-supplied lock class: a scratch pool must not teach the global one an ordering.
     pub const fn new(class: &'static LockClassKey) -> Self {
         Self {
             inner: SpinLock::new(None, class),
@@ -66,8 +64,6 @@ impl PacketPool {
         self.init_with_slots(POOL_SIZE);
     }
 
-    /// [`init`](Self::init) with an explicit slot count, so a scratch pool can
-    /// be small enough that exhausting it is cheap.
     pub fn init_with_slots(&self, slots_wanted: usize) {
         if self.initialized.swap(true, Ordering::AcqRel) {
             return;

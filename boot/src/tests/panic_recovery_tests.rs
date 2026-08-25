@@ -58,14 +58,10 @@ pub fn test_run_recoverable_cleanup() -> TestResult {
     TestResult::Pass
 }
 
-/// The budget arithmetic, on a private ledger: recording against the machine's
-/// own spends the budget whose exhaustion makes the next recovered panic fatal.
+/// A private ledger: recording against the machine's own would spend the budget
+/// whose exhaustion makes the next recovered panic fatal.
 pub fn test_oops_ledger_accessors() -> TestResult {
-    // A round trip through the free functions, not a health check: what has to
-    // be pinned is that each one reaches the machine's own ledger, and a read
-    // that merely looks reasonable passes just as well when the delegation is
-    // wired to the wrong static. Budget-neutral — `set_oops_limit` writes only
-    // the limit, and the count is put back exactly as it was found.
+    // Budget-neutral: the count is put back exactly as it was found.
     let (live_count, live_limit) = (panic_recovery::oops_count(), panic_recovery::oops_limit());
     const SENTINEL: u64 = 0xFEED_5EED;
     panic_recovery::set_oops_limit(SENTINEL);

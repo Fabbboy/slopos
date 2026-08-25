@@ -34,9 +34,7 @@ pub fn handle_cow_fault(vm_space: &mut KArc<VmSpace>, fault_addr: u64) -> Result
         return Err(MmError::InvalidAddress);
     }
 
-    // Ahead of the dispatch rather than inside one arm: both arms end in a
-    // cursor whose only recourse under contention is a bounded spin taken with
-    // the per-process lock held, and so with interrupts masked.
+    // Both arms end in a bounded spin taken under the per-process lock, IRQs masked.
     if !vm_space_is_exclusive(vm_space) {
         return Err(MmError::Retry);
     }
@@ -96,8 +94,7 @@ fn resolve_multi_ref(
         };
 
     tlb::flush_page(aligned_vaddr);
-    // After the shootdown: this may be the old page's last reference, and a
-    // peer CPU cached its translation until the flush above landed.
+    // Possibly the old page's last reference; peers cached it until the flush above.
     drop(displaced);
 
     Ok(())

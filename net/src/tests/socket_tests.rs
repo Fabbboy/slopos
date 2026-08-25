@@ -12,9 +12,8 @@ fn reset() {
     socket_reset_all();
 }
 
-/// A synthetic PCB on a 4-tuple the wire can reach is a PCB the wire can tear
-/// down between an injection and the assertion about it. The scope's peer is
-/// TEST-NET-1 behind a blackhole device, so nothing leaves and nothing answers.
+/// The scope's peer is TEST-NET-1 behind a blackhole device, so no inbound
+/// segment can tear down a synthetic PCB between injection and assertion.
 fn scope() -> Result<NetTestScope, &'static str> {
     NetTestScope::enter().map_err(|_| "net scope")
 }
@@ -123,8 +122,6 @@ pub fn test_socket_bind_already_bound() -> TestResult {
 }
 
 pub fn test_socket_listen_after_bind() -> TestResult {
-    // The listener is still installed on the wildcard address when this
-    // returns, and an inbound SYN to 8080 would demux onto it and be answered.
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),
@@ -316,11 +313,7 @@ pub fn test_socket_state_after_bind() -> TestResult {
 }
 
 pub fn test_socket_reset_all() -> TestResult {
-    // "Reset all" is the contract, so the global counts are what has to be
-    // asserted — a version checking only this test's own two sockets passes
-    // while leaving a stranger's. The scope is what makes those counts a known
-    // quantity: its `enter` and `Drop` each retire the socket table, the PCBs,
-    // the demux entries and the ephemeral ports.
+    // Global counts are the contract, and the scope is what makes them known.
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),
@@ -332,8 +325,7 @@ pub fn test_socket_reset_all() -> TestResult {
     }
     let (listener, datagram) = (listener as u32, datagram as u32);
 
-    // Listen rather than connect: it installs a PCB without putting a SYN on
-    // the wire, so the connection this test owns is one nothing else can retire.
+    // Listen rather than connect: a PCB without a SYN on the wire.
     assert_eq_test!(socket_bind(listener, [0, 0, 0, 0], 8181), 0);
     assert_eq_test!(socket_listen(listener, 4), 0);
     let Some(conn) = socket_lookup_tcp_idx(listener) else {
@@ -366,8 +358,6 @@ pub fn test_socket_reset_all() -> TestResult {
 }
 
 pub fn test_socket_accept_no_pending_returns_eagain() -> TestResult {
-    // "No pending" is the assertion, and an inbound SYN completing a handshake
-    // on 8080 is what would put one there.
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),
@@ -846,9 +836,6 @@ pub fn test_tcp_send_before_handshake_complete() -> TestResult {
 }
 
 pub fn test_tcp_listen_accept_incoming_syn() -> TestResult {
-    // A listener on a wire-reachable address is the one shape in this file that
-    // races *inbound*: a real SYN to the bound port would be accepted as this
-    // test's peer.
     let scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),

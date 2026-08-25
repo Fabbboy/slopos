@@ -13,12 +13,7 @@ use crate::irq::{
     unmask_irq_line,
 };
 
-/// Puts one line's routing and mask back on the way out.
-///
-/// The routing table is the machine's, not the test's: a line left routed
-/// sends every later mask request for it at an IOAPIC entry nothing programmed.
-/// A guard rather than a restore at the end of the body, so a failing early
-/// return cannot skip it.
+/// The routing table is the machine's: a line left routed aims later mask requests at nothing.
 struct IrqLineGuard {
     line: u8,
     saved: IrqLineState,
@@ -175,8 +170,7 @@ pub fn test_ostd_alloc_drop_releases() -> TestResult {
 }
 
 pub fn test_ostd_reserve_specific_double_claim_refused() -> TestResult {
-    // The allocator's own answer for which vector is taken, rather than a
-    // guess at one no driver holds: a guess that loses makes the test inert.
+    // The allocator's own answer for which vector is taken; a guess that loses makes this inert.
     let line = IrqAllocator::alloc().expect("alloc");
     let r = IrqAllocator::reserve_specific(line.vector());
     assert_test!(
@@ -256,8 +250,7 @@ pub fn test_ostd_handle_drop_clears_dispatch() -> TestResult {
 }
 
 pub fn test_ostd_dispatch_to_unregistered_vector_is_noop() -> TestResult {
-    // Held for the call, so the vector cannot be one a driver registered: a
-    // dispatch to that would run its handler with a fabricated error code.
+    // Held for the call, so the vector cannot be one a driver registered.
     let line = IrqAllocator::alloc().expect("alloc");
     dispatch(line.vector(), 0);
     TestResult::Pass

@@ -1,20 +1,5 @@
-//! RAII fixture for kernel net tests.
-//!
-//! Holds four things as one unit because they are one decision: where a packet
-//! a test sends goes, which wheel a `schedule` lands in, what `now_ms()`
-//! returns, and whether the kernel's own net threads may deliver a frame or
-//! fire a timer. Splitting them leaves a window in which a timer is scheduled
-//! against one clock and fired against another, or in which a synthetic PCB
-//! shares a 4-tuple with the wire.
-//!
-//! Two mechanisms make a fixture PCB unreachable, and neither is the address
-//! class. Outbound: the fixture installs a metric-0 `/24` at the blackhole sink,
-//! which wins longest-prefix over the DHCP default route — without it,
-//! `192.0.2.2` falls through to the physical NIC exactly as any other address
-//! would. Inbound: `ingress::quiesce_begin` gates the physical RX path and both
-//! net kthreads for the scope's life. RFC 5737 TEST-NET-1 is chosen so the
-//! fixture's 4-tuple is one no host network sources, which is a second line of
-//! defence and not the first.
+//! RAII net-test fixture: a metric-0 `/24` at a blackhole sink outranks the DHCP
+//! default route, and `ingress::quiesce_begin` gates physical RX for its life.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -47,8 +32,6 @@ const TEST_PEER_MAC: MacAddr = MacAddr([0x02, 0x00, 0x5f, 0x00, 0x02, 0x02]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeError {
-    /// The fixture's route could not be installed, so its address would fall
-    /// through to the live default route.
     NoRoute,
     Alloc,
     NoDeviceSlot,
@@ -57,9 +40,7 @@ pub enum ScopeError {
 
 static PANIC_CLEANUP_REGISTERED: StateFlag = StateFlag::new();
 
-/// The live scope's sink, for the panic hook to retire. `NO_DEV` when no scope
-/// is up. A `Drop` that never ran is the only way this is read, and only one
-/// scope exists at a time, so a plain atomic is the whole synchronisation.
+/// The live scope's sink, for the panic hook to retire; `NO_DEV` when none.
 const NO_DEV: u32 = u32::MAX;
 static LIVE_SINK: AtomicU32 = AtomicU32::new(NO_DEV);
 
@@ -69,21 +50,10 @@ fn ensure_panic_cleanup_registered() {
     }
 }
 
-/// A test that panicked inside a scope never ran its `Drop`.
-///
-/// The three process-global switches come first because each one, left set,
-/// silently disables networking for the rest of the boot, and all three are
-/// atomics that take no lock a panicking context might hold. The sink is
-/// retired after them, because leaving it registered is not cosmetic: the next
-/// scope installs a *second* `192.0.2.0/24` at equal prefix and metric, and a
-/// lookup that returns the stale device hands the SYN to whatever now occupies
-/// that slot. The three calls take ordinary registry locks, which the panic
-/// path has already unwound out of.
+/// A panicking test never ran its `Drop`. The sink must be retired too, or the
+/// next scope installs a second `192.0.2.0/24` at equal prefix and metric.
 fn panic_reopen_dataplane() {
-    // Before the gate reopens: a PCB the panicking test left with a latched
-    // delayed ACK would otherwise survive into a live dataplane, and the
-    // kthread would transmit it. Ordinary registry locks, which the panic path
-    // has already unwound out of.
+    // Before the gate reopens: a latched delayed ACK must not reach a live dataplane.
     socket::socket_reset_all();
 
     ingress::quiesce_clear();
@@ -111,8 +81,7 @@ impl NetTestScope {
         Self::build(None)
     }
 
-    /// [`enter`](Self::enter) with the mock clock pinned at `ms`, so every
-    /// deadline the test creates is in mock time and an `advance` can cross it.
+    /// [`enter`](Self::enter) with the mock clock pinned at `ms`.
     pub fn enter_at_mock_ms(ms: u64) -> Result<Self, ScopeError> {
         Self::build(Some(ms))
     }
@@ -120,8 +89,8 @@ impl NetTestScope {
     fn build(mock_ms: Option<u64>) -> Result<Self, ScopeError> {
         ensure_panic_cleanup_registered();
 
-        // Before the wheel swap: this cancels every live TCP and neighbour
-        // token, and a token is only cancellable in the wheel that minted it.
+        // Before the wheel swap: a token is only cancellable in the wheel that
+        // minted it.
         socket::socket_reset_all();
 
         ingress::quiesce_begin();
@@ -134,24 +103,17 @@ impl NetTestScope {
             }
         };
 
-        // Cleared unconditionally, so the scope is a strict superset of
-        // `tcp_common::reset_all()` and a caller can use it in place of one. A
-        // predecessor's mock time surviving into an `enter()` scope would make
-        // `check_zero_window_probe` and the timestamp option — both of which
-        // read `now_ms()` directly rather than taking it as an argument — read
-        // a clock nothing in this test set.
+        // Unconditional: a predecessor's mock time would leak into `now_ms()`
+        // callers that take no clock argument.
         MockClock::clear();
         if let Some(ms) = mock_ms {
             MockClock::install_at(ms);
         }
 
-        // Anything a panicked predecessor left behind, before this scope's own
-        // schedules start landing here.
         timer::TEST_TIMER_WHEEL.clear();
         timer::select_test_wheel(true);
 
-        // After the swap, so the entry's ArpExpire lands in the test wheel and
-        // the live stack's wheel gains nothing from the fixture.
+        // After the swap, so the entry's ArpExpire lands in the test wheel.
         let _ = NEIGHBOR_CACHE.insert_or_update(
             dev,
             Ipv4Addr(TEST_PEER_IP),
@@ -164,7 +126,6 @@ impl NetTestScope {
         Ok(Self { sink, dev })
     }
 
-    /// The sink the fixture's routes point at.
     pub fn dev(&self) -> DevIndex {
         self.dev
     }
@@ -181,22 +142,17 @@ impl NetTestScope {
         TEST_PEER_PORT
     }
 
-    /// Frames the fixture swallowed. A send to [`peer_ip`](Self::peer_ip)
-    /// raises this and nothing else, so it is also the proof that the frame did
-    /// not go out on a real device.
+    /// Frames the fixture swallowed — proof a send did not reach a real device.
     pub fn tx_packets(&self) -> u64 {
         self.sink.tx_packets()
     }
 
-    /// Fire the due timers of exactly `kind`. Entries of other kinds stay
-    /// pending, so a fast-forward cannot consume — and discard — a timer the
-    /// test does not own.
+    /// Fire the due timers of exactly `kind`; other kinds stay pending.
     pub fn dispatch_due(&self, kind: TimerKind) -> KVec<FiredTimer> {
         timer::wheel().process_due_matching(kind)
     }
 
-    /// Complete the client 3WHS for `id` with a synthetic SYN+ACK carrying
-    /// `peer_iss`, and notify the socket layer as the RX path would.
+    /// Complete the client 3WHS for `id` with a synthetic SYN+ACK.
     pub fn inject_syn_ack(&self, id: tcp::ConnId, peer_iss: u32) -> Option<()> {
         let (tuple, iss) = tcp::with_pcb(id, |pcb| {
             let iss = match &pcb.state {
@@ -235,24 +191,17 @@ impl NetTestScope {
 
 impl Drop for NetTestScope {
     fn drop(&mut self) {
-        // Still on the test wheel, so the tokens this cancels are the ones it
-        // minted.
+        // Still on the test wheel, so this cancels the tokens it minted.
         socket::socket_reset_all();
-        // The whole device, not just the pre-seeded peer: a send to any other
-        // address in the fixture's /24 creates a pending entry holding queued
-        // buffers and an ArpRetransmit token minted in the test wheel, and the
-        // clear below would leave that entry naming an index in a wheel that no
-        // longer holds it.
+        // The whole device: a send anywhere in the fixture's /24 leaves a pending
+        // entry naming an ArpRetransmit token the clear below would strand.
         drop(NEIGHBOR_CACHE.flush_device(self.dev));
 
-        // Emptied before the swap back, so no token minted here can later be
-        // cancelled against the live stack's wheel.
+        // Emptied before the swap back, so no token minted here outlives it.
         timer::TEST_TIMER_WHEEL.clear();
 
-        // Clock before wheel, and unconditional: deselecting first leaves a
-        // window in which the live wheel is selected while `now_ms()` still
-        // reads the test's fast-forwarded time, and every deadline in that
-        // wheel looks due.
+        // Clock before wheel: deselecting first leaves the live wheel selected
+        // while `now_ms()` still reads fast-forwarded time.
         MockClock::clear();
         timer::select_test_wheel(false);
 
@@ -302,11 +251,7 @@ fn arm_addressing(dev: DevIndex) -> Result<(), ScopeError> {
     .map_err(|_| ScopeError::Attach)?;
 
     // `ROUTE_TABLE.add` rather than `route::add`: the fixture posts no netmon
-    // event on the way in, and `route::remove_device_routes` on the way out
-    // pairs with the `iface::detach` and `unregister` that do announce.
-    // Checked: an unrouted fixture address falls through to whatever default
-    // route the live stack has, which is the physical NIC — the one outcome the
-    // scope exists to make impossible.
+    // event on the way in.
     if !ROUTE_TABLE.add(RouteEntry {
         prefix: Ipv4Addr(TEST_LOCAL_IP).masked(TEST_PREFIX_LEN),
         prefix_len: TEST_PREFIX_LEN,
@@ -320,8 +265,6 @@ fn arm_addressing(dev: DevIndex) -> Result<(), ScopeError> {
     Ok(())
 }
 
-/// Nothing the fixture sends can reach a real device, and nothing a real device
-/// receives can reach the stack while it is up.
 pub fn test_net_scope_is_hermetic() -> TestResult {
     use slopos_abi::net::{AF_INET, SOCK_STREAM};
     use slopos_abi::syscall::ERRNO_EINPROGRESS;
@@ -371,8 +314,7 @@ pub fn test_net_scope_is_hermetic() -> TestResult {
         "peer is the address the fixture's /24 routes at the sink"
     );
 
-    // Exactly one: the SYN. A second would mean the pre-seeded neighbour was
-    // missed and an ARP request was built for a peer that does not exist.
+    // A second would mean the pre-seeded neighbour was missed and ARP ran.
     assert_eq_test!(scope.tx_packets(), 1, "the SYN went into the sink");
 
     pass!()

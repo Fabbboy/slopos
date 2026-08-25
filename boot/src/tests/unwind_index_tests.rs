@@ -13,14 +13,10 @@ const DEPTH_DELTA: u32 = 20;
 const SHALLOW_DEPTH: u32 = 2;
 
 /// A ratio, not a nanosecond budget: an absolute bound measures the host as
-/// much as the unwinder, and a vCPU the host deschedules inside one catch
-/// blows any budget wide enough to be portable. Scan-shaped lookup puts the
-/// deep catch an order of magnitude above the shallow one; indexed lookup
-/// leaves it under twice.
+/// much as the unwinder.
 const DEPTH_COST_RATIO_LIMIT: u64 = 4;
 
-/// Repetitions per depth. The minimum is the only steal-immune statistic here:
-/// one clean pass is enough, and no number of stolen ones can lower it.
+/// Repetitions per depth; the minimum is the only steal-immune statistic.
 const TIMED_CATCHES: u32 = 3;
 
 #[inline(never)]
@@ -33,7 +29,6 @@ fn recurse_then_panic(depth: u32) {
     core::hint::black_box(depth);
 }
 
-/// Fastest of [`TIMED_CATCHES`] caught panics thrown `depth` frames down.
 fn time_catch(depth: u32) -> u64 {
     let mut best = u64::MAX;
     for _ in 0..TIMED_CATCHES {

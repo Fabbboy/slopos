@@ -322,10 +322,7 @@ pub fn test_heap_stats() -> TestResult {
     kfree(ptr);
     let freed = get_heap_stats_owned();
 
-    // The byte totals move under a peer's `kfree`, and `free_size` is derived
-    // from the other two rather than accumulated, so nothing there can fail.
-    // Both counts only ever climb: this test's own pair of calls must move one
-    // of each.
+    // Byte totals move under a peer's `kfree`; the two counts only ever climb.
     if allocated.allocation_count <= before.allocation_count {
         return fail!(
             "allocation count did not advance ({} -> {})",
@@ -414,17 +411,8 @@ fn heap_reuse_round() -> HeapReuse {
     }
 }
 
-/// Two frees followed by two allocations of the same class must hand back the
-/// two addresses just freed.
-///
-/// Asserted on this test's own pointers rather than on the heap's total size:
-/// that total moves with every other CPU's slab refill.
-///
-/// A single round is allowed to miss. The magazine fast path is skipped
-/// whenever a peer holds the class lock — masking this CPU's interrupts says
-/// nothing about that — and a free diverted past it lands on a shared slab
-/// free list a peer can allocate from. A class that does not reuse at all
-/// misses every round.
+/// A round may legitimately miss: a peer holding the class lock diverts the
+/// free past the magazine onto a shared slab list. A broken class misses all.
 pub fn test_heap_free_list_search() -> TestResult {
     const ROUNDS: u32 = 8;
 

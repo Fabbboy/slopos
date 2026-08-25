@@ -101,10 +101,7 @@ impl SynSentState {
         };
         let our_wscale = if wscale_enabled { s.our_wscale } else { 0 };
 
-        // Every path that leaves the PCB in `SynSent` has already returned, so
-        // from here the state is replaced either way and the SYN's own
-        // retransmit timer has no segment left to send. Left armed, it fires a
-        // data retransmit against a PCB whose send buffer is empty.
+        // Left armed, this fires a data retransmit against a PCB whose send buffer is empty.
         let syn_retransmit = s.retransmit_token.take();
 
         // Drop the &mut borrow of pcb.state before writing it back.

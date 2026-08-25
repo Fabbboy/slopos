@@ -639,8 +639,7 @@ pub fn test_process_group_slot_survives_republication() -> TestResult {
         "the displaced group is still readable through the handle"
     );
 
-    // `rcu_barrier`, not a bounded poll: the refcount below is exact only once
-    // the callback has *run*, and a poll that gives up leaves it read early.
+    // `rcu_barrier`, not a bounded poll: the count below is exact only once the callback has run.
     slopos_ostd::sync::rcu_barrier();
     assert_eq_test!(
         KArc::strong_count(&held),
@@ -1051,10 +1050,6 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     TestResult::Pass
 }
 
-/// A poll registration whose fd closed must not resolve to whatever later
-/// occupies that descriptor. Stated on the registration's identity rather than
-/// on the reopened fd's number: which number the allocator hands back is not
-/// part of the property.
 pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -1239,9 +1234,6 @@ pub fn test_fork_blocked_parent() -> TestResult {
     TestResult::Pass
 }
 
-/// An address space plus an owning reference to its process, so the process's
-/// quota row stays readable after the address space is torn down: that is the
-/// only moment at which "every page was given back" can be stated.
 struct AccountedVm {
     process: KArc<slopos_ostd::process::Process>,
     id: slopos_ostd::process::ProcessId,
@@ -1280,13 +1272,6 @@ impl AccountedVm {
     }
 }
 
-/// Tearing an address space down gives every page it was charged back to the
-/// principal that held them.
-///
-/// Read per-account rather than off the machine-wide free count: per-CPU cache
-/// refills, RCU-deferred frees and cross-CPU TLB drains all move the global
-/// number while nothing has leaked, which is why the old form needed a slack
-/// bound. A per-principal charge is exact, so this asserts equality.
 pub fn test_fork_cleanup_on_failure() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -1458,10 +1443,6 @@ pub fn test_operations_on_terminated_task() -> TestResult {
     TestResult::Pass
 }
 
-/// The same refund guarantee as `test_fork_cleanup_on_failure`, with the buddy
-/// allocator held under pressure so the fork path takes its low-memory arms.
-/// Asserted per-account for the same reason: the machine-wide free count moves
-/// for reasons that are not leaks.
 pub fn test_fork_memory_pressure() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -1821,9 +1802,7 @@ pub fn test_futex_contention_path_stability() -> TestResult {
     TestResult::Pass
 }
 
-/// Split out of [`test_signal_install_deliver_and_sigreturn`] so neither half
-/// carries the other's locals: at opt-level 0 the combined frame exceeded the
-/// 2 KiB cap `check_stack_sizes.sh` enforces.
+// Split out so the two halves' locals do not share a frame: combined they exceed the 2 KiB cap.
 #[inline(never)]
 fn sigreturn_refuses_a_poisoned_fpu_image(
     pid: slopos_fs::fileio::FdTable,
@@ -1854,8 +1833,7 @@ fn sigreturn_refuses_a_poisoned_fpu_image(
             &mut *user_frame,
         )
     });
-    // The scheduler restores the task's own save area on the next context
-    // switch, so the poison must not survive there either.
+    // The next context switch restores the task's own save area, so the poison must not survive.
     let leftover = {
         let current = assert_some!(Current::get(), "current task after dispatch");
         current.task().with_fpu_bytes_mut(&current, |data| {
@@ -5178,13 +5156,6 @@ pub fn test_task_state_fused_cas() -> TestResult {
 
 /// The full kernel poll path end to end: WQ registration, readiness check,
 /// `block_current_task_with_timeout`, and wakeup via `unix_send`.
-///
-/// Every claim is stated on `poll`'s own decision rather than on how long the
-/// call took. `syscall_poll` returns a non-zero count only from its ready
-/// branch and 0 only from its timeout branch, so with readiness established
-/// before the call the return value *is* "ready without waiting". The one
-/// surviving duration check is a lower bound, which a descheduled vCPU can
-/// only lengthen.
 pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
     use crate::syscall::fs::syscall_poll;
     use slopos_abi::syscall::UserPollFd;
@@ -5279,8 +5250,6 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
     });
     let elapsed2 = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start2);
 
-    // 0 rather than a negative errno: the deadline passed, and neither a wake
-    // nor an abort cut the wait short.
     assert_eq_test!(frame2.rax(), 0, "poll with no data should timeout");
     assert_test!(
         elapsed2 >= POLL_TIMEOUT_MS,
@@ -5478,10 +5447,6 @@ fn socket_handle_for_fd(table: FdTable, fd: i32) -> Option<slopos_net::unix_sock
 
 /// Demonstrates the check-first-register-second race: the write publishes to a
 /// queue nobody is on, so no `unblock_task` can run.
-///
-/// Stated on the queue's occupancy at the moment of the write, not on the
-/// waiter's state afterwards: that task is PCR-current with interrupts live,
-/// so its status is not this test's to hold still.
 pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
@@ -5684,10 +5649,7 @@ fn unix_create_connected_pair_raw() -> Option<(
     Some((accepted, cli))
 }
 
-/// Owns both endpoints of a raw AF_UNIX pair. `MAX_UNIX_SOCKETS` is a fixed
-/// pool, so a return path that skips the close — `fail!` included — costs the
-/// rest of the boot two slots. Closing an endpoint a test already closed is a
-/// generation-checked no-op.
+// `MAX_UNIX_SOCKETS` is a fixed pool: a return path that skips the close costs the boot two slots.
 struct RawUnixPair {
     server: slopos_net::unix_socket::SocketHandle,
     client: slopos_net::unix_socket::SocketHandle,
@@ -5707,7 +5669,6 @@ impl Drop for RawUnixPair {
     }
 }
 
-/// Owns a descriptor in `table`, closing it on drop.
 struct OwnedFd {
     table: FdTable,
     fd: i32,
@@ -5725,7 +5686,6 @@ impl Drop for OwnedFd {
     }
 }
 
-/// Owns a task created by a test, terminating it on drop.
 struct OwnedTask(u32);
 
 impl OwnedTask {
@@ -6787,12 +6747,6 @@ slopos_testing::stest!(
     suite = syscall_signal
 );
 
-/// Every live task a sender holding `sender_flags` may not name through
-/// `kill(-1, …)`, with the pending mask it carried beforehand.
-///
-/// The broadcast selector names whatever population the run happens to have,
-/// so the set it must leave alone is enumerated rather than assumed to be the
-/// two tasks a test created.
 fn broadcast_spared_pending(sender_id: u32, sender_flags: u16) -> slopos_ostd::KVec<(u32, SigSet)> {
     use crate::syscall::signal::{signal_dominates, signal_is_init, signal_may_name};
 
@@ -6811,9 +6765,6 @@ fn broadcast_spared_pending(sender_id: u32, sender_flags: u16) -> slopos_ostd::K
     spared
 }
 
-/// The id of a spared task whose pending mask moved, or `None`. A task that
-/// has since left the registry counts as unchanged: it cannot be re-read, and
-/// the fanout is not what removed it.
 fn spared_pending_moved(spared: &slopos_ostd::KVec<(u32, SigSet)>) -> Option<u32> {
     spared.iter().find_map(|(task_id, before)| {
         let now = task_find_by_id(*task_id).map_or(*before, |target| target.signal_pending());
@@ -6823,10 +6774,6 @@ fn spared_pending_moved(spared: &slopos_ostd::KVec<(u32, SigSet)>) -> Option<u32
 
 /// A broadcast `kill` never names a kernel task: the SIGKILL path is not
 /// signal-gated, so a fanout would tear down a driver thread and its IRQ line.
-///
-/// Checked over the whole enumeration the selector produces, not over the one
-/// kernel task this test made: a spot check states nothing about the tasks it
-/// did not look at.
 pub fn test_broadcast_kill_spares_kernel_tasks() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -6969,8 +6916,7 @@ pub fn test_kill_refuses_a_more_privileged_target() -> TestResult {
     pass!()
 }
 
-/// The broadcast arm applies the same relation to every target it collects —
-/// every one, not the single privileged task this test happens to have made.
+/// The broadcast arm applies the same relation to every target it collects.
 pub fn test_broadcast_kill_spares_privileged_tasks() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -7612,9 +7558,7 @@ pub fn test_sigchld_ignore_skips_the_zombie_state() -> TestResult {
 pub fn test_zombie_budget_is_enforced_per_parent() -> TestResult {
     let _fixture = SyscallFixture::new();
 
-    // The precondition is `budget + 1` consecutive spawns against a shared
-    // registry, VM slot table and buddy allocator, so reclaim an earlier
-    // test's deferred teardown before counting on it.
+    // `budget + 1` consecutive spawns share a registry and allocator with earlier tests.
     task::task_graveyard_drain();
     slopos_ostd::sync::rcu_barrier();
 

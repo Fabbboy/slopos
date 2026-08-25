@@ -388,12 +388,8 @@ pub fn notify_mm_switch(new_key: Option<TlbProcessKey>, new_process_id: u32, cpu
         .store(new_process_id, Ordering::Release);
 }
 
-/// Test hook: drop `cpu_id`'s record of the address space it last ran, leaving
-/// every process's shootdown mask untouched.
-///
-/// `TlbProcessKey` is a bare slot index with no generation, so once the process
-/// a CPU was parked in is gone, `notify_mm_switch(None, ..)` would clear that
-/// slot's mask bit on behalf of whichever process has since taken the slot.
+/// `TlbProcessKey` carries no generation, so `notify_mm_switch(None, ..)` would
+/// clear the shootdown mask bit of whichever process now holds the slot.
 #[cfg(feature = "test-hooks")]
 pub fn forget_cpu_process_key(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {

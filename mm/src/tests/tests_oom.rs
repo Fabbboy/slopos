@@ -41,15 +41,8 @@ impl FreeOutcome {
     }
 }
 
-/// Free `pa` and report what that did to the buddy's books.
-///
-/// Asks about a frame the test itself holds rather than about the global free
-/// count, which three other CPUs move. The read after the free is the one place
-/// a peer can intrude: it can take the frame straight back out, and the books
-/// spell that exactly as a free that did nothing. So `HandedOut` is not
-/// believed on sight — it is re-read after [`FREE_CONFIRM_MS`] of real time,
-/// which outlasts a peer's transient allocation but not a long-lived one. That
-/// residue is why `StillHandedOut` claims only what the second read saw.
+/// A peer re-allocating the frame reads exactly like a free that did nothing,
+/// so a post-free `HandedOut` is re-read after [`FREE_CONFIRM_MS`].
 fn free_and_observe(pa: PhysAddr) -> FreeOutcome {
     if frame_accounting(pa) != FrameAccounting::HandedOut {
         return FreeOutcome::NotHandedOut;
@@ -76,11 +69,7 @@ fn off_the_books(pa: PhysAddr) -> bool {
     )
 }
 
-/// How long a post-free `HandedOut` is given to resolve itself before it counts
-/// as a leak. Several timer ticks, and a heuristic rather than a bound: nothing
-/// caps how long a peer holds a page it legitimately allocated, so this trades
-/// a longer failing run for not reporting that peer as a leak. Paid only on a
-/// reading that needs it, which a working allocator almost never produces.
+/// Heuristic, not a bound: nothing caps how long a peer holds a page.
 const FREE_CONFIRM_MS: u32 = 50;
 
 pub fn test_page_alloc_until_oom() -> TestResult {
@@ -115,10 +104,7 @@ pub fn test_page_alloc_until_oom() -> TestResult {
     let mut first_bad: Option<(usize, FreeOutcome)> = None;
     for i in 0..count {
         if first_bad.is_some() {
-            // The verdict is settled and only the first frame is reported, so
-            // the remaining frames need returning, not observing: confirming
-            // each would spend `FREE_CONFIRM_MS` up to 512 times over on a
-            // reading already discarded.
+            // Verdict settled; confirming each would cost 512 delays.
             free_page_frame(allocated[i]);
             continue;
         }

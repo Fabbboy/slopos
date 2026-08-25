@@ -3,13 +3,6 @@
 //! Recording filters use atomics — never a `SpinLock` — because
 //! `XdpFilter::execute` runs under a `NET_EPOCH` read guard where acquiring a
 //! tracked lock is forbidden.
-//!
-//! [`crate::ingress::net_rx_inner`] reads [`XDP`] and no other chain, so a test
-//! of the ingress path has to publish into the kernel-wide one. Every such test
-//! holds [`Quiesced`] first: the physical NIC's frames reach the chain through
-//! that same funnel, and a `Drop` verdict standing over the live NIC is a
-//! disconnected machine for as long as the test runs. A test that only needs a
-//! verdict runs its filters through [`LOCAL_CHAIN`] and publishes nothing.
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use slopos_ostd::lock_class;
@@ -219,13 +212,11 @@ fn chain_of(filters: &[&'static dyn XdpFilter]) -> Option<KVec<&'static dyn XdpF
     Some(v)
 }
 
-/// A chain nothing else executes, for the tests that assert on a verdict rather
-/// than on what the ingress path did with one.
+/// A chain nothing else executes, for tests asserting only on a verdict.
 static LOCAL_CHAIN: XdpHookChain = XdpHookChain::new();
 
-/// Shuts the physical NIC's ingress funnel for as long as it lives, so a filter
-/// published in [`XDP`] below can only ever be reached by this test's own
-/// injected frame.
+/// Shuts the physical ingress funnel, so a filter published in [`XDP`] is
+/// reachable only by this test's own injected frame.
 struct Quiesced;
 
 impl Quiesced {
@@ -241,9 +232,7 @@ impl Drop for Quiesced {
     }
 }
 
-/// A kernel-wide install that cannot outlive the test that made it: an
-/// `assert_*` returning early must not leave a verdict standing over every
-/// device in the machine.
+/// A kernel-wide install an early `assert_*` return cannot leave standing.
 struct GlobalChain;
 
 impl GlobalChain {
@@ -259,12 +248,8 @@ impl Drop for GlobalChain {
     }
 }
 
-/// The one cache key a test needs absent beforehand and gone afterwards,
-/// established without emptying the table the live NIC's gateway entry is in.
-///
-/// The index is not private: `make_test_handle`'s private registry hands out
-/// `DevIndex(0)`, which in the global cache this writes to is loopback. Safe
-/// only because nothing else claims these addresses there.
+/// One cache key cleared on both edges, without emptying the table holding the
+/// live NIC's gateway entry. `DevIndex(0)` here is loopback in the global cache.
 struct ScopedNeighbor {
     dev: DevIndex,
     ip: Ipv4Addr,
@@ -357,10 +342,7 @@ pub fn test_xdp_filter_pass_falls_through() -> TestResult {
     pass!()
 }
 
-/// Ordering is a property of `execute` walking a chain, so it is asserted
-/// against a chain of this test's own. `ORDER_LOG` records one entry per
-/// filter run: published in [`XDP`], every frame the live NIC received would
-/// append to it and the recorded order would be somebody else's traffic.
+/// Local chain, not [`XDP`]: live NIC frames would append to `ORDER_LOG` too.
 pub fn test_xdp_filter_chain_order() -> TestResult {
     ensure_pool_init();
 

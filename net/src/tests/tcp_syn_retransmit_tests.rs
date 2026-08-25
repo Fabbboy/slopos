@@ -1,10 +1,4 @@
 //! Active-open SYN retransmission (RFC 793 §3.4, RFC 6298 §5).
-//!
-//! `SynSentState` has carried `retransmits` and `retransmit_token` since it was
-//! written, and nothing incremented either: `connect` armed no timer and
-//! `on_retransmit` matched only `PcbState::Data`. A SYN was therefore sent
-//! exactly once, so one lost SYN stalled the connect for its whole wall-clock
-//! deadline and an unreachable peer for all of it.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
@@ -25,9 +19,8 @@ fn pcb_is_live(id: tcp::ConnId) -> bool {
     tcp::with_pcb(id, |_| ()).is_some()
 }
 
-/// Every retransmit carries the original ISS: a SYN re-sent under a new
-/// sequence number is a second connection attempt, and the peer's SYN-ACK for
-/// the first would then be rejected.
+/// A SYN re-sent under a new sequence number would be a second connection
+/// attempt, and the peer's SYN-ACK for the first would be rejected.
 pub fn test_syn_is_retransmitted_with_the_original_iss() -> TestResult {
     let (_scope, id, iss) = match open(100) {
         Ok(v) => v,
@@ -54,9 +47,8 @@ pub fn test_syn_is_retransmitted_with_the_original_iss() -> TestResult {
     pass!()
 }
 
-/// The attempt is abandoned rather than retried forever, and the PCB goes with
-/// it: a `SynSent` entry nothing retires holds its shard slot and its ephemeral
-/// port for the life of the boot.
+/// A `SynSent` entry nothing retires holds its shard slot and ephemeral port
+/// for the life of the boot.
 pub fn test_syn_retransmits_are_bounded_and_release_the_pcb() -> TestResult {
     let (_scope, id, _iss) = match open(200) {
         Ok(v) => v,
@@ -93,13 +85,8 @@ pub fn test_syn_retransmits_are_bounded_and_release_the_pcb() -> TestResult {
     pass!()
 }
 
-/// A completed handshake must take the SYN's timer with it. Left armed, it
-/// fires against a `Data` PCB, and the wheel entry outlives the connection's
-/// need for it.
-///
-/// The observable is the wheel's own pending count, taken across the scope that
-/// owns the wheel: the token is moved out of the state during the transition,
-/// so nothing else can be asked whether it was cancelled.
+/// The token is moved out of the state during the transition, so the wheel's
+/// pending count is the only observable for the cancellation.
 pub fn test_completed_handshake_retires_the_syn_timer() -> TestResult {
     let scope = match NetTestScope::enter_at_mock_ms(300) {
         Ok(s) => s,

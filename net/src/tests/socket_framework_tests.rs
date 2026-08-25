@@ -21,8 +21,6 @@ fn scope() -> Result<NetTestScope, &'static str> {
 }
 
 pub fn test_slab_alloc_free_cycle() -> TestResult {
-    // The counts are machine-wide, so the table has to start empty and end
-    // empty; the scope's `enter` and `Drop` are what retire it on both edges.
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),
@@ -52,8 +50,6 @@ pub fn test_slab_alloc_free_cycle() -> TestResult {
 }
 
 pub fn test_ephemeral_port_exhaustion() -> TestResult {
-    // Draining the whole range only reaches `EPHEMERAL_PORT_COUNT` if the
-    // allocator starts empty, which is what the scope's entry teardown gives.
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),
@@ -80,8 +76,6 @@ pub fn test_ephemeral_port_exhaustion() -> TestResult {
 }
 
 pub fn test_udp_demux_dispatch() -> TestResult {
-    // Both ports are demux targets, and the assertions are on exactly which
-    // datagram is at the head of each queue.
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),
@@ -119,8 +113,6 @@ pub fn test_udp_demux_dispatch() -> TestResult {
 }
 
 pub fn test_inaddr_any_wildcard() -> TestResult {
-    // A wildcard bind catches every destination address, so any inbound
-    // datagram to 43000 lands in the queue this test reads.
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),
@@ -188,7 +180,6 @@ pub fn test_recv_queue_overflow() -> TestResult {
 }
 
 pub fn test_so_reuseaddr() -> TestResult {
-    // Two sockets are left sharing a demux registration on 44000 at return.
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),
@@ -272,8 +263,6 @@ pub fn test_so_rcvbuf_resize() -> TestResult {
 }
 
 pub fn test_shutdown_read_behavior() -> TestResult {
-    // The wildcard bind outlives the test with its read side shut, so anything
-    // the ingress path enqueues there is never drained.
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),

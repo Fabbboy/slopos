@@ -1,12 +1,6 @@
 //! Test-only sink device: accepts every transmit and yields nothing on RX.
-//!
-//! `tx` must return `Ok`. `ipv4::send` propagates an error up through
-//! `socket_send_tcp_segment` into `socket_connect`, which aborts the PCB, so a
-//! rejecting device would make a connection *fail* rather than go nowhere.
-//!
-//! Every counter is an atomic: the tree's other mock devices keep theirs behind
-//! `SpinLock`s, and each such lock is a lockdep class the tests-build class caps
-//! count exactly.
+//! `tx` must return `Ok`, or `socket_connect` aborts the PCB instead of the
+//! connection going nowhere. Counters are atomics to add no lockdep class.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -37,8 +31,7 @@ impl BlackholeDev {
         }
     }
 
-    /// Frames this device swallowed — how a test proves a send happened without
-    /// a peer existing.
+    /// Frames this device swallowed.
     pub fn tx_packets(&self) -> u64 {
         self.tx_packets.load(Ordering::Relaxed)
     }

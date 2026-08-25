@@ -26,10 +26,8 @@ fn bytes_are(slice: &[u8], expected: u8) -> bool {
     slice.iter().all(|b| *b == expected)
 }
 
-/// Empties the reassembly table however the test leaves, and before the scope
-/// does. A group that survives holds a timeout token minted in the test wheel,
-/// which the scope's `Drop` clears and deselects — so the next reset would
-/// cancel that index against the live wheel instead.
+/// Must run before the scope's `Drop`: a surviving group holds a timeout token
+/// minted in the test wheel.
 struct ResetOnExit;
 
 impl Drop for ResetOnExit {
@@ -307,8 +305,7 @@ pub fn test_reassembly_max_groups_eviction() -> TestResult {
 
 const BYPASS_DST: Ipv4Addr = Ipv4Addr([10, 0, 5, 250]);
 const BYPASS_PROBE_SRC: Ipv4Addr = Ipv4Addr([10, 0, 5, 200]);
-/// Unassigned (RFC 3692), so `dispatch_l4` has no handler and the reassembly
-/// table is the only state an accepted packet can reach.
+/// Unassigned (RFC 3692), so `dispatch_l4` has no handler for it.
 const BYPASS_PROTOCOL: u8 = 253;
 const BYPASS_FRAGMENT_LEN: usize = 100;
 
@@ -318,7 +315,6 @@ struct GroupKey {
     identification: u16,
 }
 
-/// A well-formed IPv4 packet, optionally carrying the More Fragments flag.
 fn ipv4_packet(key: GroupKey, more_fragments: bool) -> Option<PacketBuf> {
     const HEADER_LEN: usize = 20;
     const TOTAL_LEN: usize = HEADER_LEN + BYPASS_FRAGMENT_LEN;
@@ -349,9 +345,7 @@ fn drive_ingress(dev: DevIndex, key: GroupKey, more_fragments: bool) -> bool {
     }
 }
 
-/// Take every group slot, returning the key of the group eviction reaches
-/// first — group ids are a monotonic counter, so that is the one inserted here
-/// first.
+/// Returns the key eviction reaches first: group ids are a monotonic counter.
 fn fill_groups() -> Option<GroupKey> {
     reset_reassembly_table();
     let mut table = REASSEMBLY_TABLE.lock();
@@ -397,18 +391,12 @@ fn complete_group(key: GroupKey) -> bool {
         .is_some()
 }
 
-/// A packet with neither More Fragments nor a fragment offset must never reach
-/// the reassembly table.
-///
-/// The table is filled first, so a group the ingress path creates has to evict
-/// one — whether the evicted group still completes is the observation.
 pub fn test_non_fragmented_bypasses_reassembly() -> TestResult {
     PACKET_POOL.init();
     let scope = match NetTestScope::enter() {
         Ok(s) => s,
         Err(e) => return fail!("net scope: {:?}", e),
     };
-    // After the scope, so it drops first and its reset runs inside.
     let _reset = ResetOnExit;
 
     let Some(oldest) = fill_groups() else {
@@ -423,8 +411,7 @@ pub fn test_non_fragmented_bypasses_reassembly() -> TestResult {
     }
     let bypassed = complete_group(oldest);
 
-    // The same packet with More Fragments set does take a slot, so the check
-    // above cannot pass merely because the packet was rejected earlier.
+    // With More Fragments the same packet does take a slot: the control.
     let Some(oldest) = fill_groups() else {
         return fail!("could not refill the reassembly table");
     };

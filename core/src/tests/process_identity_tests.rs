@@ -53,9 +53,7 @@ pub fn test_fileio_create_table_rejects_a_bound_process() -> TestResult {
 /// A leftover binding means the ids come back bound to tables their new holders
 /// never opened, and the very next `task_build` is refused a descriptor table.
 pub fn test_a_fixture_reset_releases_fd_tables() -> TestResult {
-    // The reset destroys every descriptor table and every address space in the
-    // machine, so it may not run against live APs or a running kernel-I/O
-    // thread; the scope parks both for the duration.
+    // The reset destroys every table and address space, so it may not run against live APs.
     let _scope = KernelTestScope::enter();
 
     let Ok(process) = slopos_ostd::process::process_spawn_root() else {
@@ -102,8 +100,7 @@ pub fn test_a_fixture_reset_releases_fd_tables() -> TestResult {
 pub fn test_a_recycled_pid_does_not_resolve_to_the_prior_principal() -> TestResult {
     use slopos_ostd::process::{process_for_handle, process_retire, process_spawn_root};
 
-    // Lowest-free allocation only reissues the id if nothing else takes it in
-    // between, and every AP is free to spawn.
+    // Lowest-free allocation reissues the id only if no AP takes it in between.
     let _scope = KernelTestScope::enter();
 
     let Ok(first) = process_spawn_root() else {
@@ -174,9 +171,8 @@ pub fn test_a_recycled_pid_does_not_resolve_to_the_prior_principal() -> TestResu
 /// table" has to answer with a refusal, never a redirect into a more
 /// privileged domain.
 pub fn test_fileio_refuses_a_process_with_no_table() -> TestResult {
-    // `FdTable::Kernel` is the one table every kernel task shares, so counting
-    // it is only a measurement of this call while no other task can open or
-    // close a descriptor.
+    // `FdTable::Kernel` is shared by every kernel task, so the count is this call's only while
+    // no other task can open or close a descriptor.
     let _scope = KernelTestScope::enter();
 
     let Ok(process) = slopos_ostd::process::process_spawn_root() else {

@@ -859,9 +859,6 @@ fn transmit_udp_packet_locked(
         frame[udp + 6..udp + 8].copy_from_slice(&udp_csum.to_be_bytes());
     }
 
-    // Counted for the same reason as `virtio_net_transmit`: this is the other
-    // path that reaches the ring without going through `NetDevice::tx`, and a
-    // DNS query sent through it was invisible to every TX statistic.
     if submit_tx(state, tx_page, total_len as u32) {
         counters::bump(&counters::TX_PACKETS, 1);
         counters::bump(&counters::TX_BYTES, frame_len as u64);
@@ -911,11 +908,7 @@ fn run_napi_burst() -> u32 {
 
 /// Drain the loopback device (DevIndex 0), which stores TX'd packets
 /// internally, back through ingress so they appear as received local traffic.
-///
-/// Gated like `ingress::net_rx`, which this path deliberately bypasses: a frame
-/// queued before a hermetic scope opened would otherwise be delivered into the
-/// global TCP table while the scope is up, minting timeout tokens in the test
-/// wheel and transmitting resets.
+/// Gated like `ingress::net_rx`, which this path bypasses, so a hermetic scope holds.
 fn poll_loopback() {
     use slopos_net::netdev::DEVICE_REGISTRY;
     use slopos_net::types::DevIndex;
@@ -1347,9 +1340,6 @@ pub fn virtio_net_transmit(packet: &[u8]) -> bool {
         return false;
     }
 
-    // Counted here, matching `NetDevice::tx` and `submit_tx_zerocopy`: this is
-    // the service path — DNS queries and `transmit_udp_packet` reach the ring
-    // through it — and a frame it sent was invisible to every TX statistic.
     if submit_tx(&mut state, tx_page, (hdr_len + packet.len()) as u32) {
         counters::bump(&counters::TX_PACKETS, 1);
         counters::bump(&counters::TX_BYTES, packet.len() as u64);

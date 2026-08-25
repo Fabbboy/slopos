@@ -1,9 +1,5 @@
 //! Ingress pipeline — every packet received from any network device passes
 //! through [`net_rx`].
-//!
-//! It is also where a net test fixture holds the data plane still: the kernel's
-//! networking kthreads keep running and keep draining the RX ring, they just
-//! find the door locked here. Nothing is frozen, so nothing can time out.
 
 #[cfg(feature = "test-hooks")]
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -15,19 +11,16 @@ use super::packetbuf::PacketBuf;
 use super::types::{EtherType, MacAddr};
 use super::{ETH_HEADER_LEN, arp, ipv4};
 
-/// Nesting count, not a flag: a helper that enters a scope inside a test that
-/// already holds one must not reopen the gate when it returns.
+/// Nesting count, not a flag: an inner scope must not reopen the gate on exit.
 #[cfg(feature = "test-hooks")]
 static QUIESCE_DEPTH: AtomicU32 = AtomicU32::new(0);
 
-/// Whether a net test fixture is currently holding the data plane still.
 #[cfg(feature = "test-hooks")]
 #[inline]
 pub fn dataplane_quiesced() -> bool {
     QUIESCE_DEPTH.load(Ordering::Relaxed) != 0
 }
 
-/// Whether a net test fixture is currently holding the data plane still.
 #[cfg(not(feature = "test-hooks"))]
 #[inline(always)]
 pub fn dataplane_quiesced() -> bool {
@@ -51,9 +44,7 @@ pub fn quiesce_depth() -> u32 {
     QUIESCE_DEPTH.load(Ordering::Relaxed)
 }
 
-/// Reopen the gate unconditionally. A test that panicked inside a scope never
-/// ran its `Drop`, and a gate left shut kills networking for the rest of the
-/// boot.
+/// A test that panics never runs its `Drop`, and a shut gate kills networking for the boot.
 #[cfg(feature = "test-hooks")]
 pub fn quiesce_clear() {
     QUIESCE_DEPTH.store(0, Ordering::Release);
@@ -61,10 +52,6 @@ pub fn quiesce_clear() {
 
 /// Called from the NAPI poll loop after [`DeviceHandle::poll_rx`] returns a
 /// batch of packets.
-///
-/// Loopback does not come through here — the NAPI loop hands its packets
-/// straight to [`ipv4::handle_rx`] — so quiescing the data plane cuts off the
-/// physical NIC without cutting off local traffic.
 pub fn net_rx(handle: &DeviceHandle, pkt: PacketBuf) {
     if dataplane_quiesced() {
         return;
@@ -72,8 +59,6 @@ pub fn net_rx(handle: &DeviceHandle, pkt: PacketBuf) {
     net_rx_inner(handle, pkt)
 }
 
-/// [`net_rx`] with the quiesce gate bypassed, for the tests that drive the
-/// pipeline with a synthetic frame and a device of their own.
 #[cfg(feature = "test-hooks")]
 pub fn net_rx_injected(handle: &DeviceHandle, pkt: PacketBuf) {
     net_rx_inner(handle, pkt)

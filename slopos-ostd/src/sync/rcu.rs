@@ -189,18 +189,10 @@ fn gp_start_if_idle() {
     });
 }
 
-/// Calls into [`rcu_gp_poll`], per CPU.
-///
-/// This is the only operation that can *complete* a grace period — nothing
-/// else runs the compare-exchange below — so a wait for completion has to
-/// reach it, and one that never does cannot terminate. That makes the count a
-/// clock-free detector for an inline wait open-coded on the callback drain,
-/// which reaches neither [`synchronize_rcu`] nor [`rcu_note_qs`] and so moves
-/// no other counter. Per-CPU for [`rcu_sync_entry_count`]'s reason.
+/// Calls into [`rcu_gp_poll`], per CPU: the only site that can complete a grace
+/// period, so a wait that never reaches it cannot terminate.
 static RCU_GP_POLLS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
-/// How many times `cpu` has called [`rcu_gp_poll`]. Ungated for
-/// [`rcu_qs_counter`]'s reason.
 pub fn rcu_gp_poll_count(cpu: usize) -> u64 {
     if cpu >= MAX_CPUS {
         return 0;
@@ -361,17 +353,8 @@ fn monotonic_ns() -> u64 {
 }
 
 /// Entries into [`synchronize_rcu`], per CPU.
-///
-/// Per-CPU rather than one global counter because the question a caller asks of
-/// it is about itself: a peer taking a grace period of its own must not read
-/// back as this CPU having waited.
 static RCU_SYNC_ENTRIES: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
-/// How many times `cpu` has entered [`synchronize_rcu`].
-///
-/// Ungated for the same reason as [`rcu_qs_counter`]: it is the only way a
-/// caller on a path that must never take a grace period inline — the callback
-/// drain — can tell that it did not.
 pub fn rcu_sync_entry_count(cpu: usize) -> u64 {
     if cpu >= MAX_CPUS {
         return 0;

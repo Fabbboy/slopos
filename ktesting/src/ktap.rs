@@ -11,9 +11,7 @@ use crate::result::TestResult;
 /// Per-failing-test cap on captured-log emission, to bound serial output.
 const MAX_LOG_EMIT: usize = 4096;
 
-/// Stands in for `time_ms=N` when the harness had no monotonic time base to
-/// measure with. Occupies the field's position so a trailing directive keeps
-/// the leading space the host parser matches on.
+/// Holds `time_ms=N`'s position so a trailing directive keeps the space the host parser needs.
 const NO_TIME_BASE: &str = "NO_TIME_BASE";
 
 pub fn emit_header(plan: u32) {

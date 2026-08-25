@@ -13,22 +13,15 @@ use crate::timer::{FiredTimer, MAX_TIMERS_PER_PROCESS, NetTimerWheel, TimerKind,
 /// Arbitrary non-zero base so the mock clock is active (zero = passthrough).
 const BASE_MS: u64 = 1_000;
 
-/// The wheel under test is private, but the clock it reads is not: `now_ms` is
-/// the one clock the whole stack reads, so pinning it is only safe inside a
-/// [`NetTestScope`], which holds the live data plane still for the duration.
-/// The clock is pinned before the wheel exists, so every `schedule(delay_ms, …)`
-/// records an absolute deadline of `BASE_MS + delay_ms`. Callers must bind both
-/// halves — dropping the scope early lets the live stack read the pinned clock.
+/// `now_ms` is the whole stack's clock, so pinning it is only safe inside a
+/// [`NetTestScope`]; callers must bind both halves or the live stack reads it.
 fn fresh_wheel() -> (KBox<NetTimerWheel>, NetTestScope) {
     let scope = NetTestScope::enter_at_mock_ms(BASE_MS).expect("net scope");
     let wheel = KBox::try_init(NetTimerWheel::init()).expect("alloc");
     (wheel, scope)
 }
 
-/// For the three tests that never read the clock — they schedule and cancel by
-/// token and never fire anything. The scope exists to pin `now_ms`; a test that
-/// does not depend on the clock does not need it, and a scope registers a
-/// device, adds a route and retires the socket table twice for nothing.
+/// For tests that schedule and cancel by token without ever reading the clock.
 fn fresh_wheel_unpinned() -> KBox<NetTimerWheel> {
     KBox::try_init(NetTimerWheel::init()).expect("alloc")
 }

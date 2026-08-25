@@ -39,10 +39,8 @@ fn fresh() -> &'static Connectivity {
     &SCRATCH
 }
 
-/// Holds the kernel's own net threads out of the tables a test is reading:
-/// physical ingress and the net timer thread both check this gate, so DHCP
-/// cannot bind an address, and ARP cannot learn a neighbour, in the middle of an
-/// observation.
+/// Gates physical ingress and the net timer thread, so DHCP cannot bind and ARP
+/// cannot learn in the middle of an observation.
 struct Quiesced;
 
 impl Quiesced {
@@ -58,7 +56,6 @@ impl Drop for Quiesced {
     }
 }
 
-/// Released on drop, so a failing assertion cannot leak a monitor slot.
 struct Monitor {
     handle: usize,
 }
@@ -71,14 +68,8 @@ impl Monitor {
             .map(|handle| Self { handle })
     }
 
-    /// Keep only the connectivity records whose transition started at `old`.
-    ///
-    /// A connectivity record addresses the stack rather than an interface, so
-    /// there is no ifindex to filter a monitor on the way
-    /// `netmon_producer_tests` does: the transition itself is the only
-    /// discriminator the record carries.
-    ///
-    /// Chunked through a small stack array to stay under the 2 KiB frame gate.
+    /// The transition is the only discriminator a connectivity record carries;
+    /// chunked through a small stack array to stay under the 2 KiB frame gate.
     fn drain_from(&self, old: u8, out: &mut [NetEvent]) -> usize {
         let mut chunk = [NetEvent::default(); 8];
         let mut kept = 0usize;
@@ -341,11 +332,8 @@ fn test_conn_off_link_needs_a_cached_prefix() -> TestResult {
     pass!()
 }
 
-/// The live classifier posts to the same registry, so the count below is taken
-/// over the records this test can prove are its own: `fresh()` puts the scratch
-/// classifier back at `Unknown`, the ladder never returns there, and the live
-/// one is driven out of it before the monitor is opened. From that point a
-/// record whose transition begins at `Unknown` can only be the scratch one's.
+/// The live classifier posts to the same registry; a record leaving `Unknown`
+/// can only be the scratch one's, since the ladder never returns there.
 fn test_conn_transition_posts_one_event() -> TestResult {
     connectivity::recheck();
     assert_test!(
@@ -381,9 +369,6 @@ fn test_conn_transition_posts_one_event() -> TestResult {
     pass!()
 }
 
-/// Asserts that the dark interface moves nothing, not that it is the only
-/// contributor: the real NIC already raises both rungs, and separating them
-/// would need `gather_evidence` made pure over a supplied row set.
 fn test_conn_gather_ignores_a_carrierless_device() -> TestResult {
     struct DarkMock {
         mac: MacAddr,
@@ -421,8 +406,7 @@ fn test_conn_gather_ignores_a_carrierless_device() -> TestResult {
         }
     }
 
-    // Held across both gathers: without it a DHCP bind or a learned neighbour
-    // lands between them and the delta reads as the mock's doing.
+    // Held across both gathers, or a DHCP bind between them reads as the mock's.
     let _quiesced = Quiesced::enter();
 
     let mac = MacAddr([2, 0, 0, 0, 11, 1]);
@@ -455,8 +439,7 @@ fn test_conn_gather_ignores_a_carrierless_device() -> TestResult {
     );
 
     // `gather_evidence` reads the real tables, so it also sees the live NIC:
-    // only the delta a dark interface makes can be asserted on. Nothing else may
-    // write those tables inside this window — see the guard above.
+    // only the delta a dark interface makes can be asserted on.
     let before = connectivity::gather_evidence();
     iface::detach(dev);
     DEVICE_REGISTRY.unregister(dev);

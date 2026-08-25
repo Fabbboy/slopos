@@ -13,10 +13,8 @@ fn reset() {
     socket_reset_all();
 }
 
-/// A bound UDP port is a demux target: the ingress path enqueues into it, so a
-/// test that asserts on its own queue needs the gate shut. `enter` does the
-/// `socket_reset_all` itself, before seeding the fixture's neighbour, so a
-/// scoped test must not call [`reset`] as well.
+/// `enter` does the `socket_reset_all` itself, before seeding the fixture's
+/// neighbour, so a scoped test must not call [`reset`] as well.
 fn scope() -> Result<NetTestScope, &'static str> {
     NetTestScope::enter().map_err(|_| "net scope")
 }
@@ -55,14 +53,8 @@ pub fn test_udp_t2_dispatch_delivery_and_unbound_drop() -> TestResult {
     pass!()
 }
 
-/// `transmit_udp_packet` builds its own frame and submits straight to the ring,
-/// so it consults no route and no scope can blackhole it — the frame leaves the
-/// guest whatever a test does. The destination is therefore TEST-NET-1, which
-/// no host network routes, rather than a live resolver.
-///
-/// The assertion was `ok || !ok`. It is now the TX counter, which the same
-/// commit that found this made observable: a submit that reported success must
-/// have advanced it by exactly one.
+/// `transmit_udp_packet` submits straight to the ring, so no scope can
+/// blackhole it — hence a TEST-NET-1 destination no host network routes.
 pub fn test_udp_t3_generic_udp_tx_no_crash() -> TestResult {
     use crate::tests::net_scope::{TEST_LOCAL_IP, TEST_PEER_IP};
 
@@ -95,9 +87,7 @@ pub fn test_udp_t3_generic_udp_tx_no_crash() -> TestResult {
 }
 
 pub fn test_udp_t4_sendto_recvfrom_kernel_level() -> TestResult {
-    // The datagram is routed, and the ephemeral port `sendto` auto-binds is
-    // exactly where a reply to it would land — which is what "empty recvfrom"
-    // below asserts did not happen.
+    // The ephemeral port `sendto` auto-binds is where a reply would land.
     let scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),

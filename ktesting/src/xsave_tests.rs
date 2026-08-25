@@ -152,8 +152,7 @@ pub fn test_sse_xsave_xrstor_roundtrip() -> TestResult {
         ],
     };
 
-    // The load/save/zero/restore/read sequence asserts on the live register
-    // file, which an interrupt taken inside it would legitimately swap out.
+    // Asserts on the live register file, which an interrupt would legitimately swap out.
     let readback = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
         slopos_ostd::test_support::cpu_state::sse_xsave_xrstor_roundtrip_4(
             &patterns.data,

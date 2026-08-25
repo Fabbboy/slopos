@@ -93,11 +93,6 @@ pub struct EventBus {
     netmon: [WaitQueue; MAX_NETMON],
 }
 
-/// Every queue empty.
-///
-/// A const rather than a second literal at each site: [`BUS`] and [`TEST_BUS`]
-/// are both this value, so the two instances share one lock class per queue
-/// array instead of minting a second set of twelve.
 const EMPTY_BUS: EventBus = EventBus {
     socket_recv: [const { WaitQueue::new(lock_class!("evbus.socket_recv", LOCK_LEVEL_RESOURCE)) };
         MAX_SOCKETS],
@@ -126,19 +121,9 @@ const EMPTY_BUS: EventBus = EventBus {
 };
 
 /// The kernel-wide event bus.
-///
-/// Const-evaluated, so this large value is laid out as a static and never
-/// built on a stack frame.
 pub static BUS: EventBus = EMPTY_BUS;
 
-/// A second bus no production path can reach, for the kernel tests that assert
-/// on queues with no waiters: proving that accounting property against [`BUS`]
-/// both depends on nothing being blocked there and wakes whatever is.
-///
-/// Socket events route to this instance's own folded arrays rather than the
-/// shared [`SOCKET_QUEUES`] spine, which `queue_for` reads from a static: no
-/// caller allocates the spine for this bus, and a slot past `MAX_SOCKET_SLOTS`
-/// misses it even once some other bus has.
+/// A second bus no production path reaches, for tests asserting on empty queues.
 #[cfg(any(test, feature = "test-helpers"))]
 pub static TEST_BUS: EventBus = EMPTY_BUS;
 

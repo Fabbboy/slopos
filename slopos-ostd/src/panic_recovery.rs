@@ -45,10 +45,6 @@ pub fn production_recovery_enabled() -> bool {
 const OOPS_LIMIT_DEFAULT: u64 = 100;
 
 /// A recovered-panic count and the budget it is judged against.
-///
-/// A type rather than a pair of statics so the arithmetic can be pinned on a
-/// private instance: every increment of the machine's own ledger spends part
-/// of the budget whose exhaustion is fatal.
 pub struct OopsLedger {
     count: AtomicU64,
     limit: AtomicU64,
@@ -70,20 +66,16 @@ impl OopsLedger {
         self.limit.load(Ordering::Relaxed)
     }
 
-    /// `0` disables the limit.
     pub fn set_limit(&self, limit: u64) {
         self.limit.store(limit, Ordering::Relaxed);
     }
 
-    /// Record one oops, returning the post-increment count and whether the
-    /// configured limit has been reached.
     pub fn record(&self) -> (u64, bool) {
         let count = self.count.fetch_add(1, Ordering::SeqCst).saturating_add(1);
         let limit = self.limit.load(Ordering::Relaxed);
         (count, limit != 0 && count >= limit)
     }
 
-    /// Hermetic-test use only: production code never lowers the count.
     #[doc(hidden)]
     pub fn restore(&self, count: u64, limit: u64) {
         self.count.store(count, Ordering::SeqCst);

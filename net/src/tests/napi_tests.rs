@@ -16,9 +16,8 @@ use crate::tests::net_scope::NetTestScope;
 use crate::tests::socket_tests;
 use crate::tests::tcp_common::PEER_ISS;
 
-/// Connect to the scope's sink and complete the handshake by injection: the
-/// sink answers nothing, so the SYN+ACK has to be synthetic, and the peer is
-/// TEST-NET-1 so no real reply can reach the resulting 4-tuple either.
+/// The sink answers nothing, so the SYN+ACK completing the handshake is
+/// synthetic.
 fn connect_and_establish(scope: &NetTestScope) -> Result<(u32, tcp::ConnId), &'static str> {
     let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0, socket::SocketOwner::UNOWNED);
     if sock < 0 {
@@ -79,12 +78,7 @@ pub fn test_napi_waker_rearm_short_circuits() -> TestResult {
     pass!()
 }
 
-/// The submit enqueues and returns; it never waits for the device to complete
-/// the descriptor. Asserted by depth rather than by a wall clock, which
-/// measures the host: a submit that waited for its own completion could not
-/// leave more than one frame outstanding, so `BURST` back-to-back submits
-/// advancing `tx_packets` by `BURST` is the property, and it is the same
-/// verdict on a machine of any speed.
+/// Asserted by outstanding depth, not a wall clock, which would measure the host.
 pub fn test_tx_fire_and_forget() -> TestResult {
     const BURST: u64 = 8;
 
@@ -100,8 +94,7 @@ pub fn test_tx_fire_and_forget() -> TestResult {
         return fail!("a ready driver with no device handle");
     };
 
-    // An empty frame is answered before the ring is touched, so it must not
-    // move the counter and is the control for the burst below.
+    // An empty frame is answered before the ring is touched: the control.
     let before_empty = handle.stats().tx_packets;
     assert_test!(
         (driver.virtio_net_transmit)(&[]),

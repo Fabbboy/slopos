@@ -24,15 +24,8 @@ pub trait Reclaimable: Sync {
 
     /// Release `want` pages. Returns how many were actually released.
     ///
-    /// `want` is never zero: [`run`] stops asking the moment its budget is
-    /// met, so an ask for zero pages is a defect in the caller rather than a
-    /// case a registrant has to handle.
-    ///
-    /// A budget, not a ceiling: a reclaimer whose unit is indivisible — the
-    /// quarantine releases whole buddy blocks — stops as soon as the budget is
-    /// met, so the total may exceed `want` by less than one of its units. The
-    /// alternative, declining a unit that would overshoot, is a reclaimer that
-    /// reports zero forever while `reclaimable_pages` says there is work.
+    /// A budget, not a ceiling: a reclaimer whose unit is indivisible may
+    /// overshoot `want` by less than one of its units. `want` is never zero.
     ///
     /// Must not block, must not allocate, and must return zero rather than
     /// wait for a lock.
@@ -113,12 +106,7 @@ pub fn reclaimable_pages() -> u32 {
     total
 }
 
-/// Ask the registrants for `want` pages, stopping at the first pass that meets
-/// the budget or frees nothing. Returns how many actually came back.
-///
-/// The total may exceed `want` by less than one reclaimer unit, for the reason
-/// [`Reclaimable::reclaim`] gives. `run` stops asking the moment the budget is
-/// met, so the overshoot is one unit for the whole call, not one per pass.
+/// Try to release `want` pages, returning how many actually came back.
 pub fn run(want: u32) -> u32 {
     if want == 0 {
         return 0;
@@ -127,9 +115,6 @@ pub fn run(want: u32) -> u32 {
     for _ in 0..MAX_PASSES {
         let before = freed;
         for_each(|r| {
-            // Saturating because the overshoot `Reclaimable::reclaim` documents
-            // can carry `freed` past `want`, and the subtraction must survive
-            // that on its own rather than only because the check above it ran.
             let left = want.saturating_sub(freed);
             if left == 0 {
                 return;
