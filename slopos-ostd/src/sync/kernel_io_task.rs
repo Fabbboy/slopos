@@ -183,10 +183,11 @@ fn held_ids_snapshot() -> KernelIoTaskIds {
 /// answers `true` for a task the release walk will not visit.
 ///
 /// A union with what is already held, never a replacement. The depth counter
-/// nests; the id set has to nest with it, or an inner arm taken after a stop
-/// deregistered — or before one bound its id — drops that id, the outermost
-/// disarm never visits it, and the task is stranded in `Held` on no queue, past
-/// where the rescue sweep looks.
+/// nests; the id set has to nest with it, or an inner arm taken while a stop is
+/// registered-but-unbound drops that id, the outermost disarm never visits it,
+/// and the task is stranded in `Held` on no queue, past where the rescue sweep
+/// looks. (Nothing deregisters a stop, so that is the only way the registry can
+/// answer with less than the incumbent set.)
 pub fn arm_kernel_io_hold() {
     let mut merged = held_ids_snapshot();
     for stop in registered_stops().iter().flatten() {
@@ -198,12 +199,14 @@ pub fn arm_kernel_io_hold() {
 
 /// Union the registry into an armed hold's cover, without touching the depth.
 ///
-/// A stop that registers — or binds its id, which `KernelIoStop::task_id`
-/// leaves `INVALID_TASK_ID` until the thread first runs — after the arm is
-/// otherwise outside the cover for the hold's whole life: every claim declines
-/// it, so it stays freely queueable while the hold claims to have swept
-/// everything. Refreshing inside the settle loop closes that window rather than
-/// leaving it to be discovered as a flake.
+/// [`__spawn_kernel_io`] publishes the stop to the registry *before* binding the
+/// spawned id to it, so a hold armed inside that window records the stop with
+/// `INVALID_TASK_ID` and covers nothing. This is called from the settle loop,
+/// which closes the window only for as long as that loop runs — a spawn landing
+/// after the hold has settled is still uncovered, and is the residual recorded
+/// in `plans/pipeline-stability.md` §4. Nothing in the tree spawns a kernel-I/O
+/// thread off the BSP today, which is why that residual is tolerated rather
+/// than fixed here.
 ///
 /// A no-op when no hold is armed, so a caller need not check first.
 pub fn refresh_kernel_io_hold() {

@@ -7,14 +7,26 @@ use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 use crate::packetbuf::PacketBuf;
 use crate::socket::*;
 use crate::tests::env_wait::errno_i64;
+use crate::tests::net_scope::NetTestScope;
 use crate::types::{Ipv4Addr, Port, SockAddr};
 
 fn reset() {
     socket_reset_all();
 }
 
+/// `enter` performs the `socket_reset_all` itself, ahead of seeding the
+/// fixture's neighbour entry, so a scoped test must not also call [`reset`].
+fn scope() -> Result<NetTestScope, &'static str> {
+    NetTestScope::enter().map_err(|_| "net scope")
+}
+
 pub fn test_slab_alloc_free_cycle() -> TestResult {
-    reset();
+    // The counts are machine-wide, not this test's: one socket opened by a live
+    // thread makes every one of them off by one.
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
 
     let mut sockets: KVec<u32> = KVec::new();
     for _ in 0..100 {
@@ -40,7 +52,12 @@ pub fn test_slab_alloc_free_cycle() -> TestResult {
 }
 
 pub fn test_ephemeral_port_exhaustion() -> TestResult {
-    reset();
+    // Draining the whole range only reaches `EPHEMERAL_PORT_COUNT` if the
+    // allocator starts empty, and a live `sendto` auto-bind holds a port.
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
 
     let mut alloc = EPHEMERAL_PORTS.lock();
     let mut released = None;
@@ -63,7 +80,12 @@ pub fn test_ephemeral_port_exhaustion() -> TestResult {
 }
 
 pub fn test_udp_demux_dispatch() -> TestResult {
-    reset();
+    // Both ports are demux targets, and the assertions are on exactly which
+    // datagram is at the head of each queue.
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
 
     let a = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     let b = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
@@ -97,7 +119,12 @@ pub fn test_udp_demux_dispatch() -> TestResult {
 }
 
 pub fn test_inaddr_any_wildcard() -> TestResult {
-    reset();
+    // A wildcard bind catches every destination address, so any inbound
+    // datagram to 43000 lands in the queue this test reads.
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
 
     let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
@@ -161,7 +188,11 @@ pub fn test_recv_queue_overflow() -> TestResult {
 }
 
 pub fn test_so_reuseaddr() -> TestResult {
-    reset();
+    // Two sockets are left sharing a demux registration on 44000 at return.
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
 
     let a = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     let b = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
@@ -241,7 +272,12 @@ pub fn test_so_rcvbuf_resize() -> TestResult {
 }
 
 pub fn test_shutdown_read_behavior() -> TestResult {
-    reset();
+    // The wildcard bind outlives the test with its read side shut, so anything
+    // the ingress path enqueues there is never drained.
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
 
     let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {

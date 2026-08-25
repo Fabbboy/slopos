@@ -109,9 +109,8 @@ pub fn reclaimable_pages() -> u32 {
     total
 }
 
-/// Try to release `want` pages, returning how many actually came back.
 /// Ask the registrants for `want` pages, stopping at the first pass that meets
-/// the budget or frees nothing.
+/// the budget or frees nothing. Returns how many actually came back.
 ///
 /// The total may exceed `want` by less than one reclaimer unit, for the reason
 /// [`Reclaimable::reclaim`] gives. `run` stops asking the moment the budget is

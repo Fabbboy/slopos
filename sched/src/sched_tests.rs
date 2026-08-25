@@ -7232,12 +7232,15 @@ pub fn test_quota_charge_cost() -> TestResult {
     let restore = quota_mode();
     set_quota_mode(QuotaMode::Enforce);
 
-    // The same batch shape over a bare uncontended CAS, so the gate has a
-    // same-run scale for its ratio. An absolute cycle budget on this path is a
+    // The same batch shape over an uncontended load-and-CAS, so the gate has a
+    // same-run scale to divide by. An absolute cycle budget on this path is a
     // measurement of the accelerator, not of the kernel: on a KVM host the
     // charge costs ~1500 cycles and on a TCG one ~20000, and both are correct.
-    // A CAS is what `charge_row` and `release_row` each do once per level, so
-    // dividing by it cancels whatever factor the emulation applies.
+    //
+    // It is one iteration of *this build*, not an isolated `lock cmpxchg`: at
+    // opt-level 0 the loop body is out-of-line calls around the atomic. That is
+    // the honest comparand — `charge_row` pays the same overhead — but it is
+    // why the ratio only carries a floor and not a ceiling.
     let measure_reference = || -> u64 {
         use core::sync::atomic::{AtomicU64, Ordering};
         let cell = AtomicU64::new(0);

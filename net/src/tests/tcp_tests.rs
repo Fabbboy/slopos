@@ -534,7 +534,7 @@ pub fn test_tcp_close_not_found() -> TestResult {
 }
 
 pub fn test_tcp_active_handshake_complete() -> TestResult {
-    reset();
+    let _scope = enter_scope!();
 
     let (id, syn_seg) = tcp::connect(LOCAL_IP, REMOTE_IP, 80).unwrap();
     assert_eq_test!(tcp::get_state(id), Some(TcpState::SynSent), "SYN_SENT");
@@ -620,7 +620,7 @@ pub fn test_tcp_active_rst_in_syn_sent() -> TestResult {
 }
 
 pub fn test_tcp_active_bad_ack_in_syn_sent() -> TestResult {
-    reset();
+    let _scope = enter_scope!();
 
     let (id, syn_seg) = tcp::connect(LOCAL_IP, REMOTE_IP, 80).unwrap();
     let client_port = syn_seg.tuple.local_port;
@@ -654,7 +654,7 @@ pub fn test_tcp_active_bad_ack_in_syn_sent() -> TestResult {
 }
 
 pub fn test_tcp_active_mss_negotiation() -> TestResult {
-    reset();
+    let _scope = enter_scope!();
 
     let (id, syn_seg) = tcp::connect(LOCAL_IP, REMOTE_IP, 80).unwrap();
     let client_port = syn_seg.tuple.local_port;
@@ -853,7 +853,7 @@ pub fn test_tcp_passive_rst_in_syn_received() -> TestResult {
 }
 
 pub fn test_tcp_passive_ack_to_listen_sends_rst() -> TestResult {
-    reset();
+    let _scope = enter_scope!();
     tcp::listen(LOCAL_IP, 80).unwrap();
 
     let ack = TcpHeader {
@@ -898,7 +898,7 @@ fn establish_client_connection(remote_port: u16) -> (ConnId, u32, u16) {
 }
 
 pub fn test_tcp_active_close() -> TestResult {
-    reset();
+    let _scope = enter_scope!();
 
     let (id, server_iss, client_port) = establish_client_connection(80);
     assert_eq_test!(
@@ -991,7 +991,7 @@ pub fn test_tcp_passive_close() -> TestResult {
 }
 
 pub fn test_tcp_simultaneous_close() -> TestResult {
-    reset();
+    let _scope = enter_scope!();
 
     let (id, server_iss, client_port) = establish_client_connection(80);
 
@@ -1247,7 +1247,7 @@ pub fn test_tcp_rst_to_unknown_ignored() -> TestResult {
 /// RFC 5961 §4: a blind SYN on an established connection is answered with a
 /// challenge ACK and must not tear the connection down.
 pub fn test_tcp_syn_in_established_sends_challenge_ack() -> TestResult {
-    reset();
+    let _scope = enter_scope!();
 
     let (_id, _server_iss, client_port) = establish_client_connection(80);
 
@@ -1348,7 +1348,7 @@ pub fn test_tcp_state_is_closing() -> TestResult {
 }
 
 pub fn test_tcp_find_exact_match() -> TestResult {
-    reset();
+    let _scope = enter_scope!();
     let (id, syn_seg) = tcp::connect(LOCAL_IP, REMOTE_IP, 80).unwrap();
     let tuple = TcpTuple {
         local_ip: LOCAL_IP,
@@ -1422,7 +1422,7 @@ pub fn test_tcp_tuple_mismatch() -> TestResult {
 }
 
 pub fn test_tcp_simultaneous_open() -> TestResult {
-    reset();
+    let _scope = enter_scope!();
 
     let (id, syn_seg) = tcp::connect(LOCAL_IP, REMOTE_IP, 80).unwrap();
     let client_port = syn_seg.tuple.local_port;
@@ -1640,45 +1640,36 @@ pub fn test_tcp_buffer_alloc_failure_resets_peer() -> TestResult {
     tcp::listen(LOCAL_IP, 80).unwrap();
     let before = tcp::active_count();
 
+    // Both injections go through the out-of-line helpers: two inline `Actions`
+    // return slots in this frame put it over the 2 KiB stack gate.
     let client_iss = 3000u32;
-    let syn = TcpHeader {
-        src_port: 50001,
-        dst_port: 80,
-        seq_num: client_iss,
-        ack_num: 0,
-        data_offset: 5,
-        flags: TCP_FLAG_SYN,
-        window_size: 32768,
-        checksum: 0,
-        urgent_ptr: 0,
+    let Some(server_iss) = crate::tests::tcp_common::inject_for_reply_seq(
+        REMOTE_IP,
+        LOCAL_IP,
+        50001,
+        80,
+        client_iss,
+        0,
+        TCP_FLAG_SYN,
+        0,
+    ) else {
+        return fail!("no SYN+ACK for the opening SYN");
     };
-    let syn_result = tcp::input(REMOTE_IP, LOCAL_IP, &syn, &[], &[], 0);
-    let syn_ack = match syn_result.segments().next() {
-        Some(s) => s.clone(),
-        None => return fail!("no SYN+ACK for the opening SYN"),
-    };
-    let server_iss = syn_ack.seq_num;
 
     // The final ACK is where the connection is installed and its rings are
     // allocated, so that is where the failure has to land.
     crate::tcp::buffer::inject_buffer_alloc_failures(1);
-    let ack = TcpHeader {
-        src_port: 50001,
-        dst_port: 80,
-        seq_num: client_iss.wrapping_add(1),
-        ack_num: server_iss.wrapping_add(1),
-        data_offset: 5,
-        flags: TCP_FLAG_ACK,
-        window_size: 32768,
-        checksum: 0,
-        urgent_ptr: 0,
-    };
-    let result = tcp::input(REMOTE_IP, LOCAL_IP, &ack, &[], &[], 0);
+    let reset_sent = crate::tests::tcp_common::inject_for_reset_to(
+        REMOTE_IP,
+        LOCAL_IP,
+        50001,
+        80,
+        client_iss.wrapping_add(1),
+        server_iss.wrapping_add(1),
+        TCP_FLAG_ACK,
+        0,
+    );
     crate::tcp::buffer::inject_buffer_alloc_failures(0);
-
-    let reset_sent = result
-        .segments()
-        .any(|seg| seg.flags & TCP_FLAG_RST != 0 && seg.tuple.remote_port == 50001);
     assert_test!(reset_sent, "a peer that cannot be served was not reset");
     assert_eq_test!(
         tcp::active_count(),

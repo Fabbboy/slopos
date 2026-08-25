@@ -9,11 +9,15 @@ use crate::tcp::{
     TcpHeader, TcpOutSegment, TcpTuple,
 };
 
-/// RFC 5737 TEST-NET-1, matching [`crate::tests::net_scope`]. Deliberately not
-/// `10.0.0.x`: that subnet is reachable through the boot default route, so a
-/// retransmit or a delayed ACK really left the guest, QEMU's gateway really
-/// answered it, and the answer tore down a PCB the test was still asserting on.
-/// Unroutable without a scope, and routed at the scope's sink with one.
+/// RFC 5737 TEST-NET-1, matching [`crate::tests::net_scope`].
+///
+/// The address class buys nothing on its own: DHCP installs a `0.0.0.0/0`
+/// default route, so 192.0.2.2 falls through to the physical NIC exactly as
+/// 10.0.0.2 did. What makes a fixture PCB unreachable is the scope's own
+/// metric-0 `/24` at the blackhole sink, which wins longest-prefix over that
+/// default. These constants exist so a test's 4-tuple matches the one the
+/// scope routes — a test that transmits without holding a scope puts the frame
+/// on the wire whichever subnet it names.
 pub const LOCAL_IP: [u8; 4] = crate::tests::net_scope::TEST_LOCAL_IP;
 pub const REMOTE_IP: [u8; 4] = crate::tests::net_scope::TEST_PEER_IP;
 pub const REMOTE_PORT: u16 = 80;
@@ -200,6 +204,73 @@ pub fn inject_with_options_into(
 ) {
     let hdr = make_header(src_port, dst_port, seq, ack, flags, 32768);
     *out = tcp::input(src_ip, dst_ip, &hdr, options, payload, tcp::clock::now_ms());
+}
+
+/// [`inject`] discarding the result. `#[inline(never)]` so the ~400 B `Actions`
+/// slot stays in this frame: at opt-level 0 a caller with two `let _ =
+/// tcp::input(..)` sites carries two of them and lands over the 2 KiB gate.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub fn inject_discarding(
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload: &[u8],
+    now_ms: u64,
+) {
+    let hdr = make_header(src_port, dst_port, seq, ack, flags, 32768);
+    let _ = tcp::input(src_ip, dst_ip, &hdr, &[], payload, now_ms);
+}
+
+/// [`inject`] keeping only the first outgoing segment's sequence number, for
+/// the same frame-size reason as [`inject_discarding`].
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub fn inject_for_reply_seq(
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    now_ms: u64,
+) -> Option<u32> {
+    let hdr = make_header(src_port, dst_port, seq, ack, flags, 32768);
+    let actions = tcp::input(src_ip, dst_ip, &hdr, &[], &[], now_ms);
+    actions.segments().next().map(|seg| seg.seq_num)
+}
+
+/// [`inject`] keeping only whether a reset was sent to `src_port`, for the same
+/// frame-size reason as [`inject_discarding`].
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub fn inject_for_reset_to(
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    now_ms: u64,
+) -> bool {
+    let hdr = make_header(src_port, dst_port, seq, ack, flags, 32768);
+    let actions = tcp::input(src_ip, dst_ip, &hdr, &[], &[], now_ms);
+    actions
+        .segments()
+        .any(|seg| seg.flags & TCP_FLAG_RST != 0 && seg.tuple.remote_port == src_port)
+}
+
+/// A window-advertising ACK from the peer, result discarded.
+#[inline(never)]
+pub fn inject_window_update(local_port: u16, seq: u32, ack: u32, window: u16, now_ms: u64) {
+    let hdr = make_header(REMOTE_PORT, local_port, seq, ack, TCP_FLAG_ACK, window);
+    let _ = tcp::input(REMOTE_IP, LOCAL_IP, &hdr, &[], &[], now_ms);
 }
 
 /// Build a 12-byte TCP Timestamp option (NOP+NOP+TSopt).

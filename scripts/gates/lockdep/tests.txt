@@ -67,6 +67,11 @@
 # orderings below that ceiling now passes green, reaching the operator only as
 # a DRIFT line on a passing run's stderr.
 #
+# Those two numbers are exact: the fill check compares `val * 100` against
+# `max-fill-pct * pool_size` rather than a truncated percentage, so 1433 chains
+# pass and 1434 fail. A truncated comparison would have made the enforced
+# ceilings 1454 and 727 while this file claimed 1433 and 716.
+#
 # Concretely, the bands lose the ability to *fail* on a new, consistent,
 # non-cyclic nesting between two already-registered classes. That is a real
 # loss, and it has been paid before: `1858edd` moved the kernel phase 351 -> 359
@@ -100,6 +105,8 @@ min-classes 32
 # one that observed more, which is the whole reason those pools carry bands.
 # These sit far under every observation (the smallest is boot's 43 edges / 110
 # chains) so they fail a validator that stopped recording and nothing else.
+# Declaring a band without the matching floor is a gate-file error rather than
+# a run failure: no run can tell you the line is missing.
 min-edges 16
 min-chains 32
 
@@ -152,9 +159,20 @@ require-phase post-userland-tests
 #   2026-08-23  kernel 183 -> 184, userland 193 -> 194: `fblog.PANIC_TAIL`
 #               registers on the first recovered panic, which both phases
 #               reach. Boot is unchanged — nothing panics before its report.
+#   2026-08-25  kernel 184 -> 186, userland 194 -> 196: exactly two new
+#               declaration sites, both test-only statics —
+#               `TEST_PACKET_POOL` (net/src/tests/packetbuf_tests.rs), the
+#               scratch pool that lets a pool test assert on a count no live
+#               receive path moves, and `NET_TEST_TIMER_WHEEL`
+#               (net/src/timer.rs), the wheel `NetTestScope` selects so a
+#               test's timers are invisible to the live net-timer thread.
+#               Boot is unchanged at 71 — it reaches neither. Measured at 71 /
+#               186 on three runs of one pinned ISO, which also settles that
+#               boot's count is deterministic per build: an earlier 71/72/73
+#               spread was across different builds, not different runs.
 boot	classes	71
-post-kernel-tests	classes	184
-post-userland-tests	classes	194
+post-kernel-tests	classes	186
+post-userland-tests	classes	196
 
 # Boot edges and chains — exact, because boot has no test scheduling in it and
 # measures 43 edges and 110 chains on every run recorded here.

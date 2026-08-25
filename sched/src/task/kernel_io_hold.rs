@@ -67,6 +67,7 @@ pub fn kernel_io_dispatchable_count() -> usize {
 #[must_use = "dropping the token publishes the held threads again"]
 pub struct KernelIoHold {
     swept: usize,
+    unsettled: usize,
     /// !Send !Sync: the release must run on the CPU that armed the hold, which
     /// is the only one not parked.
     _not_send: PhantomData<*mut ()>,
@@ -78,6 +79,16 @@ impl KernelIoHold {
     #[inline]
     pub fn swept(&self) -> usize {
         self.swept
+    }
+
+    /// Registered kernel-I/O threads a container still owned when the settle
+    /// loop gave up. Zero is the hold's contract; anything else means the
+    /// caller's scope does not have the property it was entered for, and the
+    /// caller has to be able to say so rather than discover it as a flake in
+    /// whichever test runs next.
+    #[inline]
+    pub fn unsettled(&self) -> usize {
+        self.unsettled
     }
 }
 
@@ -108,12 +119,20 @@ pub fn hold_kernel_io_all(_freeze: &KernelIoFreeze, paused: &ApPauseToken) -> Ke
         }
         core::hint::spin_loop();
     }
-    if !settled {
-        klog_debug!(
-            "SCHED: kernel-io hold left {} thread(s) owned by a container",
-            kernel_io_dispatchable_count()
+    // `klog_info!`, not debug: a give-up means the scope's stated contract is
+    // false, and a diagnostic the default verbosity filters out is a give-up
+    // nobody sees. It reaches the raw stream, where a ratchet can parse it.
+    let unsettled = if settled {
+        0
+    } else {
+        let left = kernel_io_dispatchable_count();
+        slopos_ostd::klog_info!(
+            "SCHED: KERNEL_IO_HOLD_UNSETTLED left={} spins={}",
+            left,
+            HOLD_SETTLE_SPINS
         );
-    }
+        left
+    };
     if swept != 0 {
         klog_debug!(
             "SCHED: kernel-io hold took {} thread(s) off a run queue",
@@ -122,6 +141,7 @@ pub fn hold_kernel_io_all(_freeze: &KernelIoFreeze, paused: &ApPauseToken) -> Ke
     }
     KernelIoHold {
         swept,
+        unsettled,
         _not_send: PhantomData,
     }
 }

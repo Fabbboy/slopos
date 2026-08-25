@@ -144,7 +144,12 @@ emit_gate_data() {
     echo "# The peak of a kind nobody exercised is zero, and a cap derived from"
     echo "# it would bound nothing. Every listed kind must have been reached."
     echo "min-kinds 2"
-    echo "min-kinds-for boot 1"
+    # Only for a phase this run actually reported: the check path sweeps
+    # `min-kinds-for` for dead entries, so emitting it unconditionally produced
+    # a file the emitter's own output could not pass.
+    if [ -n "${SEEN_PHASE[boot]+x}" ]; then
+        echo "min-kinds-for boot 1"
+    fi
     echo
     echo "# A denial is an over-limit charge. Under quota=warn it is granted and"
     echo "# counted, so a non-zero total means the enforced tier would have"
@@ -182,9 +187,15 @@ emit_gate_data() {
         fi
     done
     if [ "$shallow" -gt 0 ] && [ "$deep_depth" -gt 1 ]; then
+        # A quarter above the observation: emitting it exactly makes the
+        # emitter's own output red on the very next run, so the documented
+        # remedy for a ratchet failure would not survive being used.
         printf 'max-depth-cost-ratio %s %s\n' "$deep_depth" \
-            "$(( deepest * 100 / shallow ))"
+            "$(( deepest * 125 / shallow ))"
     fi
+    echo
+    echo "# A physical bound on the reference, not a measurement."
+    echo "min-reference-cycles 20"
 }
 
 run_gate() {
@@ -201,7 +212,7 @@ run_gate() {
     local -a REQUIRED=()
     declare -A CAPS=()
     declare -A COST_FLOOR=()
-    local DEPTH_RATIO_DEPTH=0 DEPTH_RATIO_CAP=0
+    local DEPTH_RATIO_DEPTH=0 DEPTH_RATIO_CAP=0 MIN_REFERENCE=0
     declare -A MIN_KINDS_FOR=()
     local lineno=0 line key
     while IFS= read -r line || [ -n "$line" ]; do
@@ -220,6 +231,8 @@ run_gate() {
             max-denials)  MAX_DENIALS=$(awk '{print $2}' <<<"$line") ;;
             min-charge-over-reference)
                 COST_FLOOR["$(awk '{print $2}' <<<"$line")"]=$(awk '{print $3}' <<<"$line") ;;
+            min-reference-cycles)
+                MIN_REFERENCE=$(awk '{print $2}' <<<"$line") ;;
             max-depth-cost-ratio)
                 DEPTH_RATIO_DEPTH=$(awk '{print $2}' <<<"$line")
                 DEPTH_RATIO_CAP=$(awk '{print $3}' <<<"$line") ;;
@@ -290,6 +303,16 @@ run_gate() {
         echo "      A cost nobody measures is how an 8 % throughput regression passes." >&2
         fail=1
     fi
+    # The floors above are ratios over this, so a reference that collapsed
+    # satisfies all of them. A `lock cmpxchg` round trip is not this cheap on
+    # any real or emulated x86, so the bound is physical rather than measured.
+    if [ "$MIN_REFERENCE" -gt 0 ] && [ "$REF_COST" -gt 0 ] \
+        && [ "$REF_COST" -lt "$MIN_REFERENCE" ]; then
+        echo "FAIL: the QUOTACOST reference measured $REF_COST cycles, under the floor $MIN_REFERENCE." >&2
+        echo "      A CAS round trip cannot be that cheap; the reference measurement collapsed," >&2
+        echo "      and every ratio taken against it is meaningless." >&2
+        fail=1
+    fi
     for depth in "${!COST_FLOOR[@]}"; do
         if [ -z "${COST[$depth]+x}" ]; then
             echo "FAIL: gate expects a QUOTACOST line for depth $depth and the boot printed none." >&2
@@ -327,6 +350,14 @@ run_gate() {
     for gkey in "${!CAPS[@]}"; do
         echo "FAIL: gate entry '$gkey' matched no observed phase/kind — dead entry, delete it." >&2
         fail=1
+    done
+    # Same ratchet: a `min-kinds-for` naming a phase nothing reports is a floor
+    # no run will ever apply, which is a silently lowered floor.
+    for gkey in "${!MIN_KINDS_FOR[@]}"; do
+        if [ -z "${SEEN_PHASE[$gkey]+x}" ]; then
+            echo "FAIL: gate entry 'min-kinds-for $gkey' matched no observed phase — dead entry, delete it." >&2
+            fail=1
+        fi
     done
 
     [ "$fail" -eq 0 ] || return 1
@@ -535,6 +566,55 @@ post-userland-tests	objectrow	257
     } > "$tmp/nonamortised-slow.log"
     _expect 1 "over the recorded cap 500" "$tmp/nonamortised-slow.log" \
         "a slower host does not excuse a non-amortising walk"
+
+    # 14f. A collapsed reference satisfies every ratio floor above, because
+    #      they are all ratios over it. The absolute floor is what closes that,
+    #      and it is a physical bound rather than a measurement.
+    {
+        cat "$clean"
+        printf 'QUOTACOST: depth=1 cycles_per_charge=15\r\n'
+        printf 'QUOTACOST: reference cycles_per_op=1\r\n'
+    } > "$tmp/noref-cycles.log"
+    printf '%smin-charge-over-reference 1 300\nmin-reference-cycles 20\n' \
+        "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 1 "under the floor 20" "$tmp/noref-cycles.log" "collapsed reference rejected"
+
+    # 14g. ...and an honest reference at the same shape passes, so 14f is not a
+    #      gate that rejects unconditionally.
+    {
+        cat "$clean"
+        printf 'QUOTACOST: depth=1 cycles_per_charge=1500\r\n'
+        printf 'QUOTACOST: reference cycles_per_op=100\r\n'
+    } > "$tmp/honest-ref.log"
+    _expect 0 "charge cost at depth 1" "$tmp/honest-ref.log" "honest reference accepted"
+
+    # 14h. A `min-kinds-for` naming a phase nothing reports is a floor no run
+    #      will apply -- the same dead-entry ratchet the caps carry.
+    printf '%smin-kinds-for ghost 3\n' "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 1 "dead entry" "$clean" "dead min-kinds-for rejected"
+
+    # 14i. The emitter's own output must pass the check path on the same log.
+    #      A gate file the documented remedy cannot regenerate is a gate file
+    #      nobody can fix.
+    {
+        cat "$clean"
+        printf 'QUOTACOST: depth=1 cycles_per_charge=1500\r\n'
+        printf 'QUOTACOST: depth=7 cycles_per_charge=6000\r\n'
+        printf 'QUOTACOST: reference cycles_per_op=100\r\n'
+    } > "$tmp/roundtrip.log"
+    set +e
+    out=$( "$0" --variant "$VARIANT" --gate-data-dir "$tmp/gates" \
+        --log "$tmp/roundtrip.log" --emit-allowlist 2>&1 )
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        echo "SELF-TEST FAIL [emit round-trips]: emit exit $rc, want 0" >&2
+        sed 's/^/    /' <<<"$out" >&2
+        failures=$((failures + 1))
+    else
+        printf '%s\n' "$out" > "$tmp/gates/$VARIANT.txt"
+        _expect 0 "OK:" "$tmp/roundtrip.log" "emit round-trips"
+    fi
 
     # 15. No gate data at all for the variant.
     rm -f "$tmp/gates/$VARIANT.txt"

@@ -1333,10 +1333,21 @@ pub fn virtio_net_transmit(packet: &[u8]) -> bool {
     };
 
     if !tx_page.write_slice(hdr_len, packet) {
+        counters::bump(&counters::TX_ERRORS, 1);
         return false;
     }
 
-    submit_tx(&mut state, tx_page, (hdr_len + packet.len()) as u32)
+    // Counted here, matching `NetDevice::tx` and `submit_tx_zerocopy`: this is
+    // the service path — DNS queries and `transmit_udp_packet` reach the ring
+    // through it — and a frame it sent was invisible to every TX statistic.
+    if submit_tx(&mut state, tx_page, (hdr_len + packet.len()) as u32) {
+        counters::bump(&counters::TX_PACKETS, 1);
+        counters::bump(&counters::TX_BYTES, packet.len() as u64);
+        true
+    } else {
+        counters::bump(&counters::TX_DROPPED, 1);
+        false
+    }
 }
 
 /// Return the DHCP-provided DNS server address, or `None` if not configured.

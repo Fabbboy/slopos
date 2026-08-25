@@ -1,8 +1,9 @@
 //! DNS client test suite.
 
 use slopos_testing::TestResult;
-use slopos_testing::{assert_eq_test, assert_test, pass};
+use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
+use super::net_scope::NetTestScope;
 use crate::dns;
 use crate::types::{Ipv4Addr, Port, SockAddr};
 
@@ -360,7 +361,12 @@ pub fn test_dns_t8_regression_network_stack() -> TestResult {
     use crate::socket::*;
     use slopos_abi::net::{AF_INET, SOCK_DGRAM};
 
-    socket_reset_all();
+    // `socket_bind` publishes into `UDP_DEMUX`: until the close below, an
+    // inbound datagram to this port lands in the socket the `recvfrom` reads.
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
 
     let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     assert_test!(sock >= 0, "create UDP socket");

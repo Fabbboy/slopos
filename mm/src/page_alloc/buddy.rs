@@ -60,8 +60,16 @@ const QUARANTINE_ADVANCE_FRAMES: u32 = 1024;
 /// release pass holds the allocator's cli-lock.
 const QUARANTINE_RELEASE_BATCH: u32 = 64;
 
-/// Greater than one so the backlog converges rather than merely keeping pace.
-const QUARANTINE_RELEASE_PER_FREE: u32 = 2;
+/// Release budget charged against every quarantining free, in **pages** — the
+/// unit `quarantine_release_some` counts.
+///
+/// Sized to converge rather than merely keep pace: a free pushes one block of
+/// `order_block_pages(order)`, and the loop releases whole blocks until the
+/// budget is met, so a budget of one block's worth pays back at least what the
+/// free parked and usually more (the loop's last block overshoots). Stated in
+/// pages because the same number read as blocks would drain a single order-0
+/// block per free while the backlog grew in order-2 ones.
+const QUARANTINE_RELEASE_PER_FREE: u32 = 8;
 
 /// Written under the buddy lock, read from the timer tick — which must not take
 /// the allocator's lock 100 times a second to ask a yes/no question.
