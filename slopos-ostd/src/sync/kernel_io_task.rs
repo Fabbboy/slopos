@@ -145,13 +145,16 @@ pub fn clear_kernel_io_freeze_after_panic() {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 static HOLD_DEPTH: AtomicU32 = AtomicU32::new(0);
 
+#[cfg(any(test, feature = "test-helpers"))]
 /// Mirrored out of `STOP_REGISTRY`: a claim runs under a run-queue lock, where
 /// reading the registry would invert the order `clear_cpu_queues` takes.
 static HELD_IDS: [AtomicU32; MAX_KERNEL_IO_STOPS] =
     [const { AtomicU32::new(INVALID_TASK_ID) }; MAX_KERNEL_IO_STOPS];
 
+#[cfg(any(test, feature = "test-helpers"))]
 fn store_held_ids(ids: impl IntoIterator<Item = u32>) {
     let mut ids = ids.into_iter();
     for cell in &HELD_IDS {
@@ -159,6 +162,7 @@ fn store_held_ids(ids: impl IntoIterator<Item = u32>) {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 fn held_ids_snapshot() -> KernelIoTaskIds {
     let mut ids = [INVALID_TASK_ID; MAX_KERNEL_IO_STOPS];
     let mut len = 0usize;
@@ -172,6 +176,7 @@ fn held_ids_snapshot() -> KernelIoTaskIds {
     KernelIoTaskIds { ids, len }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 /// Ids publish before the depth bump; the set unions, never replaces.
 pub fn arm_kernel_io_hold() {
     let mut merged = held_ids_snapshot();
@@ -182,6 +187,7 @@ pub fn arm_kernel_io_hold() {
     HOLD_DEPTH.fetch_add(1, Ordering::AcqRel);
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn refresh_kernel_io_hold() {
     if !kernel_io_hold_armed() {
         return;
@@ -196,6 +202,7 @@ pub fn refresh_kernel_io_hold() {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 /// `Some` only at the level that takes the depth to zero, carrying the set it covered.
 pub fn disarm_kernel_io_hold() -> Option<KernelIoTaskIds> {
     let held = held_ids_snapshot();
@@ -223,11 +230,13 @@ pub fn disarm_kernel_io_hold() -> Option<KernelIoTaskIds> {
 }
 
 #[inline]
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn kernel_io_hold_armed() -> bool {
     HOLD_DEPTH.load(Ordering::Acquire) != 0
 }
 
 #[inline]
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn kernel_io_hold_covers(task_id: u32) -> bool {
     if task_id == INVALID_TASK_ID || !kernel_io_hold_armed() {
         return false;
@@ -238,10 +247,12 @@ pub fn kernel_io_hold_covers(task_id: u32) -> bool {
 }
 
 #[inline]
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn kernel_io_held_ids() -> KernelIoTaskIds {
     held_ids_snapshot()
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn clear_kernel_io_hold_after_panic() -> Option<KernelIoTaskIds> {
     let held = held_ids_snapshot();
     if HOLD_DEPTH.swap(0, Ordering::AcqRel) == 0 {
@@ -722,6 +733,7 @@ impl KernelIoTaskIds {
     }
 
     #[inline]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn push_unique(&mut self, task_id: u32) {
         if task_id == INVALID_TASK_ID || self.contains(task_id) || self.len == self.ids.len() {
             return;

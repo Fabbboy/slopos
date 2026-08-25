@@ -180,8 +180,10 @@ pub fn miss_threshold() -> u32 {
 }
 
 /// `0` means "no override".
+#[cfg(any(test, feature = "test-helpers"))]
 static MISS_THRESHOLD_OVERRIDE: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
+#[cfg(any(test, feature = "test-helpers"))]
 fn miss_threshold_for(target: usize) -> u32 {
     match MISS_THRESHOLD_OVERRIDE
         .get(target)
@@ -192,13 +194,23 @@ fn miss_threshold_for(target: usize) -> u32 {
     }
 }
 
+/// Nothing can install a per-CPU override outside the tests build, so the
+/// watchdog tick reads the machine-wide threshold directly.
+#[cfg(not(any(test, feature = "test-helpers")))]
+#[inline(always)]
+fn miss_threshold_for(_target: usize) -> u32 {
+    miss_threshold()
+}
+
 /// Judge one CPU on a shorter fuse than the rest of the machine, for the
 /// token's lifetime.
+#[cfg(any(test, feature = "test-helpers"))]
 pub struct MissThresholdOverride {
     cpu: usize,
     previous: u32,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl MissThresholdOverride {
     pub fn for_cpu(cpu: usize, samples: u32) -> Option<Self> {
         if samples == 0 {
@@ -211,6 +223,7 @@ impl MissThresholdOverride {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl Drop for MissThresholdOverride {
     fn drop(&mut self) {
         if let Some(cell) = MISS_THRESHOLD_OVERRIDE.get(self.cpu) {

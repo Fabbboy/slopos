@@ -42,9 +42,9 @@ const NUM_PRIORITY_LEVELS: usize = 5;
 /// it without OSTD reaching into `core/`.
 pub use slopos_ostd::task::link_roles::ReadyQueueRole;
 
-use slopos_ostd::sync::kernel_io_task::{
-    KernelIoTaskIds, MAX_KERNEL_IO_STOPS, kernel_io_hold_armed, kernel_io_hold_covers,
-};
+use slopos_ostd::sync::kernel_io_task::{KernelIoTaskIds, MAX_KERNEL_IO_STOPS};
+#[cfg(feature = "test-hooks")]
+use slopos_ostd::sync::kernel_io_task::{kernel_io_hold_armed, kernel_io_hold_covers};
 
 /// Per-priority FIFO of ready tasks.
 struct ReadyQueue {
@@ -150,6 +150,7 @@ impl ReadyQueue {
         0
     }
 
+    #[cfg(feature = "test-hooks")]
     fn hold_kernel_io(&self) -> usize {
         let mut found: [Option<NonNull<Task>>; MAX_KERNEL_IO_STOPS] = [None; MAX_KERNEL_IO_STOPS];
         let mut seen = 0usize;
@@ -532,6 +533,7 @@ impl PriorityRunQueue {
         self.inbox_count.store(0, Ordering::Relaxed);
     }
 
+    #[cfg(feature = "test-hooks")]
     fn hold_kernel_io(&self) -> usize {
         let _guard = self.queue_lock.lock();
         self.ready_queues
@@ -1395,6 +1397,7 @@ pub fn clear_all_cpu_queues() {
 
 /// The token is a precondition: `ReadyQueue::dequeue` ignores its own placement CAS,
 /// so an AP still dispatching could run a task this sweep had already claimed.
+#[cfg(feature = "test-hooks")]
 pub fn hold_kernel_io_off_all_runqueues(_paused: &ApPauseToken) -> usize {
     if !kernel_io_hold_armed() {
         return 0;
