@@ -51,14 +51,11 @@ fn rcv_nxt_raw(id: tcp::ConnId) -> u32 {
     .expect("PCB should exist")
 }
 
-fn is_reset(id: tcp::ConnId) -> bool {
-    tcp::with_pcb(id, |pcb| {
-        let tcp::PcbState::Data(d) = &pcb.state else {
-            return false;
-        };
-        d.reset_received
-    })
-    .unwrap_or(false)
+/// An accepted RST sets `actions.release`, and `tcp::input` then drops the PCB
+/// out of the table — so "the connection was reset" is observed by its absence,
+/// not by reading `reset_received` through a handle that no longer resolves.
+fn pcb_is_live(id: tcp::ConnId) -> bool {
+    tcp::with_pcb(id, |_| ()).is_some()
 }
 
 pub fn test_active_open_ts_negotiation() -> TestResult {
@@ -141,6 +138,16 @@ pub fn test_paws_rejects_old_duplicate() -> TestResult {
     pass!()
 }
 
+/// RFC 7323 §5.2 R1 excludes RST from the PAWS check — "and the RST bit is not
+/// set" — because a peer that crashed and rebooted has lost its timestamp state,
+/// so its RST carries a stale TSval and PAWS would discard the one segment that
+/// can retire a connection the peer no longer has.
+///
+/// The same stale timestamp is injected twice, once without the RST bit and once
+/// with it, so the assertion is the *difference*: dropping the first is PAWS
+/// working, and accepting the second is the exemption. Either half alone would
+/// pass against a kernel that ignored PAWS entirely, or against one that
+/// ignored the exemption.
 pub fn test_paws_allows_rst() -> TestResult {
     let _scope = pinned_scope!(100);
 
@@ -159,8 +166,30 @@ pub fn test_paws_allows_rst() -> TestResult {
         &tsopt_fresh,
         b"data",
     );
+    assert_test!(
+        pcb_is_live(conn.id),
+        "the fresh segment closed the connection"
+    );
 
+    // Control: the same stale timestamp without the RST bit must be dropped, so
+    // the acceptance below is the exemption rather than an absent check.
     let tsopt_old = build_tsopt(100, 0);
+    let _ = inject_with_options(
+        REMOTE_IP,
+        LOCAL_IP,
+        REMOTE_PORT,
+        conn.local_port,
+        peer_seq + 4,
+        conn.our_iss + 1,
+        TCP_FLAG_ACK | TCP_FLAG_PSH,
+        &tsopt_old,
+        b"stale",
+    );
+    assert_test!(
+        pcb_is_live(conn.id),
+        "a stale-timestamp data segment was not dropped by PAWS"
+    );
+
     let _ = inject_with_options(
         REMOTE_IP,
         LOCAL_IP,
@@ -172,8 +201,11 @@ pub fn test_paws_allows_rst() -> TestResult {
         &tsopt_old,
         &[],
     );
-
-    assert_test!(is_reset(conn.id), "RST bypasses PAWS");
+    assert_test!(
+        !pcb_is_live(conn.id),
+        "a stale-timestamp RST was dropped by PAWS — a rebooted peer cannot \
+         retire this connection"
+    );
     pass!()
 }
 
