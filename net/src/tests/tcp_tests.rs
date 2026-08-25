@@ -1144,9 +1144,21 @@ pub fn test_tcp_retransmit_timer() -> TestResult {
     assert_test!(has_retransmit_token, "retransmit timer scheduled");
 
     let rto_before = with_data_state!(id, |d| d.rtt.rto_ms());
-    let result = tcp::on_retransmit(id.raw());
-    assert_test!(result.is_some(), "retransmit handler returned conn id");
-    assert_eq_test!(result.unwrap(), id, "correct conn_id");
+    match tcp::on_retransmit(id.raw()) {
+        tcp::RetransmitAction::Data(got) => {
+            assert_eq_test!(got, id, "correct conn_id");
+        }
+        other => {
+            return fail!(
+                "a Data PCB with an unacked segment was routed to {:?}",
+                match other {
+                    tcp::RetransmitAction::Segment(_) => "the SYN path",
+                    tcp::RetransmitAction::Data(_) => unreachable!(),
+                    tcp::RetransmitAction::Nothing => "nothing",
+                }
+            );
+        }
+    }
 
     let rto_after = with_data_state!(id, |d| d.rtt.rto_ms());
     assert_test!(rto_after > rto_before, "RTO doubled");

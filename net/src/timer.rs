@@ -419,8 +419,12 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         }
         TimerKind::TcpRetransmit => {
             klog_debug!("net_timer: TCP retransmit fired, key={}", timer.key);
-            if let Some(idx) = super::tcp::on_retransmit(timer.key) {
-                dispatch_tcp_retransmit_send(idx);
+            match super::tcp::on_retransmit(timer.key) {
+                super::tcp::RetransmitAction::Data(idx) => dispatch_tcp_retransmit_send(idx),
+                super::tcp::RetransmitAction::Segment(seg) => {
+                    let _ = super::socket::socket_send_tcp_segment(&seg, &[]);
+                }
+                super::tcp::RetransmitAction::Nothing => {}
             }
         }
         TimerKind::TcpSynAck => {

@@ -7,6 +7,7 @@ use slopos_testing::{assert_test, fail, pass};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::frame::{AnonymousMeta, Frame, Paddr};
+use slopos_ostd::sync::PreemptGuard;
 
 use crate::error::MmError;
 use crate::page_fault::{
@@ -18,6 +19,7 @@ use crate::process_vm::{
     process_vm_handle,
 };
 use crate::tests::test_fixtures::ProcessVmGuard;
+use crate::user_mappings::vm_space_mut_spins_taken;
 
 const WRITE_USER_ABSENT: u64 = 0x06;
 
@@ -123,6 +125,53 @@ pub fn test_cow_fault_retries_while_a_reader_holds_the_space() -> TestResult {
         Err(MmError::Retry) => pass!(),
         other => fail!("expected Retry, got {:?}", other),
     }
+}
+
+/// The single-reference arm of the COW dispatch, which the multi-reference
+/// tests above never reach.
+///
+/// Its return value is not the observable: with the probe pushed back inside
+/// the copying arm, this arm still ends in `Retry`, because the bounded spin in
+/// `vm_space_get_mut` gives up with `WouldBlock` and that maps to the same
+/// value. What differs is the million spins it takes to get there, with the
+/// per-process lock held and so with interrupts masked — the cost the probe
+/// exists to avoid. So the assertion is the spin count, and the `Retry` beside
+/// it only pins that the arm was entered at all.
+pub fn test_cow_fault_with_one_reference_does_not_spin_under_contention() -> TestResult {
+    let Some(vm) = ProcessVmGuard::new() else {
+        return fail!("create VM");
+    };
+    // No second `Frame` reference: this is the arm the copying tests skip.
+    if cow_page(&vm).is_none() {
+        return fail!("map and mark a COW page");
+    }
+
+    let Some(reader) = process_vm_get_vm_space(vm.process) else {
+        return fail!("clone the address space");
+    };
+
+    // Pinned: the counter is per-CPU, so a migration between the two reads
+    // would difference two different CPUs' slots.
+    let guard = PreemptGuard::new();
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    let before = vm_space_mut_spins_taken(cpu);
+    let result = vm.handle_cow_fault(0x5000);
+    let spins = vm_space_mut_spins_taken(cpu).wrapping_sub(before);
+    drop(guard);
+    drop(reader);
+
+    assert_test!(
+        result == Err(MmError::Retry),
+        "expected Retry from the single-reference arm, got {:?}",
+        result
+    );
+    assert_test!(
+        spins == 0,
+        "the fault spun {} times before giving up -- the exclusivity probe did \
+         not run ahead of the dispatch",
+        spins
+    );
+    pass!()
 }
 
 pub fn test_cow_retry_leaves_the_page_mapped_and_cow() -> TestResult {
@@ -308,6 +357,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_cow_retry_leaves_the_page_mapped_and_cow,
+    suite = vm_contention
+);
+slopos_testing::stest!(
+    name = test_cow_fault_with_one_reference_does_not_spin_under_contention,
     suite = vm_contention
 );
 slopos_testing::stest!(

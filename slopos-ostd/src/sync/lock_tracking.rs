@@ -12,8 +12,8 @@ pub use super::lock_graph::{
     held_lock_addrs_for_cpu, held_lock_count, held_lock_snapshot, innermost_held_lock,
     lockdep_mode, overflow_reported, poison_drained, poison_unlock_all_held,
     poison_unlock_held_above, pop_lock, pop_misses, push_lock, push_lock_ex,
-    report_only_violations, set_lockdep_mode, tracking_enabled, validator_alive, violation_reports,
-    violations_reported,
+    registered_class_count, report_only_violations, set_lockdep_mode, tracking_enabled,
+    validator_alive, violation_reports, violations_reported,
 };
 
 #[cfg(any(test, feature = "test-helpers"))]

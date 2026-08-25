@@ -62,6 +62,18 @@ pub const TIME_WAIT_MS: u64 = 60_000;
 
 pub const MAX_RETRANSMITS: u8 = 8;
 
+/// SYN retransmissions on an active open before the attempt is abandoned.
+///
+/// From `SynSentState::new`'s 1 s RTO, doubling each time, the SYNs go out at
+/// 0, 1, 3, 7, 15 and 31 s and the attempt is abandoned at 63 s. That is the
+/// TCP layer's own bound; a blocking `connect` gives up earlier, at the socket
+/// layer's deadline. What this governs is the case that deadline cannot see —
+/// a peer that is up and a single SYN that was dropped.
+///
+/// Named apart from the listener's [`listener::SYN_RETRIES_MAX`] because the
+/// two count opposite directions of the handshake.
+pub const ACTIVE_SYN_RETRIES_MAX: u8 = 5;
+
 /// 60 s, matching Linux's `tcp_fin_timeout` default.
 pub const FIN_WAIT2_TIMEOUT_MS: u64 = 60_000;
 
@@ -438,6 +450,31 @@ pub fn connect(
     let seg =
         SegmentBuilder::active_syn(tuple, iss, wscale).with_timestamp(clock::now_ms() as u32, 0);
     Ok((id, seg))
+}
+
+/// Start the SYN's retransmission timer.
+///
+/// Separate from [`connect`] and called after the SYN is on the wire: the RTO
+/// is measured from the transmission, and the caller emits the segment only
+/// once it has dropped the socket table lock. Without this the active-open path
+/// sends its SYN exactly once — a single lost SYN then stalls the connect for
+/// its whole wall-clock deadline, and an unreachable peer for all of it.
+///
+/// Idempotent: a second call retires the first timer rather than leaving it in
+/// the wheel to fire against a connection that is no longer waiting for it.
+pub fn arm_syn_retransmit(id: ConnId) {
+    let stale = table::with_pcb_mut(id, |pcb| {
+        let PcbState::SynSent(s) = &mut pcb.state else {
+            return None;
+        };
+        let stale = s.retransmit_token.take();
+        let token = NET_TIMER_WHEEL.schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
+        s.retransmit_token = Some(token);
+        stale
+    });
+    if let Some(Some(token)) = stale {
+        NET_TIMER_WHEEL.cancel(token);
+    }
 }
 
 /// Open a passive connection (server: → LISTEN).
@@ -1147,10 +1184,72 @@ pub fn poll_transmit(
     .flatten()
 }
 
-pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
+/// Re-send the SYN of an active open, or abandon the attempt.
+///
+/// `None` means the PCB is not in `SynSent`, which is what tells
+/// [`on_retransmit`] to fall through to the data path — distinct from
+/// `Some(RetransmitAction::Nothing)`, the exhausted attempt.
+fn on_syn_retransmit(id: ConnId) -> Option<RetransmitAction> {
+    enum SynOutcome {
+        NotSynSent,
+        Exhausted,
+        Resend(TcpOutSegment),
+    }
+
+    let outcome = table::with_pcb_mut(id, |pcb| {
+        let tuple = pcb.tuple;
+        let PcbState::SynSent(s) = &mut pcb.state else {
+            return SynOutcome::NotSynSent;
+        };
+        s.retransmit_token = None;
+        if s.retransmits >= ACTIVE_SYN_RETRIES_MAX {
+            return SynOutcome::Exhausted;
+        }
+        s.retransmits = s.retransmits.saturating_add(1);
+        s.rto_ms = s.rto_ms.saturating_mul(2);
+
+        let seg = SegmentBuilder::active_syn(tuple, s.iss.raw(), s.our_wscale)
+            .with_timestamp(clock::now_ms() as u32, 0);
+        let token = NET_TIMER_WHEEL.schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
+        s.retransmit_token = Some(token);
+        SynOutcome::Resend(seg)
+    })?;
+
+    match outcome {
+        SynOutcome::NotSynSent => None,
+        SynOutcome::Exhausted => {
+            klog_debug!(
+                "tcp: SYN retransmits exhausted id={} -> releasing",
+                id.raw()
+            );
+            table::release(id);
+            Some(RetransmitAction::Nothing)
+        }
+        SynOutcome::Resend(seg) => Some(RetransmitAction::Segment(seg)),
+    }
+}
+
+/// What a fired retransmit timer asks the caller to do.
+///
+/// The two states that can own one differ in where the bytes come from: a
+/// `Data` PCB retransmits out of its send buffer, which only the transmit path
+/// can walk, while a `SynSent` PCB has no buffer and the segment is rebuilt
+/// here. Collapsing both into `Option<ConnId>` is what left the SYN case
+/// unhandled.
+pub enum RetransmitAction {
+    Nothing,
+    Data(ConnId),
+    Segment(TcpOutSegment),
+}
+
+pub fn on_retransmit(conn_id: u32) -> RetransmitAction {
     let id = ConnId::from_raw(conn_id);
     if id.is_listener() {
-        return None;
+        return RetransmitAction::Nothing;
+    }
+
+    if let Some(action) = on_syn_retransmit(id) {
+        return action;
     }
 
     enum Outcome {
@@ -1192,13 +1291,13 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
     });
 
     match outcome {
-        None | Some(Outcome::Skip) => None,
+        None | Some(Outcome::Skip) => RetransmitAction::Nothing,
         Some(Outcome::Released) => {
             klog_debug!("tcp: retransmit timeout id={} -> releasing", conn_id);
             table::release(id);
-            None
+            RetransmitAction::Nothing
         }
-        Some(Outcome::Retransmitted) => Some(id),
+        Some(Outcome::Retransmitted) => RetransmitAction::Data(id),
     }
 }
 

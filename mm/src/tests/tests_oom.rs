@@ -114,8 +114,16 @@ pub fn test_page_alloc_until_oom() -> TestResult {
 
     let mut first_bad: Option<(usize, FreeOutcome)> = None;
     for i in 0..count {
+        if first_bad.is_some() {
+            // The verdict is settled and only the first frame is reported, so
+            // the remaining frames need returning, not observing: confirming
+            // each would spend `FREE_CONFIRM_MS` up to 512 times over on a
+            // reading already discarded.
+            free_page_frame(allocated[i]);
+            continue;
+        }
         let outcome = free_and_observe(allocated[i]);
-        if outcome != FreeOutcome::Returned && first_bad.is_none() {
+        if outcome != FreeOutcome::Returned {
             first_bad = Some((i, outcome));
         }
     }

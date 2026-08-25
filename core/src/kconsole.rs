@@ -114,7 +114,8 @@ fn run_stalls(kc: &mut KConsole<'_>) {
 /// which writes at a level the boot may have filtered out and which a CI gate
 /// parses.
 fn run_locks(kc: &mut KConsole<'_>) {
-    let classes = lg::class_count();
+    let classes = lg::registered_class_count();
+    let slots = lg::class_count();
     let state = if !lg::tracking_enabled() {
         "OFF (tracking never enabled)"
     } else if lg::graph_overflowed() {
@@ -130,8 +131,9 @@ fn run_locks(kc: &mut KConsole<'_>) {
     kline!(kc, "lockdep: {} mode={:?}", state, lg::lockdep_mode());
     kline!(
         kc,
-        "  classes={}/{} edges={}/{} chains={}/{} held_max={}/{}",
+        "  classes={} slots={}/{} edges={}/{} chains={}/{} held_max={}/{}",
         classes,
+        slots,
         lg::REGISTRABLE_CLASSES,
         lg::edge_count(),
         lg::MAX_EDGES,

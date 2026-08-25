@@ -55,8 +55,8 @@ pub use lock_tracking::{
     fatal_bypassed, for_each_held_lock_name, for_each_held_lock_name_for_cpu, graph_overflowed,
     held_depth_max, held_depth_overflows, held_lock_addrs, held_lock_addrs_for_cpu,
     held_lock_count, lockdep_mode, overflow_reported, poison_unlock_all_held,
-    report_only_violations, set_lockdep_mode, tracking_enabled, validator_alive, violation_reports,
-    violations_reported,
+    registered_class_count, report_only_violations, set_lockdep_mode, tracking_enabled,
+    validator_alive, violation_reports, violations_reported,
 };
 pub use mutex::{Mutex, MutexGuard};
 pub use once_lock::OnceLock;
@@ -66,9 +66,9 @@ pub use raw_link::{ByteChain, RawLink};
 pub use raw_table::RawTable;
 pub use rcu::{
     RcuArcSlot, RcuBackend, RcuCell, RcuCellGuard, RcuReadGuard, call_rcu, rcu_barrier,
-    rcu_gp_poll, rcu_gp_seq, rcu_note_cpu_idle_enter, rcu_note_cpu_idle_exit, rcu_note_qs,
-    rcu_note_qs_from_interrupt, rcu_process_callbacks, rcu_qs_counter, rcu_raise_softirq,
-    rcu_read_lock, rcu_sync_entry_count, register_rcu_backend, synchronize_rcu,
+    rcu_gp_poll, rcu_gp_poll_count, rcu_gp_seq, rcu_note_cpu_idle_enter, rcu_note_cpu_idle_exit,
+    rcu_note_qs, rcu_note_qs_from_interrupt, rcu_process_callbacks, rcu_qs_counter,
+    rcu_raise_softirq, rcu_read_lock, rcu_sync_entry_count, register_rcu_backend, synchronize_rcu,
 };
 pub use seqlock::{SeqLock, SeqLockWriteGuard};
 pub use spin::{

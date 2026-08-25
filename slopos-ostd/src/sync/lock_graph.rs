@@ -1285,12 +1285,33 @@ pub unsafe fn poison_unlock_held_above(mark: u32) {
 
 /// Registrable class slots consumed, out of [`REGISTRABLE_CLASSES`].
 ///
+/// Slots, **not** classes: [`register_class`] reserves one before it knows
+/// whether it will win the link race, and a loser's slot stays consumed and
+/// unlinked. Use [`registered_class_count`] for the number of distinct
+/// declaration sites; use this for pool headroom, which the leaked slots do
+/// consume.
+///
 /// **Clamped**: [`register_class`] bumps `CLASS_COUNT` before its bound check,
 /// so the raw counter overshoots the moment the table fills and keeps climbing
 /// while allocation is still being attempted.
 #[inline]
 pub fn class_count() -> usize {
     (CLASS_COUNT.load(Ordering::Relaxed) as usize).min(REGISTRABLE_CLASSES)
+}
+
+/// Distinct declaration sites registered: [`class_count`] less the slots lost
+/// to the link race.
+///
+/// This is the quantity "one class per declaration site" describes, and the
+/// only one of the two that is a property of the kernel rather than of a
+/// boot's scheduling. Every CPU that first-acquires an instance of the same
+/// class inside one window reserves a slot and all but one leak, so on a
+/// 4-vCPU boot the per-CPU run queues alone move [`class_count`] across three
+/// values on one image — which a ratchet holding that number to an exact cap
+/// reads as a lock appearing and disappearing.
+#[inline]
+pub fn registered_class_count() -> usize {
+    class_count().saturating_sub(class_slots_leaked() as usize)
 }
 
 /// Dependency edges learned. Same clamp rationale as [`class_count`]

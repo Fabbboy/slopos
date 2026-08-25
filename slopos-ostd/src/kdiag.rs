@@ -349,7 +349,12 @@ pub fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
 pub fn kdiag_dump_lock_graph(phase: &str) {
     use crate::sync::lock_graph as lg;
 
-    let classes = lg::class_count();
+    // Registered sites, not slots consumed: a slot lost to the link race holds
+    // a duplicate of a class already registered, and counting it makes this
+    // line report a lock that does not exist. `leaked` below keeps the pool
+    // fact the raw count used to carry.
+    let classes = lg::registered_class_count();
+    let leaked = lg::class_slots_leaked();
     let edges = lg::edge_count();
     let chains = lg::chain_count();
     let state = if !lg::tracking_enabled() {
@@ -367,7 +372,7 @@ pub fn kdiag_dump_lock_graph(phase: &str) {
     crate::klog_info!(
         "LOCKDEP[{}]: {} classes={}/{} ({}%) edges={}/{} chains={}/{} \
          declared={}/{} held_max={}/{} held_drops={} chain_hit={} chain_miss={} \
-         violations={} reports={} collisions={} mode={:?}",
+         violations={} reports={} collisions={} leaked={} mode={:?}",
         phase,
         state,
         classes,
@@ -387,6 +392,7 @@ pub fn kdiag_dump_lock_graph(phase: &str) {
         lg::violations_reported(),
         lg::violation_reports(),
         lg::class_collisions(),
+        leaked,
         lg::lockdep_mode(),
     );
 }

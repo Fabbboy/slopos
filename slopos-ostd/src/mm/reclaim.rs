@@ -24,6 +24,10 @@ pub trait Reclaimable: Sync {
 
     /// Release `want` pages. Returns how many were actually released.
     ///
+    /// `want` is never zero: [`run`] stops asking the moment its budget is
+    /// met, so an ask for zero pages is a defect in the caller rather than a
+    /// case a registrant has to handle.
+    ///
     /// A budget, not a ceiling: a reclaimer whose unit is indivisible — the
     /// quarantine releases whole buddy blocks — stops as soon as the budget is
     /// met, so the total may exceed `want` by less than one of its units. The
@@ -123,10 +127,14 @@ pub fn run(want: u32) -> u32 {
     for _ in 0..MAX_PASSES {
         let before = freed;
         for_each(|r| {
-            if freed >= want {
+            // Saturating because the overshoot `Reclaimable::reclaim` documents
+            // can carry `freed` past `want`, and the subtraction must survive
+            // that on its own rather than only because the check above it ran.
+            let left = want.saturating_sub(freed);
+            if left == 0 {
                 return;
             }
-            freed = freed.saturating_add(r.reclaim(want - freed));
+            freed = freed.saturating_add(r.reclaim(left));
         });
         if freed >= want || freed == before {
             break;
