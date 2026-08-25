@@ -3,29 +3,40 @@
 //! The kernel test phase runs before the scheduler hands over, so there is no
 //! current task to block: only task-free structure is observable here, and a
 //! real `wait`/`wake` round-trip belongs to the userland phase.
+//!
+//! Anything asserted about an *empty* queue is asserted against
+//! [`TEST_BUS`](slopos_ostd::sync::TEST_BUS). The kernel's own queues carry
+//! whatever the running system has parked on them, so "socket slot 0 has no
+//! waiters" is a claim about the machine, not about the bus — and publishing
+//! onto them to find out wakes real blockers. Routing, which is a property of
+//! the code rather than of the moment, is still asserted against the real bus.
 
 use slopos_abi::event::{CHILD_EXIT_BUCKETS, MAX_PIPES, MAX_TTYS, MAX_UNIX_SOCKETS};
 use slopos_abi::event::{KernelEvent, PipeSlot, SocketSlot, TaskSlot, TtySlot, UnixSocketSlot};
-use slopos_abi::net::MAX_SOCKETS;
-use slopos_ostd::sync::BUS;
+use slopos_abi::net::{MAX_SOCKET_SLOTS, MAX_SOCKETS};
+use slopos_ostd::sync::{BUS, TEST_BUS};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
 /// One representative event per variant, including boundary slot ids and an
 /// oversized id that must fold back into range via `% CAP`.
+///
+/// Every AF_INET id sits at or past `MAX_SOCKET_SLOTS`: below that bound
+/// `queue_for` routes to the spine, which is a static shared by every bus, so
+/// a lower id would take a `TEST_BUS` publish back onto a kernel queue.
 fn sample_events() -> [KernelEvent; 14] {
     [
         KernelEvent::SocketRecv {
-            sock: SocketSlot(0),
+            sock: SocketSlot(MAX_SOCKET_SLOTS as u32),
         },
         KernelEvent::SocketRecv {
-            sock: SocketSlot((MAX_SOCKETS - 1) as u32),
+            sock: SocketSlot((MAX_SOCKET_SLOTS + MAX_SOCKETS - 1) as u32),
         },
         KernelEvent::SocketSend {
-            sock: SocketSlot((MAX_SOCKETS + 5) as u32),
+            sock: SocketSlot((MAX_SOCKET_SLOTS + 5) as u32),
         },
         KernelEvent::SocketAccept {
-            sock: SocketSlot((MAX_SOCKETS - 1) as u32),
+            sock: SocketSlot(u32::MAX),
         },
         KernelEvent::PipeRead { pipe: PipeSlot(0) },
         KernelEvent::PipeWrite {
@@ -54,18 +65,84 @@ fn sample_events() -> [KernelEvent; 14] {
     ]
 }
 
+/// An unbounded id paired with the in-range id it must fold onto. A publisher
+/// and a subscriber fold by the same rule, so a wake is lost the moment the two
+/// stop landing on one queue.
+fn folded_pairs() -> [(KernelEvent, KernelEvent); 6] {
+    const HUGE: usize = u32::MAX as usize;
+    [
+        (
+            KernelEvent::PipeRead {
+                pipe: PipeSlot(u32::MAX),
+            },
+            KernelEvent::PipeRead {
+                pipe: PipeSlot((HUGE % MAX_PIPES) as u32),
+            },
+        ),
+        (
+            KernelEvent::PipeWrite {
+                pipe: PipeSlot(u32::MAX),
+            },
+            KernelEvent::PipeWrite {
+                pipe: PipeSlot((HUGE % MAX_PIPES) as u32),
+            },
+        ),
+        (
+            KernelEvent::TtyInput {
+                tty: TtySlot(u32::MAX),
+            },
+            KernelEvent::TtyInput {
+                tty: TtySlot((HUGE % MAX_TTYS) as u32),
+            },
+        ),
+        (
+            KernelEvent::TtyOutput {
+                tty: TtySlot(u32::MAX),
+            },
+            KernelEvent::TtyOutput {
+                tty: TtySlot((HUGE % MAX_TTYS) as u32),
+            },
+        ),
+        (
+            KernelEvent::UnixSocket {
+                sock: UnixSocketSlot(u32::MAX),
+            },
+            KernelEvent::UnixSocket {
+                sock: UnixSocketSlot((HUGE % MAX_UNIX_SOCKETS) as u32),
+            },
+        ),
+        (
+            KernelEvent::ChildExit {
+                task: TaskSlot(u32::MAX),
+            },
+            KernelEvent::ChildExit {
+                task: TaskSlot((HUGE % CHILD_EXIT_BUCKETS) as u32),
+            },
+        ),
+    ]
+}
+
+/// Every variant routes to a queue of the bus it was published on, and an
+/// out-of-range slot id folds into that bus rather than off the end of it.
 pub fn test_event_publish_routes_in_range() -> TestResult {
     for ev in sample_events() {
-        assert_eq_test!(BUS.publish(ev), 0, "idle publish wakes nobody");
-        assert_test!(!BUS.publish_one(ev), "idle publish_one wakes nobody");
+        assert_eq_test!(TEST_BUS.publish(ev), 0, "idle publish wakes nobody");
+        assert_test!(!TEST_BUS.publish_one(ev), "idle publish_one wakes nobody");
+    }
+    for (oversized, folded) in folded_pairs() {
+        assert_test!(
+            BUS.shares_queue(oversized, folded),
+            "an out-of-range slot id does not share the queue it folds onto — \
+             a publish and a subscribe that disagree lose the wake"
+        );
     }
     pass!()
 }
 
 pub fn test_event_idle_queue_has_no_waiters() -> TestResult {
     for ev in sample_events() {
-        assert_test!(!BUS.has_waiters(ev), "idle queue has no waiters");
-        assert_eq_test!(BUS.waiter_count(ev), 0, "idle queue waiter_count is 0");
+        assert_test!(!TEST_BUS.has_waiters(ev), "idle queue has no waiters");
+        assert_eq_test!(TEST_BUS.waiter_count(ev), 0, "idle queue waiter_count is 0");
     }
     pass!()
 }
@@ -73,18 +150,24 @@ pub fn test_event_idle_queue_has_no_waiters() -> TestResult {
 pub fn test_event_subscription_pre_check_paths() -> TestResult {
     let ev = KernelEvent::PipeRead { pipe: PipeSlot(40) };
     assert_test!(
-        BUS.subscribe(ev).wait_event(|| true).is_ok(),
+        TEST_BUS.subscribe(ev).wait_event(|| true).is_ok(),
         "wait_event pre-check returns true"
     );
     assert_test!(
-        BUS.subscribe(ev).wait_event_timeout(|| true, 100).is_ok(),
+        TEST_BUS
+            .subscribe(ev)
+            .wait_event_timeout(|| true, 100)
+            .is_ok(),
         "wait_event_timeout pre-check returns true"
     );
     assert_test!(
-        BUS.subscribe(ev).wait_event_timeout(|| false, 1).is_err(),
+        TEST_BUS
+            .subscribe(ev)
+            .wait_event_timeout(|| false, 1)
+            .is_err(),
         "unsatisfiable timed wait does not report success"
     );
-    assert_test!(!BUS.has_waiters(ev), "no waiter left behind");
+    assert_test!(!TEST_BUS.has_waiters(ev), "no waiter left behind");
     pass!()
 }
 
@@ -99,8 +182,6 @@ slopos_testing::stest!(
 /// A folded index would still be correct — waiters re-check their predicate —
 /// but would wake unrelated sockets.
 pub fn test_event_socket_queues_do_not_alias() -> TestResult {
-    use slopos_abi::net::MAX_SOCKET_SLOTS;
-
     // Normally allocated by the socket-create path; done explicitly so this
     // test does not depend on a socket having been made first.
     assert_test!(

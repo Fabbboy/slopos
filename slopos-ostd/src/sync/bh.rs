@@ -18,7 +18,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::cpu::preempt::PreemptGuard;
 use crate::cpu::x86_64::{interrupts, pcr};
-use crate::sync::BspToken;
+use crate::sync::{BspToken, CacheAligned};
 
 /// Witness that the holder stands in bottom-half context on this CPU.
 ///
@@ -45,18 +45,45 @@ static RELAXED_DRAIN: AtomicUsize = AtomicUsize::new(0);
 /// indefinitely; what is left over stays pending for the next point.
 const MAX_BH_PASSES: u32 = 8;
 
-/// Declines whose cause is the calling context rather than re-entrancy. A
-/// drain site whose preconditions quietly stopped holding shows up here rather
-/// than as a growing backlog.
-static DECLINED_CONTEXT: AtomicU64 = AtomicU64::new(0);
+/// What the point did on one CPU. Every predicate counted here is a fact about
+/// the calling CPU alone, so a machine-wide total would let one CPU's ordinary
+/// drain pass as evidence about another's.
+struct BhCounters {
+    /// Declines whose cause is the calling context rather than re-entrancy. A
+    /// drain site whose preconditions quietly stopped holding shows up here
+    /// rather than as a growing backlog.
+    declined_context: AtomicU64,
+    /// Declines because this CPU was already draining. Expected and large —
+    /// every unlock inside a drain lands here — so it is counted apart.
+    declined_reentrant: AtomicU64,
+    /// Completed drains, so a caller can tell "the point was reached" from
+    /// "there was nothing to do".
+    drains: AtomicU64,
+}
 
-/// Declines because this CPU was already draining. Expected and large — every
-/// unlock inside a drain lands here — so it is counted apart.
-static DECLINED_REENTRANT: AtomicU64 = AtomicU64::new(0);
+impl BhCounters {
+    const fn new() -> Self {
+        Self {
+            declined_context: AtomicU64::new(0),
+            declined_reentrant: AtomicU64::new(0),
+            drains: AtomicU64::new(0),
+        }
+    }
+}
 
-/// Completed drains, so a caller can tell "the point was reached" from "there
-/// was nothing to do".
-static DRAINS: AtomicU64 = AtomicU64::new(0);
+/// Indexed directly rather than through [`crate::sync::CpuLocal`], whose
+/// pinning guard's drop *is* the release hook this module hangs off: an
+/// increment site would re-enter [`run_pending_slow`] from that destructor and
+/// recurse against the 4 KiB stack. Losing the pin costs nothing here — a
+/// relaxed increment landing on the previous CPU's slot after a migration is
+/// still a diagnostic counter.
+static BH_COUNTERS: [CacheAligned<BhCounters>; pcr::MAX_CPUS] =
+    [const { CacheAligned(BhCounters::new()) }; pcr::MAX_CPUS];
+
+#[inline]
+fn counters() -> Option<&'static BhCounters> {
+    BH_COUNTERS.get(pcr::get_current_cpu()).map(|slot| &slot.0)
+}
 
 /// Wire the bottom-half point.
 ///
@@ -124,14 +151,18 @@ fn run_pending_slow() {
         || pcr::panic_in_flight_depth() != 0
         || crate::sync::held_lock_count() != 0
     {
-        DECLINED_CONTEXT.fetch_add(1, Ordering::Relaxed);
+        if let Some(counters) = counters() {
+            counters.declined_context.fetch_add(1, Ordering::Relaxed);
+        }
         return;
     }
 
     // Before any guard exists: a decline that had already created one would fire
     // the release hook again from that guard's own drop.
     if pcr::bh_active_swap(true) {
-        DECLINED_REENTRANT.fetch_add(1, Ordering::Relaxed);
+        if let Some(counters) = counters() {
+            counters.declined_reentrant.fetch_add(1, Ordering::Relaxed);
+        }
         return;
     }
     let _claim = BhClaim;
@@ -159,23 +190,27 @@ fn run_pending_slow() {
         pcr::bh_pending_set();
     }
 
-    DRAINS.fetch_add(1, Ordering::Relaxed);
+    if let Some(counters) = counters() {
+        counters.drains.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
-/// Declines whose cause was the calling context rather than re-entrancy.
+/// Declines on the calling CPU whose cause was the calling context rather than
+/// re-entrancy.
 #[inline]
 pub fn declined_context() -> u64 {
-    DECLINED_CONTEXT.load(Ordering::Relaxed)
+    counters().map_or(0, |c| c.declined_context.load(Ordering::Relaxed))
 }
 
-/// Declines because this CPU was already inside a drain. Expected to be large.
+/// Declines on the calling CPU because it was already inside a drain. Expected
+/// to be large.
 #[inline]
 pub fn declined_reentrant() -> u64 {
-    DECLINED_REENTRANT.load(Ordering::Relaxed)
+    counters().map_or(0, |c| c.declined_reentrant.load(Ordering::Relaxed))
 }
 
-/// Drains that ran to completion.
+/// Drains that ran to completion on the calling CPU.
 #[inline]
 pub fn drains() -> u64 {
-    DRAINS.load(Ordering::Relaxed)
+    counters().map_or(0, |c| c.drains.load(Ordering::Relaxed))
 }

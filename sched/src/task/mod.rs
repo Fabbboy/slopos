@@ -1,5 +1,6 @@
 use core::ffi::c_void;
 
+mod kernel_io_hold;
 mod pending_spawn;
 mod task_cleanup_hooks;
 mod task_family;
@@ -23,6 +24,10 @@ pub use slopos_abi::task::{
 };
 pub use slopos_arch::arch::idt::IdtEntry;
 
+pub(crate) use kernel_io_hold::kernel_io_hold_claim;
+pub use kernel_io_hold::{
+    KernelIoHold, hold_kernel_io_all, kernel_io_dispatchable_count, republish_held_kernel_io,
+};
 pub use pending_spawn::SpawnGuard;
 pub use task_cleanup_hooks::*;
 pub use task_family::*;

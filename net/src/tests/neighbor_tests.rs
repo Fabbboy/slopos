@@ -6,20 +6,16 @@ use slopos_testing::{assert_eq_test, assert_test, pass};
 
 use crate::neighbor::{NeighborAction, NeighborCache, ResolveOutcome};
 use crate::packetbuf::PacketBuf;
-use crate::pool::PACKET_POOL;
+use crate::tests::packetbuf_tests::{TEST_PACKET_POOL, ensure_test_pool};
 use crate::types::{DevIndex, Ipv4Addr, MacAddr, NetError};
 
 fn fresh_cache() -> NeighborCache {
     NeighborCache::new()
 }
 
-fn ensure_pool_init() {
-    PACKET_POOL.init();
-}
-
-fn dummy_packet() -> PacketBuf {
+fn dummy_packet() -> Option<PacketBuf> {
     let data = [0xAA_u8; 64];
-    PacketBuf::from_raw_copy(&data).expect("pool should have capacity")
+    PacketBuf::from_raw_copy_in(&TEST_PACKET_POOL, &data)
 }
 
 pub fn test_neighbor_lookup_empty_cache() -> TestResult {
@@ -94,21 +90,25 @@ pub fn test_neighbor_update_overwrites_mac() -> TestResult {
 }
 
 pub fn test_neighbor_incomplete_to_reachable_flush() -> TestResult {
-    ensure_pool_init();
+    ensure_test_pool();
     let cache = fresh_cache();
 
     let dev = DevIndex(0);
     let ip = Ipv4Addr([10, 0, 0, 1]);
     let mac = MacAddr([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01]);
 
-    let pkt1 = dummy_packet();
+    let Some(pkt1) = dummy_packet() else {
+        return slopos_testing::fail!("test pool should have capacity");
+    };
     let outcome1 = cache.resolve(dev, ip, pkt1);
     assert_test!(
         matches!(outcome1, ResolveOutcome::ArpNeeded(_)),
         "first resolve should create Incomplete entry and request ARP"
     );
 
-    let pkt2 = dummy_packet();
+    let Some(pkt2) = dummy_packet() else {
+        return slopos_testing::fail!("test pool should have capacity");
+    };
     let outcome2 = cache.resolve(dev, ip, pkt2);
     assert_test!(
         matches!(outcome2, ResolveOutcome::Queued),
@@ -143,13 +143,15 @@ pub fn test_neighbor_incomplete_to_reachable_flush() -> TestResult {
 }
 
 pub fn test_neighbor_failed_drops_packets() -> TestResult {
-    ensure_pool_init();
+    ensure_test_pool();
     let cache = fresh_cache();
 
     let dev = DevIndex(0);
     let ip = Ipv4Addr([10, 0, 0, 1]);
 
-    let pkt = dummy_packet();
+    let Some(pkt) = dummy_packet() else {
+        return slopos_testing::fail!("test pool should have capacity");
+    };
     let outcome = cache.resolve(dev, ip, pkt);
     assert_test!(
         matches!(outcome, ResolveOutcome::ArpNeeded(_)),
@@ -178,7 +180,9 @@ pub fn test_neighbor_failed_drops_packets() -> TestResult {
         "should drop 1 pending packet on Failed transition"
     );
 
-    let pkt2 = dummy_packet();
+    let Some(pkt2) = dummy_packet() else {
+        return slopos_testing::fail!("test pool should have capacity");
+    };
     let outcome = cache.resolve(dev, ip, pkt2);
     assert_test!(
         matches!(outcome, ResolveOutcome::Failed(NetError::HostUnreachable)),
@@ -192,7 +196,7 @@ pub fn test_neighbor_failed_drops_packets() -> TestResult {
 }
 
 pub fn test_neighbor_resolve_reachable_returns_mac() -> TestResult {
-    ensure_pool_init();
+    ensure_test_pool();
     let cache = fresh_cache();
 
     let dev = DevIndex(0);
@@ -201,7 +205,9 @@ pub fn test_neighbor_resolve_reachable_returns_mac() -> TestResult {
 
     cache.insert_or_update(dev, ip, mac, 100);
 
-    let pkt = dummy_packet();
+    let Some(pkt) = dummy_packet() else {
+        return slopos_testing::fail!("test pool should have capacity");
+    };
     let outcome = cache.resolve(dev, ip, pkt);
     match outcome {
         ResolveOutcome::Resolved {
@@ -248,7 +254,7 @@ pub fn test_neighbor_expire_reachable_to_stale() -> TestResult {
 /// `NET_Q_NEIGH` reads `snapshot_owned`, so `ip neigh` shows exactly what it
 /// returns — every state, not just the resolved ones.
 pub fn test_neighbor_snapshot_owned_reports_every_state() -> TestResult {
-    ensure_pool_init();
+    ensure_test_pool();
     let cache = fresh_cache();
     let dev = DevIndex(7);
     let reachable_ip = Ipv4Addr([10, 0, 2, 2]);

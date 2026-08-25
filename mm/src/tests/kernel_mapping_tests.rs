@@ -1,24 +1,22 @@
 //! Kernel-half mapping tests, over the one surface that writes the
 //! kernel master's page tables.
 //!
-//! Every case brackets itself with the buddy's free-page count and asserts
-//! the exact delta: a page the unmap path forgets leaks, and one it accounts
-//! for twice is reissued while a live mapping still names it.
-//!
-//! Each bracket is preceded by a warm-up map/unmap at the same address,
-//! because the first mapping at a fresh VA also allocates the PD and the PT
-//! that reach it and a kernel-half intermediate is never released.
+//! Ownership is asserted per frame rather than against the allocator's free
+//! count: the leaf holds the single reference to the page it maps, unmap hands
+//! back exactly that page, and a second unmap of the same address hands back
+//! nothing. A page the unmap path forgets fails the first; one it accounts for
+//! twice fails the last.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
-use slopos_ostd::mm::frame::{Frame, KernelMeta, meta_slots_coverage};
+use slopos_ostd::mm::frame::{Frame, KernelMeta, meta_slots_coverage, reference_count_at};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 
 use crate::kernel_mappings::{
     kernel_is_mapped, kernel_map_4kb, kernel_map_4kb_frame, kernel_map_io_4kb, kernel_unmap_4kb,
 };
-use crate::page_alloc::{alloc_kernel_page, get_page_allocator_stats};
+use crate::page_alloc::alloc_kernel_page;
 use crate::paging::{PageTableLevel, kernel_pml4_phys, walk_phys};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
@@ -30,24 +28,6 @@ const SCRATCH_VA_BASE: u64 = 0xFFFF_9137_9ABC_D000;
 #[inline]
 fn scratch_va(slot: u64) -> VirtAddr {
     VirtAddr::new(SCRATCH_VA_BASE + slot * PAGE_SIZE_4KB)
-}
-
-fn free_pages() -> u32 {
-    let free = get_page_allocator_stats().free;
-    free
-}
-
-/// Map and unmap `va` once, so the PD and PT that reach it exist before a
-/// bracketed case measures anything.
-fn warm_up_path(va: VirtAddr) -> bool {
-    let pa = alloc_kernel_page();
-    if pa.is_null() {
-        return false;
-    }
-    if kernel_map_4kb(va, pa, PageFlags::KERNEL_RW.bits()) != 0 {
-        return false;
-    }
-    !kernel_unmap_4kb(va).is_null()
 }
 
 /// A physical address `META_SLOTS` does not cover — the class of paddr
@@ -64,11 +44,7 @@ fn slotless_paddr() -> Option<PhysAddr> {
 pub fn test_kernel_mapping_round_trip_returns_frame() -> TestResult {
     let va = scratch_va(0);
     assert_test!(!kernel_is_mapped(va), "scratch VA starts unmapped");
-    if !warm_up_path(va) {
-        return fail!("warm-up map/unmap");
-    }
 
-    let before = free_pages();
     let pa = alloc_kernel_page();
     if pa.is_null() {
         return fail!("frame allocation");
@@ -78,13 +54,22 @@ pub fn test_kernel_mapping_round_trip_returns_frame() -> TestResult {
         "kernel_map_4kb succeeded"
     );
     assert_test!(kernel_is_mapped(va), "mapped VA resolves");
+    let held = reference_count_at(pa);
 
     let unmapped = kernel_unmap_4kb(va);
+    let second = kernel_unmap_4kb(va);
+
+    assert_test!(
+        held == 1,
+        "the leaf holds {} references to the page it maps, want the one it owns",
+        held
+    );
     assert_test!(unmapped == pa, "unmap returned the mapped physical page");
     assert_test!(!kernel_is_mapped(va), "unmapped VA no longer resolves");
     assert_test!(
-        free_pages() == before,
-        "free-page count returned to baseline"
+        second.is_null(),
+        "unmapping an absent leaf yielded {:#x} to free a second time",
+        second.as_u64()
     );
     pass!()
 }
@@ -131,11 +116,7 @@ pub fn test_kernel_mapping_leaf_is_global_supervisor() -> TestResult {
 pub fn test_kernel_mapping_overlap_refused() -> TestResult {
     let va = scratch_va(2);
     assert_test!(!kernel_is_mapped(va), "scratch VA starts unmapped");
-    if !warm_up_path(va) {
-        return fail!("warm-up map/unmap");
-    }
 
-    let before = free_pages();
     let first = alloc_kernel_page();
     if first.is_null() {
         return fail!("first frame allocation");
@@ -154,6 +135,9 @@ pub fn test_kernel_mapping_overlap_refused() -> TestResult {
         kernel_map_4kb(va, second, PageFlags::KERNEL_RW.bits()) != 0,
         "second map over a present leaf was refused"
     );
+    // The refused map consumed the frame it was handed, so the page it named
+    // must be back with the allocator rather than owned by nobody.
+    let refused_holds = reference_count_at(second);
 
     let resolved = walk_phys(kernel_pml4_phys(), va).map(|r| r.phys_addr);
     let unmapped = kernel_unmap_4kb(va);
@@ -164,8 +148,9 @@ pub fn test_kernel_mapping_overlap_refused() -> TestResult {
     );
     assert_test!(unmapped == first, "unmap returned the first page");
     assert_test!(
-        free_pages() == before,
-        "the refused page was not leaked — count back to baseline"
+        refused_holds == 0,
+        "the refused page is still held by {} owner(s) -- it was leaked",
+        refused_holds
     );
     pass!()
 }
@@ -176,11 +161,7 @@ pub fn test_kernel_mapping_overlap_refused() -> TestResult {
 pub fn test_kernel_map_frame_accepts_kernel_meta() -> TestResult {
     let va = scratch_va(3);
     assert_test!(!kernel_is_mapped(va), "scratch VA starts unmapped");
-    if !warm_up_path(va) {
-        return fail!("warm-up map/unmap");
-    }
 
-    let before = free_pages();
     let Some(frame) = Frame::<KernelMeta>::alloc_zeroed() else {
         return fail!("typed frame allocation");
     };
@@ -190,12 +171,21 @@ pub fn test_kernel_map_frame_accepts_kernel_meta() -> TestResult {
         "kernel_map_4kb_frame succeeded"
     );
     assert_test!(kernel_is_mapped(va), "mapped VA resolves");
+    let held = reference_count_at(expected);
 
     let unmapped = kernel_unmap_4kb(va);
+    let second = kernel_unmap_4kb(va);
+
+    assert_test!(
+        held == 1,
+        "the cursor consumed the caller's frame but the slot holds {} references",
+        held
+    );
     assert_test!(unmapped == expected, "unmap returned the frame's page");
     assert_test!(
-        free_pages() == before,
-        "free-page count returned to baseline"
+        second.is_null(),
+        "unmapping an absent leaf yielded {:#x} to free a second time",
+        second.as_u64()
     );
     pass!()
 }
@@ -228,14 +218,6 @@ pub fn test_kernel_map_io_owns_no_frame() -> TestResult {
     let Some(device_pa) = slotless_paddr() else {
         return fail!("META_SLOTS not installed");
     };
-    // Warm the intermediates with a device mapping too — this path
-    // allocates the same PD/PT the RAM path would.
-    if kernel_map_io_4kb(va, device_pa, PageFlags::MMIO.bits()) != 0 {
-        return fail!("warm-up map_io");
-    }
-    let _ = kernel_unmap_4kb(va);
-
-    let before = free_pages();
     assert_test!(
         kernel_map_io_4kb(va, device_pa, PageFlags::MMIO.bits()) == 0,
         "kernel_map_io_4kb succeeded"
@@ -255,10 +237,6 @@ pub fn test_kernel_map_io_owns_no_frame() -> TestResult {
     assert_test!(
         !kernel_is_mapped(va),
         "unmapped device VA no longer resolves"
-    );
-    assert_test!(
-        free_pages() == before,
-        "device map/unmap left the allocator untouched"
     );
     pass!()
 }

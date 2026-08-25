@@ -2,7 +2,7 @@
 //!
 //! `PacketBuf` is the single currency exchanged between the driver layer and the
 //! protocol stack. It is **move-only**; dropping a pooled buffer returns its
-//! slot to the global [`PacketPool`](super::pool::PacketPool).
+//! slot to the [`PacketPool`](super::pool::PacketPool) it came from.
 //!
 //! ```text
 //! |<-- headroom -->|<-- payload (head..tail) -->|<-- tailroom -->|
@@ -18,7 +18,7 @@ use core::fmt;
 use slopos_ostd::KVec;
 use slopos_ostd::mm::frame::{Frame, PacketMeta};
 
-use super::pool::{BUF_SIZE, PACKET_POOL};
+use super::pool::{BUF_SIZE, PACKET_POOL, PacketPool};
 use super::types::{Ipv4Addr, NetError};
 
 /// Reserved headroom in each pooled buffer (bytes): Ethernet (14) + IP (20) +
@@ -27,8 +27,11 @@ pub const HEADROOM: u16 = 128;
 
 enum PacketBufInner {
     /// Pool-backed fast path. `frame` is `Option` only so `Drop` can move it
-    /// out; it is `Some` for the whole of a live buffer's lifetime.
+    /// out; it is `Some` for the whole of a live buffer's lifetime. The pool is
+    /// carried rather than assumed so a buffer drawn from a test's private pool
+    /// returns there instead of inflating the global one's free count.
     Pooled {
+        pool: &'static PacketPool,
         slot: u16,
         frame: Option<Frame<PacketMeta>>,
     },
@@ -51,9 +54,9 @@ pub struct PacketBuf {
 
 impl Drop for PacketBuf {
     fn drop(&mut self) {
-        if let PacketBufInner::Pooled { slot, frame } = &mut self.inner {
+        if let PacketBufInner::Pooled { pool, slot, frame } = &mut self.inner {
             if let Some(f) = frame.take() {
-                PACKET_POOL.restore(*slot, f);
+                pool.restore(*slot, f);
             }
         }
     }
@@ -88,9 +91,18 @@ impl PacketBuf {
     ///
     /// Returns `None` if the pool is exhausted.
     pub fn alloc() -> Option<Self> {
-        let (slot, frame) = PACKET_POOL.acquire()?;
+        Self::alloc_in(&PACKET_POOL)
+    }
+
+    /// [`alloc`](Self::alloc) from an explicit pool — the form the
+    /// [`NetDevice::poll_rx`](super::netdev::NetDevice::poll_rx) `pool`
+    /// parameter has always promised, and what lets a test drive a pool whose
+    /// free count nothing else moves.
+    pub fn alloc_in(pool: &'static PacketPool) -> Option<Self> {
+        let (slot, frame) = pool.acquire()?;
         Some(Self {
             inner: PacketBufInner::Pooled {
+                pool,
                 slot,
                 frame: Some(frame),
             },
@@ -109,13 +121,19 @@ impl PacketBuf {
     ///
     /// Returns `None` if the pool is exhausted or `data.len() > BUF_SIZE`.
     pub fn from_raw_copy(data: &[u8]) -> Option<Self> {
+        Self::from_raw_copy_in(&PACKET_POOL, data)
+    }
+
+    /// [`from_raw_copy`](Self::from_raw_copy) from an explicit pool.
+    pub fn from_raw_copy_in(pool: &'static PacketPool, data: &[u8]) -> Option<Self> {
         if data.len() > BUF_SIZE {
             return None;
         }
-        let (slot, mut frame) = PACKET_POOL.acquire()?;
+        let (slot, mut frame) = pool.acquire()?;
         frame.as_bytes_mut()[..data.len()].copy_from_slice(data);
         Some(Self {
             inner: PacketBufInner::Pooled {
+                pool,
                 slot,
                 frame: Some(frame),
             },

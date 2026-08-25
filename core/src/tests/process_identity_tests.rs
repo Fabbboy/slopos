@@ -13,6 +13,7 @@ use slopos_fs::fileio::{
 };
 use slopos_mm::process_vm::{destroy_process_vm, init_process_vm};
 use slopos_ostd::klog_info;
+use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::TestResult;
 use slopos_testing::assert_test;
 
@@ -52,6 +53,11 @@ pub fn test_fileio_create_table_rejects_a_bound_process() -> TestResult {
 /// A leftover binding means the ids come back bound to tables their new holders
 /// never opened, and the very next `task_build` is refused a descriptor table.
 pub fn test_a_fixture_reset_releases_fd_tables() -> TestResult {
+    // The reset destroys every descriptor table and every address space in the
+    // machine, so it may not run against live APs or a running kernel-I/O
+    // thread; the scope parks both for the duration.
+    let _scope = KernelTestScope::enter();
+
     let Ok(process) = slopos_ostd::process::process_spawn_root() else {
         klog_info!("PROC_ID_TEST: could not register a process");
         return TestResult::Fail;
@@ -95,6 +101,10 @@ pub fn test_a_fixture_reset_releases_fd_tables() -> TestResult {
 /// servicing a fault or an open in a stranger's tables.
 pub fn test_a_recycled_pid_does_not_resolve_to_the_prior_principal() -> TestResult {
     use slopos_ostd::process::{process_for_handle, process_retire, process_spawn_root};
+
+    // Lowest-free allocation only reissues the id if nothing else takes it in
+    // between, and every AP is free to spawn.
+    let _scope = KernelTestScope::enter();
 
     let Ok(first) = process_spawn_root() else {
         klog_info!("PROC_ID_TEST: could not register a process");
@@ -164,6 +174,11 @@ pub fn test_a_recycled_pid_does_not_resolve_to_the_prior_principal() -> TestResu
 /// table" has to answer with a refusal, never a redirect into a more
 /// privileged domain.
 pub fn test_fileio_refuses_a_process_with_no_table() -> TestResult {
+    // `FdTable::Kernel` is the one table every kernel task shares, so counting
+    // it is only a measurement of this call while no other task can open or
+    // close a descriptor.
+    let _scope = KernelTestScope::enter();
+
     let Ok(process) = slopos_ostd::process::process_spawn_root() else {
         klog_info!("PROC_ID_TEST: could not register a process");
         return TestResult::Fail;

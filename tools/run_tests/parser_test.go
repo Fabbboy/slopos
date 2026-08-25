@@ -525,3 +525,220 @@ func TestRecorderAggregatesTwoPhases(t *testing.T) {
 		t.Errorf("truncated should be false")
 	}
 }
+
+func filterAborts(events []Event) []*EvKernelAbort {
+	var out []*EvKernelAbort
+	for _, e := range events {
+		if a, ok := e.(*EvKernelAbort); ok {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func TestKernelAbortBannerEmitsEvent(t *testing.T) {
+	p := NewKtapParser()
+	events := feedAll(p, []string{
+		"",
+		KernelAbortBanner,
+		"NMI watchdog: CPU made no progress, sustained",
+		"System halted.",
+	})
+	aborts := filterAborts(events)
+	if len(aborts) != 1 {
+		t.Fatalf("want exactly 1 abort event, got %d", len(aborts))
+	}
+	if aborts[0].Reason != "NMI watchdog: CPU made no progress, sustained" {
+		t.Fatalf("reason drifted: %q", aborts[0].Reason)
+	}
+}
+
+// The kernel writes "\n\n=== KERNEL ABORT ===", so a blank line precedes the
+// banner; a blank line must never be mistaken for the reason.
+func TestKernelAbortIgnoresBlankLinesBeforeTheReason(t *testing.T) {
+	p := NewKtapParser()
+	events := feedAll(p, []string{KernelAbortBanner, "   ", "panic core abort"})
+	aborts := filterAborts(events)
+	if len(aborts) != 1 || aborts[0].Reason != "panic core abort" {
+		t.Fatalf("want one abort with the reason line, got %+v", aborts)
+	}
+}
+
+// The fully-dead-machine case: the banner is the last thing the kernel wrote.
+func TestBareKernelAbortBannerStillEmitsOnFlush(t *testing.T) {
+	p := NewKtapParser()
+	if n := len(filterAborts(feedAll(p, []string{KernelAbortBanner}))); n != 0 {
+		t.Fatalf("banner alone should not emit until resolved, got %d", n)
+	}
+	aborts := filterAborts(p.Flush())
+	if len(aborts) != 1 {
+		t.Fatalf("Flush must emit the pending abort, got %d", len(aborts))
+	}
+	if aborts[0].Reason != "" {
+		t.Fatalf("want empty reason, got %q", aborts[0].Reason)
+	}
+	if n := len(filterAborts(p.Flush())); n != 0 {
+		t.Fatalf("a second Flush must emit nothing, got %d", n)
+	}
+}
+
+// The recorded case: the abort was CPU 1 only and the BSP produced thousands
+// of further results. A result line arriving straight after the banner must
+// still parse, and the abort must still be reported.
+func TestKernelAbortDoesNotDisturbKtapParsing(t *testing.T) {
+	p := NewKtapParser()
+	events := feedAll(p, []string{
+		"KTAP\tTAP version 14",
+		"KTAP\t1..2",
+		"KTAP\tok 1 - mod::a # time_ms=1",
+		KernelAbortBanner,
+		"KTAP\tok 2 - mod::b # time_ms=2",
+		"KTAP\t# elapsed_ms=9 pass=2 fail=0 skip=0 over_time=0",
+	})
+	if n := len(filterAborts(events)); n != 1 {
+		t.Fatalf("a KTAP line must resolve the banner, got %d aborts", n)
+	}
+	tests := filterTests(events)
+	if len(tests) != 2 {
+		t.Fatalf("want 2 test records across the abort, got %d", len(tests))
+	}
+	if tests[1].Record.Name != "mod::b" || tests[1].Record.Outcome != OutcomePass {
+		t.Fatalf("result after the banner mis-parsed: %+v", tests[1].Record)
+	}
+	if len(filterPhaseEnds(events)) != 1 {
+		t.Fatalf("footer must still parse after an abort")
+	}
+}
+
+// Two CPUs aborting back to back are two events, not one swallowed by the
+// other; and the second banner is never read as the first one's reason.
+func TestBackToBackKernelAbortsEmitSeparateEvents(t *testing.T) {
+	p := NewKtapParser()
+	events := feedAll(p, []string{
+		KernelAbortBanner,
+		KernelAbortBanner,
+		"panic core abort",
+	})
+	aborts := filterAborts(events)
+	if len(aborts) != 2 {
+		t.Fatalf("want 2 abort events, got %d", len(aborts))
+	}
+	if aborts[0].Reason != "" {
+		t.Fatalf("first abort has no reason of its own, got %q", aborts[0].Reason)
+	}
+	if aborts[1].Reason != "panic core abort" {
+		t.Fatalf("second abort lost its reason: %q", aborts[1].Reason)
+	}
+}
+
+// The banner goes out over the polling early console while peers may still be
+// writing klog, so it can arrive with a foreign prefix glued to its head.
+func TestKernelAbortDetectedWithInterleavedPrefix(t *testing.T) {
+	p := NewKtapParser()
+	events := feedAll(p, []string{
+		"SCHED: cpu 3 idle" + KernelAbortBanner,
+		"NMI watchdog: sustained",
+	})
+	if aborts := filterAborts(events); len(aborts) != 1 ||
+		aborts[0].Reason != "NMI watchdog: sustained" {
+		t.Fatalf("interleaved banner not recognised: %+v", aborts)
+	}
+}
+
+// The banner is klog like any other klog: it stays in the tail attached to the
+// next failure, and it still surfaces as EvNonKtap for --raw.
+func TestKernelAbortStillReachesKlogTailAndNonKtap(t *testing.T) {
+	p := NewKtapParser()
+	events := feedAll(p, []string{KernelAbortBanner, "panic core abort"})
+	var nonKtap int
+	for _, e := range events {
+		if _, ok := e.(*EvNonKtap); ok {
+			nonKtap++
+		}
+	}
+	if nonKtap != 2 {
+		t.Fatalf("want both lines as EvNonKtap, got %d", nonKtap)
+	}
+	tail := p.KlogTail()
+	if len(tail) != 2 || tail[0] != KernelAbortBanner {
+		t.Fatalf("banner missing from klog tail: %q", tail)
+	}
+}
+
+// A pending banner must not survive into the next phase: whatever the next
+// phase's first klog line says, it is not this abort's reason.
+func TestKernelAbortDoesNotCrossPhaseBoundary(t *testing.T) {
+	p := NewKtapParser()
+	events := feedAll(p, []string{
+		"KTAP\tTAP version 14",
+		"KTAP\t1..1",
+		"KTAP\tok 1 - mod::a # time_ms=1",
+		KernelAbortBanner,
+		"KTAP\tTAP version 14",
+		"USERLAND: launched /sbin/init",
+	})
+	aborts := filterAborts(events)
+	if len(aborts) != 1 {
+		t.Fatalf("want 1 abort, got %d", len(aborts))
+	}
+	if aborts[0].Reason != "" {
+		t.Fatalf("next phase's klog must not become the reason, got %q", aborts[0].Reason)
+	}
+	if n := len(filterPhaseStarts(events)); n != 2 {
+		t.Fatalf("both phases must still open, got %d", n)
+	}
+}
+
+// A record left uncommitted when the stream died is evidence, not litter.
+func TestFlushCommitsTheTrailingRecord(t *testing.T) {
+	p := NewKtapParser()
+	feedAll(p, []string{
+		"KTAP\tTAP version 14",
+		"KTAP\t1..2",
+		"KTAP\tnot ok 1 - mod::a # time_ms=1",
+	})
+	tests := filterTests(p.Flush())
+	if len(tests) != 1 || tests[0].Record.Name != "mod::a" {
+		t.Fatalf("Flush must commit the pending record, got %+v", tests)
+	}
+}
+
+func TestKernelAbortRecordedOnSummary(t *testing.T) {
+	p, r := NewKtapParser(), NewRecorder()
+	for _, ln := range []string{KernelAbortBanner, "NMI watchdog: sustained"} {
+		for _, ev := range p.Feed(ln) {
+			r.Record(ev)
+		}
+	}
+	if !r.Summary.KernelAbort {
+		t.Fatalf("recorder must latch KernelAbort")
+	}
+	if r.Summary.KernelAbortReason != "NMI watchdog: sustained" {
+		t.Fatalf("reason not recorded: %q", r.Summary.KernelAbortReason)
+	}
+}
+
+// The first reason names the CPU that died first; a later abort is usually the
+// cascade and must not overwrite it.
+func TestKernelAbortRecorderKeepsTheFirstReason(t *testing.T) {
+	r := NewRecorder()
+	r.Record(&EvKernelAbort{Reason: "first"})
+	r.Record(&EvKernelAbort{Reason: "second"})
+	if r.Summary.KernelAbortReason != "first" {
+		t.Fatalf("first reason must win, got %q", r.Summary.KernelAbortReason)
+	}
+}
+
+// A reasonless abort followed by one that has a reason still records it: the
+// latch is on the flag, the reason is filled by whichever event first has one.
+func TestKernelAbortRecorderTakesTheFirstNonEmptyReason(t *testing.T) {
+	r := NewRecorder()
+	r.Record(&EvKernelAbort{})
+	if !r.Summary.KernelAbort {
+		t.Fatalf("a reasonless abort must still latch the flag")
+	}
+	r.Record(&EvKernelAbort{Reason: "panic core abort"})
+	if r.Summary.KernelAbortReason != "panic core abort" {
+		t.Fatalf("reason not backfilled: %q", r.Summary.KernelAbortReason)
+	}
+}

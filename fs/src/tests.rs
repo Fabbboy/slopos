@@ -32,8 +32,22 @@ macro_rules! mount_ext2 {
     };
 }
 
+/// Mount the builtin filesystems. Idempotent in the VFS itself, so every test
+/// that touches a path calls this rather than depending on whichever test the
+/// lex order happens to run first.
+fn ensure_vfs_ready() -> bool {
+    if vfs_init_builtin_filesystems().is_err() {
+        klog_info!("VFS_TEST: failed to initialize VFS");
+        return false;
+    }
+    true
+}
+
 pub fn test_vfs_initialized() -> TestResult {
     klog_info!("VFS_TEST: check initialized");
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
     if !vfs_is_initialized() {
         return TestResult::Fail;
     }
@@ -42,6 +56,9 @@ pub fn test_vfs_initialized() -> TestResult {
 
 pub fn test_vfs_root_stat() -> TestResult {
     klog_info!("VFS_TEST: root stat");
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
     let (kind, _size) = match vfs_stat(b"/") {
         Ok(stat) => stat,
         Err(_) => return TestResult::Fail,
@@ -54,9 +71,10 @@ pub fn test_vfs_root_stat() -> TestResult {
 
 pub fn test_vfs_file_roundtrip() -> TestResult {
     klog_info!("VFS_TEST: file roundtrip");
-    if vfs_mkdir(b"/vfs_test").is_err() {
+    if !ensure_vfs_ready() {
         return TestResult::Fail;
     }
+    let _ = vfs_mkdir(b"/vfs_test");
 
     let handle = match vfs_open(b"/vfs_test/hello.txt", true) {
         Ok(h) => h,
@@ -80,24 +98,37 @@ pub fn test_vfs_file_roundtrip() -> TestResult {
     TestResult::Pass
 }
 
+/// A private directory: the entry under test can then only be missing because
+/// `readdir` omitted it, never because leftovers pushed it past the buffer.
 pub fn test_vfs_list() -> TestResult {
     klog_info!("VFS_TEST: list directory");
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
+    let _ = vfs_mkdir(b"/vfs_list_test");
+    if vfs_open(b"/vfs_list_test/listed.txt", true).is_err() {
+        return slopos_testing::fail!("could not create the listing fixture");
+    }
+
     let mut entries = [UserFsEntry::new(); 8];
-    let count = match vfs_list(b"/vfs_test", &mut entries) {
+    let count = match vfs_list(b"/vfs_list_test", &mut entries) {
         Ok(count) => count,
         Err(_) => return TestResult::Fail,
     };
+    if count == entries.len() {
+        return slopos_testing::fail!("the fixture directory filled the listing buffer");
+    }
 
     let mut found = false;
     for entry in entries.iter().take(count) {
-        if entry.name_str() == "hello.txt" {
+        if entry.name_str() == "listed.txt" {
             found = true;
             break;
         }
     }
 
     if !found {
-        return TestResult::Fail;
+        return slopos_testing::fail!("a just-created file was absent from its own directory");
     }
     TestResult::Pass
 }
@@ -109,6 +140,13 @@ pub fn test_vfs_cd_into_listed_dirs() -> TestResult {
     use slopos_abi::fs::FS_TYPE_DIRECTORY;
 
     klog_info!("VFS_TEST: cd into every listed directory");
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
+    // Its own directory in the root, so the sweep below is never vacuous
+    // whatever else has or has not run.
+    const FIXTURE: &str = "vfs_cd_test";
+    let _ = vfs_mkdir(b"/vfs_cd_test");
 
     // 32 × 72 bytes of entries — more than the whole frame budget on its own.
     let Ok(mut entries) = KVec::filled(UserFsEntry::new(), 32) else {
@@ -119,7 +157,7 @@ pub fn test_vfs_cd_into_listed_dirs() -> TestResult {
         Err(_) => return TestResult::Fail,
     };
 
-    let mut dirs_seen = 0u32;
+    let mut saw_fixture = false;
     for entry in entries.iter().take(count) {
         if entry.type_ != FS_TYPE_DIRECTORY {
             continue;
@@ -145,30 +183,41 @@ pub fn test_vfs_cd_into_listed_dirs() -> TestResult {
                 return TestResult::Fail;
             }
         }
-        dirs_seen += 1;
+        saw_fixture |= name == FIXTURE;
     }
 
-    if dirs_seen == 0 {
-        return TestResult::Skipped;
+    if !saw_fixture {
+        return slopos_testing::fail!("a just-created root directory was absent from `ls /`");
     }
     TestResult::Pass
 }
 
 pub fn test_vfs_unlink() -> TestResult {
     klog_info!("VFS_TEST: unlink file");
-    if vfs_unlink(b"/vfs_test/hello.txt").is_err() {
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
+    let _ = vfs_mkdir(b"/vfs_unlink_test");
+    if vfs_open(b"/vfs_unlink_test/doomed.txt", true).is_err() {
+        return slopos_testing::fail!("could not create the unlink fixture");
+    }
+
+    if vfs_unlink(b"/vfs_unlink_test/doomed.txt").is_err() {
         return TestResult::Fail;
     }
 
     let mut entries = [UserFsEntry::new(); 8];
-    let count = match vfs_list(b"/vfs_test", &mut entries) {
+    let count = match vfs_list(b"/vfs_unlink_test", &mut entries) {
         Ok(count) => count,
         Err(_) => return TestResult::Fail,
     };
+    if count == entries.len() {
+        return slopos_testing::fail!("the fixture directory filled the listing buffer");
+    }
 
     for entry in entries.iter().take(count) {
-        if entry.name_str() == "hello.txt" {
-            return TestResult::Fail;
+        if entry.name_str() == "doomed.txt" {
+            return slopos_testing::fail!("an unlinked file was still listed");
         }
     }
     TestResult::Pass
@@ -219,6 +268,9 @@ pub fn test_vfs_canonicalise_table() -> TestResult {
 /// The mount is reached through every spelling of its path, so writes through
 /// `//tmp/f` and reads through `/tmp/f` name one file.
 pub fn test_vfs_mount_reached_through_every_spelling() -> TestResult {
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
     let payload = b"canonical";
     if vfs_open(b"/tmp/canon_probe.txt", true)
         .and_then(|h| h.write(0, payload))
@@ -254,6 +306,9 @@ pub fn test_vfs_mount_reached_through_every_spelling() -> TestResult {
 /// entry can never be matched by the name that created it, so the file and
 /// its inode are unreachable and unreclaimable.
 pub fn test_ramfs_long_name_refused() -> TestResult {
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
     let mut path = [b'A'; 64];
     path[..5].copy_from_slice(b"/tmp/");
     let long = &path[..];
@@ -268,6 +323,11 @@ pub fn test_ramfs_long_name_refused() -> TestResult {
 /// Renaming a directory into its own descendant detaches the subtree: it
 /// becomes unreachable from the root and unremovable.
 pub fn test_ramfs_rename_into_descendant_refused() -> TestResult {
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
+    let _ = vfs_unlink(b"/tmp/anc/child");
+    let _ = vfs_unlink(b"/tmp/anc");
     if vfs_mkdir(b"/tmp/anc").is_err() || vfs_mkdir(b"/tmp/anc/child").is_err() {
         return slopos_testing::fail!("could not build the fixture");
     }
@@ -284,9 +344,10 @@ pub fn test_ramfs_rename_into_descendant_refused() -> TestResult {
 }
 
 pub fn test_vfs_storage_contention_stress_baseline() -> TestResult {
-    if vfs_mkdir(b"/vfs_stress").is_err() {
+    if !ensure_vfs_ready() {
         return TestResult::Fail;
     }
+    let _ = vfs_mkdir(b"/vfs_stress");
 
     let mut payload = [0u8; 256];
     for (idx, b) in payload.iter_mut().enumerate() {
@@ -1150,34 +1211,11 @@ pub fn test_ext2_remove_path_not_file() -> TestResult {
     }
 }
 
-fn ext2_tests_init() -> bool {
-    if let Err(_) = vfs_init_builtin_filesystems() {
-        klog_info!("VFS_TEST: failed to initialize VFS");
-        return false;
-    }
-    true
-}
-
-// Lex order of test names is what guarantees `test_ext2_aaa_init` runs before
-// any other `test_ext2_*` / `test_vfs_*` entry in this file.
-static EXT2_VFS_READY: slopos_ostd::sync::StateFlag = slopos_ostd::sync::StateFlag::new();
-
-fn ensure_ext2_vfs_ready() -> bool {
-    if EXT2_VFS_READY.is_active() {
-        return true;
-    }
-    if !ext2_tests_init() {
-        return false;
-    }
-    EXT2_VFS_READY.set_active();
-    true
-}
-
 fn test_ext2_aaa_init() -> TestResult {
-    if ensure_ext2_vfs_ready() {
+    if ensure_vfs_ready() {
         TestResult::Pass
     } else {
-        TestResult::Skipped
+        TestResult::Fail
     }
 }
 
@@ -1351,9 +1389,9 @@ pub fn test_fileio_open_at_fd() -> TestResult {
     use crate::fileio::{file_close_fd, fileio_open_at_fd};
     use slopos_abi::fs::O_RDONLY;
 
-    // Runs after `test_ext2_aaa_init` (lex-first) mounts the writable root. A
-    // private directory, so it never collides with `test_vfs_*`, whose `mkdir`
-    // asserts first-creation.
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
     let _ = vfs_mkdir(b"/fileio_test");
     let handle = match vfs_open(b"/fileio_test/open_at.txt", true) {
         Ok(h) => h,
@@ -1389,6 +1427,9 @@ pub fn test_fileio_file_ref_move() -> TestResult {
     };
     use slopos_abi::fs::O_RDONLY;
 
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
     let _ = vfs_mkdir(b"/fileio_test");
     let handle = match vfs_open(b"/fileio_test/refmove.txt", true) {
         Ok(h) => h,
@@ -1619,6 +1660,9 @@ pub fn test_fileio_open_file_limit() -> TestResult {
     use crate::fileio::{FILEIO_MAX_OPEN_FILES, file_open_for_process};
     use slopos_abi::fs::O_RDONLY;
 
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
     let _ = vfs_mkdir(b"/fileio_test");
     let handle = match vfs_open(b"/fileio_test/limit.txt", true) {
         Ok(h) => h,
@@ -1684,10 +1728,11 @@ pub fn test_quota_fdslot_drive_to_full() -> TestResult {
     };
     let table = scratch.table();
     let account = table.account();
+    let baseline = stats(account, ResourceKind::FdSlot).map_or(0, |s| s.used);
 
     let restore = quota_mode();
     set_quota_mode(QuotaMode::Enforce);
-    set_limit(account, ResourceKind::FdSlot, CEILING);
+    set_limit(account, ResourceKind::FdSlot, baseline + CEILING);
 
     let mut opened = 0u32;
     let mut first_failure = 0i32;
@@ -1721,8 +1766,8 @@ pub fn test_quota_fdslot_drive_to_full() -> TestResult {
     let Some(s) = s else {
         return slopos_testing::fail!("the account row vanished mid-test");
     };
-    if s.used != CEILING {
-        return slopos_testing::fail!("used={} after filling to {}", s.used, CEILING);
+    if s.used != baseline + CEILING {
+        return slopos_testing::fail!("used={} after filling to {}", s.used, baseline + CEILING);
     }
     if s.denials == 0 {
         return slopos_testing::fail!("a refusal nobody counted is a silent denial");
@@ -1814,7 +1859,7 @@ pub fn test_quota_fdslot_cross_process_isolation() -> TestResult {
     use crate::fileio::file_open_for_process;
     use slopos_abi::fs::O_RDONLY;
     use slopos_abi::quota::{QuotaMode, ResourceKind};
-    use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode};
+    use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode, stats};
 
     const CEILING: u32 = 4;
 
@@ -1829,10 +1874,15 @@ pub fn test_quota_fdslot_cross_process_isolation() -> TestResult {
     };
     let greedy_table = greedy.table();
     let neighbour_table = neighbour.table();
+    let baseline = stats(greedy_table.account(), ResourceKind::FdSlot).map_or(0, |s| s.used);
 
     let restore = quota_mode();
     set_quota_mode(QuotaMode::Enforce);
-    set_limit(greedy_table.account(), ResourceKind::FdSlot, CEILING);
+    set_limit(
+        greedy_table.account(),
+        ResourceKind::FdSlot,
+        baseline + CEILING,
+    );
 
     let mut opened = 0u32;
     while file_open_for_process(greedy_table, path, O_RDONLY as u32) >= 0 {
@@ -1887,6 +1937,9 @@ slopos_testing::stest!(name = test_zzz_quota_ledger_is_consistent_after_exhausti
 
 /// A file to open repeatedly, or `None` if the scratch tree is unavailable.
 fn scratch_file(path: &'static [u8]) -> Option<&'static [u8]> {
+    if !ensure_vfs_ready() {
+        return None;
+    }
     let _ = vfs_mkdir(b"/fileio_test");
     let handle = vfs_open(path, true).ok()?;
     handle.write(0, b"x").ok()?;
@@ -1899,8 +1952,12 @@ fn scratch_file(path: &'static [u8]) -> Option<&'static [u8]> {
 pub fn test_sealed_inode_refuses_mutation() -> TestResult {
     use crate::vfs::{VfsError, VfsOpenFlags, vfs_open_flags, vfs_set_sealed};
 
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
     const SEALED: &[u8] = b"/tmp/seal_sealed";
     const PLAIN: &[u8] = b"/tmp/seal_plain";
+    let _ = vfs_unlink(b"/tmp/seal_moved");
     let _ = vfs_unlink(SEALED);
     let _ = vfs_unlink(PLAIN);
 
@@ -1982,6 +2039,9 @@ pub fn test_sealed_inode_refuses_mutation() -> TestResult {
 pub fn test_set_sealed_defaults_closed() -> TestResult {
     use crate::vfs::{VfsError, vfs_set_sealed};
 
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
     match vfs_set_sealed(b"/dev/null") {
         Err(VfsError::NotSupported) => TestResult::Pass,
         other => slopos_testing::fail!("devfs answered {:?}, want NotSupported", other),
@@ -2018,7 +2078,8 @@ pub fn test_quota_objectrow_drive_to_full() -> TestResult {
     set_limit(account, ResourceKind::ObjectRow, baseline + CEILING);
     // The descriptor ceiling must stay clear of the object ceiling, or the
     // refusal under test would come from the wrong axis with the wrong errno.
-    set_limit(account, ResourceKind::FdSlot, baseline + CEILING + 64);
+    let fd_baseline = stats(account, ResourceKind::FdSlot).map_or(0, |s| s.used);
+    set_limit(account, ResourceKind::FdSlot, fd_baseline + CEILING + 64);
 
     let mut opened = 0u32;
     let mut first_failure = 0i32;
@@ -2060,7 +2121,7 @@ pub fn test_quota_objectrow_cross_process_isolation() -> TestResult {
     use crate::fileio::file_open_for_process;
     use slopos_abi::fs::O_RDONLY;
     use slopos_abi::quota::{QuotaMode, ResourceKind};
-    use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode};
+    use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode, stats};
 
     const CEILING: u32 = 3;
 
@@ -2072,10 +2133,15 @@ pub fn test_quota_objectrow_cross_process_isolation() -> TestResult {
     };
     let greedy_table = greedy.table();
     let neighbour_table = neighbour.table();
+    let baseline = stats(greedy_table.account(), ResourceKind::ObjectRow).map_or(0, |s| s.used);
 
     let restore = quota_mode();
     set_quota_mode(QuotaMode::Enforce);
-    set_limit(greedy_table.account(), ResourceKind::ObjectRow, CEILING);
+    set_limit(
+        greedy_table.account(),
+        ResourceKind::ObjectRow,
+        baseline + CEILING,
+    );
 
     let mut opened = 0u32;
     while file_open_for_process(greedy_table, path, O_RDONLY as u32) >= 0 {

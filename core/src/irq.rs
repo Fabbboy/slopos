@@ -148,3 +148,44 @@ pub fn enable_line(irq: u8) {
 pub fn disable_line(irq: u8) {
     mask_irq_line(irq);
 }
+
+/// One line's book-keeping, captured so a test can put back exactly what it
+/// found: [`set_irq_route`] has no inverse, so a test that routes a line it
+/// found unrouted cannot otherwise undo that.
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy)]
+pub struct IrqLineState {
+    flags: u8,
+    gsi: u32,
+}
+
+#[cfg(feature = "test-hooks")]
+pub fn irq_line_state(irq: u8) -> Option<IrqLineState> {
+    if irq as usize >= IRQ_LINES {
+        return None;
+    }
+    Some(IrqLineState {
+        flags: flags_get(irq),
+        gsi: IRQ_GSI[irq as usize].load(Ordering::Acquire),
+    })
+}
+
+/// The route is restored by store and the mask through the public path, so the
+/// IOAPIC sees a mask change exactly when it would have seen it originally.
+#[cfg(feature = "test-hooks")]
+pub fn restore_irq_line_state(irq: u8, saved: IrqLineState) {
+    if irq as usize >= IRQ_LINES {
+        return;
+    }
+    IRQ_GSI[irq as usize].store(saved.gsi, Ordering::Release);
+    if saved.flags & FLAG_VIA_IOAPIC != 0 {
+        flags_set_bits(irq, FLAG_VIA_IOAPIC);
+    } else {
+        flags_clear_bits(irq, FLAG_VIA_IOAPIC);
+    }
+    if saved.flags & FLAG_MASKED != 0 {
+        mask_irq_line(irq);
+    } else {
+        unmask_irq_line(irq);
+    }
+}

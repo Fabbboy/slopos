@@ -17,7 +17,14 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
+
+// PostAbortSilenceSec is how long a run gets after a kernel abort. Long enough
+// for a surviving BSP to finish its phase and emit its summaries, short enough
+// that a fully dead machine costs ~20 s instead of the whole wall budget — the
+// recorded case sat idle for 134 s before the 900 s guard killed QEMU.
+const PostAbortSilenceSec = 20
 
 // repoRoot resolves the SlopOS repo root by walking up for a `justfile`,
 // falling back to the current working directory.
@@ -169,24 +176,35 @@ func run(rawArgv []string) int {
 		WallTimeoutSec: float64(args.TimeoutSecs),
 		SilenceSec:     float64(args.SilenceSecs),
 	}
+	handle := func(ev Event) {
+		recorder.Record(ev)
+		renderer.OnEvent(ev, recorder.Summary)
+		if _, ok := ev.(*EvKernelAbort); ok {
+			driver.TightenSilence(PostAbortSilenceSec * time.Second)
+		}
+		if jsonlSink != nil {
+			if err := jsonlSink.Write(ev, recorder.Summary); err != nil {
+				fmt.Fprintln(os.Stderr, "run_tests: jsonl:", err)
+			}
+		}
+	}
 	onLine := func(line string) {
 		if rawPassthrough {
 			fmt.Fprintln(os.Stdout, line)
 		}
 		for _, ev := range parser.Feed(line) {
-			recorder.Record(ev)
-			renderer.OnEvent(ev, recorder.Summary)
-			if jsonlSink != nil {
-				if err := jsonlSink.Write(ev, recorder.Summary); err != nil {
-					fmt.Fprintln(os.Stderr, "run_tests: jsonl:", err)
-				}
-			}
+			handle(ev)
 		}
 	}
 	driverRes, err := driver.Run(ctx, onLine)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "run_tests:", err)
 		return 64
+	}
+	// State the parser held open when the stream ended — a banner whose reason
+	// line never arrived, and the last uncommitted result.
+	for _, ev := range parser.Flush() {
+		handle(ev)
 	}
 
 	recorder.Finalize(driverRes.QemuStatus)

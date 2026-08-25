@@ -15,17 +15,13 @@ use slopos_abi::addr::PhysAddr;
 
 const PML4: u64 = 0x1_000;
 
-/// Return every frame the address spaces below borrowed, so the allocator is
-/// left as it was found. Teardown defers frame reuse until the quiesce epoch
-/// closes, and a later test that compares free-page counts against a baseline
-/// would otherwise read that deferral as a leak.
+/// Return every frame the address spaces below borrowed, so the suite does not
+/// carry a growing quarantine from here to whatever runs next.
 fn settle_teardown() {
-    // Address-space teardown returns frames by three staged routes, and a
-    // later test that compares global free-page counts against a baseline
-    // sees them only once all three have run: the quiesce epoch has to close
-    // before a frame is reusable, the quarantine holds it for a rotation
-    // after that, and the per-CPU cache holds it after that again.
-    crate::mmu::quiesce::force_close_epoch_for_test();
+    // Teardown stages a frame through three holds before it is reusable: the
+    // quiesce epoch has to close, then the quarantine rotates, then the
+    // per-CPU cache drains.
+    let _ = crate::mmu::quiesce::force_close_epoch_for_test();
     for _ in 0..4 {
         crate::page_alloc::quarantine_rotate();
         while crate::page_alloc::quarantine_has_releasable() {
@@ -37,9 +33,12 @@ fn settle_teardown() {
     crate::page_alloc::pcp_drain_all();
 }
 
-fn selection(ctx_raw: u64, tlb_gen: u64) -> (u16, bool) {
+/// `cpu` is a parameter rather than a fresh `get_current_cpu()` per call: the
+/// pool a sequence of selections reasons about belongs to one CPU, and a
+/// sequence that changed pools mid-way would compare two of them.
+fn selection(cpu: usize, ctx_raw: u64, tlb_gen: u64) -> (u16, bool) {
     let value = select_cr3(
-        slopos_arch::pcr::get_current_cpu(),
+        cpu,
         MmContextId::from_raw(ctx_raw),
         PhysAddr::new(PML4),
         tlb_gen,
@@ -64,35 +63,38 @@ pub fn test_pcid_reuse_always_flushes() -> TestResult {
     }
 
     let contexts = DYN_ASIDS_PER_CPU as u64 + 1;
-    let mut seen_pcids: [u16; 64] = [0; 64];
 
-    for i in 0..contexts {
-        let ctx = 1_000 + i;
-        let (pcid, no_flush) = selection(ctx, 1);
-        assert_test!(
-            pcid != Pcid::KERNEL.bits() as u16,
-            "a user context must never be issued the kernel PCID (context {})",
-            ctx
-        );
-        assert_test!(
-            !no_flush,
-            "a context newly bound to a slot must load flushing (context {})",
-            ctx
-        );
-        if (i as usize) < seen_pcids.len() {
-            seen_pcids[i as usize] = pcid;
+    // Masked throughout: a context switch on this CPU selects from the same
+    // pool, and one landing between the binding loop and the re-selection
+    // below could evict the slot whose residency is the property under test.
+    slopos_arch::cpu::IrqDisabled::with(|_irq| {
+        let cpu = slopos_arch::pcr::get_current_cpu();
+
+        for i in 0..contexts {
+            let ctx = 1_000 + i;
+            let (pcid, no_flush) = selection(cpu, ctx, 1);
+            assert_test!(
+                pcid != Pcid::KERNEL.bits() as u16,
+                "a user context must never be issued the kernel PCID (context {})",
+                ctx
+            );
+            assert_test!(
+                !no_flush,
+                "a context newly bound to a slot must load flushing (context {})",
+                ctx
+            );
         }
-    }
 
-    // Re-selecting a context still resident at the same generation is the hit
-    // case, and only that case may skip the flush.
-    let (_, no_flush) = selection(1_000 + contexts - 1, 1);
-    assert_test!(
-        no_flush,
-        "a resident context at an unchanged generation must not re-flush"
-    );
+        // Re-selecting a context still resident at the same generation is the
+        // hit case, and only that case may skip the flush.
+        let (_, no_flush) = selection(cpu, 1_000 + contexts - 1, 1);
+        assert_test!(
+            no_flush,
+            "a resident context at an unchanged generation must not re-flush"
+        );
 
-    pass!()
+        pass!()
+    })
 }
 
 /// A page-table mutation bumps the address space's generation. A slot cached
@@ -104,24 +106,31 @@ pub fn test_stale_generation_forces_a_flush() -> TestResult {
     }
 
     let ctx = 2_000u64;
-    let (pcid_a, _) = selection(ctx, 1);
-    let (pcid_b, no_flush_b) = selection(ctx, 1);
-    assert_test!(pcid_a == pcid_b, "a resident context must keep its tag");
-    assert_test!(no_flush_b, "an unchanged generation is the hit case");
 
-    let (pcid_c, _) = selection(ctx, 2);
-    assert_test!(
-        pcid_c == pcid_a,
-        "a generation bump must not change the tag, only refresh it"
-    );
+    // The four selections are one sequence over one CPU's pool; a context
+    // switch between any two of them would re-bind the slot under it.
+    slopos_arch::cpu::IrqDisabled::with(|_irq| {
+        let cpu = slopos_arch::pcr::get_current_cpu();
 
-    let (_, no_flush_d) = selection(ctx, 2);
-    assert_test!(
-        no_flush_d,
-        "a slot refreshed to the current generation is a hit"
-    );
+        let (pcid_a, _) = selection(cpu, ctx, 1);
+        let (pcid_b, no_flush_b) = selection(cpu, ctx, 1);
+        assert_test!(pcid_a == pcid_b, "a resident context must keep its tag");
+        assert_test!(no_flush_b, "an unchanged generation is the hit case");
 
-    pass!()
+        let (pcid_c, _) = selection(cpu, ctx, 2);
+        assert_test!(
+            pcid_c == pcid_a,
+            "a generation bump must not change the tag, only refresh it"
+        );
+
+        let (_, no_flush_d) = selection(cpu, ctx, 2);
+        assert_test!(
+            no_flush_d,
+            "a slot refreshed to the current generation is a hit"
+        );
+
+        pass!()
+    })
 }
 
 /// PCID 0 is the kernel's. No user address space may be issued it, which is
@@ -131,8 +140,9 @@ pub fn test_kernel_pcid_is_never_issued_to_a_user_context() -> TestResult {
         return pass!();
     }
 
+    let cpu = slopos_arch::pcr::get_current_cpu();
     for i in 0..(DYN_ASIDS_PER_CPU as u64 * 4) {
-        let (pcid, _) = selection(3_000 + i, 1);
+        let (pcid, _) = selection(cpu, 3_000 + i, 1);
         assert_test!(
             pcid != Pcid::KERNEL.bits() as u16,
             "context {} was issued the kernel PCID",

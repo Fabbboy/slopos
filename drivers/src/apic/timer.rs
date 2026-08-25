@@ -222,27 +222,34 @@ impl ReferenceTimer {
     }
 }
 
+/// One measurement window: the LAPIC counter delta, and the wall time the HPET
+/// saw pass while it was counted (`0` when the HPET is unavailable).
+fn sample_window(reference: &ReferenceTimer) -> (u32, u64) {
+    // Masked, so no interrupt fires during calibration.
+    write_timer_lvt(LAPIC_TIMER_ONESHOT | LAPIC_LVT_MASKED);
+    timer_set_divisor(LAPIC_TIMER_DIV_16);
+
+    // Maximum initial count, so the counter cannot underflow to zero.
+    write_register(LAPIC_TIMER_ICR, 0xFFFF_FFFF);
+
+    let wall_start = crate::hpet::read_counter();
+    reference.delay();
+    let elapsed = 0xFFFF_FFFFu32.wrapping_sub(timer_get_current_count());
+    let wall_ns = crate::hpet::nanoseconds(crate::hpet::read_counter().wrapping_sub(wall_start));
+
+    // Writing 0 to the initial count register stops the timer.
+    write_register(LAPIC_TIMER_ICR, 0);
+
+    (elapsed, wall_ns)
+}
+
 /// Multi-sample calibration against `reference`, in Hz, or `0` if the counter
 /// did not advance.
 fn calibrate_against(reference: ReferenceTimer) -> u64 {
     let mut total_elapsed: u64 = 0;
 
     for _ in 0..CALIBRATION_SAMPLES {
-        // Masked, so no interrupt fires during calibration.
-        write_timer_lvt(LAPIC_TIMER_ONESHOT | LAPIC_LVT_MASKED);
-        timer_set_divisor(LAPIC_TIMER_DIV_16);
-
-        // Maximum initial count, so the counter cannot underflow to zero.
-        write_register(LAPIC_TIMER_ICR, 0xFFFF_FFFF);
-
-        reference.delay();
-
-        let remaining = timer_get_current_count();
-        let elapsed = 0xFFFF_FFFFu32.wrapping_sub(remaining);
-
-        // Writing 0 to the initial count register stops the timer.
-        write_register(LAPIC_TIMER_ICR, 0);
-
+        let (elapsed, _) = sample_window(&reference);
         total_elapsed += elapsed as u64;
     }
 
@@ -253,4 +260,32 @@ fn calibrate_against(reference: ReferenceTimer) -> u64 {
     }
 
     (avg_elapsed as u128 * 1_000_000_000 / window_ns as u128) as u64
+}
+
+/// One calibration measurement, reported rather than folded into an average.
+#[cfg(feature = "test-hooks")]
+pub struct CalibrationSample {
+    pub lapic_ticks: u32,
+    pub requested_window_ns: u64,
+    pub observed_window_ns: u64,
+}
+
+/// Take a single HPET-referenced calibration window without publishing a
+/// frequency.
+///
+/// The LAPIC counter stops while the host has this vCPU descheduled and the
+/// HPET does not, so a window the host stretched reads as a slow LAPIC.
+/// Reporting both clocks is what lets a caller tell the two apart; `calibrate`
+/// cannot, because it averages.
+#[cfg(feature = "test-hooks")]
+pub fn sample_hpet_window_for_test() -> Option<CalibrationSample> {
+    if !is_enabled() || !crate::hpet::is_available() {
+        return None;
+    }
+    let (lapic_ticks, observed_window_ns) = sample_window(&ReferenceTimer::Hpet);
+    Some(CalibrationSample {
+        lapic_ticks,
+        requested_window_ns: CALIBRATION_WINDOW_NS,
+        observed_window_ns,
+    })
 }

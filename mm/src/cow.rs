@@ -1,7 +1,7 @@
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::frame::{Paddr, reference_count_at};
-use slopos_ostd::mm::vm_space::VmSpace;
+use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
@@ -9,8 +9,8 @@ use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
 use crate::user_mappings::{
-    ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_resolve_cow_4kb, ostd_unmap_4kb_user,
-    ostd_virt_to_phys_4kb,
+    ostd_get_pte_flags_4kb, ostd_replace_4kb_user, ostd_resolve_cow_4kb, ostd_virt_to_phys_4kb,
+    vm_space_is_exclusive,
 };
 
 /// Copy a full 4 KiB page through the HHDM mapping. Both `src` and `dst`
@@ -24,11 +24,19 @@ pub fn handle_cow_fault(vm_space: &mut KArc<VmSpace>, fault_addr: u64) -> Result
     let vaddr = VirtAddr::new(fault_addr);
     let aligned_vaddr = VirtAddr::new(fault_addr & !(PAGE_SIZE_4KB - 1));
 
-    let flags = match ostd_get_pte_flags_4kb(vm_space, vaddr) {
-        Some(f) if f.contains(PageFlags::COW) => f,
+    // The caller decided this was a COW fault under a *previous* acquisition of
+    // the per-process lock, so a sibling thread of the same process can have
+    // resolved the page in between. A leaf that is now present and writable is
+    // that race, and the work is already done: re-executing the store is
+    // correct. Reporting a failure here instead is a `SIGSEGV` for a correct
+    // program, which is the defect `MmError::Retry` exists to remove.
+    match ostd_get_pte_flags_4kb(vm_space, vaddr) {
+        Some(f) if f.contains(PageFlags::COW) => {}
+        Some(f) if f.contains(PageFlags::PRESENT) && f.contains(PageFlags::WRITABLE) => {
+            return Ok(());
+        }
         _ => return Err(MmError::NotCowPage),
-    };
-    let _ = flags;
+    }
 
     let old_phys = ostd_virt_to_phys_4kb(vm_space, aligned_vaddr);
     if old_phys.is_null() {
@@ -48,10 +56,15 @@ fn resolve_single_ref(
     vm_space: &mut KArc<VmSpace>,
     aligned_vaddr: VirtAddr,
 ) -> Result<(), MmError> {
-    if !ostd_resolve_cow_4kb(vm_space, aligned_vaddr).map_err(|_| MmError::MappingFailed)? {
-        return Err(MmError::MappingFailed);
+    match ostd_resolve_cow_4kb(vm_space, aligned_vaddr) {
+        Ok(true) => Ok(()),
+        // The leaf was emptied under us by a concurrent unmap, which is
+        // transient by the same argument as the race above: re-execute and
+        // decide again against whatever is mapped then.
+        Ok(false) => Err(MmError::Retry),
+        Err(MapError::WouldBlock) => Err(MmError::Retry),
+        Err(_) => Err(MmError::MappingFailed),
     }
-    Ok(())
 }
 
 fn resolve_multi_ref(
@@ -59,6 +72,10 @@ fn resolve_multi_ref(
     aligned_vaddr: VirtAddr,
     old_phys: PhysAddr,
 ) -> Result<(), MmError> {
+    if !vm_space_is_exclusive(vm_space) {
+        return Err(MmError::Retry);
+    }
+
     let new_phys = alloc_kernel_page();
     if new_phys.is_null() {
         return Err(MmError::NoMemory);
@@ -74,20 +91,23 @@ fn resolve_multi_ref(
 
     copy_full_page(old_virt, new_virt);
 
-    let new_flags = PageFlags::USER_RW;
-
-    if let Err(err) = ostd_unmap_4kb_user(vm_space, aligned_vaddr) {
-        slopos_ostd::klog_info!("cow::resolve_multi_ref: OSTD unmap failed: {:?}", err);
-        free_page_frame(new_phys);
-        return Err(MmError::MappingFailed);
-    }
-    if let Err(err) = ostd_map_4kb_user(vm_space, aligned_vaddr, new_phys, new_flags.bits()) {
-        slopos_ostd::klog_info!("cow::resolve_multi_ref: OSTD remap failed: {:?}", err);
-        free_page_frame(new_phys);
-        return Err(MmError::MappingFailed);
-    }
+    let displaced =
+        match ostd_replace_4kb_user(vm_space, aligned_vaddr, new_phys, PageFlags::USER_RW.bits()) {
+            Ok(displaced) => displaced,
+            Err(err) => {
+                free_page_frame(new_phys);
+                if err == MapError::WouldBlock {
+                    return Err(MmError::Retry);
+                }
+                slopos_ostd::klog_info!("cow::resolve_multi_ref: OSTD replace failed: {:?}", err);
+                return Err(MmError::MappingFailed);
+            }
+        };
 
     tlb::flush_page(aligned_vaddr);
+    // After the shootdown: this may be the old page's last reference, and a
+    // peer CPU cached its translation until the flush above landed.
+    drop(displaced);
 
     Ok(())
 }

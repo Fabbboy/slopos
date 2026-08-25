@@ -337,6 +337,25 @@ fn monotonic_ns() -> u64 {
     crate::arch::x86_64::tsc::rdtsc()
 }
 
+/// Entries into [`synchronize_rcu`], per CPU.
+///
+/// Per-CPU rather than one global counter because the question a caller asks of
+/// it is about itself: a peer taking a grace period of its own must not read
+/// back as this CPU having waited.
+static RCU_SYNC_ENTRIES: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// How many times `cpu` has entered [`synchronize_rcu`].
+///
+/// Ungated for the same reason as [`rcu_qs_counter`]: it is the only way a
+/// caller on a path that must never take a grace period inline — the callback
+/// drain — can tell that it did not.
+pub fn rcu_sync_entry_count(cpu: usize) -> u64 {
+    if cpu >= MAX_CPUS {
+        return 0;
+    }
+    RCU_SYNC_ENTRIES[cpu].load(Ordering::Acquire)
+}
+
 /// Block until a grace period that began after this call has elapsed.
 ///
 /// Snap the target first, then poll: concurrent callers land on the same target
@@ -346,6 +365,11 @@ fn monotonic_ns() -> u64 {
 /// up and letting the caller free hands memory back while a reader may still be
 /// dereferencing it.
 pub fn synchronize_rcu() {
+    let entry_cpu = get_current_cpu();
+    if entry_cpu < MAX_CPUS {
+        RCU_SYNC_ENTRIES[entry_cpu].fetch_add(1, Ordering::Release);
+    }
+
     let target = gp_snap(GP_SEQ.load(Ordering::Acquire));
     gp_start_if_idle();
 

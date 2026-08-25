@@ -7,29 +7,27 @@ use slopos_testing::{assert_eq_test, assert_test, pass};
 use crate::loopback::LoopbackDev;
 use crate::netdev::{NetDevice, NetDeviceFeatures};
 use crate::packetbuf::PacketBuf;
-use crate::pool::PACKET_POOL;
 use crate::route::RouteTable;
+use crate::tests::packetbuf_tests::{TEST_PACKET_POOL, ensure_test_pool};
 use crate::types::{DevIndex, Ipv4Addr};
 
-fn ensure_pool_init() {
-    PACKET_POOL.init();
-}
-
-fn dummy_packet(fill: u8) -> PacketBuf {
+fn dummy_packet(fill: u8) -> Option<PacketBuf> {
     let data = [fill; 64];
-    PacketBuf::from_raw_copy(&data).expect("pool should have capacity")
+    PacketBuf::from_raw_copy_in(&TEST_PACKET_POOL, &data)
 }
 
 pub fn test_loopback_tx_then_poll_rx() -> TestResult {
-    ensure_pool_init();
+    ensure_test_pool();
 
     let lo = LoopbackDev::new();
 
-    let pkt = dummy_packet(0xAB);
+    let Some(pkt) = dummy_packet(0xAB) else {
+        return slopos_testing::fail!("test pool should have capacity");
+    };
     let result = lo.tx(pkt);
     assert_test!(result.is_ok(), "loopback tx should succeed");
 
-    let received = lo.poll_rx(16, &PACKET_POOL);
+    let received = lo.poll_rx(16, &TEST_PACKET_POOL);
     assert_eq_test!(received.len(), 1, "should receive 1 packet back");
     assert_eq_test!(
         received[0].payload()[0],
@@ -41,34 +39,36 @@ pub fn test_loopback_tx_then_poll_rx() -> TestResult {
 }
 
 pub fn test_loopback_multiple_tx_poll() -> TestResult {
-    ensure_pool_init();
+    ensure_test_pool();
 
     let lo = LoopbackDev::new();
 
     for i in 0..5u8 {
-        let pkt = dummy_packet(i);
+        let Some(pkt) = dummy_packet(i) else {
+            return slopos_testing::fail!("test pool should have capacity");
+        };
         assert_test!(lo.tx(pkt).is_ok(), "tx should succeed");
     }
 
-    let batch1 = lo.poll_rx(3, &PACKET_POOL);
+    let batch1 = lo.poll_rx(3, &TEST_PACKET_POOL);
     assert_eq_test!(batch1.len(), 3, "first poll should return 3 packets");
     assert_eq_test!(batch1[0].payload()[0], 0, "first packet fill=0");
     assert_eq_test!(batch1[1].payload()[0], 1, "second packet fill=1");
     assert_eq_test!(batch1[2].payload()[0], 2, "third packet fill=2");
 
-    let batch2 = lo.poll_rx(16, &PACKET_POOL);
+    let batch2 = lo.poll_rx(16, &TEST_PACKET_POOL);
     assert_eq_test!(batch2.len(), 2, "second poll should return 2 packets");
     assert_eq_test!(batch2[0].payload()[0], 3, "fourth packet fill=3");
     assert_eq_test!(batch2[1].payload()[0], 4, "fifth packet fill=4");
 
-    let batch3 = lo.poll_rx(16, &PACKET_POOL);
+    let batch3 = lo.poll_rx(16, &TEST_PACKET_POOL);
     assert_test!(batch3.is_empty(), "third poll should be empty");
 
     pass!()
 }
 
 pub fn test_loopback_stats() -> TestResult {
-    ensure_pool_init();
+    ensure_test_pool();
 
     let lo = LoopbackDev::new();
 
@@ -76,8 +76,11 @@ pub fn test_loopback_stats() -> TestResult {
     assert_eq_test!(stats.tx_packets, 0, "initial tx_packets = 0");
     assert_eq_test!(stats.rx_packets, 0, "initial rx_packets = 0");
 
-    let _ = lo.tx(dummy_packet(0xAA));
-    let _ = lo.tx(dummy_packet(0xBB));
+    let (Some(first), Some(second)) = (dummy_packet(0xAA), dummy_packet(0xBB)) else {
+        return slopos_testing::fail!("test pool should have capacity");
+    };
+    let _ = lo.tx(first);
+    let _ = lo.tx(second);
 
     let stats_after_tx = lo.stats();
     assert_eq_test!(stats_after_tx.tx_packets, 2, "tx_packets = 2 after tx");
@@ -87,7 +90,7 @@ pub fn test_loopback_stats() -> TestResult {
         "rx_packets still 0 before poll"
     );
 
-    let _ = lo.poll_rx(1, &PACKET_POOL);
+    let _ = lo.poll_rx(1, &TEST_PACKET_POOL);
 
     let stats_after_poll = lo.stats();
     assert_eq_test!(
@@ -114,14 +117,17 @@ pub fn test_loopback_properties() -> TestResult {
 }
 
 pub fn test_loopback_queue_capacity() -> TestResult {
-    ensure_pool_init();
+    ensure_test_pool();
 
     let lo = LoopbackDev::new();
 
-    // The global packet pool has only 256 slots and earlier tests may still
-    // hold some, so this stops well short of the 256-packet queue capacity.
+    // The test pool holds fewer buffers than the device's 256-packet queue, so
+    // this reaches only the within-capacity path.
     for _ in 0..10 {
-        let result = lo.tx(dummy_packet(0xFF));
+        let Some(pkt) = dummy_packet(0xFF) else {
+            return slopos_testing::fail!("test pool should have capacity");
+        };
+        let result = lo.tx(pkt);
         assert_test!(result.is_ok(), "should accept packets within capacity");
     }
 
@@ -129,7 +135,7 @@ pub fn test_loopback_queue_capacity() -> TestResult {
     assert_eq_test!(stats_before.tx_packets, 10, "tx_packets = 10 after batch");
     assert_eq_test!(stats_before.tx_dropped, 0, "no drops within capacity");
 
-    let drained = lo.poll_rx(256, &PACKET_POOL);
+    let drained = lo.poll_rx(256, &TEST_PACKET_POOL);
     assert_eq_test!(drained.len(), 10, "should drain all 10 packets");
     drop(drained);
 

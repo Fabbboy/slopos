@@ -138,8 +138,6 @@ pub fn test_sse_xsave_xrstor_roundtrip() -> TestResult {
     let mut area: KBox<XsaveArea> = KBox::zeroed().expect("alloc");
 
     let xcr0 = xsave::active_xcr0();
-    let xcr0_lo = xcr0 as u32;
-    let xcr0_hi = (xcr0 >> 32) as u32;
 
     #[repr(C, align(16))]
     struct Patterns {
@@ -154,12 +152,15 @@ pub fn test_sse_xsave_xrstor_roundtrip() -> TestResult {
         ],
     };
 
-    let readback = slopos_ostd::test_support::cpu_state::sse_xsave_xrstor_roundtrip_4(
-        &patterns.data,
-        &mut area.data,
-        xcr0,
-    );
-    let _ = (xcr0_lo, xcr0_hi);
+    // The load/save/zero/restore/read sequence asserts on the live register
+    // file, which an interrupt taken inside it would legitimately swap out.
+    let readback = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        slopos_ostd::test_support::cpu_state::sse_xsave_xrstor_roundtrip_4(
+            &patterns.data,
+            &mut area.data,
+            xcr0,
+        )
+    });
 
     for i in 0..4 {
         if patterns.data[i] != readback[i] {
@@ -187,9 +188,6 @@ pub fn test_avx_xsave_xrstor_roundtrip() -> TestResult {
 
     let mut area: KBox<XsaveArea> = KBox::zeroed().expect("alloc");
 
-    let xcr0_lo = xcr0 as u32;
-    let xcr0_hi = (xcr0 >> 32) as u32;
-
     #[repr(C, align(16))]
     struct YmmPatterns {
         data: [[u64; 2]; 4],
@@ -203,12 +201,13 @@ pub fn test_avx_xsave_xrstor_roundtrip() -> TestResult {
         ],
     };
 
-    let readback = slopos_ostd::test_support::cpu_state::avx_xsave_xrstor_roundtrip_2ymm(
-        &patterns.data,
-        &mut area.data,
-        xcr0,
-    );
-    let _ = (xcr0_lo, xcr0_hi);
+    let readback = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        slopos_ostd::test_support::cpu_state::avx_xsave_xrstor_roundtrip_2ymm(
+            &patterns.data,
+            &mut area.data,
+            xcr0,
+        )
+    });
 
     let labels = ["YMM0 lower", "YMM0 UPPER", "YMM1 lower", "YMM1 UPPER"];
     for i in 0..4 {
@@ -231,8 +230,6 @@ pub fn test_sse_multi_register_isolation() -> TestResult {
     let mut area: KBox<XsaveArea> = KBox::zeroed().expect("alloc");
 
     let xcr0 = xsave::active_xcr0();
-    let xcr0_lo = xcr0 as u32;
-    let xcr0_hi = (xcr0 >> 32) as u32;
 
     #[repr(C, align(16))]
     struct MultiPatterns {
@@ -251,12 +248,13 @@ pub fn test_sse_multi_register_isolation() -> TestResult {
         ],
     };
 
-    let readback = slopos_ostd::test_support::cpu_state::sse_xsave_xrstor_roundtrip_8(
-        &patterns.data,
-        &mut area.data,
-        xcr0,
-    );
-    let _ = (xcr0_lo, xcr0_hi);
+    let readback = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        slopos_ostd::test_support::cpu_state::sse_xsave_xrstor_roundtrip_8(
+            &patterns.data,
+            &mut area.data,
+            xcr0,
+        )
+    });
 
     for i in 0..8 {
         if patterns.data[i] != readback[i] {

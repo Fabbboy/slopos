@@ -76,6 +76,11 @@ type RunSummary struct {
 	UserAborted       bool
 	TimedOut          bool
 	SilenceHit        bool
+	// KernelAbort latches once any CPU printed the abort banner. The run is
+	// not green after that even with zero failing tests: results emitted by the
+	// surviving CPUs came from a machine that was already partly dead.
+	KernelAbort       bool
+	KernelAbortReason string
 	QemuStatus        *int
 	// AbortKlogTail is the parser's klog tail, snapshotted by main when the
 	// run aborted (timeout / silence / truncation).
@@ -211,6 +216,13 @@ func (r *RunRecorder) Record(ev Event) {
 		if p := r.Summary.phaseByIdx[e.PhaseIdx]; p != nil {
 			reason := e.Reason
 			p.BailReason = &reason
+		}
+	case *EvKernelAbort:
+		r.Summary.KernelAbort = true
+		// First reason wins: it names the CPU that died first, and a later
+		// abort is usually the cascade.
+		if r.Summary.KernelAbortReason == "" && e.Reason != "" {
+			r.Summary.KernelAbortReason = e.Reason
 		}
 	}
 	// EvNonKtap is consumed only by the raw renderer; recorder ignores it.

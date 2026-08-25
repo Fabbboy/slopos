@@ -188,17 +188,56 @@ impl IrqEdgeEvent {
 
     /// Park until the edge fires or `timeout_ms` elapses. Returns `true`
     /// iff the edge was consumed.
+    #[inline]
     pub fn wait_timeout_ms(&self, timeout_ms: u32) -> bool {
+        matches!(
+            self.wait_timeout(timeout_ms),
+            EdgeWait::Latched | EdgeWait::Woken
+        )
+    }
+
+    /// [`wait_timeout_ms`](Self::wait_timeout_ms), reporting which way the wait
+    /// ended rather than only whether it was satisfied.
+    ///
+    /// A timeout never expires before `timeout_ms` has elapsed: the wait
+    /// queue's deadline comes from a millisecond clock that truncates, so the
+    /// budget handed to it carries the partial millisecond it would otherwise
+    /// drop.
+    pub fn wait_timeout(&self, timeout_ms: u32) -> EdgeWait {
+        if self.try_consume() {
+            return EdgeWait::Latched;
+        }
+
         match self.waiters.wait_event_timeout_until(
             || if self.try_consume() { Some(()) } else { None },
-            timeout_ms as u64,
+            timeout_ms as u64 + 1,
         ) {
-            Ok(()) => true,
+            Ok(()) => EdgeWait::Woken,
+            Err(WaitAbort::Timeout) => EdgeWait::TimedOut,
             // Pre-scheduler context (probe paths): fall back to polling.
-            Err(WaitAbort::NoRuntime) => hpet_poll_wait(&|| self.try_consume(), timeout_ms),
-            Err(_) => false,
+            Err(WaitAbort::NoRuntime) => {
+                if hpet_poll_wait(&|| self.try_consume(), timeout_ms) {
+                    EdgeWait::Woken
+                } else {
+                    EdgeWait::TimedOut
+                }
+            }
+            Err(_) => EdgeWait::Aborted,
         }
     }
+}
+
+/// How an [`IrqEdgeEvent`] wait ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeWait {
+    /// The edge was already latched and was consumed without parking.
+    Latched,
+    /// Parked, then woken by the edge.
+    Woken,
+    /// The deadline passed with no edge.
+    TimedOut,
+    /// The waiting task was killed or took a signal.
+    Aborted,
 }
 
 /// Legacy alias — use [`IrqEdgeEvent`] for new code.

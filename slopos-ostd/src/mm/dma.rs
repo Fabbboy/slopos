@@ -129,6 +129,10 @@ pub fn register_iommu_mapper<'brand>(
 }
 
 fn current_iommu_mapper() -> Option<&'static dyn IommuMapper> {
+    #[cfg(any(test, feature = "test-helpers"))]
+    if HIDDEN_FROM_CPU.load(Ordering::Acquire) == crate::cpu::x86_64::pcr::get_current_cpu() {
+        return None;
+    }
     let raw = IOMMU_MAPPER.inner.load(Ordering::Acquire);
     if raw.is_null() {
         return None;
@@ -145,6 +149,44 @@ pub fn reset_for_test() {
     IOMMU_MAPPER
         .inner
         .store(core::ptr::null_mut(), Ordering::Release);
+}
+
+/// The one CPU that [`MapperHiddenForTest`] currently answers `None` on;
+/// `usize::MAX` when no test holds the guard.
+#[cfg(any(test, feature = "test-helpers"))]
+static HIDDEN_FROM_CPU: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Hides the registered mapper from the calling CPU for the guard's lifetime,
+/// so a test can observe the no-mapper deny.
+///
+/// Emptying the process-wide slot instead takes the mapper away from every
+/// other CPU too, and a driver that allocates DMA in that window fails with
+/// [`DmaError::NotInitialised`] over a test's shoulder. The guard pins the CPU
+/// it hides the mapper from, so the allocation it denies is the caller's own.
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use = "the mapper reappears when the guard drops"]
+pub struct MapperHiddenForTest {
+    _pinned: crate::cpu::preempt::DisabledPreemptGuard,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl MapperHiddenForTest {
+    pub fn for_current_cpu() -> Self {
+        let pinned = crate::cpu::preempt::DisabledPreemptGuard::new();
+        HIDDEN_FROM_CPU.store(
+            crate::cpu::x86_64::pcr::get_current_cpu(),
+            Ordering::Release,
+        );
+        Self { _pinned: pinned }
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl Drop for MapperHiddenForTest {
+    fn drop(&mut self) {
+        HIDDEN_FROM_CPU.store(usize::MAX, Ordering::Release);
+    }
 }
 
 /// Passthrough mapper: IOVA == physical address, unmap is a no-op. Turns the
@@ -192,8 +234,30 @@ impl Drop for RunRelease {
     fn drop(&mut self) {
         if let Some(allocator) = current_frame_allocator() {
             allocator.dealloc(self.head, self.len_pages);
+            #[cfg(any(test, feature = "test-helpers"))]
+            PAGES_RETURNED.fetch_add(self.len_pages as u64, Ordering::Relaxed);
         }
     }
+}
+
+/// Pages [`DmaRun`] has taken from the frame allocator, and pages it has handed
+/// back — see [`run_page_account`].
+#[cfg(any(test, feature = "test-helpers"))]
+static PAGES_TAKEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(any(test, feature = "test-helpers"))]
+static PAGES_RETURNED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// `(taken, returned)` since boot, in pages.
+///
+/// Both are monotonic, so a test compares deltas across its own window: a
+/// neighbour's DMA churn adds to each equally and cancels, where the page
+/// allocator's free count cannot tell that neighbour from a leak.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn run_page_account() -> (u64, u64) {
+    (
+        PAGES_TAKEN.load(Ordering::Relaxed),
+        PAGES_RETURNED.load(Ordering::Relaxed),
+    )
 }
 
 /// A contiguous run of DMA pages together with the release that hands them
@@ -230,6 +294,8 @@ impl<M: AnyUFrameMeta> DmaRun<M> {
             dma: false,
         };
         let head = allocator.alloc(opts).ok_or(DmaError::Exhausted)?;
+        #[cfg(any(test, feature = "test-helpers"))]
+        PAGES_TAKEN.fetch_add(npages as u64, Ordering::Relaxed);
         let release = RunRelease {
             head,
             len_pages: npages,

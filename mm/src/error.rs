@@ -14,16 +14,31 @@ pub enum MmError {
     MappingFailed,
     InvalidAddress,
     NoAddressSpace,
-    NotAligned { address: u64, required: u64 },
-    NotMapped { address: u64, level: PageTableLevel },
-    AlreadyMapped { address: u64 },
-    MappedToHugePage { level: PageTableLevel },
+    NotAligned {
+        address: u64,
+        required: u64,
+    },
+    NotMapped {
+        address: u64,
+        level: PageTableLevel,
+    },
+    AlreadyMapped {
+        address: u64,
+    },
+    MappedToHugePage {
+        level: PageTableLevel,
+    },
     InvalidPageTable,
-    InvalidPhysicalAddress { address: u64 },
+    InvalidPhysicalAddress {
+        address: u64,
+    },
     NotCowPage,
     NoVma,
     NotDemandPaged,
     PermissionDenied,
+    /// Exclusive access to the address space was unavailable. Transient:
+    /// never fatal to the faulting task, which re-executes and re-faults.
+    Retry,
 }
 
 impl fmt::Display for MmError {
@@ -57,6 +72,7 @@ impl fmt::Display for MmError {
             Self::NoVma => write!(f, "no VMA covers the faulting address"),
             Self::NotDemandPaged => write!(f, "page is not demand-paged"),
             Self::PermissionDenied => write!(f, "VMA permissions deny this access"),
+            Self::Retry => write!(f, "address space temporarily not exclusive"),
         }
     }
 }

@@ -11,27 +11,47 @@ use crate::result::TestResult;
 /// Per-failing-test cap on captured-log emission, to bound serial output.
 const MAX_LOG_EMIT: usize = 4096;
 
+/// Stands in for `time_ms=N` when the harness had no monotonic time base to
+/// measure with. Occupies the field's position so a trailing directive keeps
+/// the leading space the host parser matches on.
+const NO_TIME_BASE: &str = "NO_TIME_BASE";
+
 pub fn emit_header(plan: u32) {
     klog_info!("KTAP\tTAP version 14");
     klog_info!("KTAP\t1..{}", plan);
 }
 
-pub fn emit_ok(idx: u32, desc: &TestDesc, time_ms: u32, suffix: Option<&str>) {
-    match suffix {
-        Some(s) => klog_info!(
+pub fn emit_ok(idx: u32, desc: &TestDesc, time_ms: Option<u32>, suffix: Option<&str>) {
+    match (time_ms, suffix) {
+        (Some(ms), Some(s)) => klog_info!(
             "KTAP\tok {} - {}::{} # time_ms={} {}",
             idx,
             desc.module,
             desc.name,
-            time_ms,
+            ms,
             s,
         ),
-        None => klog_info!(
+        (Some(ms), None) => klog_info!(
             "KTAP\tok {} - {}::{} # time_ms={}",
             idx,
             desc.module,
             desc.name,
-            time_ms,
+            ms,
+        ),
+        (None, Some(s)) => klog_info!(
+            "KTAP\tok {} - {}::{} # {} {}",
+            idx,
+            desc.module,
+            desc.name,
+            NO_TIME_BASE,
+            s,
+        ),
+        (None, None) => klog_info!(
+            "KTAP\tok {} - {}::{} # {}",
+            idx,
+            desc.module,
+            desc.name,
+            NO_TIME_BASE,
         ),
     }
 }
@@ -49,18 +69,27 @@ pub fn emit_skip(idx: u32, desc: &TestDesc, reason: &str) {
 pub fn emit_not_ok(
     idx: u32,
     desc: &TestDesc,
-    time_ms: u32,
+    time_ms: Option<u32>,
     outcome: TestResult,
     log: &[u8],
     truncated_bytes: usize,
 ) {
-    klog_info!(
-        "KTAP\tnot ok {} - {}::{} # time_ms={}",
-        idx,
-        desc.module,
-        desc.name,
-        time_ms,
-    );
+    match time_ms {
+        Some(ms) => klog_info!(
+            "KTAP\tnot ok {} - {}::{} # time_ms={}",
+            idx,
+            desc.module,
+            desc.name,
+            ms,
+        ),
+        None => klog_info!(
+            "KTAP\tnot ok {} - {}::{} # {}",
+            idx,
+            desc.module,
+            desc.name,
+            NO_TIME_BASE,
+        ),
+    }
     klog_info!("KTAP\t  ---");
     klog_info!("KTAP\t  outcome: {:?}", outcome);
     klog_info!("KTAP\t  file: {}:{}", desc.file, desc.line);

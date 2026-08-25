@@ -518,9 +518,12 @@ pub fn ensure_task_manager_initialized() -> c_int {
     0
 }
 
-/// Test-fixture only, and gated on a freeze token rather than a comment: this
-/// wipes the sleep queue, and a frozen thread holds no deadline to lose. The
-/// monotonic ID source keeps advancing across resets.
+/// Test-fixture only. The token witnesses that a freeze was asked for, not
+/// that every thread parked — a freeze is cooperative. What actually keeps a
+/// still-armed deadline across the sleep-queue wipe below is
+/// `reset_sleep_queue_preserving_kernel_io`, and what keeps the threads off the
+/// run queues is the scope's hold. The monotonic ID source keeps advancing
+/// across resets.
 pub fn task_registry_reset(freeze: &crate::task::KernelIoFreeze) -> c_int {
     if ensure_task_manager_initialized() != 0 {
         return -1;

@@ -10,6 +10,7 @@ use slopos_ostd::lock_class;
 
 use slopos_ostd::KVec;
 use slopos_ostd::mm::frame::{Frame, PacketMeta};
+use slopos_ostd::sync::lock_tracking::LockClassKey;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 /// Usable prefix of each 4 KiB backing frame: max Ethernet frame (1518) plus
@@ -42,28 +43,42 @@ pub struct PacketPool {
 }
 
 /// Global packet pool; [`PacketPool::init`] must run before any networking code.
-pub static PACKET_POOL: PacketPool = PacketPool {
-    inner: SpinLock::new(None, lock_class!("PACKET_POOL", LOCK_LEVEL_RESOURCE)),
-    initialized: AtomicBool::new(false),
-    count: AtomicUsize::new(0),
-};
+pub static PACKET_POOL: PacketPool =
+    PacketPool::new(lock_class!("PACKET_POOL", LOCK_LEVEL_RESOURCE));
 
 impl PacketPool {
+    /// An empty, uninitialised pool. The class comes from the caller so a
+    /// scratch pool a test builds is a different lockdep class from the global
+    /// one, and neither teaches the other an ordering.
+    pub const fn new(class: &'static LockClassKey) -> Self {
+        Self {
+            inner: SpinLock::new(None, class),
+            initialized: AtomicBool::new(false),
+            count: AtomicUsize::new(0),
+        }
+    }
+
     /// Allocate the backing frames and build the free-list.
     ///
     /// Idempotent. Builds with however many of the [`POOL_SIZE`] frames the
     /// allocator supplies rather than panicking when it is short.
     pub fn init(&self) {
+        self.init_with_slots(POOL_SIZE);
+    }
+
+    /// [`init`](Self::init) with an explicit slot count, so a scratch pool can
+    /// be small enough that exhausting it is cheap.
+    pub fn init_with_slots(&self, slots_wanted: usize) {
         if self.initialized.swap(true, Ordering::AcqRel) {
             return;
         }
 
         let mut slots: KVec<Option<Frame<PacketMeta>>> =
-            KVec::with_capacity(POOL_SIZE).expect("packet pool: slots alloc");
+            KVec::with_capacity(slots_wanted).expect("packet pool: slots alloc");
         let mut free: KVec<u16> =
-            KVec::with_capacity(POOL_SIZE).expect("packet pool: free-list alloc");
+            KVec::with_capacity(slots_wanted).expect("packet pool: free-list alloc");
 
-        for i in 0..POOL_SIZE {
+        for i in 0..slots_wanted {
             match Frame::<PacketMeta>::alloc() {
                 Some(frame) => {
                     slots.push(Some(frame)).expect("packet pool: push slot");

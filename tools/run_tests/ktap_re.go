@@ -20,6 +20,11 @@ const MaxLogEmit = 4096
 // next failure when a hard panic pre-empts the orderly `log: |` block.
 const KlogTailLines = 64
 
+// KernelAbortBanner is the line `boot/src/panic.rs` and `slopos-ostd/src/panic.rs`
+// both write to the polling early console immediately before the abort reason.
+// It is plain klog, never KTAP-prefixed.
+const KernelAbortBanner = "=== KERNEL ABORT ==="
+
 var (
 	planRE = regexp.MustCompile(`^1\.\.(\d+)$`)
 

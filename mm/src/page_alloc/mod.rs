@@ -18,6 +18,8 @@ use slopos_abi::addr::PhysAddr;
 use slopos_arch::pcr::MAX_CPUS;
 use slopos_ostd::mm::frame::FrameAlloc;
 
+#[cfg(feature = "test-hooks")]
+pub use buddy::FrameAccounting;
 pub use buddy::{
     ALLOC_FLAG_DMA, ALLOC_FLAG_KERNEL, ALLOC_FLAG_NO_PCP, ALLOC_FLAG_ORDER_MASK,
     ALLOC_FLAG_ORDER_SHIFT, BuddyAllocator,
@@ -117,9 +119,9 @@ pub fn pcp_drain_all() {
 
 /// Promote the batch the closing epoch proved safe. Called by
 /// [`crate::mmu::quiesce`] from whichever CPU closes the epoch — so it must
-/// stay O(1).
-pub fn quarantine_rotate() {
-    BUDDY_ALLOCATOR.quarantine_rotate();
+/// stay O(1). Returns the frames it released, which a rotation makes zero.
+pub fn quarantine_rotate() -> u32 {
+    BUDDY_ALLOCATOR.quarantine_rotate()
 }
 
 /// Splice up to `limit` proven-safe blocks back into the free lists, from
@@ -188,6 +190,13 @@ pub fn get_pcp_stats(cpu: usize) -> Option<PcpStats> {
             allocs,
             frees,
         })
+}
+
+/// Test hook: how the buddy accounts one frame. See
+/// [`BuddyAllocator::frame_accounting`].
+#[cfg(feature = "test-hooks")]
+pub fn frame_accounting(phys_addr: PhysAddr) -> FrameAccounting {
+    BUDDY_ALLOCATOR.frame_accounting(phys_addr)
 }
 
 pub fn page_frame_is_tracked(phys_addr: PhysAddr) -> c_int {

@@ -4,13 +4,70 @@
 //! already been calibrated by `BOOT_STEP_LAPIC_CALIBRATION`.
 
 use slopos_arch::arch::idt::LAPIC_TIMER_VECTOR;
-use slopos_arch::tsc::rdtsc;
-use slopos_kernel_services::driver_runtime::irq_get_timer_ticks;
+use slopos_arch::pcr;
 use slopos_ostd::klog_info;
+use slopos_ostd::sync::PreemptGuard;
 use slopos_testing::TestResult;
-use slopos_testing::measure_elapsed_ms;
 
 use crate::apic;
+use crate::apic::regs::{LAPIC_LVT_TIMER, LAPIC_TIMER_ICR};
+use crate::hpet;
+
+/// The baseline scheduler tick these tests program.
+const PERIOD_MS: u32 = 10;
+
+/// Failsafe for a timer that never fires. Not the interval under test: the
+/// LAPIC counts down only while this vCPU executes, so no amount of wall time
+/// bounds how long a given number of ticks takes.
+const TICK_FAILSAFE_MS: u32 = 1000;
+
+/// The LAPIC programming a test interrupts and must put back: it owns the CPU
+/// it runs on, and the scheduler — plus every later test — needs its ticks.
+struct TimerProgramming {
+    lvt: u32,
+    initial_count: u32,
+}
+
+fn save_timer_programming() -> TimerProgramming {
+    TimerProgramming {
+        lvt: apic::read_register(LAPIC_LVT_TIMER),
+        initial_count: apic::read_register(LAPIC_TIMER_ICR),
+    }
+}
+
+fn restore_timer_programming(saved: &TimerProgramming) {
+    apic::write_register(LAPIC_LVT_TIMER, saved.lvt);
+    apic::timer_start(saved.initial_count);
+}
+
+/// Timer interrupts taken by *this* CPU.
+///
+/// `irq_get_timer_ticks()` is one global counter every CPU's ISR bumps, so it
+/// advances at `cpu_count` × the tick rate and says nothing about this CPU. The
+/// PCR heartbeat moves once per timer interrupt, on the CPU that took it.
+fn local_ticks() -> u64 {
+    pcr::heartbeat_for_cpu(pcr::get_current_cpu())
+}
+
+/// Spin until this CPU has taken `want` timer interrupts, returning how many
+/// arrived before `failsafe_ms` of wall time ran out.
+fn await_local_ticks(want: u64, failsafe_ms: u32) -> u64 {
+    let start = local_ticks();
+    let Some(failsafe_ticks) = hpet::ms_to_ticks(failsafe_ms) else {
+        return local_ticks().saturating_sub(start);
+    };
+    let wall_start = hpet::read_counter();
+    loop {
+        let observed = local_ticks().saturating_sub(start);
+        if observed >= want {
+            return observed;
+        }
+        if hpet::read_counter().wrapping_sub(wall_start) >= failsafe_ticks {
+            return observed;
+        }
+        core::hint::spin_loop();
+    }
+}
 
 pub fn test_lapic_timer_is_calibrated() -> TestResult {
     if !apic::timer::is_calibrated() {
@@ -62,18 +119,43 @@ pub fn test_lapic_timer_recalibration_consistent() -> TestResult {
         return TestResult::Skipped;
     }
 
-    // Ticks counted across an HPET window, so steal can only read *low* — wall
-    // time advances while ticks go unobserved. Largest of N is least spoiled.
-    const ROUNDS: usize = 5;
-    let mut recalibrated = 0u64;
+    let _pinned = PreemptGuard::new();
+    let saved = save_timer_programming();
+
+    const ROUNDS: usize = 8;
+    let mut best_clean = 0u64;
+    let mut best_any = 0u64;
     for _ in 0..ROUNDS {
-        // Safe at runtime: one-shot masked mode, no interrupts fire.
-        let sample = apic::timer::calibrate();
-        if sample == 0 {
-            klog_info!("LAPIC_TIMER_TEST: BUG - re-calibration returned 0");
-            return TestResult::Fail;
+        let Some(sample) = apic::timer::sample_hpet_window_for_test() else {
+            continue;
+        };
+        if sample.observed_window_ns == 0 {
+            continue;
         }
-        recalibrated = recalibrated.max(sample);
+        let hz =
+            (sample.lapic_ticks as u128 * 1_000_000_000 / sample.observed_window_ns as u128) as u64;
+        best_any = best_any.max(hz);
+        // A host cannot shorten the window, so the overshoot is time this vCPU
+        // spent descheduled — time the LAPIC spent stopped and the HPET did not.
+        let stretch = sample.requested_window_ns / 8;
+        if sample.observed_window_ns <= sample.requested_window_ns + stretch {
+            best_clean = best_clean.max(hz);
+        }
+    }
+
+    restore_timer_programming(&saved);
+
+    let recalibrated = if best_clean != 0 {
+        best_clean
+    } else {
+        best_any
+    };
+    if recalibrated == 0 {
+        klog_info!(
+            "LAPIC_TIMER_TEST: BUG - no re-calibration window advanced the counter in {} rounds",
+            ROUNDS,
+        );
+        return TestResult::Fail;
     }
 
     // `original` is one boot-time window that may itself have read low, which
@@ -107,15 +189,21 @@ pub fn test_lapic_timer_periodic_programs_timer() -> TestResult {
         return TestResult::Skipped;
     }
 
-    // `set_periodic_ms` programs the LVT unmasked, so stop the timer and
-    // re-mask it (LVT timer register 0x320, bit 16) before anything can fire.
-    let ok = apic::timer::set_periodic_ms(0xEF, 10);
+    let _pinned = PreemptGuard::new();
+    let saved = save_timer_programming();
+
+    // `set_periodic_ms` programs the LVT unmasked, so stop the timer and put
+    // the previous programming back before anything can fire on 0xEF.
+    let ok = apic::timer::set_periodic_ms(0xEF, PERIOD_MS);
 
     apic::timer_stop();
-    apic::write_register(0x320, 1 << 16);
+    restore_timer_programming(&saved);
 
     if !ok {
-        klog_info!("LAPIC_TIMER_TEST: BUG - set_periodic_ms(0xEF, 10) returned false");
+        klog_info!(
+            "LAPIC_TIMER_TEST: BUG - set_periodic_ms(0xEF, {}) returned false",
+            PERIOD_MS,
+        );
         return TestResult::Fail;
     }
 
@@ -128,8 +216,16 @@ pub fn test_lapic_timer_stop_clears_counter() -> TestResult {
         return TestResult::Skipped;
     }
 
+    // Stop and read must reach the same LAPIC, so nothing may migrate this task
+    // between them.
+    let _pinned = PreemptGuard::new();
+    let saved = save_timer_programming();
+
     apic::timer_stop();
     let count = apic::timer_get_current_count();
+
+    restore_timer_programming(&saved);
+
     if count != 0 {
         klog_info!(
             "LAPIC_TIMER_TEST: BUG - timer_get_current_count() = {} after stop (expected 0)",
@@ -143,33 +239,27 @@ pub fn test_lapic_timer_stop_clears_counter() -> TestResult {
 /// If ticks do not advance, the IDT handler is broken — e.g. a missing ISR
 /// stub causing #GP on vector 0xEC.
 pub fn test_lapic_timer_ticks_advance() -> TestResult {
-    if !crate::apic::is_enabled() {
+    if !apic::is_enabled() {
         klog_info!("LAPIC_TIMER_TEST: SKIP - LAPIC not enabled");
         return TestResult::Skipped;
     }
-    if !crate::apic::timer::is_calibrated() {
+    if !apic::timer::is_calibrated() {
         klog_info!("LAPIC_TIMER_TEST: SKIP - timer not calibrated");
         return TestResult::Skipped;
     }
 
-    // Earlier tests leave the timer stopped and masked; restart it on the real
-    // scheduler vector.
-    crate::apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, 10);
+    let _pinned = PreemptGuard::new();
 
-    let ticks_before = irq_get_timer_ticks();
+    apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, PERIOD_MS);
 
-    // At 100 Hz, 100 ms is ~10 ticks; the floor of 5 absorbs QEMU jitter.
-    crate::hpet::delay_ms(100);
-
-    let ticks_after = irq_get_timer_ticks();
-    let delta = ticks_after.saturating_sub(ticks_before);
-
-    if delta < 5 {
+    const WANTED: u64 = 5;
+    let observed = await_local_ticks(WANTED, TICK_FAILSAFE_MS);
+    if observed < WANTED {
         klog_info!(
-            "LAPIC_TIMER_TEST: BUG - ticks barely advanced (before={}, after={}, delta={}, expected >=5)",
-            ticks_before,
-            ticks_after,
-            delta,
+            "LAPIC_TIMER_TEST: BUG - only {} of {} ticks arrived on this CPU within {} ms",
+            observed,
+            WANTED,
+            TICK_FAILSAFE_MS,
         );
         return TestResult::Fail;
     }
@@ -178,50 +268,42 @@ pub fn test_lapic_timer_ticks_advance() -> TestResult {
 
 /// CRITICAL: Always unmask at the end, or the kernel will hang.
 pub fn test_lapic_timer_mask_suppresses_ticks() -> TestResult {
-    if !crate::apic::is_enabled() {
+    if !apic::is_enabled() {
         klog_info!("LAPIC_TIMER_TEST: SKIP - LAPIC not enabled");
         return TestResult::Skipped;
     }
-    if !crate::apic::timer::is_calibrated() {
+    if !apic::timer::is_calibrated() {
         klog_info!("LAPIC_TIMER_TEST: SKIP - timer not calibrated");
         return TestResult::Skipped;
     }
 
-    crate::apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, 10);
+    const MASKED_WINDOW_MS: u32 = 50;
 
-    let ticks_before = irq_get_timer_ticks();
+    let _pinned = PreemptGuard::new();
+    apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, PERIOD_MS);
 
-    crate::apic::timer::mask();
+    apic::timer::mask();
+    // Read after the mask, so a tick already latched when it was written lands
+    // on this side of the window.
+    let masked_from = local_ticks();
+    hpet::delay_ms(MASKED_WINDOW_MS);
+    let delta_masked = local_ticks().saturating_sub(masked_from);
 
-    crate::hpet::delay_ms(50);
+    apic::timer::unmask();
+    let delta_unmasked = await_local_ticks(1, TICK_FAILSAFE_MS);
 
-    let ticks_after_mask = irq_get_timer_ticks();
-    let delta_masked = ticks_after_mask.saturating_sub(ticks_before);
-
-    crate::apic::timer::unmask();
-
-    crate::hpet::delay_ms(50);
-
-    let ticks_after_unmask = irq_get_timer_ticks();
-    let delta_unmasked = ticks_after_unmask.saturating_sub(ticks_after_mask);
-
-    // Other CPUs' LAPIC timers still fire into the global tick counter while
-    // this CPU's is masked, hence the N*5 allowance over the masked window.
-    let cpu_count = slopos_arch::pcr::get_cpu_count() as u64;
-    let max_masked_ticks = if cpu_count > 1 { cpu_count * 5 } else { 1 };
-    if delta_masked > max_masked_ticks {
+    if delta_masked != 0 {
         klog_info!(
-            "LAPIC_TIMER_TEST: BUG - mask did not suppress ticks (delta_masked={}, max_allowed={})",
+            "LAPIC_TIMER_TEST: BUG - mask did not suppress this CPU's ticks (delta_masked={})",
             delta_masked,
-            max_masked_ticks,
         );
         return TestResult::Fail;
     }
 
-    if delta_unmasked < 2 {
+    if delta_unmasked == 0 {
         klog_info!(
-            "LAPIC_TIMER_TEST: BUG - unmask did not resume ticks (delta_unmasked={})",
-            delta_unmasked,
+            "LAPIC_TIMER_TEST: BUG - unmask did not resume ticks within {} ms",
+            TICK_FAILSAFE_MS,
         );
         return TestResult::Fail;
     }
@@ -242,55 +324,64 @@ pub fn test_lapic_timer_idt_gate_installed() -> TestResult {
 }
 
 pub fn test_lapic_timer_tick_rate_reasonable() -> TestResult {
-    if !crate::apic::is_enabled() {
+    if !apic::is_enabled() {
         klog_info!("LAPIC_TIMER_TEST: SKIP - LAPIC not enabled");
         return TestResult::Skipped;
     }
-    if !crate::apic::timer::is_calibrated() {
+    if !apic::timer::is_calibrated() {
         klog_info!("LAPIC_TIMER_TEST: SKIP - timer not calibrated");
         return TestResult::Skipped;
     }
 
-    crate::apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, 10);
+    const ROUNDS: usize = 3;
+    const WINDOW_MS: u32 = 100;
 
-    let ticks_before = irq_get_timer_ticks();
-    let tsc_start = rdtsc();
+    let _pinned = PreemptGuard::new();
+    apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, PERIOD_MS);
 
-    crate::hpet::delay_ms(200);
+    let programmed_hz = 1000 / PERIOD_MS as u64;
+    let min_hz = programmed_hz / 2;
+    let max_hz = programmed_hz * 2;
 
-    let ticks_after = irq_get_timer_ticks();
-    let tsc_end = rdtsc();
+    // Being descheduled costs this CPU ticks over a window of wall time and can
+    // never hand it extra, so the ceiling holds for every round while the floor
+    // holds only for the best of them.
+    let mut best_hz = 0u64;
+    for _ in 0..ROUNDS {
+        let wall_start = hpet::read_counter();
+        let ticks_start = local_ticks();
+        hpet::delay_ms(WINDOW_MS);
+        let delta_ticks = local_ticks().saturating_sub(ticks_start);
+        let elapsed_ns = hpet::nanoseconds(hpet::read_counter().wrapping_sub(wall_start));
 
-    let delta_ticks = ticks_after.saturating_sub(ticks_before);
-    let elapsed_ms = measure_elapsed_ms(tsc_start, tsc_end);
+        if elapsed_ns == 0 {
+            klog_info!(
+                "LAPIC_TIMER_TEST: BUG - HPET did not advance across a {} ms delay",
+                WINDOW_MS,
+            );
+            return TestResult::Fail;
+        }
 
-    if elapsed_ms == 0 {
-        klog_info!("LAPIC_TIMER_TEST: SKIP - elapsed_ms is 0");
-        return TestResult::Skipped;
+        let observed_hz = (delta_ticks as u128 * 1_000_000_000 / elapsed_ns as u128) as u64;
+        if observed_hz > max_hz {
+            klog_info!(
+                "LAPIC_TIMER_TEST: BUG - tick rate {} Hz above {} Hz (delta_ticks={}, elapsed_ns={})",
+                observed_hz,
+                max_hz,
+                delta_ticks,
+                elapsed_ns,
+            );
+            return TestResult::Fail;
+        }
+        best_hz = best_hz.max(observed_hz);
     }
 
-    if delta_ticks == 0 {
-        klog_info!("LAPIC_TIMER_TEST: BUG - no ticks advanced during 200ms measurement");
-        return TestResult::Fail;
-    }
-
-    let observed_rate_hz = (delta_ticks as u64 * 1000) / (elapsed_ms as u64);
-
-    // All CPUs' LAPIC timers increment the global tick counter, but earlier
-    // tests may leave the AP timers stopped: hence a single-CPU floor and a
-    // ceiling covering every CPU at 200 Hz.
-    let cpu_count = slopos_arch::pcr::get_cpu_count() as u64;
-    let min_hz: u64 = 50;
-    let max_hz: u64 = 200 * cpu_count.max(1);
-
-    if observed_rate_hz < min_hz || observed_rate_hz > max_hz {
+    if best_hz < min_hz {
         klog_info!(
-            "LAPIC_TIMER_TEST: BUG - tick rate {} Hz outside [{}, {}] Hz (delta_ticks={}, elapsed_ms={})",
-            observed_rate_hz,
+            "LAPIC_TIMER_TEST: BUG - best of {} tick-rate rounds was {} Hz, below {} Hz",
+            ROUNDS,
+            best_hz,
             min_hz,
-            max_hz,
-            delta_ticks,
-            elapsed_ms,
         );
         return TestResult::Fail;
     }

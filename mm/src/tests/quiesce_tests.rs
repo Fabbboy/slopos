@@ -10,6 +10,10 @@ use slopos_testing::{assert_eq_test, assert_test};
 use crate::mmu::quiesce;
 use crate::page_alloc;
 
+/// Bounds the loops below. Every iteration closes an epoch, and three CPUs
+/// cannot keep the window open against that for long.
+const CLOSURE_BUDGET: u32 = 8;
+
 /// Everything else here is vacuous if the machinery never armed.
 pub fn test_quiesce_is_active() -> TestResult {
     assert_test!(
@@ -21,14 +25,15 @@ pub fn test_quiesce_is_active() -> TestResult {
 
 /// An epoch that never closes grows the quarantine until allocation fails.
 pub fn test_quiesce_epoch_advances() -> TestResult {
-    let (start, _, _) = quiesce::stats();
-    quiesce::force_close_epoch_for_test();
-    let (now, _, _) = quiesce::stats();
-    klog_info!("QUIESCE_TEST: epoch {} -> {}", start, now);
-    assert_eq_test!(
-        now,
-        start + 1,
-        "a fully acked epoch must close exactly once"
+    let Some(closed) = quiesce::force_close_epoch_for_test() else {
+        klog_info!("QUIESCE_TEST: no epoch closed under a full set of acks");
+        return TestResult::Fail;
+    };
+    klog_info!("QUIESCE_TEST: closed epoch {}", closed);
+    assert_test!(
+        quiesce::current_epoch() > closed,
+        "epoch {} closed but the counter never passed it",
+        closed
     );
     TestResult::Pass
 }
@@ -37,34 +42,43 @@ pub fn test_quiesce_epoch_advances() -> TestResult {
 /// epoch?" flag reads false for a frame freed an epoch after its unmap — the
 /// ordinary refcounted case — and releases it under a stale peer TLB.
 pub fn test_quarantine_spans_two_epochs_after_a_deferred_unmap() -> TestResult {
-    quiesce::note_deferred_unmap();
-    let (deferred_at, _, stamp) = quiesce::stats();
-    assert_eq_test!(
-        stamp,
-        deferred_at,
-        "note_deferred_unmap must stamp the current epoch"
-    );
+    let deferred_at = quiesce::note_deferred_unmap();
     assert_test!(
         quiesce::quarantine_required(),
-        "a frame freed in the same epoch as the unmap must be quarantined"
+        "a frame freed in the epoch its unmap stamped ({}) must be quarantined",
+        deferred_at
     );
 
-    // A peer may have acked early in `deferred_at`, so one closure is not enough.
-    if !advance_one_epoch() {
-        klog_info!("QUIESCE_TEST: could not close an epoch; environment too slow");
-        return TestResult::Fail;
+    // The stamp is a `fetch_max`, so a peer's own deferral pushes the discharge
+    // further out; re-reading it each round is what keeps this asserting the
+    // window rather than a race against that peer.
+    let mut closures = 0u32;
+    loop {
+        let (epoch, _, stamp) = quiesce::stats();
+        if epoch >= stamp + 2 {
+            break;
+        }
+        assert_test!(
+            quiesce::quarantine_required(),
+            "epoch {} is within two of the deferral stamped at {}, yet the \
+             quarantine discharged -- this is the use-after-free",
+            epoch,
+            stamp
+        );
+        if quiesce::force_close_epoch_for_test().is_none() {
+            klog_info!("QUIESCE_TEST: no epoch closed under a full set of acks");
+            return TestResult::Fail;
+        }
+        closures += 1;
+        if closures > CLOSURE_BUDGET {
+            klog_info!(
+                "QUIESCE_TEST: window still open after {} closures",
+                closures
+            );
+            return TestResult::Fail;
+        }
     }
-    let (after_one, _, _) = quiesce::stats();
-    assert_eq_test!(after_one, deferred_at + 1, "expected exactly one advance");
-    assert_test!(
-        quiesce::quarantine_required(),
-        "one closed epoch does not discharge a deferral — this is the use-after-free"
-    );
 
-    if !advance_one_epoch() {
-        klog_info!("QUIESCE_TEST: could not close the second epoch");
-        return TestResult::Fail;
-    }
     assert_test!(
         !quiesce::quarantine_required(),
         "two closed epochs must discharge the deferral"
@@ -75,37 +89,43 @@ pub fn test_quarantine_spans_two_epochs_after_a_deferred_unmap() -> TestResult {
 /// Rotation runs from a timer interrupt: a splicing rotation would hold the
 /// allocator's cli-lock for O(blocks x free-list length) inside that handler.
 pub fn test_quarantine_rotate_does_not_splice() -> TestResult {
-    let before = page_alloc::quarantine_frames();
-    page_alloc::quarantine_rotate();
-    let after = page_alloc::quarantine_frames();
+    let released = page_alloc::quarantine_rotate();
     assert_eq_test!(
-        after,
-        before,
+        released,
+        0,
         "rotate must only move list heads, never release frames"
     );
     TestResult::Pass
 }
 
 /// A backlog that only grows is an out-of-memory bug with extra steps.
+///
+/// Peers park frames behind this loop, so "the backlog is empty afterwards" is
+/// not a property of the kernel; that each bounded pass over a non-empty
+/// backlog splices something back is.
 pub fn test_quarantine_backlog_drains() -> TestResult {
-    for _ in 0..64 {
-        if !page_alloc::quarantine_has_releasable() {
+    const BLOCKS_PER_PASS: u32 = 64;
+    const MAX_PASSES: u32 = 64;
+
+    let mut passes = 0u32;
+    let mut released_total = 0u32;
+    while passes < MAX_PASSES {
+        let released = page_alloc::quarantine_release_some(BLOCKS_PER_PASS);
+        if released == 0 {
             break;
         }
-        page_alloc::quarantine_release_some(64);
+        released_total = released_total.saturating_add(released);
+        passes += 1;
     }
+
     assert_test!(
-        !page_alloc::quarantine_has_releasable(),
-        "releasable backlog must drain under repeated bounded release"
+        passes < MAX_PASSES,
+        "{} bounded releases spliced {} frames back and the backlog still had \
+         more -- release is not keeping up with its own splice",
+        passes,
+        released_total
     );
     TestResult::Pass
-}
-
-fn advance_one_epoch() -> bool {
-    let (start, _, _) = quiesce::stats();
-    quiesce::force_close_epoch_for_test();
-    let (now, _, _) = quiesce::stats();
-    now > start
 }
 
 slopos_testing::stest!(name = test_quiesce_is_active, suite = quiesce);

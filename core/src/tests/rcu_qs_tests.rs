@@ -7,7 +7,12 @@
 //! either can land in the middle of one, and a report from inside a reader frees
 //! the object that reader is still dereferencing.
 //! `rcu_note_qs_from_interrupt` is the guarded variant those two sites use.
+//!
+//! Those same two sites are also why every observation below is taken with
+//! interrupts masked: they call the function under test on this very CPU, so an
+//! unmasked sample pair counts their reports as well as the test's own.
 
+use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
 use slopos_ostd::sync::{rcu_note_qs_from_interrupt, rcu_qs_counter, rcu_read_lock};
 use slopos_testing::TestResult;
 use slopos_testing::assert_test;
@@ -19,11 +24,14 @@ use slopos_testing::assert_test;
 pub fn test_rcu_interrupt_qs_declines_inside_a_reader() -> TestResult {
     let cpu = slopos_arch::pcr::get_current_cpu();
 
-    let guard = rcu_read_lock();
-    let before = rcu_qs_counter(cpu);
-    let reported = rcu_note_qs_from_interrupt();
-    let after = rcu_qs_counter(cpu);
-    drop(guard);
+    let (reported, advance) = IrqDisabled::with(|_irq| {
+        let guard = rcu_read_lock();
+        let before = rcu_qs_counter(cpu);
+        let reported = rcu_note_qs_from_interrupt();
+        let after = rcu_qs_counter(cpu);
+        drop(guard);
+        (reported, after.wrapping_sub(before))
+    });
 
     assert_test!(
         !reported,
@@ -31,7 +39,7 @@ pub fn test_rcu_interrupt_qs_declines_inside_a_reader() -> TestResult {
          read-side critical section"
     );
     assert_test!(
-        before == after,
+        advance == 0,
         "a declined report still advanced this CPU's quiescent-state counter — \
          synchronize_rcu would free an object a live reader is dereferencing"
     );
@@ -44,9 +52,12 @@ pub fn test_rcu_interrupt_qs_declines_inside_a_reader() -> TestResult {
 pub fn test_rcu_interrupt_qs_reports_outside_a_reader() -> TestResult {
     let cpu = slopos_arch::pcr::get_current_cpu();
 
-    let before = rcu_qs_counter(cpu);
-    let reported = rcu_note_qs_from_interrupt();
-    let after = rcu_qs_counter(cpu);
+    let (reported, advance) = IrqDisabled::with(|_irq| {
+        let before = rcu_qs_counter(cpu);
+        let reported = rcu_note_qs_from_interrupt();
+        let after = rcu_qs_counter(cpu);
+        (reported, after.wrapping_sub(before))
+    });
 
     assert_test!(
         reported,
@@ -54,7 +65,7 @@ pub fn test_rcu_interrupt_qs_reports_outside_a_reader() -> TestResult {
          section — a tick that can never report stalls every grace period"
     );
     assert_test!(
-        after == before.wrapping_add(1),
+        advance == 1,
         "a successful report did not advance this CPU's quiescent-state counter \
          by exactly one"
     );
@@ -67,20 +78,23 @@ pub fn test_rcu_interrupt_qs_reports_outside_a_reader() -> TestResult {
 pub fn test_rcu_interrupt_qs_recovers_after_the_reader_ends() -> TestResult {
     let cpu = slopos_arch::pcr::get_current_cpu();
 
-    let guard = rcu_read_lock();
-    let declined = rcu_note_qs_from_interrupt();
-    drop(guard);
+    let (declined, reported, advance) = IrqDisabled::with(|_irq| {
+        let guard = rcu_read_lock();
+        let declined = rcu_note_qs_from_interrupt();
+        drop(guard);
 
-    let before = rcu_qs_counter(cpu);
-    let reported = rcu_note_qs_from_interrupt();
-    let after = rcu_qs_counter(cpu);
+        let before = rcu_qs_counter(cpu);
+        let reported = rcu_note_qs_from_interrupt();
+        let after = rcu_qs_counter(cpu);
+        (declined, reported, after.wrapping_sub(before))
+    });
 
     assert_test!(
         !declined,
         "report was not declined while the reader was held"
     );
     assert_test!(
-        reported && after == before.wrapping_add(1),
+        reported && advance == 1,
         "this CPU did not resume reporting once its read-side section ended"
     );
     TestResult::Pass

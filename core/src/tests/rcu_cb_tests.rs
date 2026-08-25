@@ -1,43 +1,42 @@
 //! Kernel-side tests for RCU deferred-callback reclamation.
 //!
-//! `call_rcu` only queues, so these tests never call the drain by hand: a queue
-//! whose consumer is unreachable looks exactly like a working one from the
-//! producer's side.
+//! `call_rcu` only queues, so the reachability test never calls the drain by
+//! hand: a queue whose consumer is unreachable looks exactly like a working one
+//! from the producer's side.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_kernel_services::platform::{clock_monotonic_ns, timer_poll_delay_ms};
+use slopos_kernel_services::platform::timer_poll_delay_ms;
 use slopos_ostd::KArc;
 use slopos_ostd::sync::RcuArcSlot;
+use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::TestResult;
 use slopos_testing::fail;
 
-/// How long to give the drain before calling it unreachable: it runs when a CPU
-/// finds nothing to dispatch, so the bound is a scheduling property.
-const RECLAIM_DEADLINE_MS: u32 = 400;
+/// Quiescent-state reports to allow before calling the drain unreachable.
+///
+/// The budget is guest progress, not wall clock: this CPU's timer tick both
+/// reports a quiescent state and raises the RCU softirq, so a descheduled vCPU
+/// delivers no tick and spends none of the budget.
+const RECLAIM_DEADLINE_REPORTS: u64 = 64;
+
+/// Backstop on the budget above. Reaching it means this CPU stopped reporting
+/// altogether, which is a dead timer tick rather than a slow host.
+const TICK_WATCHDOG_MS: u32 = 5_000;
 
 /// Polled rather than slept: the kernel test phase runs on the BSP before it
 /// enters the scheduler, so this task cannot block.
 const POLL_INTERVAL_MS: u32 = 10;
 
-/// Drive the RCU drain until `done` holds, or the deadline expires. Polls for
-/// the effect rather than trusting the manual call: a CPU that already detached
-/// the chain leaves nothing for that call to find while the callback is in
-/// flight.
+/// Drive every callback queued before this call to invocation, then report
+/// `done`.
+///
+/// `rcu_barrier` waits for invocation rather than merely for a grace period and
+/// cannot return early, so a `false` here is the callback failing to do its
+/// work — not a deadline the host outran.
 pub fn drain_until(done: impl Fn() -> bool) -> bool {
-    let mut waited = 0;
-    loop {
-        slopos_ostd::sync::rcu_raise_softirq();
-        slopos_ostd::sync::rcu_process_callbacks();
-        if done() {
-            return true;
-        }
-        if waited >= RECLAIM_DEADLINE_MS {
-            return false;
-        }
-        timer_poll_delay_ms(POLL_INTERVAL_MS);
-        waited += POLL_INTERVAL_MS;
-    }
+    slopos_ostd::sync::rcu_barrier();
+    done()
 }
 
 static DROPPED: AtomicU32 = AtomicU32::new(0);
@@ -51,9 +50,12 @@ impl Drop for DropCounted {
 }
 
 /// `RcuArcSlot::store` defers the displaced reference through `call_rcu`, so
-/// the payload's `Drop` runs only if the callback does.
+/// the payload's `Drop` runs only if the callback does — and only if something
+/// other than this test reaches the drain.
 pub fn test_rcu_callbacks_are_invoked_without_a_manual_drain() -> TestResult {
+    let cpu = slopos_arch::pcr::get_current_cpu();
     let before = DROPPED.load(Ordering::Acquire);
+    let reports_before = slopos_ostd::sync::rcu_qs_counter(cpu);
 
     let slot = RcuArcSlot::<DropCounted>::empty();
     let Ok(value) = KArc::try_new(DropCounted) else {
@@ -64,24 +66,45 @@ pub fn test_rcu_callbacks_are_invoked_without_a_manual_drain() -> TestResult {
     slot.store(None);
 
     let mut waited = 0;
-    while waited < RECLAIM_DEADLINE_MS {
+    loop {
         if DROPPED.load(Ordering::Acquire) != before {
             return TestResult::Pass;
         }
+
+        let reports = slopos_ostd::sync::rcu_qs_counter(cpu).wrapping_sub(reports_before);
+        if reports >= RECLAIM_DEADLINE_REPORTS {
+            return fail!(
+                "no RCU callback ran across {} quiescent-state reports on CPU {} — every \
+                 deferred free since boot is leaking",
+                reports,
+                cpu
+            );
+        }
+        if waited >= TICK_WATCHDOG_MS {
+            return fail!(
+                "CPU {} reported {} quiescent states in {}ms — its timer tick has stopped, so \
+                 nothing drives the drain",
+                cpu,
+                reports,
+                TICK_WATCHDOG_MS
+            );
+        }
+
         timer_poll_delay_ms(POLL_INTERVAL_MS);
         waited += POLL_INTERVAL_MS;
     }
-
-    fail!(
-        "no RCU callback ran in {}ms — every deferred free since boot is leaking",
-        RECLAIM_DEADLINE_MS
-    )
 }
 
 /// Called from the reclaim path, including `call_rcu`'s own out-of-memory
 /// fallback, so an allocation here fails exactly when there is nothing to
 /// allocate from.
+///
+/// The heap counter is kernel-wide, so the scope is what makes it name this
+/// caller: with the APs parked and the kernel-I/O threads frozen, no other
+/// allocator is running to be mistaken for `synchronize_rcu`.
 pub fn test_synchronize_rcu_allocates_nothing() -> TestResult {
+    let _scope = KernelTestScope::enter();
+
     let before = slopos_mm::slab::get_heap_stats_owned();
     slopos_ostd::sync::synchronize_rcu();
     let after = slopos_mm::slab::get_heap_stats_owned();
@@ -89,7 +112,7 @@ pub fn test_synchronize_rcu_allocates_nothing() -> TestResult {
     if after.allocation_count != before.allocation_count {
         return fail!(
             "synchronize_rcu allocated {} time(s)",
-            after.allocation_count - before.allocation_count
+            after.allocation_count.wrapping_sub(before.allocation_count)
         );
     }
     TestResult::Pass
@@ -103,19 +126,18 @@ pub fn test_synchronize_rcu_completes_a_grace_period() -> TestResult {
     if after.wrapping_sub(before) < 2 {
         return fail!(
             "grace-period sequence advanced {} (want >= 2)",
-            after - before
+            after.wrapping_sub(before)
         );
     }
     TestResult::Pass
 }
 
 /// A drain pass never takes a grace period inline. Putting the wait back would
-/// still pass every correctness test and show up only as latency, so the passes
-/// are timed.
+/// still pass every correctness test, so the passes are counted at the wait
+/// itself: this CPU's entries into `synchronize_rcu`, which only the drain can
+/// have made here, must not move.
 pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
     const PASSES: u32 = 32;
-    // 32 passes each taking a grace period would be seconds, not milliseconds.
-    const BUDGET_MS: u64 = 50;
 
     // Queue work so the passes have something to tag and retire rather than
     // early-returning on an empty backlog.
@@ -128,19 +150,20 @@ pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
         slot.store(None);
     }
 
-    let start = clock_monotonic_ns();
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    let before = slopos_ostd::sync::rcu_sync_entry_count(cpu);
     for _ in 0..PASSES {
         slopos_ostd::sync::rcu_raise_softirq();
         slopos_ostd::sync::rcu_process_callbacks();
     }
-    let elapsed_ms = clock_monotonic_ns().saturating_sub(start) / 1_000_000;
+    let after = slopos_ostd::sync::rcu_sync_entry_count(cpu);
 
-    if elapsed_ms > BUDGET_MS {
+    if after != before {
         return fail!(
-            "{} drain passes took {}ms (budget {}ms) — the invoke step is waiting again",
+            "{} drain passes entered the grace-period wait {} time(s) — the invoke step is \
+             waiting again",
             PASSES,
-            elapsed_ms,
-            BUDGET_MS
+            after.wrapping_sub(before)
         );
     }
     TestResult::Pass

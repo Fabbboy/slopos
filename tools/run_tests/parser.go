@@ -51,12 +51,24 @@ type EvNonKtap struct {
 	Line string
 }
 
-func (*EvPhaseStart) event() {}
-func (*EvPlan) event()       {}
-func (*EvTest) event()       {}
-func (*EvPhaseEnd) event()   {}
-func (*EvBail) event()       {}
-func (*EvNonKtap) event()    {}
+// EvKernelAbort fires once per `=== KERNEL ABORT ===` banner, carrying the
+// reason line the kernel prints immediately after it (empty when no reason
+// reached the wire).
+//
+// It means some CPU is gone, NOT that the machine is gone: in the reference
+// log the abort was CPU 1 only and the BSP produced 2931 further results, so
+// the parser keeps parsing and the run keeps going.
+type EvKernelAbort struct {
+	Reason string
+}
+
+func (*EvPhaseStart) event()  {}
+func (*EvPlan) event()        {}
+func (*EvTest) event()        {}
+func (*EvPhaseEnd) event()    {}
+func (*EvBail) event()        {}
+func (*EvNonKtap) event()     {}
+func (*EvKernelAbort) event() {}
 
 // parserState is the FSM state. The diag-vs-log split exists because a
 // `log: |` literal block is closed only by `KTAP\t  ...`; a `KTAP\t` substring
@@ -94,6 +106,10 @@ type KtapParser struct {
 	logLines        []string
 	logBlockOpened  bool
 	klogTail        []string
+	// abortPending holds a seen banner whose reason line has not arrived yet.
+	// It is resolved by the next non-blank line, by the next KTAP line (with no
+	// reason), or by Flush at end of stream — never dropped.
+	abortPending bool
 }
 
 // NewKtapParser returns an empty parser ready to consume `Feed` calls.
@@ -135,13 +151,58 @@ func (p *KtapParser) Feed(rawLine string) []Event {
 				events = append(events, ev)
 			}
 		}
+		events = append(events, p.noteAbortLine(line)...)
 		p.appendKlogTail(line)
 		events = append(events, &EvNonKtap{Line: line})
 		return events
 	}
 
 	body := line[len(KtapPrefix):]
-	return p.feedKtap(body)
+	// A KTAP line resolves a pending banner with no reason of its own rather
+	// than swallowing the event: the abort must be reported either way, and a
+	// result line landing here is the recorded case — the surviving CPUs kept
+	// producing results across the abort.
+	return append(p.flushPendingAbort(""), p.feedKtap(body)...)
+}
+
+// noteAbortLine turns the banner and the reason line that follows it into a
+// single EvKernelAbort. The kernel writes "\n\n=== KERNEL ABORT ===", so a
+// blank line precedes the banner and blank lines never resolve one.
+//
+// Contains, not HasPrefix: the banner goes out over the polling early console
+// while other CPUs may still be writing klog, so it can arrive with a foreign
+// prefix glued to its head.
+func (p *KtapParser) noteAbortLine(line string) []Event {
+	if strings.Contains(line, KernelAbortBanner) {
+		// Back-to-back banners (two CPUs aborting) each get their own event.
+		events := p.flushPendingAbort("")
+		p.abortPending = true
+		return events
+	}
+	if trimmed := strings.TrimSpace(line); p.abortPending && trimmed != "" {
+		return p.flushPendingAbort(trimmed)
+	}
+	return nil
+}
+
+func (p *KtapParser) flushPendingAbort(reason string) []Event {
+	if !p.abortPending {
+		return nil
+	}
+	p.abortPending = false
+	return []Event{&EvKernelAbort{Reason: reason}}
+}
+
+// Flush resolves parser state held open at end of stream, and must be called
+// once after the last Feed. A banner that was the last line the kernel managed
+// to write still produces its event, which is precisely the dead-machine case
+// this exists for.
+func (p *KtapParser) Flush() []Event {
+	events := p.flushPendingAbort("")
+	if ev := p.commitCurrentRecord(); ev != nil {
+		events = append(events, ev)
+	}
+	return events
 }
 
 // appendKlogTail keeps a bounded rolling window of recent non-KTAP klog lines.
@@ -159,6 +220,7 @@ func (p *KtapParser) openPhase() *EvPhaseStart {
 	p.currentRecord = nil
 	p.logLines = nil
 	p.logBlockOpened = false
+	p.abortPending = false
 	p.state = stateOutside
 	p.tapVersionSeen = true
 	return &EvPhaseStart{PhaseIdx: p.phaseIdx, Name: p.phaseName}

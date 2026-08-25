@@ -16,7 +16,12 @@ doctest = false
 
 [features]
 default = []
-test-hooks = ["slopos-mm/test-hooks", "slopos-sched/test-hooks", "slopos-ring/test-hooks"]
+test-hooks = [
+    "slopos-mm/test-hooks",
+    "slopos-sched/test-hooks",
+    "slopos-ring/test-hooks",
+    "slopos-ostd/test-helpers",
+]
 
 [dependencies]
 slopos-abi = { workspace = true }

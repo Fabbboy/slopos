@@ -1,60 +1,71 @@
 # check_lockdep_headroom gate data — variant: tests
 #
 # The lock-order validator must be ACTIVE at every phase it reports, must
-# report no violation, and must keep every pool clear of its ceiling. An entry
-# records what a pool *is*, not that the value is acceptable.
+# report no violation, and must keep every pool clear of its ceiling.
 #
-#     scripts/check_lockdep_headroom.sh --variant tests --emit-allowlist
+#     scripts/check_lockdep_headroom.sh --variant tests --emit-allowlist \
+#         --log RUN1.log --log RUN2.log --log RUN3.log
 #
-# Every require-phase and every cap must be matched by a LOCKDEP[...] line: a
-# cap matching nothing is a dead entry and fails the gate, because a phase that
-# stopped reporting looks exactly like a phase that passed. Raise a cap only
-# with a fresh --emit-allowlist in the same commit, and say in the message what
-# added the locks.
+# Two kinds of entry, because the three pools are not one kind of measurement:
 #
-# Measured 2026-08-02 over 8 consecutive runs of the tests ISO. Re-measured
-# 2026-08-03 when RCU's callback-batch lock and the bottom-half tests' probe lock
-# each added a class; the edge and chain caps below still bound the new measurement
-# with room to spare and are left at their 8-run values.
+#   <phase> <TAB> <pool> <TAB> <cap>   exceeding it FAILS the run
+#   band <phase> <pool> <lo> <hi>      leaving it prints DRIFT and passes
 #
-# Re-measured 2026-08-07 over 3 runs: the TTY lock order is now declared at
-# `tty_table_init`, which registers TTY_WRITE_LOCKS eagerly (+1 boot class, +1
-# boot edge for the declared pair) instead of on its first acquire, and the
-# vconsole input-injection hook a test-hooks build carries adds one class to
-# both test phases. Edge and chain caps still bound the new measurement.
+# Either kind matching no LOCKDEP[...] line is a dead entry and fails the gate,
+# because a phase that stopped reporting looks exactly like a phase that passed.
+# An entry records what a pool *is*, not that the value is acceptable.
 #
-# Re-measured 2026-08-09 over 4 runs for the network-management change. Boot
-# gains exactly five classes, one per new lock the kernel now takes:
-# NET_IFACES (the interface table), NETMON (the monitor registry),
-# evbus.netmon (the wait queues a monitor fd blocks on, one class for the
-# whole array), UDP_PORT_LISTENERS (the kernel-side port table DHCP binds 68
-# on) and DHCP_CLIENTS. The test phases add those plus the scratch tables and
-# mock locks the new iface, netmon and DHCP tests declare. Only the class caps
-# move: every edge and chain measurement still falls under the caps below, and
-# they keep their earlier values.
 #
-# Re-measured 2026-08-09 for the per-socket wait-queue spine. The three
-# AF_INET socket queue classes (evbus.socket_recv / _send / _accept) now
-# register from the boot-allocated spine rather than the static array, so both
-# test phases gain exactly three classes. The instance count went 64 -> 1024
-# per axis but the CLASS count is what the validator tracks, and a class is
-# per declaration site, not per instance — which is the whole point of
-# declaration-site keying. Edge and chain counts are unchanged.
+# Why the split: exact where the measurement is deterministic
+# ----------------------------------------------------------
 #
-# Re-measured 2026-08-09 for the descriptor-table isolation test. Both test
-# phases gain exactly one class, KERNEL_FILE_TABLE. The test asserts that a
-# process owning no table never has descriptors installed into the kernel's,
-# and reading that table to prove it is the only acquire of that lock anywhere
-# in the tree — measured by disabling the probe, which returns both phases to
-# 176/185. Boot is unchanged; edges and chains stay under their caps.
+# A class registers on the first acquire of a declaration site, and by the end
+# of a phase every site that phase reaches has been reached. So a class count is
+# a property of the kernel, identical on every run — this file's own history
+# below records "identical in all 8 runs" and "193 on every run" — and one extra
+# class is a new lock, or a lock reached one phase earlier, which is exactly
+# what should require a deliberate bump. Class caps are exact, with no margin,
+# in every phase.
 #
-# Re-measured over 4 runs for `waitpid(-1)`. Both test phases gain exactly one
-# class, evbus.any_child_exit — the wait-queue array a wait-any caller parks on,
-# one class for the whole array as evbus.netmon is. Boot is unchanged at 70:
-# nothing on the boot path waits for an unnamed child, so the queue is first
-# acquired by the wait-any test. Edges (kernel 145-149, userland 177-184) and
-# chains (kernel 338-341, userland 379-384) still fall under the caps below and
-# keep their earlier values.
+# `boot` reaches its report by a fixed sequence with no test dispatch in it, and
+# measures 43 edges and 110 chains on every run. Its edge and chain counts are
+# therefore caps too. (The recorded caps of 49 and 112 are the values the old
+# convention left them at; tightening them onto 43/110 is a re-measurement, not
+# a policy change, and is not made here.)
+#
+# Edges and chains in the two TEST phases are a different object. They count
+# which *orderings a run happened to observe*, not which the kernel contains,
+# and they move between runs of identical code — measured spreads of 6 to 18.
+# An exact threshold on a quantity like that fires on interleaving and on suite
+# growth, not on a change to the kernel: this file previously recorded, in its
+# own prose, that "unmodified develop reaches 412 against a 409 cap", and a
+# run whose tests were entirely green failed CI for "chains grew to 400, over
+# the recorded cap 399". Those pools carry bands instead. A run inside the band
+# passes silently; a run outside it prints a DRIFT line naming which way the
+# count went and by how much, and the run still passes.
+#
+# Bands do not weaken the headroom check they sit inside. max-fill-pct 70 puts
+# the chain ceiling at 1433 of 2048 (MAX_CHAINS) against ~410 observed and the
+# edge ceiling at 716 of 1024 (MAX_EDGES) against ~200 observed, so the exact
+# caps were never the headroom check — the fill percentage is, and it still
+# fails.
+#
+#
+# What the bands give up
+# ----------------------
+#
+# The bands lose the ability to notice that a new, *consistent, non-cyclic*
+# nesting appeared between two already-registered classes, when it adds fewer
+# edges or chains than the band is wide (18 to 54 here). That is acceptable for
+# two reasons. First, the defect — an *inverted* acquire order, A→B where B→A
+# exists — is caught by the cycle detector and reported in `violations=`, which
+# this gate still fails on and which no count threshold was ever what caught.
+# Second, the exact caps already missed anything smaller than their spread: they
+# were set at an observed maximum plus one spread, so a change of fewer than 7
+# to 9 chains passed silently under the old design too. The blind spot is
+# widened, not created, and what is lost is a review prompt that now still
+# reaches the operator as a DRIFT line instead of failing an otherwise green run.
+
 
 # Classes must be well clear of the pool before the validator would disable
 # itself. 70% mirrors MAX_POOL_FILL_PCT in ktesting/src/zz_lockdep_tests.rs;
@@ -65,119 +76,88 @@ max-fill-pct 70
 # Without a floor, "0 classes" satisfies every ceiling and a validator that
 # stopped registering reports as maximally healthy — the hole `min-records`
 # plugs in the stack-size gate. Mirrors MIN_CLASSES in zz_lockdep_tests.rs.
+# The banded pools get the same floor from their band's low end.
 min-classes 32
 
 require-phase boot
 require-phase post-kernel-tests
 require-phase post-userland-tests
 
-# <phase> <TAB> <pool> <TAB> <cap>
+
+# Class caps — exact, no margin. Every value below was identical on every run
+# of the measurement that set it. What each bump was:
 #
-# Re-measured 2026-08-10 for the reclaim tier. The kernel phase gains exactly
-# one class and the userland phase gains none, which is the signature of a
-# class registering EARLIER rather than of a new lock: CACHED_EXT2 has always
-# existed and has always been taken, but before the reclaim tier nothing in the
-# kernel test phase reached it — `fs/src/tests.rs` builds its own
-# MemoryBlockDevice and never touches the mounted filesystem. The reclaim tests
-# call `reclaimable_pages`, which `try_lock`s CACHED_EXT2, so the class is now
-# first registered one phase sooner. Confirmed by the pair: post-kernel 181 ->
-# 182 while post-userland stays at 190, so the total set of classes is
-# unchanged. Edge and chain caps still bound the new measurement over 3 runs
-# (kernel edges 148-149 under 161, chains 343-345 under 351) and keep their
-# earlier values.
-#
-# Class counts were identical in all 8 runs, so their caps are the measured
-# value with no margin: a class is registered on the first acquire of a
-# declaration site, and by the end of a phase every site the phase reaches has
-# been reached. One extra class is a new lock, which is exactly what should
-# require a deliberate bump.
-#
-# Re-measured 2026-08-12 for two new locks, both of which fix a recorded
-# finding:
-#
-#   * `OPEN_FILE_POSITION` (fs/src/fileio/mod.rs) serialises the offset read,
-#     the write and the offset advance on one open file description, so two
-#     writers sharing it cannot resolve the same offset. `LO_DUPOK`, because
-#     distinct descriptions are distinct instances of one class and a caller
-#     only ever holds one.
-#   * `DNS_PENDING_QUERY` (net/src/dns.rs) holds the in-flight query's server
-#     address and source port, which the receive path checks before accepting
-#     a datagram as a reply.
-#
-# The phases gain different counts because a class registers on first acquire,
-# not at declaration. The kernel phase gains only `DNS_PENDING_QUERY` (+1): its
-# fs tests drive `vfs_*` directly and never open a descriptor, so
-# `OPEN_FILE_POSITION` is not reached until userland does real file I/O. The
-# userland phase reaches both (+2). Edge and chain caps still bound the kernel
-# phase; the userland chain cap moves with them, below.
-#
-# 2026-08-24: userland 192 -> 193. `dns_resolve_test` is the first utest to
-# take the resolver path, so `DNS_PENDING_QUERY` now registers in the userland
-# phase too. Deterministic — 193 on every run — so the cap is exact.
-#
-# 2026-08-23: kernel 183 -> 184, userland 193 -> 194. `fblog.PANIC_TAIL`
-# registers on the first recovered panic, which both phases reach; `boot` is
-# unchanged because nothing panics before the boot report. Deterministic.
+#   2026-08-02  baseline over 8 consecutive runs of the tests ISO.
+#   2026-08-03  RCU's callback-batch lock and the bottom-half tests' probe lock
+#               each add a class.
+#   2026-08-07  the TTY lock order is declared at `tty_table_init`, which
+#               registers TTY_WRITE_LOCKS eagerly (+1 boot class) instead of on
+#               first acquire; the vconsole input-injection hook a test-hooks
+#               build carries adds one class to both test phases.
+#   2026-08-09  network management. Boot gains exactly five, one per new lock:
+#               NET_IFACES, NETMON, evbus.netmon (one class for the whole
+#               wait-queue array), UDP_PORT_LISTENERS and DHCP_CLIENTS. The
+#               test phases add those plus the scratch tables and mock locks
+#               the new iface, netmon and DHCP tests declare.
+#   2026-08-09  the per-socket wait-queue spine: evbus.socket_recv / _send /
+#               _accept register from the boot-allocated spine rather than the
+#               static array, so both test phases gain exactly three. Instances
+#               went 64 -> 1024 per axis; a class is per declaration site, not
+#               per instance, which is the point of declaration-site keying.
+#   2026-08-09  descriptor-table isolation test: both test phases gain
+#               KERNEL_FILE_TABLE, the only acquire of that lock in the tree.
+#               Confirmed by disabling the probe, which returns both to
+#               176/185.
+#   ----------  `waitpid(-1)`: both test phases gain evbus.any_child_exit.
+#               Boot is unchanged — nothing on the boot path waits for an
+#               unnamed child.
+#   2026-08-10  reclaim tier: kernel +1, userland +0, which is the signature of
+#               a class registering EARLIER rather than of a new lock.
+#               CACHED_EXT2 has always been taken, but before the reclaim tier
+#               nothing in the kernel test phase reached it. Confirmed by the
+#               pair: post-kernel 181 -> 182 while post-userland stays at 190.
+#   2026-08-12  OPEN_FILE_POSITION (fs/src/fileio/mod.rs), which serialises the
+#               offset read, the write and the advance on one open file
+#               description, and DNS_PENDING_QUERY (net/src/dns.rs), which
+#               holds the in-flight query's server address and source port.
+#               The kernel phase gains only DNS_PENDING_QUERY: its fs tests
+#               drive `vfs_*` directly and never open a descriptor.
+#   2026-08-24  userland 192 -> 193: `dns_resolve_test` is the first utest to
+#               take the resolver path, so DNS_PENDING_QUERY registers there
+#               too. 193 on every run.
+#   2026-08-23  kernel 183 -> 184, userland 193 -> 194: `fblog.PANIC_TAIL`
+#               registers on the first recovered panic, which both phases
+#               reach. Boot is unchanged — nothing panics before its report.
 boot	classes	71
 post-kernel-tests	classes	184
 post-userland-tests	classes	194
 
-# Edges and chains depend on which *orders* were observed, so they move with
-# scheduling. Each cap is the observed maximum plus that phase's spread, so
-# ordinary interleaving cannot trip the gate while a new nesting — which arrives
-# in tens, not ones — still does.
-#
-# The kernel phase's chain spread went from 2 to 7 when the bottom-half point
-# gave deferred work more contexts to run in: the same orderings are reached,
-# but which of them a given run has observed by the end of the phase now varies
-# more. The edge caps still bound the new measurement and keep their 8-run
-# values.
-#
-# edges  measured: boot 43, kernel 148-152, userland 181-185
-#
-# Re-measured over the same 24 runs as the chain caps below. Boot is exactly 43
-# on every run; the test phases measured kernel 153-160 and userland 196-202
-# across both develop and the change, so userland was within 3 of its cap.
-# Same convention: observed maximum plus the phase's spread.
+# Boot edges and chains — exact, because boot has no test scheduling in it and
+# measures 43 edges and 110 chains on every run recorded here.
 boot	edges	49
-post-kernel-tests	edges	168
-post-userland-tests	edges	208
-
-# 2026-08-24: kernel 351 -> 359, userland 404 -> 409. Two new kernel test
-# modules (`tests_exec_boundary`, `tests_pcid`) create and tear down address
-# spaces, and the OOM tests now drain the quarantine and the per-CPU magazine
-# before reading a free count; both take the quiesce and quarantine locks
-# around the buddy lock, an ordering the kernel phase previously reached only
-# from process exit. Re-measured over twelve runs: kernel 345-352, userland
-# 395-402 — spread 7 in both, unchanged from the recorded spread. Each cap is
-# that maximum plus the spread.
-#
-# chains measured: boot 110, kernel 345-352, userland 395-402
-#
-# 2026-08-12: the userland cap moves 399 -> 404. The two new locks above add
-# their own chains, and the append path now takes OPEN_FILE_POSITION around a
-# filesystem lock it previously took bare, which is one more ordering per
-# filesystem reached. The observed value on the run that prompted this was 400;
-# the cap keeps the phase's previously recorded 7-chain spread above it rather
-# than sitting on the observation, since a cap set to a single sample of a
-# scheduling-dependent quantity fails on ordinary interleaving.
-#
-# Re-measured over 24 runs (12 on the sleep-queue change, 12 on unmodified
-# develop) when the sleep queue moved from the global tick counter to the HPET
-# millisecond clock. The two distributions are the same:
-#
-#            kernel chains   userland chains   userland edges
-#   develop      351-359         403-412          196-200
-#   change       351-360         404-413          197-202
-#
-# No lock was added or removed and no acquire order changed: the class counts
-# are identical (71/184/194) on all 24 runs, which is the check that would move
-# had this been a real ordering change. The caps were simply sitting on their
-# measured maxima with no spread left — unmodified develop reaches 412 against
-# a 409 cap — so this is the suite outgrowing a cap that was last measured at
-# 2972 planned tests and now runs 3003. Caps restored to the file's stated
-# convention of observed maximum plus the phase's spread: kernel 360+9, userland
-# 413+9.
 boot	chains	112
-post-kernel-tests	chains	369
-post-userland-tests	chains	422
+
+# Bands, for the two phases whose edge and chain counts move with scheduling.
+# Each band is the recorded range widened by that range's own width on each
+# side, so a band is three times as wide as the spread it was measured over and
+# a re-measurement that finds a wider spread widens the band with it.
+#
+#   post-kernel-tests    edges   148-160  (spread 12)  ->  136-172
+#   post-userland-tests  edges   196-202  (spread  6)  ->  190-208
+#   post-kernel-tests    chains  345-360  (spread 15)  ->  330-375
+#   post-userland-tests  chains  395-413  (spread 18)  ->  377-431
+#
+# Each recorded range is the union of the measurements this file already
+# carried, not one sitting: the 24-run set taken when the sleep queue moved
+# from the global tick counter to the HPET millisecond clock (12 runs on the
+# change, 12 on unmodified develop, indistinguishable distributions), the
+# twelve-run set taken for the `tests_exec_boundary` / `tests_pcid` /
+# OOM-quarantine work, and the three- and four-run sets before them. A union
+# across tree states is the right input here precisely because none of those
+# states differed in class count — the check that would have moved had any of
+# them been a real ordering change. Leaving a band is not a failure, so a band
+# set slightly tight costs a DRIFT line to read, never a red run.
+band post-kernel-tests edges 136 172
+band post-userland-tests edges 190 208
+band post-kernel-tests chains 330 375
+band post-userland-tests chains 377 431

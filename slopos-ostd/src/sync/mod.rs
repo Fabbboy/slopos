@@ -34,6 +34,8 @@ pub mod wait_queue;
 pub use atomic_cell::AtomicCell;
 pub use cpu_local::{CacheAligned, CpuLocal, CpuPinned, CpuPinnedMut};
 pub use epoch::{Epoch, EpochGuard};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use event_bus::TEST_BUS;
 pub use event_bus::{BUS, EventBus, Subscription, ensure_socket_queues_allocated};
 pub use init_flag::{InitFlag, StateFlag};
 pub use init_in_place::InitInPlace;
@@ -66,7 +68,7 @@ pub use rcu::{
     RcuArcSlot, RcuBackend, RcuCell, RcuCellGuard, RcuReadGuard, call_rcu, rcu_barrier,
     rcu_gp_poll, rcu_gp_seq, rcu_note_cpu_idle_enter, rcu_note_cpu_idle_exit, rcu_note_qs,
     rcu_note_qs_from_interrupt, rcu_process_callbacks, rcu_qs_counter, rcu_raise_softirq,
-    rcu_read_lock, register_rcu_backend, synchronize_rcu,
+    rcu_read_lock, rcu_sync_entry_count, register_rcu_backend, synchronize_rcu,
 };
 pub use seqlock::{SeqLock, SeqLockWriteGuard};
 pub use spin::{

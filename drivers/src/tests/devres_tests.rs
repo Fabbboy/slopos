@@ -1,16 +1,18 @@
 //! Managed-resource (`Devres`) and identity-DMA-mapper regression tests.
 //!
-//! The DMA release test asserts on slot state and frame accounting: the buddy
-//! absorbs a double free without faulting, so "it did not crash" is no evidence.
+//! The DMA release test asserts on slot state and on the run page account: the
+//! buddy absorbs a double free without faulting, so "it did not crash" is no
+//! evidence.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
-use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB_USIZE;
 use slopos_ostd::dev::Devres;
 use slopos_ostd::irq::IrqAllocator;
-use slopos_ostd::mm::dma::{register_identity_dma_mapper_for_test, reset_for_test};
+use slopos_ostd::mm::dma::{
+    MapperHiddenForTest, register_identity_dma_mapper_for_test, run_page_account,
+};
 use slopos_ostd::mm::frame::{SlotMetaKind, slot_snapshot};
 use slopos_ostd::mm::{DmaCoherent, DmaError};
 use slopos_testing::{TestResult, fail, pass};
@@ -81,19 +83,12 @@ pub fn test_devres_releases_irq_vector() -> TestResult {
 
     drop(res);
 
-    // The freed vector is the lowest free one again, so it must come back; the
-    // re-registration below is what proves its dispatch slot was cleared.
-    let reclaimed = match IrqAllocator::alloc() {
+    // What the release owes is that the vector is claimable again and that its
+    // dispatch slot is empty — not that the allocator's next pick lands on it.
+    let reclaimed = match IrqAllocator::reserve_specific(vector) {
         Ok(l) => l,
-        Err(_) => return fail!("vector pool exhausted (after release)"),
+        Err(e) => return fail!("released vector {} is not free again: {:?}", vector, e),
     };
-    if reclaimed.vector() != vector {
-        return fail!(
-            "freed vector {} not reclaimed (got {})",
-            vector,
-            reclaimed.vector()
-        );
-    }
     match reclaimed.register_callback_owned(|_ctx| {}) {
         Ok(o) => drop(o),
         Err(_) => return fail!("dispatch slot not cleared on release"),
@@ -103,18 +98,9 @@ pub fn test_devres_releases_irq_vector() -> TestResult {
 
 const DMA_RUN_PAGES: usize = 2;
 
-/// Enough rounds that a leak costs two orders of magnitude more frames than
-/// `DMA_ACCOUNTING_SLACK`.
+/// Repetition is stress, not statistics: the account below is exact, so one
+/// leaked round would already show.
 const DMA_CHURN_ROUNDS: usize = 1024;
-
-/// Frames the free count may legitimately move by: another CPU's allocations and
-/// any slab growth the churn itself provokes.
-const DMA_ACCOUNTING_SLACK: u32 = 256;
-
-fn free_frames() -> u32 {
-    let free = get_page_allocator_stats().free;
-    free
-}
 
 pub fn test_devres_releases_dma() -> TestResult {
     register_identity_dma_mapper_for_test();
@@ -146,24 +132,35 @@ pub fn test_devres_releases_dma() -> TestResult {
         }
     }
 
-    // One round trip proves nothing while the allocator still has free memory.
-    let free_before = free_frames();
+    // Accounted on the runs themselves, not on the page allocator's free count:
+    // that count moves for every CPU, so a neighbour's allocation and a leak
+    // read alike.
+    let (taken_before, returned_before) = run_page_account();
     for round in 0..DMA_CHURN_ROUNDS {
         match DmaCoherent::alloc(DMA_RUN_PAGES) {
             Ok(d) => drop(d),
             Err(e) => return fail!("DMA alloc failed at churn round {}: {:?}", round, e),
         }
     }
-    let free_after = free_frames();
-    let lost = free_before.saturating_sub(free_after);
-    if lost > DMA_ACCOUNTING_SLACK {
+    let (taken_after, returned_after) = run_page_account();
+
+    let taken = taken_after.saturating_sub(taken_before);
+    let returned = returned_after.saturating_sub(returned_before);
+    let expected = (DMA_CHURN_ROUNDS * DMA_RUN_PAGES) as u64;
+    if taken < expected {
         return fail!(
-            "{} DMA runs of {} pages lost {} frames (free {} -> {}); the runs are not being released",
+            "the run account saw only {} pages taken across {} rounds of {} pages",
+            taken,
             DMA_CHURN_ROUNDS,
-            DMA_RUN_PAGES,
-            lost,
-            free_before,
-            free_after
+            DMA_RUN_PAGES
+        );
+    }
+    let outstanding = taken.saturating_sub(returned);
+    if outstanding != 0 {
+        return fail!(
+            "{} of the {} DMA pages taken during the churn were never handed back",
+            outstanding,
+            taken
         );
     }
     pass!()
@@ -171,30 +168,31 @@ pub fn test_devres_releases_dma() -> TestResult {
 
 pub fn test_identity_mapper_iova_and_default_deny() -> TestResult {
     register_identity_dma_mapper_for_test();
-    let result = (|| {
-        let dma = match DmaCoherent::alloc(2) {
-            Ok(d) => d,
-            Err(e) => return fail!("DMA alloc with identity mapper failed: {:?}", e),
-        };
-        if dma.iova() != dma.phys_base().as_u64() {
-            return fail!(
-                "identity mapper: iova {:#x} != phys {:#x}",
-                dma.iova(),
-                dma.phys_base().as_u64()
-            );
-        }
-        drop(dma);
 
-        reset_for_test();
-        match DmaCoherent::alloc(2) {
-            Err(DmaError::NotInitialised) => pass!(),
-            Ok(_) => fail!("expected NotInitialised with no mapper, got Ok"),
-            Err(e) => fail!("expected NotInitialised, got {:?}", e),
-        }
-    })();
-    // Subsequent tests need the mapper back regardless of the outcome here.
-    register_identity_dma_mapper_for_test();
-    result
+    let dma = match DmaCoherent::alloc(2) {
+        Ok(d) => d,
+        Err(e) => return fail!("DMA alloc with identity mapper failed: {:?}", e),
+    };
+    if dma.iova() != dma.phys_base().as_u64() {
+        return fail!(
+            "identity mapper: iova {:#x} != phys {:#x}",
+            dma.iova(),
+            dma.phys_base().as_u64()
+        );
+    }
+    drop(dma);
+
+    // Hidden from this CPU rather than unregistered: a driver allocating DMA on
+    // another CPU must not see this test's deny.
+    let hidden = MapperHiddenForTest::for_current_cpu();
+    let denied = DmaCoherent::alloc(2);
+    drop(hidden);
+
+    match denied {
+        Err(DmaError::NotInitialised) => pass!(),
+        Ok(_) => fail!("expected NotInitialised with the mapper hidden, got Ok"),
+        Err(e) => fail!("expected NotInitialised, got {:?}", e),
+    }
 }
 
 slopos_testing::stest!(name = test_devres_lifo_drop_order, suite = devres);
