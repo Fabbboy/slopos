@@ -5,15 +5,7 @@
 //! zero-window probing.
 //!
 //! A test holds a [`NetTestScope`] when it leaves live PCB state the kernel's
-//! own threads can act on: a latched delayed ACK (whose deadline, computed from
-//! a test's `now_ms`, is already past against the real uptime the net-timer
-//! kthread reads), unacknowledged inflight data with an RTO armed in the live
-//! wheel, or a PCB still in `SYN_SENT`. Reading a global table is not by itself
-//! the criterion, and neither is the TEST-NET-1 address: the boot default route
-//! carries 192.0.2.2 to the physical NIC exactly as it did 10.0.0.2, and only
-//! the scope's own metric-0 `/24` wins longest-prefix over it. The scope resets
-//! the socket and TCP tables on both edges, in the wheel that minted their
-//! tokens, so those tests take no separate `reset()`.
+//! own threads can act on; the scope resets both tables, so no separate reset.
 
 use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::{KeepaliveFrames, UFrame};
@@ -110,10 +102,8 @@ pub fn test_ring_buffer_write_full() -> TestResult {
 }
 
 pub fn test_ring_buffer_wrap_around() -> TestResult {
-    // The even-segment-count argument that would clear the delayed-ACK latch
-    // holds only for an uninterrupted loop: a concurrent `socket_process_timers`
-    // both transmits an ACK and flips the parity, so the test returns latched.
-    // The scope is what makes the loop uninterrupted.
+    // The even-segment-count argument holds only for an uninterrupted loop: a
+    // concurrent `socket_process_timers` would flip the parity.
     let _scope = match NetTestScope::enter() {
         Ok(s) => s,
         Err(e) => return scope_error(e),
@@ -1524,8 +1514,7 @@ pub fn test_tcp_window_update_resumes_send() -> TestResult {
         "send blocked at wnd=0"
     );
 
-    // Through the out-of-line helper: a second inline `Actions` return slot in
-    // this frame puts it over the 2 KiB stack gate.
+    // Out of line: a second inline `Actions` slot crosses the 2 KiB stack gate.
     tcp_common::inject_window_update(
         client_port,
         server_iss.wrapping_add(1),

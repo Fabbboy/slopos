@@ -10,11 +10,8 @@ fn reset() {
     UDP_DEMUX.lock().clear();
 }
 
-/// Clears the demux table however the test leaves, not only on the way in.
-///
-/// These register wildcards on ports they do not own, at socket indices that do
-/// not exist. Left behind, the next inbound datagram on that port demuxes onto a
-/// stranger — and unlike a PCB, nothing ages a demux entry out.
+/// These register wildcards at socket indices that do not exist, and nothing
+/// ages a demux entry out.
 struct ClearOnExit;
 
 impl Drop for ClearOnExit {
@@ -160,8 +157,7 @@ pub fn test_udp_demux_clear() -> TestResult {
 }
 
 pub fn test_udp_demux_overflow() -> TestResult {
-    // The bucket fill is a count on a table the live stack also registers
-    // into; the scope is what makes eight the whole population.
+    // The live stack registers into this table too; the scope makes eight all.
     let _scope = match NetTestScope::enter() {
         Ok(s) => s,
         Err(e) => return fail!("net scope: {:?}", e),

@@ -119,7 +119,7 @@ pub fn pcp_drain_all() {
 
 /// Promote the batch the closing epoch proved safe. Called by
 /// [`crate::mmu::quiesce`] from whichever CPU closes the epoch — so it must
-/// stay O(1). Returns the frames it released, which a rotation makes zero.
+/// stay O(1).
 pub fn quarantine_rotate() -> u32 {
     BUDDY_ALLOCATOR.quarantine_rotate()
 }
@@ -192,15 +192,11 @@ pub fn get_pcp_stats(cpu: usize) -> Option<PcpStats> {
         })
 }
 
-/// Test hook: how the buddy accounts one frame. See
-/// [`BuddyAllocator::frame_accounting`].
 #[cfg(feature = "test-hooks")]
 pub fn frame_accounting(phys_addr: PhysAddr) -> FrameAccounting {
     BUDDY_ALLOCATOR.frame_accounting(phys_addr)
 }
 
-/// Test hook: pages every rotation so far has spliced back into the free
-/// lists. Wraps; a caller takes differences.
 #[cfg(feature = "test-hooks")]
 pub fn rotate_spliced_pages() -> u32 {
     BUDDY_ALLOCATOR.rotate_spliced_pages()
@@ -254,30 +250,12 @@ impl slopos_ostd::mm::reclaim::Reclaimable for QuarantineReclaim {
 static QUARANTINE_RECLAIM_ASKS: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
-/// Test hook: asks the reclaim tier has put to the quarantine so far. Wraps;
-/// a caller takes differences.
-///
-/// A budget governs how many times a registrant is approached, and nothing
-/// else reports that: an ask made past it frees nothing, so no page count
-/// distinguishes it. This sees only the quarantine's own asks; the registrants
-/// behind it are [`reclaim_probe_zero_asks`]'s subject.
 #[cfg(feature = "test-hooks")]
 pub fn quarantine_reclaim_asks() -> u32 {
     QUARANTINE_RECLAIM_ASKS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// A registrant that holds nothing, registered behind the quarantine.
-///
-/// `run` hands each registrant what is *left* of its budget and stops at the
-/// first pass that meets it, so on a correct kernel nobody is ever asked for
-/// zero pages. This counts the asks that break that, which makes it a witness
-/// no peer's concurrent `run` can forge: the counter moving is a defect
-/// wherever the call came from, so a test may read it without owning the
-/// reclaim tier for the duration.
-///
-/// Registered rather than merely defined because the property is about a
-/// registrant *after* the one that meets the budget, and the quarantine is
-/// always first.
+/// Holds nothing; registered behind the quarantine to catch an ask for zero pages.
 #[cfg(feature = "test-hooks")]
 struct ReclaimProbe;
 
@@ -303,13 +281,9 @@ impl slopos_ostd::mm::reclaim::Reclaimable for ReclaimProbe {
     }
 }
 
-/// The probe's registry name, so a test can prove it is walked rather than
-/// trusting an assertion that a dead registrant would also satisfy.
 #[cfg(feature = "test-hooks")]
 pub const RECLAIM_PROBE_NAME: &str = "reclaim-probe";
 
-/// Test hook: asks for zero pages the reclaim tier has put to the probe.
-/// Zero on a correct kernel, always and for every caller.
 #[cfg(feature = "test-hooks")]
 pub fn reclaim_probe_zero_asks() -> u32 {
     RECLAIM_PROBE_ZERO_ASKS.load(core::sync::atomic::Ordering::Relaxed)

@@ -151,19 +151,12 @@ pub fn reset_for_test() {
         .store(core::ptr::null_mut(), Ordering::Release);
 }
 
-/// The one CPU that [`MapperHiddenForTest`] currently answers `None` on;
-/// `usize::MAX` when no test holds the guard.
 #[cfg(any(test, feature = "test-helpers"))]
 static HIDDEN_FROM_CPU: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(usize::MAX);
 
-/// Hides the registered mapper from the calling CPU for the guard's lifetime,
-/// so a test can observe the no-mapper deny.
-///
-/// Emptying the process-wide slot instead takes the mapper away from every
-/// other CPU too, and a driver that allocates DMA in that window fails with
-/// [`DmaError::NotInitialised`] over a test's shoulder. The guard pins the CPU
-/// it hides the mapper from, so the allocation it denies is the caller's own.
+/// Hides the registered mapper from the calling CPU alone, so a concurrent
+/// driver allocation on another CPU is not denied over a test's shoulder.
 #[cfg(any(test, feature = "test-helpers"))]
 #[must_use = "the mapper reappears when the guard drops"]
 pub struct MapperHiddenForTest {
@@ -240,18 +233,13 @@ impl Drop for RunRelease {
     }
 }
 
-/// Pages [`DmaRun`] has taken from the frame allocator, and pages it has handed
-/// back — see [`run_page_account`].
 #[cfg(any(test, feature = "test-helpers"))]
 static PAGES_TAKEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 #[cfg(any(test, feature = "test-helpers"))]
 static PAGES_RETURNED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// `(taken, returned)` since boot, in pages.
-///
-/// Both are monotonic, so a test compares deltas across its own window: a
-/// neighbour's DMA churn adds to each equally and cancels, where the page
-/// allocator's free count cannot tell that neighbour from a leak.
+/// `(taken, returned)` since boot, in pages. Both monotonic, so a test compares
+/// deltas across its own window.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn run_page_account() -> (u64, u64) {
     (

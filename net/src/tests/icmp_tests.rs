@@ -1,9 +1,5 @@
 //! ICMP socket tests, including echo exchanges with the QEMU SLIRP gateway.
-//!
-//! The end-to-end cases read the live route table rather than installing one:
-//! the boot DHCP lease is the only thing that should author the topology the
-//! live stack forwards on, and a test that wrote its own would leave whatever
-//! it invented behind for every later test.
+//! End-to-end cases read the live route table rather than authoring topology.
 
 use slopos_abi::net::{AF_INET, IPPROTO_ICMP, SOCK_DGRAM};
 use slopos_ostd::klog_info;
@@ -19,16 +15,13 @@ use crate::types::{DevIndex, Ipv4Addr, Port, SockAddr};
 
 const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
 
-/// Failsafe on a wait whose other end is the environment rather than the
-/// kernel. Not a budget for the exchange it covers — a SLIRP round trip is
-/// sub-millisecond — only a bound on a wait that would otherwise not end.
+/// Bound on a wait whose other end is the environment, not a latency budget.
 const ENV_FAILSAFE_MS: u64 = 3_000;
 
-/// How long each pass leaves the peer alone before draining the NIC again.
 const POLL_INTERVAL_MS: u32 = 1;
 
-/// Drain RX for `ms`. For a reply that lands in a branch with no observable
-/// effect there is no condition to wait on, so the window is the whole test.
+/// A reply landing in a branch with no observable effect leaves no condition to
+/// wait on, so the window is the whole test.
 fn drain_rx_for(ms: u64) {
     let start = slopos_kernel_services::clock::uptime_ms();
     while slopos_kernel_services::clock::uptime_ms().saturating_sub(start) < ms {
@@ -39,17 +32,13 @@ fn drain_rx_for(ms: u64) {
 
 const REPLY_DRAIN_MS: u64 = 100;
 
-/// The device and next hop the live route table picks for the gateway, once
-/// DHCP has installed a route to it.
 fn await_gateway_route() -> Option<((DevIndex, Ipv4Addr), u64)> {
     await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
         ROUTE_TABLE.lookup(Ipv4Addr(GATEWAY_IP))
     })
 }
 
-/// Closes the socket on the early return `assert_*!` takes, which a trailing
-/// `socket_close` would skip: a bound identifier left in the ICMP demux catches
-/// a later test's replies.
+/// A bound identifier left in the ICMP demux catches a later test's replies.
 struct SocketGuard(u32);
 
 impl Drop for SocketGuard {
@@ -136,9 +125,7 @@ fn test_icmp_ping_gateway_e2e() -> TestResult {
         return fail!("send_echo_request failed: {:?}", e);
     }
 
-    // No socket is bound for this identifier, so the reply exercises the
-    // unmatched-reply drop branch in `icmp::handle_rx` and leaves nothing to
-    // observe.
+    // No socket is bound for this identifier: the unmatched-reply drop branch.
     drain_rx_for(REPLY_DRAIN_MS);
     pass!()
 }
@@ -234,8 +221,6 @@ fn test_icmp_socket_sendto_recvfrom_e2e() -> TestResult {
     pass!()
 }
 
-/// The NAPI burst must drain the virtio used ring on explicit invocation and
-/// feed the result through the ICMP demux.
 fn test_icmp_napi_scheduling_e2e() -> TestResult {
     socket::socket_reset_all();
 

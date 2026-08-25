@@ -1,8 +1,7 @@
 //! Managed-resource (`Devres`) and identity-DMA-mapper regression tests.
 //!
-//! The DMA release test asserts on slot state and on the run page account: the
-//! buddy absorbs a double free without faulting, so "it did not crash" is no
-//! evidence.
+//! The buddy absorbs a double free without faulting, so the DMA release test
+//! asserts on slot state and on the run page account instead.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -83,8 +82,6 @@ pub fn test_devres_releases_irq_vector() -> TestResult {
 
     drop(res);
 
-    // What the release owes is that the vector is claimable again and that its
-    // dispatch slot is empty — not that the allocator's next pick lands on it.
     let reclaimed = match IrqAllocator::reserve_specific(vector) {
         Ok(l) => l,
         Err(e) => return fail!("released vector {} is not free again: {:?}", vector, e),
@@ -98,8 +95,6 @@ pub fn test_devres_releases_irq_vector() -> TestResult {
 
 const DMA_RUN_PAGES: usize = 2;
 
-/// Repetition is stress, not statistics: the account below is exact, so one
-/// leaked round would already show.
 const DMA_CHURN_ROUNDS: usize = 1024;
 
 pub fn test_devres_releases_dma() -> TestResult {
@@ -132,9 +127,7 @@ pub fn test_devres_releases_dma() -> TestResult {
         }
     }
 
-    // Accounted on the runs themselves, not on the page allocator's free count:
-    // that count moves for every CPU, so a neighbour's allocation and a leak
-    // read alike.
+    // The allocator's free count moves for every CPU, so a neighbour's allocation reads as a leak.
     let (taken_before, returned_before) = run_page_account();
     for round in 0..DMA_CHURN_ROUNDS {
         match DmaCoherent::alloc(DMA_RUN_PAGES) {
@@ -182,8 +175,7 @@ pub fn test_identity_mapper_iova_and_default_deny() -> TestResult {
     }
     drop(dma);
 
-    // Hidden from this CPU rather than unregistered: a driver allocating DMA on
-    // another CPU must not see this test's deny.
+    // Hidden from this CPU rather than unregistered: another CPU's driver must not see the deny.
     let hidden = MapperHiddenForTest::for_current_cpu();
     let denied = DmaCoherent::alloc(2);
     drop(hidden);

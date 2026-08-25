@@ -1684,8 +1684,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         let _ = tcp::abort(tcp_idx);
         return send_rc;
     }
-    // After the send and outside the table lock: the RTO is measured from the
-    // transmission, and the wheel must not be entered under that lock.
+    // RTO runs from the transmission, and the wheel must not be entered under the table lock.
     tcp::arm_syn_retransmit(tcp_idx);
 
     if nonblocking {
@@ -3325,17 +3324,11 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_process_timers() {
-    // Gated like `net_timer_process`, and for a reason the clock change below
-    // creates: this walks every PCB in the global table and can transmit. Once
-    // it reads the same mock clock a test advances, a test that jumps mock time
-    // by two hours makes every armed delayed ACK in the table look due to the
-    // net-timer kthread on another CPU, which then sends the test's segment.
     if crate::ingress::dataplane_quiesced() {
         return;
     }
     // Retransmit timers fire exclusively via NET_TIMER_WHEEL → tcp::on_retransmit.
-    // `crate::clock`, not raw uptime: the deadline this is compared against was
-    // set from the same domain, and a mock advance must move both together.
+    // `crate::clock`, not raw uptime: the deadlines compared here are set in that same domain.
     let now_ms = crate::clock::now_ms();
     if let Some((_idx, seg)) = tcp::delayed_ack_check(now_ms) {
         let _ = socket_send_tcp_segment(&seg, &[]);

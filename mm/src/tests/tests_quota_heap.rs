@@ -42,11 +42,8 @@ pub fn test_quota_heap_backing_reconciles_with_the_buddy() -> TestResult {
     pass!()
 }
 
-/// The three samples bracket their calls directly. `HEAP_PAGES` is kernel-wide,
-/// so no guard here makes them adjacent — the preempt hold only keeps this
-/// CPU's own reschedule out of the bracket, and the assertions are direction
-/// checks that survive a peer either way. Not `IrqDisabled`: the large tier
-/// walks an unbounded free list and then allocates from the buddy.
+/// Not `IrqDisabled`: the large tier walks an unbounded free list before it
+/// reaches the buddy.
 pub fn test_quota_heap_large_alloc_is_charged() -> TestResult {
     const BYTES: usize = 4 * (MAX_SLAB_CLASS_BYTES + 1);
 

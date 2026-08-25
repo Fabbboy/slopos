@@ -3,13 +3,6 @@
 //! The kernel test phase runs before the scheduler hands over, so there is no
 //! current task to block: only task-free structure is observable here, and a
 //! real `wait`/`wake` round-trip belongs to the userland phase.
-//!
-//! Anything asserted about an *empty* queue is asserted against
-//! [`TEST_BUS`](slopos_ostd::sync::TEST_BUS). The kernel's own queues carry
-//! whatever the running system has parked on them, so "socket slot 0 has no
-//! waiters" is a claim about the machine, not about the bus — and publishing
-//! onto them to find out wakes real blockers. Routing, which is a property of
-//! the code rather than of the moment, is still asserted against the real bus.
 
 use slopos_abi::event::{CHILD_EXIT_BUCKETS, MAX_PIPES, MAX_TTYS, MAX_UNIX_SOCKETS};
 use slopos_abi::event::{KernelEvent, PipeSlot, SocketSlot, TaskSlot, TtySlot, UnixSocketSlot};
@@ -20,10 +13,7 @@ use slopos_testing::{assert_eq_test, assert_test, pass};
 
 /// One representative event per variant, including boundary slot ids and an
 /// oversized id that must fold back into range via `% CAP`.
-///
-/// Every AF_INET id sits at or past `MAX_SOCKET_SLOTS`: below that bound
-/// `queue_for` routes to the spine, which is a static shared by every bus, so
-/// a lower id would take a `TEST_BUS` publish back onto a kernel queue.
+/// Below `MAX_SOCKET_SLOTS` `queue_for` routes to the spine, which every bus shares.
 fn sample_events() -> [KernelEvent; 14] {
     [
         KernelEvent::SocketRecv {
@@ -65,9 +55,7 @@ fn sample_events() -> [KernelEvent; 14] {
     ]
 }
 
-/// An unbounded id paired with the in-range id it must fold onto. A publisher
-/// and a subscriber fold by the same rule, so a wake is lost the moment the two
-/// stop landing on one queue.
+/// An unbounded id paired with the in-range id it must fold onto.
 fn folded_pairs() -> [(KernelEvent, KernelEvent); 6] {
     const HUGE: usize = u32::MAX as usize;
     [
@@ -122,8 +110,6 @@ fn folded_pairs() -> [(KernelEvent, KernelEvent); 6] {
     ]
 }
 
-/// Every variant routes to a queue of the bus it was published on, and an
-/// out-of-range slot id folds into that bus rather than off the end of it.
 pub fn test_event_publish_routes_in_range() -> TestResult {
     for ev in sample_events() {
         assert_eq_test!(TEST_BUS.publish(ev), 0, "idle publish wakes nobody");

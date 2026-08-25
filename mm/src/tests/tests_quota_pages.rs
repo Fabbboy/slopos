@@ -355,9 +355,7 @@ slopos_testing::stest!(
 /// still in flight. A shared charge would be refunded at ring teardown while
 /// the driver still held the pages — a memory-lock bypass at the DMA boundary.
 ///
-/// Charged to a scratch account rather than the root: the root is the ancestor
-/// of every live principal, so its pinned row moves whenever any other CPU
-/// pins or releases a page.
+/// Charged to a scratch account: the root's pinned row moves under every CPU.
 #[cfg(feature = "test-hooks")]
 pub fn test_quota_keepalive_charge_outlives_its_pin() -> TestResult {
     use crate::pinned_user_buffer::PinnedUserBuffer;

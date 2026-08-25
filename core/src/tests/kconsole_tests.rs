@@ -20,11 +20,9 @@ static PROBE_EMIT: AtomicU32 = AtomicU32::new(0);
 /// Lines the probe actually got to emit.
 static PROBE_EMITTED: AtomicU32 = AtomicU32::new(0);
 static PROBE_TRUNCATED: AtomicU32 = AtomicU32::new(0);
-/// Asks the probe for [`MARKER`]; set by the log-ring test alone.
 static PROBE_MARK: AtomicBool = AtomicBool::new(false);
 
-/// A line no other test asks for, so a scan of the ring cannot match an
-/// earlier probe's output.
+/// A line no other test asks for, so a ring scan cannot match an earlier probe's output.
 const MARKER: &str = "kconsole probe marker";
 
 slopos_ostd::kcommand! {
@@ -69,39 +67,21 @@ fn pump() {
     bh::run_pending_if_due();
 }
 
-/// Park every AP for the duration of `f`.
-///
-/// The pending set is one machine-wide bitmap that `drain` swaps to zero, so
-/// "the drain I caused ran the command" is an observation only while no other
-/// CPU can reach a drain, and a parked AP runs no bottom half. Without it a
-/// foreign drain claims the request and this CPU reads the probe's counters
-/// while the CPU that claimed it is still inside the command.
+/// A parked AP runs no bottom half, leaving the machine-wide pending bitmap one claimant.
 fn with_aps_parked<R>(f: impl FnOnce() -> R) -> Result<R, ApPauseError> {
     let _parked = pause_all_aps()?;
     Ok(f())
 }
 
-/// [`with_aps_parked`] with this CPU's interrupts masked as well, so no timer
-/// tick lands between a request and the drain that must claim it. `f` has to
-/// call `kconsole::drain` rather than [`pump`]: the bottom-half point declines
-/// with interrupts masked.
+/// Masks this CPU's interrupts too, so `f` must call `kconsole::drain` rather than [`pump`].
 fn with_sole_drain<R>(f: impl FnOnce() -> R) -> Result<R, ApPauseError> {
     with_aps_parked(|| IrqDisabled::with(|_irq| f()))
 }
 
-/// How far back from the ring's end [`klog_holds`] searches. `klog_len`
-/// saturates once the ring is full, after which an offset captured before the
-/// command ran names a later byte than it did and cannot start the search; the
-/// line is read moments after it is emitted, so this leaves room for whatever
-/// another CPU logged in between.
+/// `klog_len` saturates once the ring is full, so an offset captured earlier cannot start a scan.
 const SCAN_TAIL: usize = 16 * 1024;
 
-/// Whether the retained log ring holds `needle`; `None` if the read window
-/// could not be allocated.
-///
-/// Reads windows forward to the ring's current length rather than stopping at
-/// the first, and overlaps them by `needle.len() - 1` so a needle straddling a
-/// read boundary is still found.
+/// Windows overlap by `needle.len() - 1` so a needle straddling a read boundary is still found.
 fn klog_holds(needle: &[u8]) -> Option<bool> {
     const WINDOW: usize = 8192;
 
@@ -190,8 +170,7 @@ pub fn test_kcon_flags_are_exclusive() -> TestResult {
 
 pub fn test_kcon_end_to_end_via_bottom_half() -> TestResult {
     with_policy(KConfig::defaults(), || {
-        // Interrupts stay on: this is the one test that must reach the real
-        // bottom-half point, which declines with them masked.
+        // Interrupts stay on: this is the one test that must reach the real bottom-half point.
         let observed = with_aps_parked(|| {
             let before = PROBE_RUNS.load(Ordering::Relaxed);
             let drains_before = bh::drains();
@@ -216,7 +195,6 @@ pub fn test_kcon_end_to_end_via_bottom_half() -> TestResult {
     })
 }
 
-/// A key queued repeatedly runs once: the pending set is a bitmap, not a ring.
 pub fn test_kcon_request_is_idempotent() -> TestResult {
     with_policy(KConfig::defaults(), || {
         let before = PROBE_RUNS.load(Ordering::Relaxed);
@@ -314,8 +292,6 @@ pub fn test_kcon_destructive_needs_the_mask_bit() -> TestResult {
         })
     });
     match refused {
-        // The key must reach a drain and be turned away there; never queued at
-        // all would satisfy the counter without the policy doing anything.
         Ok((true, true)) => {}
         Ok((false, _)) => return fail!("the request was never queued, so nothing was refused"),
         Ok((true, false)) => return fail!("a destructive command ran under the default policy"),
@@ -400,8 +376,6 @@ pub fn test_kcon_output_reaches_the_log_ring() -> TestResult {
         }
         match klog_holds(MARKER.as_bytes()) {
             Some(true) => TestResult::Pass,
-            // Equal lengths mean the ring is full and has been dropping its
-            // oldest bytes, which is what a lost marker would look like.
             Some(false) => fail!(
                 "the command's output never reached the ring (ring length {} -> {})",
                 len_before,
@@ -418,9 +392,7 @@ pub fn test_kcon_output_reaches_the_log_ring() -> TestResult {
 pub fn test_kcon_probe_slot_protocol() -> TestResult {
     use slopos_ostd::watchdog::{self, NmiDisposition};
 
-    // An index no machine this runs on has, so the lockup detector's own
-    // probes — which land on whichever CPU the host descheduled — can never
-    // contend for this slot.
+    // An index no machine this runs on has, so the lockup detector's own probes cannot contend.
     const VICTIM: usize = slopos_arch::MAX_CPUS - 1;
 
     if watchdog::probe_disposition(VICTIM) != NmiDisposition::Unsolicited {

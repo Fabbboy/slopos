@@ -13,16 +13,12 @@ use crate::apic;
 use crate::apic::regs::{LAPIC_LVT_TIMER, LAPIC_TIMER_ICR};
 use crate::hpet;
 
-/// The baseline scheduler tick these tests program.
 const PERIOD_MS: u32 = 10;
 
-/// Failsafe for a timer that never fires. Not the interval under test: the
-/// LAPIC counts down only while this vCPU executes, so no amount of wall time
-/// bounds how long a given number of ticks takes.
+// Failsafe only: the LAPIC counts down only while this vCPU executes, so wall
+// time does not bound how long a given number of ticks takes.
 const TICK_FAILSAFE_MS: u32 = 1000;
 
-/// The LAPIC programming a test interrupts and must put back: it owns the CPU
-/// it runs on, and the scheduler — plus every later test — needs its ticks.
 struct TimerProgramming {
     lvt: u32,
     initial_count: u32,
@@ -40,17 +36,11 @@ fn restore_timer_programming(saved: &TimerProgramming) {
     apic::timer_start(saved.initial_count);
 }
 
-/// Timer interrupts taken by *this* CPU.
-///
-/// `irq_get_timer_ticks()` is one global counter every CPU's ISR bumps, so it
-/// advances at `cpu_count` × the tick rate and says nothing about this CPU. The
-/// PCR heartbeat moves once per timer interrupt, on the CPU that took it.
+// Per-CPU, unlike `irq_get_timer_ticks()`, which every CPU's ISR bumps.
 fn local_ticks() -> u64 {
     pcr::heartbeat_for_cpu(pcr::get_current_cpu())
 }
 
-/// Spin until this CPU has taken `want` timer interrupts, returning how many
-/// arrived before `failsafe_ms` of wall time ran out.
 fn await_local_ticks(want: u64, failsafe_ms: u32) -> u64 {
     let start = local_ticks();
     let Some(failsafe_ticks) = hpet::ms_to_ticks(failsafe_ms) else {
@@ -135,8 +125,7 @@ pub fn test_lapic_timer_recalibration_consistent() -> TestResult {
         let hz =
             (sample.lapic_ticks as u128 * 1_000_000_000 / sample.observed_window_ns as u128) as u64;
         best_any = best_any.max(hz);
-        // A host cannot shorten the window, so the overshoot is time this vCPU
-        // spent descheduled — time the LAPIC spent stopped and the HPET did not.
+        // Overshoot is deschedule time: the LAPIC stopped, the HPET did not.
         let stretch = sample.requested_window_ns / 8;
         if sample.observed_window_ns <= sample.requested_window_ns + stretch {
             best_clean = best_clean.max(hz);
@@ -192,8 +181,7 @@ pub fn test_lapic_timer_periodic_programs_timer() -> TestResult {
     let _pinned = PreemptGuard::new();
     let saved = save_timer_programming();
 
-    // `set_periodic_ms` programs the LVT unmasked, so stop the timer and put
-    // the previous programming back before anything can fire on 0xEF.
+    // `set_periodic_ms` unmasks the LVT, so restore before 0xEF can fire.
     let ok = apic::timer::set_periodic_ms(0xEF, PERIOD_MS);
 
     apic::timer_stop();
@@ -216,8 +204,7 @@ pub fn test_lapic_timer_stop_clears_counter() -> TestResult {
         return TestResult::Skipped;
     }
 
-    // Stop and read must reach the same LAPIC, so nothing may migrate this task
-    // between them.
+    // Stop and read must reach the same LAPIC.
     let _pinned = PreemptGuard::new();
     let saved = save_timer_programming();
 
@@ -283,8 +270,7 @@ pub fn test_lapic_timer_mask_suppresses_ticks() -> TestResult {
     apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, PERIOD_MS);
 
     apic::timer::mask();
-    // Read after the mask, so a tick already latched when it was written lands
-    // on this side of the window.
+    // Read after the mask, so a tick latched during the write lands outside it.
     let masked_from = local_ticks();
     hpet::delay_ms(MASKED_WINDOW_MS);
     let delta_masked = local_ticks().saturating_sub(masked_from);
@@ -343,9 +329,7 @@ pub fn test_lapic_timer_tick_rate_reasonable() -> TestResult {
     let min_hz = programmed_hz / 2;
     let max_hz = programmed_hz * 2;
 
-    // Being descheduled costs this CPU ticks over a window of wall time and can
-    // never hand it extra, so the ceiling holds for every round while the floor
-    // holds only for the best of them.
+    // Deschedule only loses ticks, so the ceiling holds per round, the floor only for the best.
     let mut best_hz = 0u64;
     for _ in 0..ROUNDS {
         let wall_start = hpet::read_counter();

@@ -179,11 +179,9 @@ pub fn miss_threshold() -> u32 {
     MISS_THRESHOLD.load(Ordering::Acquire)
 }
 
-/// Per-target override of [`miss_threshold`]; `0` means "no override".
+/// `0` means "no override".
 static MISS_THRESHOLD_OVERRIDE: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
-/// The fuse `target` is judged on: its own override where one is installed,
-/// the machine-wide threshold otherwise.
 fn miss_threshold_for(target: usize) -> u32 {
     match MISS_THRESHOLD_OVERRIDE
         .get(target)
@@ -196,18 +194,12 @@ fn miss_threshold_for(target: usize) -> u32 {
 
 /// Judge one CPU on a shorter fuse than the rest of the machine, for the
 /// token's lifetime.
-///
-/// Lowering [`set_miss_threshold`] instead puts *every* CPU on the short fuse,
-/// and a CPU the host descheduled reads exactly like a wedged one — so a
-/// machine-wide lowering makes a stall report a function of host scheduling.
 pub struct MissThresholdOverride {
     cpu: usize,
     previous: u32,
 }
 
 impl MissThresholdOverride {
-    /// `None` for a `cpu` outside the tracked range, and for `samples == 0`,
-    /// which [`set_miss_threshold`] rejects for the same reason.
     pub fn for_cpu(cpu: usize, samples: u32) -> Option<Self> {
         if samples == 0 {
             return None;
@@ -244,7 +236,6 @@ pub fn clear_panic_override() {
     PANIC_OVERRIDE.store(PANIC_OVERRIDE_UNSET, Ordering::Release);
 }
 
-/// What `watchdog.panic=` asked for, if the operator asked for anything.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanicOverride {
     Unset,
@@ -264,9 +255,6 @@ pub fn panic_override() -> PanicOverride {
 /// both stop bumping their heartbeat. Under a hypervisor the sustained breach is
 /// therefore not evidence, and taking the machine down on it aborts a healthy
 /// kernel. `watchdog.panic=` overrides in both directions.
-///
-/// Separate from [`fatal_escalation_permitted`] so the policy can be exercised
-/// over both inputs without arming the live machine's escalation.
 pub const fn fatal_escalation_policy(configured: PanicOverride, hypervisor_present: bool) -> bool {
     match configured {
         PanicOverride::ForcedOn => true,

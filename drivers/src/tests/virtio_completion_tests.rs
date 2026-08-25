@@ -95,8 +95,6 @@ pub fn test_edge_event_wait_presignaled() -> TestResult {
     pass!()
 }
 
-/// A timeout owes the caller the interval it asked for, measured on the clock
-/// the wait itself uses.
 pub fn test_edge_event_wait_timeout() -> TestResult {
     const TIMEOUT_MS: u32 = 1;
     let ev = IrqEdgeEvent::new();

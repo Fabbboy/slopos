@@ -1,6 +1,5 @@
-//! A second `KArc<VmSpace>` is minted only under the per-process lock and
-//! released outside it, so holding one and then driving a fault path on the
-//! same CPU reproduces the contention single-threaded — no SMP, no timing.
+//! Holding a second `KArc<VmSpace>` reproduces the contention
+//! single-threaded — no SMP, no timing.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
@@ -106,8 +105,7 @@ pub fn test_cow_fault_retries_while_a_reader_holds_the_space() -> TestResult {
     let Some(phys) = cow_page(&vm) else {
         return fail!("map and mark a COW page");
     };
-    // Equivalent to a second process mapping the same paddr, which is what
-    // sends `handle_cow_fault` down the copying arm.
+    // A second reference to the paddr is what selects the copying arm.
     let shared = match Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64())) {
         Ok(frame) => frame,
         Err(e) => return fail!("take a second reference to the COW frame: {:?}", e),
@@ -127,21 +125,12 @@ pub fn test_cow_fault_retries_while_a_reader_holds_the_space() -> TestResult {
     }
 }
 
-/// The single-reference arm of the COW dispatch, which the multi-reference
-/// tests above never reach.
-///
-/// Its return value is not the observable: with the probe pushed back inside
-/// the copying arm, this arm still ends in `Retry`, because the bounded spin in
-/// `vm_space_get_mut` gives up with `WouldBlock` and that maps to the same
-/// value. What differs is the million spins it takes to get there, with the
-/// per-process lock held and so with interrupts masked — the cost the probe
-/// exists to avoid. So the assertion is the spin count, and the `Retry` beside
-/// it only pins that the arm was entered at all.
+/// Both a probed and an unprobed dispatch end in `Retry`; only the spin count
+/// separates them.
 pub fn test_cow_fault_with_one_reference_does_not_spin_under_contention() -> TestResult {
     let Some(vm) = ProcessVmGuard::new() else {
         return fail!("create VM");
     };
-    // No second `Frame` reference: this is the arm the copying tests skip.
     if cow_page(&vm).is_none() {
         return fail!("map and mark a COW page");
     }
@@ -150,8 +139,7 @@ pub fn test_cow_fault_with_one_reference_does_not_spin_under_contention() -> Tes
         return fail!("clone the address space");
     };
 
-    // Pinned: the counter is per-CPU, so a migration between the two reads
-    // would difference two different CPUs' slots.
+    // The counter is per-CPU, so a migration would difference two slots.
     let guard = PreemptGuard::new();
     let cpu = slopos_arch::pcr::get_current_cpu();
     let before = vm_space_mut_spins_taken(cpu);
@@ -301,9 +289,8 @@ pub fn test_retry_episode_warns_once_after_the_budget() -> TestResult {
     pass!()
 }
 
-/// A restart is only observable by warning again, so each arm below steps past
-/// the budget from the moment the episode would have restarted: the call that
-/// changes address or task returns `false` either way.
+/// A restart is only observable by warning again, hence the second call in
+/// each arm.
 pub fn test_retry_episode_keys_on_the_task_not_the_address() -> TestResult {
     let mut ep = RetryEpisode::IDLE;
     assert_test!(

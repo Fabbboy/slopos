@@ -237,10 +237,7 @@ pub fn quota_report(phase: &str) {
 static CHARGE_COST_NS: [core::sync::atomic::AtomicU64; 2] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 2];
 static CHARGE_COST_DEPTH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-/// Cost of one bare CAS round trip, measured in the same run and the same batch
-/// shape as the two above. The charge numbers are only meaningful against it:
-/// a cycle count on this path is a property of the accelerator, and differs by
-/// more than ten times between a KVM host and a TCG one.
+/// Bare-CAS baseline for the two above; an absolute cycle count here measures the accelerator.
 static CHARGE_COST_REF: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Record the measured per-charge cost at depth 1 and at `deep_depth`.
@@ -272,9 +269,6 @@ fn report_charge_cost() {
         depth,
         CHARGE_COST_NS[1].load(Ordering::Acquire)
     );
-    // The scale the two above are read against. Emitted from the same run and
-    // the same batch shape, so a gate can divide by it and get a number that
-    // does not move with the accelerator.
     slopos_ostd::klog_info!(
         "QUOTACOST: reference cycles_per_op={}",
         CHARGE_COST_REF.load(Ordering::Acquire)

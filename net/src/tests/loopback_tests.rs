@@ -121,8 +121,7 @@ pub fn test_loopback_queue_capacity() -> TestResult {
 
     let lo = LoopbackDev::new();
 
-    // The test pool holds fewer buffers than the device's 256-packet queue, so
-    // this reaches only the within-capacity path.
+    // Fewer buffers than the 256-packet queue: only the within-capacity path.
     for _ in 0..10 {
         let Some(pkt) = dummy_packet(0xFF) else {
             return slopos_testing::fail!("test pool should have capacity");

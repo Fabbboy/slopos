@@ -1,9 +1,5 @@
 //! Tests that exercise the live NIC, its DHCP lease and the QEMU SLIRP peer.
-//!
-//! Nothing here writes to a shared table. The route table, the interface table
-//! and the neighbour cache are what the live stack is using while these run, so
-//! a test that installed its own topology would be asserting against a stack it
-//! had just reconfigured out from under the boot lease.
+//! They assert against the live stack's own tables and install no topology.
 
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
@@ -22,9 +18,7 @@ use crate::types::{DevIndex, Ipv4Addr};
 const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
 const GATEWAY_PORT: u16 = 7;
 
-/// Failsafe on a wait whose other end is the environment rather than the
-/// kernel. Not a budget for the exchange it covers — a SLIRP round trip is
-/// sub-millisecond — only a bound on a wait that would otherwise not end.
+/// Bound on a wait that would otherwise not end, not a budget for the exchange.
 const ENV_FAILSAFE_MS: u64 = 2_000;
 
 /// How long each pass leaves the peer alone before draining the NIC again.
@@ -40,11 +34,8 @@ fn nic_dev() -> Option<DevIndex> {
     found
 }
 
-/// Wait for the boot DHCP client to put an address on `dev`.
-///
-/// The client's state reaches `Bound` under its own lock and the lease is
-/// applied after that lock is dropped, so the address — not the state — is what
-/// says the interface is configured.
+/// The lease is applied after the DHCP client drops its own lock, so the
+/// address — not the `Bound` state — is what says the interface is configured.
 fn await_dhcp_addr(dev: DevIndex) -> Option<(Ipv4Addr, u64)> {
     await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
         iface::our_ip(dev).filter(|ip| !ip.is_unspecified())
@@ -145,9 +136,7 @@ fn test_arp_resolve_gateway() -> TestResult {
     crate::arp::send_request_via_registry(dev, next_hop);
     let after = DEVICE_REGISTRY.stats_by_index(dev).unwrap_or(before);
 
-    // The half of this test that does not depend on a peer. Other CPUs transmit
-    // on this device too, so the counter is a floor rather than a count: it can
-    // only fail when the request never reached the wire at all.
+    // Other CPUs transmit on this device too, so the counter is a floor.
     assert_test!(
         after.tx_packets > before.tx_packets,
         "dev {} transmitted nothing for an ARP request for {}",

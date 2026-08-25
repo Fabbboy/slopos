@@ -385,14 +385,8 @@ fn test_admin_guard_refuses_a_second_entrant() -> TestResult {
     pass!()
 }
 
-/// An administrative down flushes the device's neighbour entries and the
-/// packets they were holding for an address that never resolved.
-///
-/// Both halves are asserted. Where the packet is comes from the cache snapshot;
-/// that it was *handed back* rather than dropped under the cache lock comes
-/// from the pool's free count — and that count is only assertable because the
-/// buffer is drawn from the tests' own pool, which no live receive path
-/// allocates from.
+/// The free count is only assertable because the buffer comes from the tests'
+/// own pool, which no live receive path allocates from.
 fn test_admin_down_flushes_neighbours_and_frees_packets() -> TestResult {
     ensure_test_pool();
 
@@ -494,15 +488,8 @@ fn test_admin_intent_survives_carrier_loss() -> TestResult {
 // restoring global state and asserts *after*, so a failing assertion cannot
 // leave networking switched off for every later test.
 
-/// Every live non-loopback interface's administrative intent, cleared for as
-/// long as the guard lives, so the master switch acts on the test's own devices
-/// and on nothing else.
-///
-/// The flag alone is not quiescence: the DHCP client would still bind or renew
-/// a lease onto an interface the switch has been told to skip. So the guard
-/// shuts the data plane first, which both physical ingress and the net timer
-/// thread check. `Drop` reopens it, so an early `assert_*` cannot leave the
-/// live NIC parked for the rest of the boot.
+/// Clears every live non-loopback interface's admin intent. The flag alone is
+/// not quiescence — DHCP would still renew — so the data plane is shut too.
 struct ParkedIfaces {
     parked: [u32; NET_MAX_IFACES],
     n: usize,
@@ -514,8 +501,7 @@ impl ParkedIfaces {
 
         let mut parked = [0u32; NET_MAX_IFACES];
         let mut n = 0usize;
-        // Collect under the table lock, mutate outside it: `set_admin_intent`
-        // takes the same lock `for_each` is holding.
+        // `set_admin_intent` takes the same lock `for_each` holds.
         iface::for_each(|i| {
             if matches!(i.kind, IfaceKind::Loopback) || !i.admin_up || keep.contains(&i.ifindex) {
                 return;
@@ -537,8 +523,7 @@ impl Drop for ParkedIfaces {
         for ifindex in &self.parked[..self.n] {
             let _ = iface::set_admin_intent(*ifindex, true);
         }
-        // Last: the kernel's net threads stay out until every interface they
-        // read is back to the intent it was found with.
+        // Last: the net threads stay out until every intent is restored.
         ingress::quiesce_end();
     }
 }

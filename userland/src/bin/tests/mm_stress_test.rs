@@ -28,13 +28,7 @@ const WORKER_ITERS: usize = 400;
 /// Bounded reap so a wedged child fails the case instead of hanging.
 const REAP_SPINS: usize = 400_000;
 
-/// Iterations between progress lines.
-///
-/// Both cases below run for tens of seconds and, until this, said nothing while
-/// they did. The harness aborts the run — not the test, the run — after
-/// `--silence-secs` of no output, so a stress case that reports only at its end
-/// is one host slowdown away from taking every later test with it. Chosen so
-/// the gap between lines stays in the low seconds under TCG.
+// Keeps output inside the harness's `--silence-secs` budget, which aborts the whole run.
 const PROGRESS_EVERY: usize = 25;
 
 const EXIT_OK: i32 = 0;

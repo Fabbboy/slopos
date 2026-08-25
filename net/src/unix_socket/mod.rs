@@ -910,9 +910,6 @@ pub fn unix_poll_register(handle: SocketHandle) -> bool {
     BUS.subscribe_current(unix_ev(wq_idx))
 }
 
-/// Tasks parked on the socket's readiness queue. Diagnostic: whether a publish
-/// can reach anybody is a property of the queue's occupancy, which no single
-/// task's state reports.
 pub fn unix_poll_waiter_count(handle: SocketHandle) -> usize {
     handle
         .slot_for_wq()

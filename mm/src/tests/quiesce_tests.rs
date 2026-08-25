@@ -10,8 +10,6 @@ use slopos_testing::{assert_eq_test, assert_test};
 use crate::mmu::quiesce;
 use crate::page_alloc;
 
-/// Bounds the loops below. Every iteration closes an epoch, and three CPUs
-/// cannot keep the window open against that for long.
 const CLOSURE_BUDGET: u32 = 8;
 
 /// Everything else here is vacuous if the machinery never armed.
@@ -23,13 +21,7 @@ pub fn test_quiesce_is_active() -> TestResult {
     TestResult::Pass
 }
 
-/// An epoch that never closes grows the quarantine until allocation fails, and
-/// one that closes twice discharges a quarantine an epoch early.
-///
-/// A closure must therefore report the epoch that was current when it ran and
-/// leave the counter exactly one higher. A peer's tick can close an epoch
-/// inside either window, which is what the retry is for; an attempt that
-/// brackets its own closure without one is the witness.
+/// An epoch that never closes grows the quarantine until allocation fails.
 pub fn test_quiesce_epoch_advances() -> TestResult {
     let mut attempts = 0u32;
     let mut last = (0u64, 0u64, 0u64);
@@ -71,9 +63,7 @@ pub fn test_quiesce_epoch_advances() -> TestResult {
     TestResult::Fail
 }
 
-/// `quarantine_required` reads the epoch and the deferral stamp itself, so
-/// pairing its answer with those two counters takes a sample that brackets the
-/// call and agrees with itself — every CPU raises both.
+/// Retries until the epoch and the deferral stamp bracket the call unchanged.
 fn sample_quarantine() -> Option<(u64, u64, bool)> {
     const SAMPLE_BUDGET: u32 = 64;
 
@@ -94,9 +84,8 @@ fn sample_quarantine() -> Option<(u64, u64, bool)> {
 pub fn test_quarantine_spans_two_epochs_after_a_deferred_unmap() -> TestResult {
     let deferred_at = quiesce::note_deferred_unmap();
 
-    // The stamp is a `fetch_max`, so a peer's own deferral pushes the discharge
-    // further out; re-reading it each round is what keeps this asserting the
-    // window rather than a race against that peer.
+    // The stamp is a `fetch_max`: a peer's deferral pushes the discharge out,
+    // so it must be re-read each round.
     let mut closures = 0u32;
     loop {
         let Some((epoch, stamp, required)) = sample_quarantine() else {
@@ -133,17 +122,6 @@ pub fn test_quarantine_spans_two_epochs_after_a_deferred_unmap() -> TestResult {
 
 /// Rotation runs from a timer interrupt: a splicing rotation would hold the
 /// allocator's cli-lock for O(blocks x free-list length) inside that handler.
-///
-/// Rotating an empty quarantine cannot splice whatever the code does, so the
-/// test parks a frame first and then drives it the whole way through --
-/// incoming to draining to releasable -- which is the only path on which a
-/// splicing rotation has anything to splice.
-///
-/// The observable is the counter rather than this call's return value: the
-/// rotations that move the parked frame along run inside
-/// `force_close_epoch_for_test`, not here. It accumulates over every CPU's
-/// rotations, and the claim holds for all of them, so a peer's tick rotating
-/// mid-test strengthens the assertion instead of racing it.
 pub fn test_quarantine_rotate_does_not_splice() -> TestResult {
     let _ = quiesce::note_deferred_unmap();
 
@@ -167,8 +145,7 @@ pub fn test_quarantine_rotate_does_not_splice() -> TestResult {
 
     let before = page_alloc::rotate_spliced_pages();
 
-    // Two closures: incoming -> draining -> releasable. Only the second leaves
-    // the frame somewhere a splice could reach it.
+    // Two closures: incoming -> draining -> releasable.
     for _ in 0..2 {
         let mut closed = false;
         for _ in 0..CLOSURE_BUDGET {
@@ -198,17 +175,12 @@ pub fn test_quarantine_rotate_does_not_splice() -> TestResult {
         "rotate must only move list heads, never release frames"
     );
 
-    // The parked frame is the test's own; leaving it on the backlog would make
-    // the next test's quarantine reading depend on this one having run.
+    // Leaving it parked would make the next test's reading depend on this one.
     let _ = page_alloc::quarantine_release_some(64);
     TestResult::Pass
 }
 
 /// A backlog that only grows is an out-of-memory bug with extra steps.
-///
-/// Peers park frames behind this loop, so "the backlog is empty afterwards" is
-/// not a property of the kernel; that each bounded pass over a non-empty
-/// backlog splices something back is.
 pub fn test_quarantine_backlog_drains() -> TestResult {
     const BLOCKS_PER_PASS: u32 = 64;
     const MAX_PASSES: u32 = 64;

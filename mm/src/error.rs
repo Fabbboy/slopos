@@ -36,8 +36,7 @@ pub enum MmError {
     NoVma,
     NotDemandPaged,
     PermissionDenied,
-    /// Exclusive access to the address space was unavailable. Transient:
-    /// never fatal to the faulting task, which re-executes and re-faults.
+    /// Exclusive access to the address space was unavailable; transient.
     Retry,
 }
 

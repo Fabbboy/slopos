@@ -295,8 +295,7 @@ fn test_dhcp_tx_binds_address_and_routes() -> TestResult {
         f.teardown();
         return fail!("the offer produces a REQUEST");
     };
-    // By position, not by index: a retransmit timer may have put a second
-    // DISCOVER between the two.
+    // By position, not index: a retransmit may sit between the two.
     assert_test!(
         discover < request,
         "the DISCOVER precedes the REQUEST it answers"
@@ -330,17 +329,13 @@ fn test_dhcp_tx_binds_address_and_routes() -> TestResult {
     pass!()
 }
 
-/// Two clients answering on port 68 would each see the other's replies, so the
-/// claim has to be exclusive rather than last-writer-wins.
 fn test_dhcp_port_listener_is_claimed() -> TestResult {
     let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 77, 5])) else {
         return fail!("could not register a mock device");
     };
 
-    // `transport::start` registers through `LISTENER.init_once_then`, so the
-    // boot client already made the claim and this call renews nothing — the
-    // claim under test is the live one, which is why the failure branch has to
-    // put it back rather than leave the port vacant.
+    // `LISTENER.init_once_then`: the boot client already holds the claim, so a
+    // failure here must put the live one back rather than leave port 68 vacant.
     if !crate::dhcp::start(f.dev) {
         f.teardown();
         return fail!("start failed");

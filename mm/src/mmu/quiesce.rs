@@ -73,9 +73,7 @@ pub fn current_epoch() -> u64 {
     EPOCH.load(Ordering::Acquire)
 }
 
-/// Record that an invalidation was deferred rather than broadcast, returning
-/// the epoch it stamped — a re-read of [`current_epoch`] can already name a
-/// later one.
+/// Record that an invalidation was deferred rather than broadcast.
 #[inline]
 pub fn note_deferred_unmap() -> u64 {
     let epoch = EPOCH.load(Ordering::Acquire);
@@ -143,9 +141,7 @@ pub fn ack_now() {
 }
 
 /// Close `epoch` if every online CPU has acked it, releasing the batch of
-/// frames that became safe. Reports whether this call was the one that closed
-/// it, so a caller learns the outcome without re-reading a counter its peers
-/// also advance.
+/// frames that became safe.
 fn try_close(epoch: u64) -> bool {
     for cpu in 0..MAX_CPUS {
         if !slopos_arch::pcr::is_cpu_online(cpu) {
@@ -184,10 +180,6 @@ fn backstop(cpu: usize) {
 
 /// Acks on behalf of every online CPU — a lie about their TLBs, and therefore
 /// test-only. Lets the window logic be checked without racing AP scheduling.
-///
-/// Returns the epoch this call closed. A peer's tick can take the closing CAS,
-/// which is why it retries; only a CPU that closed an epoch can take one from
-/// here, so one attempt per CPU is enough.
 #[cfg(feature = "test-hooks")]
 pub fn force_close_epoch_for_test() -> Option<u64> {
     for _ in 0..MAX_CPUS {

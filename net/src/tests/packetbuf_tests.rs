@@ -9,14 +9,11 @@ use crate::packetbuf::{HEADROOM, PacketBuf};
 use crate::pool::{PACKET_POOL, PacketPool};
 use crate::types::{Ipv4Addr, NetError};
 
-/// Ten is the most any one test holds at once
-/// (`loopback_tests::test_loopback_queue_capacity`); the rest is margin.
+/// Ten is the most any one test holds at once; the rest is margin.
 const TEST_POOL_SLOTS: usize = 16;
 
-/// The live stack allocates from `PACKET_POOL` asynchronously, so an exact
-/// free-count assertion needs a pool nothing else can reach. Shared with
-/// `neighbor_tests` and `loopback_tests`: every `PacketPool` is another lockdep
-/// class.
+/// An exact free-count assertion needs a pool the live stack cannot reach; one
+/// shared pool, because every `PacketPool` is another lockdep class.
 pub static TEST_PACKET_POOL: PacketPool =
     PacketPool::new(lock_class!("TEST_PACKET_POOL", LOCK_LEVEL_RESOURCE));
 

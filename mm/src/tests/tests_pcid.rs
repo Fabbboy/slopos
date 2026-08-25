@@ -30,9 +30,7 @@ fn settle_teardown() {
     crate::page_alloc::pcp_drain_all();
 }
 
-/// `cpu` is a parameter rather than a fresh `get_current_cpu()` per call: the
-/// pool a sequence of selections reasons about belongs to one CPU, and a
-/// sequence that changed pools mid-way would compare two of them.
+/// `cpu` is a parameter so a sequence of selections cannot change pools.
 fn selection(cpu: usize, ctx_raw: u64, tlb_gen: u64) -> (u16, bool) {
     let value = select_cr3(
         cpu,
@@ -61,9 +59,7 @@ pub fn test_pcid_reuse_always_flushes() -> TestResult {
 
     let contexts = DYN_ASIDS_PER_CPU as u64 + 1;
 
-    // Masked throughout: a context switch on this CPU selects from the same
-    // pool, and one landing between the binding loop and the re-selection
-    // below could evict the slot whose residency is the property under test.
+    // Masked throughout: a context switch here could evict the slot under test.
     slopos_arch::cpu::IrqDisabled::with(|_irq| {
         let cpu = slopos_arch::pcr::get_current_cpu();
 
@@ -82,8 +78,7 @@ pub fn test_pcid_reuse_always_flushes() -> TestResult {
             );
         }
 
-        // Re-selecting a context still resident at the same generation is the
-        // hit case, and only that case may skip the flush.
+        // Only a still-resident context at the same generation may skip the flush.
         let (_, no_flush) = selection(cpu, 1_000 + contexts - 1, 1);
         assert_test!(
             no_flush,
@@ -104,8 +99,7 @@ pub fn test_stale_generation_forces_a_flush() -> TestResult {
 
     let ctx = 2_000u64;
 
-    // The four selections are one sequence over one CPU's pool; a context
-    // switch between any two of them would re-bind the slot under it.
+    // One sequence over one CPU's pool; a switch would re-bind the slot.
     slopos_arch::cpu::IrqDisabled::with(|_irq| {
         let cpu = slopos_arch::pcr::get_current_cpu();
 

@@ -361,8 +361,6 @@ pub fn test_dns_t8_regression_network_stack() -> TestResult {
     use crate::socket::*;
     use slopos_abi::net::{AF_INET, SOCK_DGRAM};
 
-    // `socket_bind` publishes into `UDP_DEMUX`: until the close below, an
-    // inbound datagram to this port lands in the socket the `recvfrom` reads.
     let _scope = match NetTestScope::enter() {
         Ok(s) => s,
         Err(e) => return fail!("net scope: {:?}", e),
@@ -412,17 +410,11 @@ pub fn test_dns_t9_query_entropy() -> TestResult {
 
 /// A response from a host that is not the configured server, or to a port the
 /// query did not leave from, must not reach the resolver.
-///
-/// Nothing here assumes the resolver is idle: the provenance filter names at
-/// most one `(server, port)` pair at a time, and that holds whether or not a
-/// query is in flight.
 pub fn test_dns_t10_response_provenance() -> TestResult {
     const SERVER_A: [u8; 4] = [192, 0, 2, 53];
     const SERVER_B: [u8; 4] = [198, 51, 100, 53];
     const EPHEMERAL: u16 = 49_152;
 
-    // Source ports are drawn from the ephemeral range, so a datagram addressed
-    // below it cannot be the reply to any query this resolver ever sent.
     assert_test!(
         !dns::response_is_expected(SERVER_A, dns::DNS_PORT),
         "a datagram addressed to port 53 left no query behind"
@@ -432,8 +424,7 @@ pub fn test_dns_t10_response_provenance() -> TestResult {
         "nor one addressed below the ephemeral range"
     );
 
-    // The ID check alone would accept a datagram from any host (RFC 5452 §9);
-    // pinning the source address is what these two cannot both satisfy.
+    // RFC 5452 §9: the ID check alone would accept a datagram from any host.
     let from_a = dns::response_is_expected(SERVER_A, EPHEMERAL);
     let from_b = dns::response_is_expected(SERVER_B, EPHEMERAL);
     assert_test!(

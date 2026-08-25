@@ -39,8 +39,7 @@ fn ensure_panic_cleanup_registered() {
 
 fn panic_clear_test_scope() {
     slopos_hermetic::clear_test_scope_after_panic();
-    // Before the thaw, so a thread the hold took is back on a run queue by the
-    // time the freeze releases it.
+    // Before the thaw, so a held thread is queued again by the time the freeze releases it.
     if let Some(held) = slopos_ostd::sync::kernel_io_task::clear_kernel_io_hold_after_panic() {
         crate::task::republish_held_kernel_io(&held);
     }
@@ -72,26 +71,17 @@ pub struct KernelTestScope {
 }
 
 impl KernelTestScope {
-    /// Whether no registered kernel-I/O thread is owned by any scheduler
-    /// container: each is parked at its freeze gate or held off every run
-    /// queue. Measured, not assumed — a scheduler-ordering test consults this
-    /// because a queued kernel-I/O thread is privileged work, which disables
-    /// the aging backstop even though nothing can dispatch it.
+    /// Whether no registered kernel-I/O thread is owned by any scheduler container.
     pub fn kernel_io_is_quiesced(&self) -> bool {
         kernel_io_dispatchable_count() == 0
     }
 
-    /// What the cooperative freeze itself managed. Quiescence does not depend
-    /// on it — the hold is what guarantees that — but a test asserting so has
-    /// to be able to read it.
+    /// What the cooperative freeze itself managed; quiescence does not depend on it.
     pub fn kernel_io_freeze_outcome(&self) -> Option<FreezeOutcome> {
         self.kernel_io_freeze.as_ref().map(KernelIoFreeze::outcome)
     }
 
     /// Threads a container still owned when the hold's settle loop gave up.
-    /// Non-zero means this scope does not have the property it was entered for,
-    /// and a test that cares can say so itself instead of failing later for a
-    /// reason that does not name this.
     pub fn kernel_io_unsettled(&self) -> usize {
         self.kernel_io_hold
             .as_ref()
@@ -130,9 +120,7 @@ impl KernelTestScope {
             }
         };
 
-        // After the pause, because the sweep needs no AP dispatching; before
-        // the inbox clear, because a covered task in an inbox must reach the
-        // hold rather than be discarded.
+        // After the pause and before the inbox clear: a covered task in an inbox must reach the hold.
         let kernel_io_hold = hold_kernel_io_all(&kernel_io_freeze, &aps_paused);
 
         // Drop wake-IPIs issued before the pause flag became visible to APs.
@@ -257,9 +245,8 @@ impl Drop for KernelTestScope {
             slopos_hermetic::return_after_test(ctx);
         }
 
-        // After the restore, so the republish sees the per-CPU enabled bits it
-        // will be dispatched under; before the resume, so the pause release's
-        // own IPI sweep is what kicks the target AP.
+        // After the restore, so the republish sees the per-CPU enabled bits; before the resume,
+        // so the pause release's own IPI sweep kicks the target AP.
         drop(self.kernel_io_hold.take());
 
         if let Some(token) = self.aps_paused.take() {

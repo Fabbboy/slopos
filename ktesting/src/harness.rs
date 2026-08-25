@@ -19,8 +19,7 @@ use crate::registry::{registry_sorted, TestDesc, TestKind};
 #[cfg(feature = "tests")]
 use crate::result::TestResult;
 
-/// HPET window the TSC ratio is measured over: long enough that the counter
-/// reads are noise against it, short enough to be paid once at first use.
+/// HPET window the TSC ratio is measured over; paid once at first use.
 const CALIBRATION_NS: u64 = 1_000_000;
 
 /// Aggregated counters returned to the boot caller.
@@ -44,8 +43,6 @@ impl TestRunSummary {
 
 static CACHED_CYCLES_PER_MS: AtomicU64 = AtomicU64::new(0);
 
-/// `None` until the platform clock is wired, which is the harness's only
-/// evidence that a duration can be measured at all.
 fn monotonic_ns() -> Option<u64> {
     match clock::monotonic_ns() {
         0 => None,
@@ -60,11 +57,7 @@ fn elapsed_ms_since(start: Option<u64>) -> Option<u32> {
     Some(ms.min(u32::MAX as u64) as u32)
 }
 
-/// TSC cycles per millisecond, measured against the HPET-backed monotonic
-/// clock; `0` when no time base is available to measure against.
-///
-/// CPUID leaf 0x16 reports the nominal base frequency and is absent entirely
-/// under TCG, so it can neither be trusted nor relied on to be there.
+/// TSC cycles per millisecond; `0` without a time base. CPUID leaf 0x16 is absent under TCG.
 pub fn estimate_cycles_per_ms() -> u64 {
     let cached = CACHED_CYCLES_PER_MS.load(Ordering::Relaxed);
     if cached != 0 {
@@ -90,7 +83,6 @@ pub fn estimate_cycles_per_ms() -> u64 {
     cycles_per_ms
 }
 
-/// `0` when no time base was available to calibrate against.
 pub fn cycles_to_ms(cycles: u64) -> u32 {
     let cycles_per_ms = estimate_cycles_per_ms();
     if cycles_per_ms == 0 {
@@ -251,10 +243,6 @@ fn run_phase(
             TestResult::Pass | TestResult::OverTime => {
                 summary.passed = summary.passed.saturating_add(1);
             }
-            // Counted apart, not as a pass: a skip is a test that observed
-            // nothing, and folding it into `passed` left the KTAP footer
-            // reporting `skip=0` however many declined. A skip surge is then
-            // indistinguishable from a green run.
             TestResult::Skipped => {
                 summary.skipped = summary.skipped.saturating_add(1);
             }
@@ -290,8 +278,7 @@ fn run_phase(
         Elapsed(elapsed),
     );
 
-    // The footer grammar has no slot for an absent duration, so an unmeasured
-    // phase reports zero here and says "unmeasured" in the line above.
+    // The footer grammar has no slot for an absent duration, so it reports zero.
     crate::ktap::emit_footer(
         summary.elapsed_ms,
         summary.passed,

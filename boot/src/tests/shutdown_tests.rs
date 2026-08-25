@@ -241,8 +241,6 @@ pub fn test_shutdown_partial_init() -> TestResult {
     TestResult::Pass
 }
 
-/// Repeated teardown-and-reinit stays safe, and a task can still be created
-/// after each round.
 pub fn test_rapid_shutdown_cycles() -> TestResult {
     const CYCLES: usize = 20;
 

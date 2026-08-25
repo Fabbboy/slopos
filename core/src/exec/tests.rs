@@ -319,8 +319,7 @@ pub fn test_translate_address_user_passthrough() -> TestResult {
     TestResult::Pass
 }
 
-/// The absent designator is reaped, not invented — a pid out of the air is only
-/// absent by luck. The scope's AP pause stops it being reissued mid-check.
+/// Reaped, not invented: a pid out of the air is only absent by luck.
 pub fn test_process_vm_root_absent_for_a_reaped_process() -> TestResult {
     let _scope = KernelTestScope::enter();
 
@@ -407,8 +406,6 @@ pub fn test_init_path_within_exec_limit() -> TestResult {
     TestResult::Pass
 }
 
-/// The vector layout `setup_user_stack` writes, read back through the
-/// process's own address space.
 pub fn test_setup_user_stack_contract_layout() -> TestResult {
     let _scope = KernelTestScope::enter();
     let pid = process_vm::create_process_vm();

@@ -7183,12 +7183,7 @@ pub fn test_quota_charge_cost() -> TestResult {
     use slopos_abi::quota::{FdSlot, QuotaMode, ResourceKind};
     use slopos_ostd::process::quota::{Charge, quota_mode, set_quota_mode, try_charge};
 
-    /// Charges per measured batch, and batches per account. The published
-    /// number is the *minimum* over batches: `rdtsc` counts host wall time, so
-    /// a mean over one long loop reports whatever the host stole during it,
-    /// while a minimum needs only one batch to run clean and no number of
-    /// stolen batches can lower it. Each batch runs with interrupts masked so
-    /// an IRQ cannot land inside the window either.
+    // Reported as the minimum over batches: `rdtsc` counts host wall time, which only ever inflates.
     const BATCH_LEN: u32 = 128;
     const BATCHES: u32 = 64;
     const WARM_ITERATIONS: u32 = 1_000;
@@ -7232,15 +7227,7 @@ pub fn test_quota_charge_cost() -> TestResult {
     let restore = quota_mode();
     set_quota_mode(QuotaMode::Enforce);
 
-    // The same batch shape over an uncontended load-and-CAS, so the gate has a
-    // same-run scale to divide by. An absolute cycle budget on this path is a
-    // measurement of the accelerator, not of the kernel: on a KVM host the
-    // charge costs ~1500 cycles and on a TCG one ~20000, and both are correct.
-    //
-    // It is one iteration of *this build*, not an isolated `lock cmpxchg`: at
-    // opt-level 0 the loop body is out-of-line calls around the atomic. That is
-    // the honest comparand — `charge_row` pays the same overhead — but it is
-    // why the ratio only carries a floor and not a ceiling.
+    // A same-run scale for the gate: an absolute cycle budget here would measure the accelerator.
     let measure_reference = || -> u64 {
         use core::sync::atomic::{AtomicU64, Ordering};
         let cell = AtomicU64::new(0);
@@ -7287,8 +7274,6 @@ pub fn test_quota_charge_cost() -> TestResult {
             let batch = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_| {
                 let start = slopos_arch::tsc::rdtsc();
                 for _ in 0..BATCH_LEN {
-                    // Commit and drop, so the measurement covers the walk up,
-                    // the token, and the walk back down on refund.
                     if let Ok(reservation) = try_charge::<FdSlot>(account, 1) {
                         drop(Charge::commit(reservation));
                     }
@@ -7316,9 +7301,7 @@ pub fn test_quota_charge_cost() -> TestResult {
     drop(chain);
 
     // Cycles, not nanoseconds: converting needs a frequency, and under TCG the
-    // TSC does not track one. Published through the quota report rather than
-    // logged here, because per-test klog is shown only on failure and this line
-    // has to reach the raw stream for the gate to parse it.
+    // TSC does not track one. Reported through the quota report, which the gate parses.
     crate::quota_console::record_charge_cost(
         shallow_per_charge,
         depth,
@@ -7372,9 +7355,7 @@ pub fn test_low_priority_is_not_starved_by_busy_normal() -> TestResult {
     schedule_task(&low);
     schedule_task(&normal);
 
-    // A queued kernel-I/O thread is runnable privileged work, and `tier_owed`
-    // disables aging entirely while a privileged tier has any. The scope's hold
-    // is what makes this an assertion rather than a reason to skip.
+    // `tier_owed` disables aging entirely while a privileged tier has queued work.
     slopos_testing::assert_test!(
         fixture.kernel_io_is_quiesced(),
         "a kernel-io thread was still queued inside a scope"

@@ -95,8 +95,7 @@ pub fn test_miss_threshold_rejects_zero() -> TestResult {
         watchdog::miss_threshold() == original,
         "a rejected value still changed the threshold"
     );
-    // Raised wherever it can be: lowering the machine-wide fuse, even for the
-    // two reads below, makes a host-descheduled CPU look wedged to its watcher.
+    // Lowering the machine-wide fuse makes a descheduled CPU look wedged.
     let raised = original.checked_add(1).unwrap_or(u32::MAX - 1);
     assert_test!(
         watchdog::set_miss_threshold(raised),
@@ -228,8 +227,7 @@ pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
 
     let cpu = pcr::get_current_cpu();
 
-    // Scoped to this CPU: on the machine-wide fuse the injection would report
-    // whichever CPU the host happened to deschedule instead.
+    // Scoped to this CPU, or the injection reports whichever CPU stalled.
     let Some(_fuse) = watchdog::MissThresholdOverride::for_cpu(cpu, FUSE) else {
         return TestResult::Fail;
     };
@@ -269,8 +267,8 @@ pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
     TestResult::Pass
 }
 
-/// Over the policy function, not the live global: arming `watchdog.panic=on`
-/// would make any stall the rest of the machine takes in that window fatal.
+/// Over the policy function: arming the live global would make any concurrent
+/// stall fatal.
 pub fn test_fatal_escalation_defaults_off_under_a_hypervisor() -> TestResult {
     use slopos_ostd::watchdog::{PanicOverride, fatal_escalation_policy};
 
@@ -291,8 +289,7 @@ pub fn test_fatal_escalation_defaults_off_under_a_hypervisor() -> TestResult {
         "watchdog.panic=off did not suppress escalation"
     );
 
-    // The live decision must be that policy applied to the live inputs, or the
-    // table above describes something the detector does not consult.
+    // Or the table above describes something the detector never consults.
     assert_test!(
         watchdog::fatal_escalation_permitted()
             == fatal_escalation_policy(

@@ -1,10 +1,5 @@
 //! Tests for the ARP neighbor cache: lookup, insert/update, the
 //! `Incomplete`→`Reachable` flush, the `Failed` transition, and snapshots.
-//!
-//! The cache under test is local, but `insert_or_update`, `resolve` and
-//! `on_retransmit` schedule through the shared wheel with entry ids that
-//! restart at 1, so a test that arms one holds a `NetTestScope`: left in the
-//! live wheel those tokens fire against `NEIGHBOR_CACHE`'s entry of that id.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};

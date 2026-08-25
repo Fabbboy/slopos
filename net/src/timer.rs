@@ -124,9 +124,7 @@ pub struct NetTimerWheel {
 const NET_TIMER_WHEEL_CLASS: &slopos_ostd::sync::lock_tracking::LockClassKey =
     slopos_ostd::lock_class!("NET_TIMER_WHEEL", LOCK_LEVEL_REGISTRY);
 
-/// The scope's wheel is a distinct class, not a second instance of the class
-/// above: same-class nesting is a lockdep finding, and a test-only ordering
-/// must not be learned as an ordering of the live stack's wheel.
+/// Distinct class: same-class nesting is a lockdep finding.
 #[cfg(feature = "test-hooks")]
 const TEST_TIMER_WHEEL_CLASS: &slopos_ostd::sync::lock_tracking::LockClassKey =
     slopos_ostd::lock_class!("NET_TEST_TIMER_WHEEL", LOCK_LEVEL_REGISTRY);
@@ -248,11 +246,7 @@ impl NetTimerWheel {
         fired
     }
 
-    /// [`process_due`](Self::process_due) restricted to one [`TimerKind`].
-    ///
-    /// Entries of every other kind stay pending and are not charged against
-    /// [`MAX_TIMERS_PER_PROCESS`], so a test that fast-forwards the clock by
-    /// hours cannot consume — and discard — a timer it does not own.
+    /// Other kinds stay pending and are not charged against [`MAX_TIMERS_PER_PROCESS`].
     #[cfg(feature = "test-hooks")]
     pub fn process_due_matching(&self, kind: TimerKind) -> KVec<FiredTimer> {
         let now = crate::clock::now_ms();
@@ -294,10 +288,6 @@ impl NetTimerWheel {
         fired
     }
 
-    /// Drop every pending entry.
-    ///
-    /// A `NetTestScope` calls this on the way out so no token minted in its
-    /// wheel survives to be cancelled against the live stack's.
     #[cfg(feature = "test-hooks")]
     pub fn clear(&self) {
         self.inner.lock().entries.clear();
@@ -310,21 +300,16 @@ impl NetTimerWheel {
     }
 }
 
-/// The wheel the live stack schedules through and `net_timer_process` drains.
 static LIVE_TIMER_WHEEL: NetTimerWheel = NetTimerWheel::new();
 
-/// Second wheel a `NetTestScope` diverts every `schedule` to for its duration.
-///
-/// Deadlines are absolute, so a schedule taken while a mock clock is installed
-/// records a mock-time deadline; landing those in [`LIVE_TIMER_WHEEL`] would
-/// leave the live stack holding timers due hours of real uptime later.
+/// Deadlines are absolute, so a schedule taken under a mock clock would leave the live
+/// wheel holding timers due hours of real uptime later.
 #[cfg(feature = "test-hooks")]
 pub static TEST_TIMER_WHEEL: NetTimerWheel = NetTimerWheel::with_class(TEST_TIMER_WHEEL_CLASS);
 
 #[cfg(feature = "test-hooks")]
 static TEST_WHEEL_SELECTED: AtomicBool = AtomicBool::new(false);
 
-/// The wheel a `schedule` or `cancel` issued right now belongs in.
 #[cfg(feature = "test-hooks")]
 #[inline]
 pub fn wheel() -> &'static NetTimerWheel {
@@ -335,18 +320,13 @@ pub fn wheel() -> &'static NetTimerWheel {
     }
 }
 
-/// The wheel a `schedule` or `cancel` issued right now belongs in.
 #[cfg(not(feature = "test-hooks"))]
 #[inline]
 pub fn wheel() -> &'static NetTimerWheel {
     &LIVE_TIMER_WHEEL
 }
 
-/// Divert scheduling to [`TEST_TIMER_WHEEL`], returning the previous selection.
-///
-/// A token is only cancellable in the wheel that minted it, so a caller must
-/// settle the live stack's outstanding timers before selecting and empty the
-/// test wheel before deselecting.
+/// A token is only cancellable in the wheel that minted it; settle both wheels around this.
 #[cfg(feature = "test-hooks")]
 pub fn select_test_wheel(on: bool) -> bool {
     TEST_WHEEL_SELECTED.swap(on, Ordering::AcqRel)
@@ -357,10 +337,7 @@ pub fn test_wheel_selected() -> bool {
     TEST_WHEEL_SELECTED.load(Ordering::Acquire)
 }
 
-/// A zero-sized stand-in for whichever wheel [`wheel`] selects, so the stack's
-/// hundred-odd `NET_TIMER_WHEEL.schedule(…)` sites follow the selection
-/// without naming it. In a build without `test-hooks` it derefs to
-/// [`LIVE_TIMER_WHEEL`] unconditionally.
+/// Zero-sized stand-in so existing `NET_TIMER_WHEEL.…` sites follow [`wheel`]'s selection.
 pub struct SelectedWheel;
 
 impl core::ops::Deref for SelectedWheel {
@@ -379,10 +356,6 @@ pub static NET_TIMER_WHEEL: SelectedWheel = SelectedWheel;
 /// Called from both the NAPI poll loop and the idle wakeup callback, so timers
 /// fire during active networking and during idle periods alike.
 pub fn net_timer_process() {
-    // A net test fixture holds the data plane still by making this a no-op:
-    // draining here would fire the fixture's own timers from the kthread, and
-    // re-arming handlers would write live-stack timers into the fixture's wheel
-    // for it to discard.
     if crate::ingress::dataplane_quiesced() {
         return;
     }

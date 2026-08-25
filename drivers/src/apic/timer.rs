@@ -222,8 +222,6 @@ impl ReferenceTimer {
     }
 }
 
-/// One measurement window: the LAPIC counter delta, and the wall time the HPET
-/// saw pass while it was counted (`0` when the HPET is unavailable).
 fn sample_window(reference: &ReferenceTimer) -> (u32, u64) {
     // Masked, so no interrupt fires during calibration.
     write_timer_lvt(LAPIC_TIMER_ONESHOT | LAPIC_LVT_MASKED);
@@ -262,7 +260,6 @@ fn calibrate_against(reference: ReferenceTimer) -> u64 {
     (avg_elapsed as u128 * 1_000_000_000 / window_ns as u128) as u64
 }
 
-/// One calibration measurement, reported rather than folded into an average.
 #[cfg(feature = "test-hooks")]
 pub struct CalibrationSample {
     pub lapic_ticks: u32,
@@ -270,13 +267,7 @@ pub struct CalibrationSample {
     pub observed_window_ns: u64,
 }
 
-/// Take a single HPET-referenced calibration window without publishing a
-/// frequency.
-///
-/// The LAPIC counter stops while the host has this vCPU descheduled and the
-/// HPET does not, so a window the host stretched reads as a slow LAPIC.
-/// Reporting both clocks is what lets a caller tell the two apart; `calibrate`
-/// cannot, because it averages.
+/// The LAPIC counter stops while the host has this vCPU descheduled; the HPET does not.
 #[cfg(feature = "test-hooks")]
 pub fn sample_hpet_window_for_test() -> Option<CalibrationSample> {
     if !is_enabled() || !crate::hpet::is_available() {

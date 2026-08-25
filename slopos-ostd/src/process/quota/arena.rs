@@ -46,12 +46,8 @@ const NO_PARENT: u32 = u32::MAX;
 /// live at that instant, not the high-water mark a ceiling has to be derived
 /// from. `denials` exists so that a refusal nobody can see is not silent.
 struct AccountRow {
-    /// `used` in the low half, `peak` in the high half. One word rather than
-    /// two atomics: whichever of a pair is published first is a window in which
-    /// a lock-free reader observes `used > peak`, which is precisely the
-    /// invariant [`ledger_audit`] exists to check. Packed, a charge installs
-    /// both in one compare-exchange, so no reader can see the pair apart and a
-    /// charge whose CAS fails moves neither.
+    /// `used` in the low half, `peak` in the high half: one compare-exchange
+    /// installs both, so no reader can observe `used > peak`.
     usage: [AtomicU64; KIND_COUNT],
     limit: [AtomicU32; KIND_COUNT],
     denials: [AtomicU32; KIND_COUNT],
@@ -257,16 +253,10 @@ pub fn account_release(id: AccountId) {
         return;
     };
 
-    // Dark first: while this row is still live the audit counts it among its
-    // parent's children, so crediting the parent ahead of it would leave the
-    // parent below the sum of its children for the length of the hand-up.
+    // Dark first: the audit counts a live row among its parent's children, so
+    // crediting the parent ahead of it dips the parent below their sum.
     row.live.store(false, Ordering::Release);
 
-    // `used` is the sum of the charges outstanding against this row, and going
-    // dark is precisely what turns their refunds into generation-mismatch
-    // no-ops, so handing that sum up cancels them exactly. Skipping it would
-    // leave every ancestor holding one debit per charge that outlived its
-    // process.
     let parent_slot = row.parent.load(Ordering::Acquire);
     if parent_slot != NO_PARENT {
         let parent = account_id_at(parent_slot);
@@ -438,10 +428,6 @@ fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> 
             row.denials[idx].fetch_add(1, Ordering::Relaxed);
             return Err(());
         }
-        // The mark moves in the same word as the value it covers, so a reader
-        // cannot see one without the other and a charge that loses the CAS
-        // moves neither. `Release` so an auditor's `Acquire` load synchronises
-        // with everything this charge did.
         let peak = usage_peak(packed).max(next);
         match row.usage[idx].compare_exchange_weak(
             packed,
@@ -465,10 +451,6 @@ fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> 
 /// Credit one row. Saturating rather than wrapping: an under-run is a
 /// bookkeeping bug, and a count wrapped to `u32::MAX` would refuse every
 /// subsequent charge forever.
-///
-/// The store is a release so that an auditor which reads a row and then its
-/// children cannot see an ancestor's credit without the descendant credit that
-/// preceded it up the chain.
 fn release_row(row: &AccountRow, kind: ResourceKind, n: u32) {
     let idx = kind.index();
     let mut packed = row.usage[idx].load(Ordering::Relaxed);
@@ -488,11 +470,7 @@ fn release_row(row: &AccountRow, kind: ResourceKind, n: u32) {
     }
 }
 
-/// Give back the levels a refused walk had already debited, leaf-first — the
-/// direction an ordinary refund takes.
-///
-/// Generation-compared rather than slot-and-live: a slot rebound between the
-/// debit and the unwind would otherwise be credited for a stranger's charge.
+/// Give back the levels a refused walk had already debited.
 fn unwind(levels: &[AccountId], kind: ResourceKind, n: u32) {
     for &id in levels {
         if let Some(row) = row_for(id) {
@@ -632,9 +610,6 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
 
         for kind in ResourceKind::ALL {
             let idx = kind.index();
-            // One load for both halves, so `used <= peak` is not a race the
-            // audit can catch a row mid-way through — it holds by construction
-            // and this check only fires on memory corruption.
             let usage = row.usage[idx].load(Ordering::Acquire);
             let used = usage_used(usage);
             let peak = usage_peak(usage);
@@ -826,12 +801,6 @@ mod tests {
         id
     }
 
-    /// `UsedAbovePeak` is the one ledger invariant a lock-free reader can hold
-    /// to at every instant — `peak` is monotone and lives on the row `used`
-    /// does — so a reader racing a charger must never catch the two out of
-    /// order. The hierarchy checks compare rows sampled at different times and
-    /// are sound only against a quiesced ledger, which is why this pins the
-    /// peak alone.
     #[test]
     fn no_reader_ever_observes_used_above_peak() {
         let _f = fixture();
@@ -839,9 +808,6 @@ mod tests {
         let ancestor = root();
 
         let stop = Arc::new(AtomicBool::new(false));
-        // The reader has to be sampling before the charges start, or the whole
-        // run can land between its spawn and its first load and the test proves
-        // nothing while still passing.
         let started = Arc::new(AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
         let reader_started = Arc::clone(&started);
@@ -881,11 +847,6 @@ mod tests {
         assert!(samples > 0, "the reader never sampled the ledger");
     }
 
-    /// The walk debits the leaf before the ancestor that refuses, so the leaf
-    /// really did hold the batch for the length of the walk. `peak` records
-    /// what was held rather than what was kept — an over-reported high-water
-    /// mark is conservative, an under-reported one would make the audit's
-    /// `UsedAbovePeak` unfalsifiable.
     #[test]
     fn a_batch_refused_above_the_leaf_leaves_the_leaf_peak_raised() {
         let _f = fixture();

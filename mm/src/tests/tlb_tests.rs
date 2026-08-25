@@ -22,14 +22,9 @@ use slopos_abi::task::INVALID_PROCESS_ID;
 const OFFLINE_CPU_A: usize = MAX_CPUS - 1;
 const OFFLINE_CPU_B: usize = MAX_CPUS - 2;
 
-/// Drop the two fake CPUs' record of whatever address space a test parked them
-/// in. Process slots recycle, so a loaded-process key left behind here is
-/// carried into the next test's process and clears a mask bit it never set.
-///
-/// `forget_cpu_process_key` rather than `notify_mm_switch(None, ..)`: a caller
-/// may already have destroyed the process, and the switch-out would then clear
-/// the slot's mask bit on behalf of the slot's next occupant. A bit left set
-/// here is never inherited, because a slot's mask is cleared when it is bound.
+/// Process slots recycle, so a key left behind here would be carried into the
+/// next test's process. Not `notify_mm_switch(None, ..)`: the process may
+/// already be destroyed, and the switch-out would clear the next occupant's bit.
 fn release_offline_cpus() {
     forget_cpu_process_key(OFFLINE_CPU_A);
     forget_cpu_process_key(OFFLINE_CPU_B);
@@ -395,9 +390,7 @@ pub fn test_cpumask_clear_all() -> TestResult {
     TestResult::Pass
 }
 
-/// The flag belongs to whichever CPU is running this, and a context switch on
-/// it owns the same word: masking interrupts is what makes the read after each
-/// write report this test's own store.
+/// The flag is per-CPU and a context switch owns the same word, hence the mask.
 pub fn test_lazy_tlb_flag() -> TestResult {
     slopos_arch::cpu::IrqDisabled::with(|_irq| {
         let cpu = slopos_arch::pcr::get_current_cpu();

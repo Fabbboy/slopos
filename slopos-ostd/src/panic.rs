@@ -65,10 +65,6 @@ pub fn format_panic_location_message(info_ptr: *const PanicInfo, out: &mut dyn W
 }
 
 /// A single-winner election over CPU indices.
-///
-/// A type rather than a bare static so the CAS semantics can be pinned on a
-/// private instance: claiming the machine's own election announces a fatal
-/// panic to every path that reads it.
 pub struct PanicOwner(AtomicU32);
 
 impl PanicOwner {
@@ -76,8 +72,6 @@ impl PanicOwner {
         Self(AtomicU32::new(NO_OWNER))
     }
 
-    /// Returns `true` iff THIS call won the election. A loser must quietly
-    /// self-stop and never touch the console.
     #[inline]
     pub fn claim(&self, cpu: u32) -> bool {
         self.0
@@ -90,8 +84,6 @@ impl PanicOwner {
         self.0.load(Ordering::Acquire) != NO_OWNER
     }
 
-    /// True if `cpu` is the elected owner — a self-directed NMI must not stop
-    /// the owner that issued the broadcast.
     #[inline]
     pub fn is_owner(&self, cpu: u32) -> bool {
         self.0.load(Ordering::Acquire) == cpu

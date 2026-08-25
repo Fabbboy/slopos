@@ -2,10 +2,7 @@
 //! kernel master's page tables.
 //!
 //! Ownership is asserted per frame rather than against the allocator's free
-//! count: the leaf holds the single reference to the page it maps, unmap hands
-//! back exactly that page, and a second unmap of the same address hands back
-//! nothing. A page the unmap path forgets fails the first; one it accounts for
-//! twice fails the last.
+//! count, which every CPU moves.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_kernel_services::kernel_vm_space::kernel_vm_space;

@@ -145,17 +145,10 @@ pub fn clear_kernel_io_freeze_after_panic() {
     }
 }
 
-/// The freeze's second phase. A freeze is cooperative — a thread parks only by
-/// running — so a caller whose correctness needs the threads *off the run
-/// queues* arms a hold once the freeze's window has had its chance. While a
-/// hold is armed no covered task may be linked into a run queue at all.
-///
-/// A depth, not a flag, for `FREEZE_DEPTH`'s reason.
 static HOLD_DEPTH: AtomicU32 = AtomicU32::new(0);
 
-/// The covered ids, mirrored out of `STOP_REGISTRY` so the publish path can ask
-/// without taking it: a claim runs under a run-queue lock, and reading the
-/// registry there would invert the order `clear_cpu_queues` takes.
+/// Mirrored out of `STOP_REGISTRY`: a claim runs under a run-queue lock, where
+/// reading the registry would invert the order `clear_cpu_queues` takes.
 static HELD_IDS: [AtomicU32; MAX_KERNEL_IO_STOPS] =
     [const { AtomicU32::new(INVALID_TASK_ID) }; MAX_KERNEL_IO_STOPS];
 
@@ -179,15 +172,7 @@ fn held_ids_snapshot() -> KernelIoTaskIds {
     KernelIoTaskIds { ids, len }
 }
 
-/// Ids are published before the depth bump so [`kernel_io_hold_covers`] never
-/// answers `true` for a task the release walk will not visit.
-///
-/// A union with what is already held, never a replacement. The depth counter
-/// nests; the id set has to nest with it, or an inner arm taken while a stop is
-/// registered-but-unbound drops that id, the outermost disarm never visits it,
-/// and the task is stranded in `Held` on no queue, past where the rescue sweep
-/// looks. (Nothing deregisters a stop, so that is the only way the registry can
-/// answer with less than the incumbent set.)
+/// Ids publish before the depth bump; the set unions, never replaces.
 pub fn arm_kernel_io_hold() {
     let mut merged = held_ids_snapshot();
     for stop in registered_stops().iter().flatten() {
@@ -197,18 +182,6 @@ pub fn arm_kernel_io_hold() {
     HOLD_DEPTH.fetch_add(1, Ordering::AcqRel);
 }
 
-/// Union the registry into an armed hold's cover, without touching the depth.
-///
-/// [`__spawn_kernel_io`] publishes the stop to the registry *before* binding the
-/// spawned id to it, so a hold armed inside that window records the stop with
-/// `INVALID_TASK_ID` and covers nothing. This is called from the settle loop,
-/// which closes the window only for as long as that loop runs — a spawn landing
-/// after the hold has settled is still uncovered, and is the residual recorded
-/// in `plans/pipeline-stability.md` §4. Nothing in the tree spawns a kernel-I/O
-/// thread off the BSP today, which is why that residual is tolerated rather
-/// than fixed here.
-///
-/// A no-op when no hold is armed, so a caller need not check first.
 pub fn refresh_kernel_io_hold() {
     if !kernel_io_hold_armed() {
         return;
@@ -223,11 +196,7 @@ pub fn refresh_kernel_io_hold() {
     }
 }
 
-/// Release one level. `Some` only for the level that takes the depth to zero,
-/// carrying the set that level covered so the caller can publish each held task
-/// again. Saturating for [`release_kernel_io_freeze`]'s reason, and worse here:
-/// a wrapped depth would keep every kernel-I/O thread off every run queue for
-/// the rest of the boot.
+/// `Some` only at the level that takes the depth to zero, carrying the set it covered.
 pub fn disarm_kernel_io_hold() -> Option<KernelIoTaskIds> {
     let held = held_ids_snapshot();
     let mut depth = HOLD_DEPTH.load(Ordering::Acquire);
@@ -268,14 +237,11 @@ pub fn kernel_io_hold_covers(task_id: u32) -> bool {
         .any(|cell| cell.load(Ordering::Acquire) == task_id)
 }
 
-/// The set an armed hold covers.
 #[inline]
 pub fn kernel_io_held_ids() -> KernelIoTaskIds {
     held_ids_snapshot()
 }
 
-/// Panic path: a test that panics under a hold must not leave the threads off
-/// every run queue for the rest of the boot.
 pub fn clear_kernel_io_hold_after_panic() -> Option<KernelIoTaskIds> {
     let held = held_ids_snapshot();
     if HOLD_DEPTH.swap(0, Ordering::AcqRel) == 0 {
@@ -285,14 +251,6 @@ pub fn clear_kernel_io_hold_after_panic() -> Option<KernelIoTaskIds> {
     Some(held)
 }
 
-/// Arm a hold additionally covering `ids`, handing back the set it found so a
-/// test nested inside a real hold can restore exactly that.
-///
-/// Additive rather than displacing so the panic path stays correct: unwinding
-/// runs `KernelIoHold::drop` (which takes the depth 2 -> 1 and republishes
-/// nothing) *before* `clear_kernel_io_hold_after_panic` snapshots `HELD_IDS`.
-/// A displacing helper would leave that snapshot holding only the test's
-/// synthetic ids, and every real kernel-I/O thread stranded in `Held`.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn arm_kernel_io_hold_over_for_test(ids: &[u32]) -> KernelIoTaskIds {
     let found = held_ids_snapshot();
@@ -305,10 +263,6 @@ pub fn arm_kernel_io_hold_over_for_test(ids: &[u32]) -> KernelIoTaskIds {
     found
 }
 
-/// Saturating, like [`disarm_kernel_io_hold`]: a test that unwinds past its own
-/// disarm, or one whose panic cleanup zeroed the depth first, would otherwise
-/// wrap it to `u32::MAX` and refuse every kernel-I/O publication for the rest
-/// of the boot.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn disarm_kernel_io_hold_for_test(displaced: &KernelIoTaskIds) {
     let mut depth = HOLD_DEPTH.load(Ordering::Acquire);
@@ -767,9 +721,6 @@ impl KernelIoTaskIds {
         self.ids[..self.len].iter().copied()
     }
 
-    /// Ignores [`INVALID_TASK_ID`] and duplicates, and saturates rather than
-    /// panicking: the set is a *cover*, and a nested arm that overflowed it
-    /// would drop an id the release walk must still visit.
     #[inline]
     fn push_unique(&mut self, task_id: u32) {
         if task_id == INVALID_TASK_ID || self.contains(task_id) || self.len == self.ids.len() {

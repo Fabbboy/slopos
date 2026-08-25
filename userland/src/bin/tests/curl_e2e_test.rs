@@ -40,11 +40,8 @@ const TCP_DNS_QUERY: &[u8] = &[
 /// Connects to the first reachable target and names every refusal: one
 /// filtered address and no route off the machine are different faults.
 ///
-/// Each attempt is announced before it blocks. A `connect` to an address that
-/// answers nothing runs to the kernel's own connect deadline, and with three
-/// targets tried in series and two cases calling this, the run would otherwise
-/// go silent for longer than the harness allows before the first `report` —
-/// which loses every test after this one, not just this one.
+/// Each attempt is announced before it blocks: three serial connect deadlines
+/// exceed the harness's silence budget.
 fn connect_any() -> Result<(SocketAddrV4, TcpStream, u128), String> {
     let mut refusals = String::new();
     for ip in TEST_DST_IPS {

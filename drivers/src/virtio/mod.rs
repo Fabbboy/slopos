@@ -196,13 +196,8 @@ impl IrqEdgeEvent {
         )
     }
 
-    /// [`wait_timeout_ms`](Self::wait_timeout_ms), reporting which way the wait
-    /// ended rather than only whether it was satisfied.
-    ///
-    /// A timeout never expires before `timeout_ms` has elapsed: the wait
-    /// queue's deadline comes from a millisecond clock that truncates, so the
-    /// budget handed to it carries the partial millisecond it would otherwise
-    /// drop.
+    /// [`wait_timeout_ms`](Self::wait_timeout_ms), reporting how the wait ended.
+    /// `+1`: the wait queue's millisecond deadline truncates, so a timeout never fires early.
     pub fn wait_timeout(&self, timeout_ms: u32) -> EdgeWait {
         if self.try_consume() {
             return EdgeWait::Latched;
@@ -230,13 +225,9 @@ impl IrqEdgeEvent {
 /// How an [`IrqEdgeEvent`] wait ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeWait {
-    /// The edge was already latched and was consumed without parking.
     Latched,
-    /// Parked, then woken by the edge.
     Woken,
-    /// The deadline passed with no edge.
     TimedOut,
-    /// The waiting task was killed or took a signal.
     Aborted,
 }
 

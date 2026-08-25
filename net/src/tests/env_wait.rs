@@ -7,15 +7,8 @@ pub fn pump_rx() {
     }
 }
 
-/// Wait up to `failsafe_ms` for `probe` to yield, returning its value and the
-/// milliseconds it took.
-///
-/// A wake would be the better signal and there is none to park on: these run
-/// from a BSP boot step, where the condition is reached by the netpoll kthread
-/// on another CPU and a blocking wait would spin without draining RX. Elapsed
-/// guest time is measured rather than sleeps counted, so an overrunning delay
-/// does not multiply into the bound and the loop leaves the moment the
-/// condition holds instead of at the granularity of the delay.
+/// Polls rather than parks: the caller is a BSP boot step, and a blocking wait
+/// would spin without draining RX.
 pub fn await_env<T>(
     failsafe_ms: u64,
     poll_interval_ms: u32,
@@ -35,12 +28,10 @@ pub fn await_env<T>(
     }
 }
 
-/// `errno` as the negative `i32` a syscall wrapper returns.
 pub fn errno_i32(errno: u64) -> i32 {
     errno as i64 as i32
 }
 
-/// `errno` as the negative `i64` a syscall returns.
 pub fn errno_i64(errno: u64) -> i64 {
     errno as i64
 }

@@ -25,8 +25,6 @@ use super::task::{
 };
 use super::test_fixture::{KernelTestScope, dummy_task_entry};
 
-/// A synthetic, never-dispatched task the hold can be armed over, so the
-/// mechanism tests do not depend on a live kthread's timing.
 fn make_ready_task(name: &[u8]) -> Option<(u32, TaskRef)> {
     let id = task_create(
         name.as_ptr() as *const c_char,
@@ -273,8 +271,7 @@ pub fn test_a_scope_takes_every_kernel_io_thread_off_every_runqueue() -> TestRes
     TestResult::Pass
 }
 
-/// The regression test for the flake family this hold exists for: the freeze is
-/// cooperative and can report anything, and quiescence must not depend on it.
+/// The freeze is cooperative and may report anything; quiescence must not depend on it.
 pub fn test_scope_quiescence_does_not_depend_on_the_freeze_outcome() -> TestResult {
     let (_ids, len) = live_kernel_io_task_ids();
     if len == 0 {
@@ -357,8 +354,7 @@ pub fn test_the_sweep_takes_a_queued_task_off_the_queue() -> TestResult {
     let Some((id, task)) = make_ready_task(b"SweptQueued\0") else {
         return fail!("task creation failed");
     };
-    // Enqueued locally rather than published, so the node is on a queue this
-    // CPU can then watch the sweep take it off.
+    // Enqueued locally rather than published, so the node lands on this CPU's queue.
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     let queued = with_cpu_scheduler(cpu_id, |sched| sched.enqueue_local(&task)) == Some(0);
     if !queued || !task.ready_link.is_linked() {
@@ -367,19 +363,13 @@ pub fn test_the_sweep_takes_a_queued_task_off_the_queue() -> TestResult {
     }
 
     let displaced = arm_kernel_io_hold_over_for_test(&[id]);
-    // Nested, so the sweep inside a scope still has the token its precondition
-    // is stated in.
+    // Nested, so the sweep still holds the token its precondition is stated in.
     let Ok(paused) = pause_all_aps() else {
         disarm_kernel_io_hold_for_test(&displaced);
         let _ = task_terminate(id);
         return fail!("nested AP pause failed");
     };
-    // The test helper's cover is additive, so this sweep also covers the
-    // enclosing scope's real kernel-I/O threads. They are already `Held` and off
-    // every queue, so a settled outer hold contributes nothing and the count is
-    // this task alone. The second call is what separates the two causes: a
-    // repeat that takes anything more is the outer hold having not settled, and
-    // says so rather than reporting it against this task.
+    // A settled outer hold contributes nothing, so the repeat separates that cause from this task's.
     let swept = hold_kernel_io_off_all_runqueues(&paused);
     let residual = hold_kernel_io_off_all_runqueues(&paused);
     resume_all_aps_if_not_nested(paused);
@@ -418,10 +408,7 @@ pub fn test_the_inbox_drain_hands_a_held_task_to_the_hold() -> TestResult {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     let strong_base = task_placement_strong_count(node);
 
-    // Pushed before the hold is armed, so the entry is really in the inbox and
-    // the drain is what has to claim it. A push made *while* armed never gets
-    // that far — the publish path claims it directly, which the second half
-    // below pins.
+    // Pushed before arming, so the entry really is in the inbox for the drain to claim.
     let _ = with_cpu_scheduler(cpu_id, |sched| sched.push_remote_wake(&task));
     let pushed = task.sched_placement() == SchedPlacement::RemoteWake;
 
@@ -452,8 +439,6 @@ pub fn test_the_inbox_drain_hands_a_held_task_to_the_hold() -> TestResult {
     TestResult::Pass
 }
 
-/// A publish made while the hold is armed is claimed where it is made, so a
-/// covered task never reaches a container at all.
 pub fn test_a_push_under_the_hold_never_reaches_the_inbox() -> TestResult {
     let _scope = KernelTestScope::enter();
     let Some((id, task)) = make_ready_task(b"HeldPush\0") else {
@@ -489,9 +474,7 @@ pub fn test_a_push_under_the_hold_never_reaches_the_inbox() -> TestResult {
     TestResult::Pass
 }
 
-/// The I2/I7 regression test: the hold parks no reference of its own, so every
-/// step of sweep-and-release must move the strong count by exactly the queue
-/// membership it takes or gives back.
+/// I2/I7: the hold parks no reference of its own.
 pub fn test_holding_and_releasing_a_held_task_is_refcount_neutral() -> TestResult {
     let _scope = KernelTestScope::enter();
     let Some((id, task)) = make_ready_task(b"HeldRefcount\0") else {

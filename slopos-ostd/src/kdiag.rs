@@ -349,10 +349,8 @@ pub fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
 pub fn kdiag_dump_lock_graph(phase: &str) {
     use crate::sync::lock_graph as lg;
 
-    // Registered sites, not slots consumed: a slot lost to the link race holds
-    // a duplicate of a class already registered, and counting it makes this
-    // line report a lock that does not exist. `leaked` below keeps the pool
-    // fact the raw count used to carry.
+    // Registered sites, not slots consumed: a slot lost to the link race is a
+    // duplicate of a class already registered.
     let classes = lg::registered_class_count();
     let leaked = lg::class_slots_leaked();
     let edges = lg::edge_count();

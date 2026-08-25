@@ -10,9 +10,7 @@ use crate::{cow, demand, process_vm};
 pub enum FaultOutcome {
     /// Serviced; the faulting instruction can be retried.
     Resolved,
-    /// Exclusive access to the address space was unavailable. Nothing was
-    /// mapped and nothing was changed; the instruction re-executes and
-    /// re-faults, and the decision is retaken then.
+    /// Exclusive access was unavailable; nothing changed and the instruction re-faults.
     Retry,
     /// Not serviceable; the task dies with this reason, which `waitpid` needs
     /// to tell an out-of-memory kill from a wild dereference.
@@ -42,13 +40,7 @@ slopos_ostd::cpu_local! {
     static RETRY_EPISODE: RetryEpisode = RetryEpisode::IDLE;
 }
 
-/// `true` iff this is the moment to log. Pure: the caller supplies the clock,
-/// so the escalation policy is testable without a contended host.
-///
-/// Keyed on the task, not on the address it faulted at: a multi-threaded
-/// process retrying at two addresses on one CPU would otherwise reset the
-/// episode on every alternation and never reach the budget, which is the shape
-/// most likely to produce a retry that does not terminate.
+/// Keyed on the task, not the address: alternating addresses would reset the episode.
 pub(crate) fn note_retry(
     ep: &mut RetryEpisode,
     task_id: u32,
@@ -72,15 +64,11 @@ pub(crate) fn note_retry(
     true
 }
 
-/// No escalation: a `Retry` that never terminates is a leaked address-space
-/// handle, which is a kernel defect. Killing the task would hide it, and any
-/// count or deadline threshold is user-reachable — a multi-threaded process
-/// hammering `copy_from_user` can keep a reader outstanding indefinitely.
+/// No escalation: any threshold here is user-reachable, and a stuck retry is a defect.
 fn retry(task_id: u32, fault_addr: u64) -> FaultOutcome {
     let warn = {
         let mut episode = RETRY_EPISODE.get_mut();
-        // The HPET read is an uncached MMIO access taken here with `IF` clear,
-        // so it is skipped once this task's episode has already been reported.
+        // The clock read is uncached MMIO taken with `IF` clear; skip it once warned.
         if episode.task_id == task_id && episode.warned {
             false
         } else {
@@ -117,10 +105,7 @@ pub fn try_resolve_user_fault(
         return FaultOutcome::Fatal(TaskFaultReason::UserPage);
     };
 
-    // One acquisition, not two: deciding under one hold of the per-process lock
-    // and acting under the next lets a sibling thread resolve the page in
-    // between, and the second hold then reports a failure for work that is
-    // already done.
+    // One hold of the per-process lock, not two: a sibling can resolve the page between.
     let cow = process_vm::process_vm_with_vm_space_by_handle(handle, |vs| {
         if !cow::is_cow_fault(error_code, vs, fault_addr) {
             return None;
@@ -130,8 +115,6 @@ pub fn try_resolve_user_fault(
 
     match cow {
         Ok(Some(Ok(()))) => return FaultOutcome::Resolved,
-        // Returns rather than falling through: a `Retry` inspected no page
-        // state, so the demand path would be deciding on a different question.
         Ok(Some(Err(MmError::Retry))) => return retry(task_id, fault_addr),
         Ok(Some(Err(MmError::NoMemory))) => {
             klog_info!(

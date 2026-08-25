@@ -18,9 +18,8 @@ use crate::with_data_state;
 use crate::tests::net_scope::NetTestScope;
 use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP, reset_all as reset};
 
-/// The live net threads walk the same PCB table, timer wheel and counters the
-/// tests below assert on. The fixture holds them still, and routes its
-/// TEST-NET-1 addresses at a blackhole device so no segment reaches the wire.
+/// The live net threads walk the same PCB table and wheel these tests assert
+/// on; the fixture holds them still and blackholes its TEST-NET-1 addresses.
 macro_rules! enter_scope {
     () => {
         match NetTestScope::enter() {
@@ -874,8 +873,6 @@ pub fn test_tcp_passive_ack_to_listen_sends_rst() -> TestResult {
     pass!()
 }
 
-/// Establish a client-side connection on the fixture addresses, returning
-/// `(id, server_iss, client_port)`.
 fn establish_client_connection(remote_port: u16) -> (ConnId, u32, u16) {
     let (id, syn_seg) = tcp::connect(LOCAL_IP, REMOTE_IP, remote_port).unwrap();
     let client_iss = syn_seg.seq_num;
@@ -1652,8 +1649,7 @@ pub fn test_tcp_buffer_alloc_failure_resets_peer() -> TestResult {
     tcp::listen(LOCAL_IP, 80).unwrap();
     let before = tcp::active_count();
 
-    // Both injections go through the out-of-line helpers: two inline `Actions`
-    // return slots in this frame put it over the 2 KiB stack gate.
+    // Out of line: two inline `Actions` slots cross the 2 KiB stack gate.
     let client_iss = 3000u32;
     let Some(server_iss) = crate::tests::tcp_common::inject_for_reply_seq(
         REMOTE_IP,

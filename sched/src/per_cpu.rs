@@ -150,9 +150,6 @@ impl ReadyQueue {
         0
     }
 
-    /// Unlink every task the hold covers, releasing the membership reference
-    /// this queue held. Two passes because the list has no remove-while-
-    /// iterating: at most `MAX_KERNEL_IO_STOPS` nodes can match.
     fn hold_kernel_io(&self) -> usize {
         let mut found: [Option<NonNull<Task>>; MAX_KERNEL_IO_STOPS] = [None; MAX_KERNEL_IO_STOPS];
         let mut seen = 0usize;
@@ -168,8 +165,6 @@ impl ReadyQueue {
 
         let mut held = 0usize;
         for node in found[..seen].iter().flatten() {
-            // Claimed before the unlink and rolled back if the unlink fails:
-            // the same order `steal_from_tail` takes, for the same reason.
             let claimed = with_parked_node(*node, |task| {
                 task.sched_placement_compare_exchange(
                     SchedPlacement::ReadyQueue,
@@ -385,8 +380,6 @@ impl PriorityRunQueue {
         if current == SchedPlacement::Nascent {
             return -1;
         }
-        // `1`, as for every other owner: the hold owns this task and will
-        // publish it itself, so a publisher must not hunt for another CPU.
         if current == SchedPlacement::Held {
             return 1;
         }
@@ -405,11 +398,7 @@ impl PriorityRunQueue {
         if current != from {
             return -1;
         }
-        // Claim, not refuse: `from` here is a placement the caller *owns* --
-        // `OnCpu` from a dispatcher unwinding into the pause, `Migrating` from
-        // a thief, `Waking` from a wake that reserved before the hold armed.
-        // A refusal keyed on `Held` never sees those, because the task was
-        // already off every list when the sweep ran.
+        // Claim, not refuse: `from` is a placement the caller owns, unseen by a `Held` refusal.
         if crate::task::kernel_io_hold_claim(body, from) {
             return 1;
         }
@@ -537,8 +526,7 @@ impl PriorityRunQueue {
     /// Clear the remote inbox and its count. Test fixtures only.
     #[cfg(feature = "test-hooks")]
     pub fn force_clear_inbox_count(&self) {
-        // Off-lock, and before the drain: the stop registry ranks with the task
-        // registry, not with a run queue.
+        // Off-lock: the stop registry ranks with the task registry, not with a run queue.
         let kernel_io = slopos_ostd::sync::kernel_io_task::kernel_io_task_ids();
         self.clear_remote_inbox_with_ref_release(&kernel_io);
         self.inbox_count.store(0, Ordering::Relaxed);
@@ -756,10 +744,7 @@ impl PriorityRunQueue {
         self.saturating_sub_inbox_count(count);
     }
 
-    /// Discard the whole inbox, releasing each parked reference. A registered
-    /// kernel-I/O thread is moved to this CPU's ready queue instead of dropped:
-    /// `Ready` with no scheduler owner is a state no wake undoes, and nothing
-    /// respawns one of these threads.
+    /// Discard the whole inbox, releasing each parked reference.
     fn clear_remote_inbox_with_ref_release(&self, kernel_io: &KernelIoTaskIds) {
         let mut cursor = self
             .remote_inbox_head
@@ -1408,12 +1393,8 @@ pub fn clear_all_cpu_queues() {
     }
 }
 
-/// Take every task an armed kernel-I/O hold covers off every CPU's ready queue
-/// and remote inbox.
-///
-/// The token is the precondition, not a courtesy: `ReadyQueue::dequeue`
-/// ignores its own placement CAS, so an AP still dispatching could run a task
-/// this sweep had already claimed.
+/// The token is a precondition: `ReadyQueue::dequeue` ignores its own placement CAS,
+/// so an AP still dispatching could run a task this sweep had already claimed.
 pub fn hold_kernel_io_off_all_runqueues(_paused: &ApPauseToken) -> usize {
     if !kernel_io_hold_armed() {
         return 0;
@@ -1424,12 +1405,7 @@ pub fn hold_kernel_io_off_all_runqueues(_paused: &ApPauseToken) -> usize {
         let Some(sched) = cpu_scheduler(cpu_id) else {
             continue;
         };
-        // Unconditional, and a drain rather than a discard: the drain hands a
-        // covered task to the hold, and lands every other pending wake in a
-        // ready queue where `task_shutdown_population` retires it. Discarding
-        // the inbox instead — which is what `force_clear_inbox_count` does a
-        // few lines later in `enter()` — leaves a woken task `Ready` with no
-        // placement, which no wake re-publishes.
+        // A drain, not a discard: a discarded wake leaves the task `Ready` with no placement.
         sched.drain_remote_inbox();
         held += sched.hold_kernel_io();
     }
