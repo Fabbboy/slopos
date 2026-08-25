@@ -12,9 +12,8 @@ use crate::tcp::pcb::time_wait::TimeWaitState;
 use crate::tcp::pcb::{Pcb, PcbState};
 use crate::tcp::seq::SeqNum;
 use crate::tcp::tuple::TcpTuple;
+use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
 
-const LOCAL_IP: [u8; 4] = [10, 0, 0, 1];
-const REMOTE_IP: [u8; 4] = [10, 0, 0, 2];
 const LOCAL_PORT: u16 = 49_152;
 const REMOTE_PORT: u16 = 80;
 

@@ -17,6 +17,7 @@ use slopos_testing::{assert_test, fail, pass};
 use crate::mmu::quiesce;
 use crate::page_alloc::{
     FrameAccounting, alloc_kernel_page_with, frame_accounting, free_page_frame,
+    max_reclaim_unit_pages,
 };
 
 /// Allocate a frame and free it into the quarantine's incoming list. Release
@@ -66,17 +67,24 @@ pub fn test_reclaim_registrants_report_without_freeing() -> TestResult {
     pass!()
 }
 
-/// `run(0)` is a no-op, and `run` never returns more than it was asked for.
+/// `run(0)` is a no-op, and `run` stops asking once the budget is met.
+///
+/// Not `freed <= want`: the quarantine releases whole buddy blocks, so the last
+/// one legitimately carries the total past the budget. What `run` must not do
+/// is keep asking after that — the overshoot is bounded by one block for the
+/// whole call, not one per pass or one per registrant.
 pub fn test_reclaim_run_respects_its_bound() -> TestResult {
     assert_test!(reclaim::run(0) == 0, "run(0) freed pages");
 
     let want = 4u32;
     let freed = reclaim::run(want);
+    let ceiling = want.saturating_add(max_reclaim_unit_pages().saturating_sub(1));
     assert_test!(
-        freed <= want,
-        "asked for {} pages and got {} back",
+        freed <= ceiling,
+        "asked for {} pages and got {} back, over the one-unit overshoot at {}",
         want,
-        freed
+        freed,
+        ceiling
     );
     pass!()
 }
@@ -106,13 +114,29 @@ pub fn test_reclaim_returns_pages_to_the_buddy() -> TestResult {
         }
     }
 
-    let freed = reclaim::run(u32::MAX);
+    // One page per pass: `run` hands every registrant what is left of the
+    // request, and the quarantine's splice holds the buddy's interrupts-off
+    // lock for as many blocks as it is asked for. The witness sits behind
+    // whatever peers parked after it, which is what the passes are for.
+    const RELEASE_PASSES: u32 = 256;
+
+    let mut freed_total = 0u32;
+    let mut passes = 0u32;
+    while passes < RELEASE_PASSES && frame_accounting(witness) == FrameAccounting::Quarantined {
+        let freed = reclaim::run(1);
+        if freed == 0 {
+            break;
+        }
+        freed_total = freed_total.saturating_add(freed);
+        passes += 1;
+    }
+
     let after = frame_accounting(witness);
     assert_test!(
         after != FrameAccounting::Quarantined,
-        "reclaim reported {} pages released and still left this test's own \
-         frame parked",
-        freed
+        "{} passes released {} pages and left this test's own frame parked",
+        passes,
+        freed_total
     );
     pass!()
 }

@@ -402,9 +402,14 @@ pub fn test_the_inbox_drain_hands_a_held_task_to_the_hold() -> TestResult {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     let strong_base = task_placement_strong_count(node);
 
-    let displaced = arm_kernel_io_hold_over_for_test(&[id]);
+    // Pushed before the hold is armed, so the entry is really in the inbox and
+    // the drain is what has to claim it. A push made *while* armed never gets
+    // that far — the publish path claims it directly, which the second half
+    // below pins.
     let _ = with_cpu_scheduler(cpu_id, |sched| sched.push_remote_wake(&task));
     let pushed = task.sched_placement() == SchedPlacement::RemoteWake;
+
+    let displaced = arm_kernel_io_hold_over_for_test(&[id]);
     let _ = with_cpu_scheduler(cpu_id, |sched| sched.drain_remote_inbox());
 
     let placement = task.sched_placement();
@@ -427,6 +432,43 @@ pub fn test_the_inbox_drain_hands_a_held_task_to_the_hold() -> TestResult {
     assert_test!(
         strong_after == strong_base,
         "the inbox reference was not released exactly once"
+    );
+    TestResult::Pass
+}
+
+/// A publish made while the hold is armed is claimed where it is made, so a
+/// covered task never reaches a container at all.
+pub fn test_a_push_under_the_hold_never_reaches_the_inbox() -> TestResult {
+    let _scope = KernelTestScope::enter();
+    let Some((id, task)) = make_ready_task(b"HeldPush\0") else {
+        return fail!("task creation failed");
+    };
+    let node = task.node();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let strong_base = task_placement_strong_count(node);
+
+    let displaced = arm_kernel_io_hold_over_for_test(&[id]);
+    let _ = with_cpu_scheduler(cpu_id, |sched| sched.push_remote_wake(&task));
+
+    let placement = task.sched_placement();
+    let inbox_linked = task.inbox_link().is_linked();
+    let pending = with_cpu_scheduler(cpu_id, |sched| sched.has_pending_inbox()).unwrap_or(true);
+    let strong_after = task_placement_strong_count(node);
+    disarm_kernel_io_hold_for_test(&displaced);
+
+    let body: &Task = &task;
+    let _ = body.sched_placement_compare_exchange(SchedPlacement::Held, SchedPlacement::None);
+    let _ = task_terminate(id);
+
+    assert_test!(
+        placement == SchedPlacement::Held,
+        "the push did not hand the task to the hold"
+    );
+    assert_test!(!inbox_linked, "a held task was linked into an inbox");
+    assert_test!(!pending, "a held task left an entry in the inbox");
+    assert_test!(
+        strong_after == strong_base,
+        "the refused push parked a reference"
     );
     TestResult::Pass
 }
@@ -501,6 +543,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_the_inbox_drain_hands_a_held_task_to_the_hold,
+    suite = kernel_io
+);
+slopos_testing::stest!(
+    name = test_a_push_under_the_hold_never_reaches_the_inbox,
     suite = kernel_io
 );
 slopos_testing::stest!(

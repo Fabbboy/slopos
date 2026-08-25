@@ -1,85 +1,128 @@
+//! Tests that exercise the live NIC, its DHCP lease and the QEMU SLIRP peer.
+//!
+//! Nothing here writes to a shared table. The route table, the interface table
+//! and the neighbour cache are what the live stack is using while these run, so
+//! a test that installed its own topology would be asserting against a stack it
+//! had just reconfigured out from under the boot lease.
+
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
-use slopos_testing::{assert_test, fail, pass};
+use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
-use crate::iface;
+use crate::iface::{self, IfaceKind};
 use crate::neighbor::NEIGHBOR_CACHE;
-use crate::route::ROUTE_TABLE;
+use crate::netdev::DEVICE_REGISTRY;
+use crate::route::{ROUTE_TABLE, RouteEntry};
 use crate::socket;
 use crate::tcp;
+use crate::tests::env_wait::await_env;
+use crate::tests::env_wait::errno_i32;
 use crate::types::{DevIndex, Ipv4Addr};
 
 const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
 const GATEWAY_PORT: u16 = 7;
 
-fn restore_boot_routes() {
-    use crate::route::RouteEntry;
-    // The route table is the only record of the DHCP-learned gateway, so it has
-    // to be captured before the reset wipes it.
-    let saved_gateway = ROUTE_TABLE
-        .all_routes()
-        .iter()
-        .find(|r| r.prefix_len == 0 && !r.gateway.is_unspecified())
-        .map(|r| r.gateway);
-    ROUTE_TABLE.reset();
-    ROUTE_TABLE.add(RouteEntry {
-        prefix: Ipv4Addr([127, 0, 0, 0]),
-        prefix_len: 8,
-        gateway: Ipv4Addr::UNSPECIFIED,
-        dev: DevIndex(0),
-        metric: 0,
-    });
-    // The gateway comes from the saved default route rather than the interface:
-    // the route table is the authority for forwarding.
-    if let Some(nic) = iface::get_by_dev(DevIndex(1))
-        && let Some(addr) = nic.primary_addr()
-    {
-        ROUTE_TABLE.add(RouteEntry {
-            prefix: addr.network(),
-            prefix_len: addr.prefix_len,
-            gateway: Ipv4Addr::UNSPECIFIED,
-            dev: DevIndex(1),
-            metric: 0,
-        });
-        if let Some(gw) = saved_gateway {
-            ROUTE_TABLE.add(RouteEntry {
-                prefix: Ipv4Addr::UNSPECIFIED,
-                prefix_len: 0,
-                gateway: gw,
-                dev: DevIndex(1),
-                metric: 100,
-            });
+/// Failsafe on a wait whose other end is the environment rather than the
+/// kernel. Not a budget for the exchange it covers — a SLIRP round trip is
+/// sub-millisecond — only a bound on a wait that would otherwise not end.
+const ENV_FAILSAFE_MS: u64 = 2_000;
+
+/// How long each pass leaves the peer alone before draining the NIC again.
+const POLL_INTERVAL_MS: u32 = 1;
+
+fn nic_dev() -> Option<DevIndex> {
+    let mut found = None;
+    iface::for_each(|i| {
+        if found.is_none() && i.kind == IfaceKind::Ethernet {
+            found = Some(i.dev);
         }
-    }
+    });
+    found
+}
+
+/// Wait for the boot DHCP client to put an address on `dev`.
+///
+/// The client's state reaches `Bound` under its own lock and the lease is
+/// applied after that lock is dropped, so the address — not the state — is what
+/// says the interface is configured.
+fn await_dhcp_addr(dev: DevIndex) -> Option<(Ipv4Addr, u64)> {
+    await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
+        iface::our_ip(dev).filter(|ip| !ip.is_unspecified())
+    })
+}
+
+fn default_route_on(dev: DevIndex) -> Option<RouteEntry> {
+    let routes = ROUTE_TABLE.all_routes();
+    routes
+        .iter()
+        .copied()
+        .find(|r| r.prefix_len == 0 && r.dev == dev)
 }
 
 fn test_route_table_has_default() -> TestResult {
-    restore_boot_routes();
-    let routes = ROUTE_TABLE.all_routes();
-    klog_info!("tcp_live: route_count={}", routes.len());
-    for r in &routes {
-        klog_info!("tcp_live:   {:?}", r);
-    }
-    let has_default = routes.iter().any(|r| r.prefix_len == 0);
-    assert_test!(has_default, "no default route in table");
+    let Some(dev) = nic_dev() else {
+        return fail!("no Ethernet interface is attached");
+    };
+
+    let Some((route, waited)) =
+        await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || default_route_on(dev))
+    else {
+        return fail!(
+            "dev {} has no default route after {}ms (DHCP state {:?}) — the environment's DHCP server did not answer",
+            dev,
+            ENV_FAILSAFE_MS,
+            crate::dhcp::state_of(dev)
+        );
+    };
+    klog_info!("tcp_live: default route {:?} after {}ms", route, waited);
+
+    assert_test!(
+        !route.gateway.is_unspecified(),
+        "the default route on dev {} is directly connected, so nothing is reachable off-link: {:?}",
+        dev,
+        route
+    );
     pass!()
 }
 
 fn test_iface_has_ipv4() -> TestResult {
-    let ip = iface::first_ipv4();
-    klog_info!("tcp_live: our_ipv4={:?}", ip);
-    assert_test!(ip.is_some(), "no IPv4 address configured");
-    let addr = ip.unwrap().0;
-    assert_test!(addr != [0; 4], "IPv4 address is 0.0.0.0");
+    let Some(dev) = nic_dev() else {
+        return fail!("no Ethernet interface is attached");
+    };
+
+    let Some((addr, waited)) = await_dhcp_addr(dev) else {
+        return fail!(
+            "dev {} has no IPv4 address after {}ms (DHCP state {:?}) — the environment's DHCP server did not answer",
+            dev,
+            ENV_FAILSAFE_MS,
+            crate::dhcp::state_of(dev)
+        );
+    };
+    klog_info!(
+        "tcp_live: our_ipv4={} on dev {} after {}ms",
+        addr,
+        dev,
+        waited
+    );
+
+    assert_test!(
+        !addr.is_loopback(),
+        "the Ethernet interface took loopback address {}",
+        addr
+    );
+    assert_eq_test!(
+        iface::first_ipv4(),
+        Some(addr),
+        "first_ipv4 disagrees with the NIC's own address"
+    );
     pass!()
 }
 
 fn test_arp_resolve_gateway() -> TestResult {
     let gw_ip = Ipv4Addr(GATEWAY_IP);
 
-    let (dev, next_hop) = match ROUTE_TABLE.lookup(gw_ip) {
-        Some(r) => r,
-        None => return fail!("no route to gateway {}", gw_ip),
+    let Some((dev, next_hop)) = ROUTE_TABLE.lookup(gw_ip) else {
+        return fail!("no route to gateway {}", gw_ip);
     };
     klog_info!(
         "tcp_live: route to {} -> dev={} next_hop={}",
@@ -88,35 +131,47 @@ fn test_arp_resolve_gateway() -> TestResult {
         next_hop
     );
 
-    if NEIGHBOR_CACHE.lookup(dev, next_hop).is_some() {
-        klog_info!("tcp_live: gateway MAC already cached");
+    if let Some(mac) = NEIGHBOR_CACHE.lookup(dev, next_hop) {
+        klog_info!("tcp_live: {} already cached as {}", next_hop, mac);
         return pass!();
     }
 
-    klog_info!("tcp_live: gateway MAC not cached, sending ARP on all devices");
-    let dev_count = crate::netdev::DEVICE_REGISTRY.device_count();
-    for i in 0..dev_count {
-        crate::arp::send_request_via_registry(DevIndex(i), next_hop);
-    }
+    let Some(before) = DEVICE_REGISTRY.stats_by_index(dev) else {
+        return fail!(
+            "the route names dev {}, which the device registry does not hold",
+            dev
+        );
+    };
+    crate::arp::send_request_via_registry(dev, next_hop);
+    let after = DEVICE_REGISTRY.stats_by_index(dev).unwrap_or(before);
 
-    for attempt in 0..20u32 {
-        slopos_kernel_services::driver_runtime::sleep_current_task_ms(100);
-        if let Some(d) = crate::net_driver_service::net_driver() {
-            (d.virtnet_force_napi_poll)();
-        }
-        for i in 0..dev_count {
-            if NEIGHBOR_CACHE.lookup(DevIndex(i), next_hop).is_some() {
-                klog_info!(
-                    "tcp_live: ARP resolved on dev {} after {}ms",
-                    i,
-                    (attempt + 1) * 100
-                );
-                return pass!();
-            }
-        }
-    }
+    // The half of this test that does not depend on a peer. Other CPUs transmit
+    // on this device too, so the counter is a floor rather than a count: it can
+    // only fail when the request never reached the wire at all.
+    assert_test!(
+        after.tx_packets > before.tx_packets,
+        "dev {} transmitted nothing for an ARP request for {}",
+        dev,
+        next_hop
+    );
 
-    fail!("ARP for gateway {} did not resolve in 2s", gw_ip)
+    let Some((mac, waited)) = await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
+        NEIGHBOR_CACHE.lookup(dev, next_hop)
+    }) else {
+        return fail!(
+            "{} did not answer ARP on dev {} within {}ms — the environment's gateway is not responding",
+            next_hop,
+            dev,
+            ENV_FAILSAFE_MS
+        );
+    };
+    klog_info!(
+        "tcp_live: {} resolved to {} after {}ms",
+        next_hop,
+        mac,
+        waited
+    );
+    pass!()
 }
 
 /// An external destination must take its source IP from the NIC.
@@ -125,24 +180,28 @@ fn test_arp_resolve_gateway() -> TestResult {
 /// NIC, so sourcing that way sends external traffic with `src_ip = 127.0.0.1`,
 /// whose replies QEMU SLIRP's TCP forwarder drops.
 fn test_source_ip_for_external_uses_nic() -> TestResult {
-    let external = Ipv4Addr(GATEWAY_IP);
-    let src = match iface::source_ip_for(external) {
-        Some(ip) => ip,
-        None => return fail!("source_ip_for({}) returned None", external),
+    let Some(dev) = nic_dev() else {
+        return fail!("no Ethernet interface is attached");
     };
-    klog_info!(
-        "tcp_live: source_ip_for({}) -> {} (must NOT be 127.x)",
-        external,
-        src
-    );
-    assert_test!(
-        !src.is_loopback(),
-        "source_ip_for(external dst) returned loopback {} — outbound TCP would send with src=127.0.0.1 and never receive replies",
-        src
-    );
-    assert_test!(
-        !src.is_unspecified(),
-        "source_ip_for(external dst) returned 0.0.0.0 — DHCP did not configure the NIC"
+    let Some((nic_addr, _)) = await_dhcp_addr(dev) else {
+        return fail!(
+            "dev {} has no IPv4 address after {}ms (DHCP state {:?}) — source selection has nothing to pick",
+            dev,
+            ENV_FAILSAFE_MS,
+            crate::dhcp::state_of(dev)
+        );
+    };
+
+    let external = Ipv4Addr(GATEWAY_IP);
+    let Some(src) = iface::source_ip_for(external) else {
+        return fail!("source_ip_for({}) returned None", external);
+    };
+    klog_info!("tcp_live: source_ip_for({}) -> {}", external, src);
+
+    assert_eq_test!(
+        src,
+        nic_addr,
+        "source_ip_for(external dst) must pick the NIC's address; outbound TCP sourced from anywhere else never receives replies"
     );
     pass!()
 }
@@ -165,12 +224,19 @@ fn test_source_ip_for_loopback_uses_loopback() -> TestResult {
 }
 
 fn test_tcp_syn_transmit() -> TestResult {
-    let our_ip = match iface::first_ipv4() {
-        Some(ip) => ip.0,
-        None => return fail!("no local IP"),
+    let Some(dev) = nic_dev() else {
+        return fail!("no Ethernet interface is attached");
+    };
+    let Some((our_ip, _)) = await_dhcp_addr(dev) else {
+        return fail!(
+            "dev {} has no IPv4 address after {}ms (DHCP state {:?}) — a SYN has no source address",
+            dev,
+            ENV_FAILSAFE_MS,
+            crate::dhcp::state_of(dev)
+        );
     };
 
-    let (tcp_id, syn) = match tcp::connect(our_ip, GATEWAY_IP, GATEWAY_PORT) {
+    let (tcp_id, syn) = match tcp::connect(our_ip.0, GATEWAY_IP, GATEWAY_PORT) {
         Ok(r) => r,
         Err(e) => return fail!("tcp_connect failed: {:?}", e),
     };
@@ -193,6 +259,19 @@ fn test_tcp_syn_transmit() -> TestResult {
 
 fn test_tcp_nonblocking_connect_returns_einprogress() -> TestResult {
     use slopos_abi::net::{AF_INET, SOCK_STREAM};
+    use slopos_abi::syscall::ERRNO_EINPROGRESS;
+
+    let Some(dev) = nic_dev() else {
+        return fail!("no Ethernet interface is attached");
+    };
+    if await_dhcp_addr(dev).is_none() {
+        return fail!(
+            "dev {} has no IPv4 address after {}ms (DHCP state {:?}) — connect has no source address",
+            dev,
+            ENV_FAILSAFE_MS,
+            crate::dhcp::state_of(dev)
+        );
+    }
 
     let sock_fd = socket::socket_create(AF_INET, SOCK_STREAM, 0, socket::SocketOwner::UNOWNED);
     if sock_fd < 0 {
@@ -207,8 +286,8 @@ fn test_tcp_nonblocking_connect_returns_einprogress() -> TestResult {
     let _ = socket::socket_close(sock_idx);
 
     assert_test!(
-        rc == 0 || rc == -115,
-        "nonblocking connect: expected 0 or EINPROGRESS(-115), got {}",
+        rc == 0 || rc == errno_i32(ERRNO_EINPROGRESS),
+        "nonblocking connect: expected 0 or EINPROGRESS, got {}",
         rc,
     );
     pass!()

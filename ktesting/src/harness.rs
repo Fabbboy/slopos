@@ -248,8 +248,15 @@ fn run_phase(
         }
 
         match outcome.outcome {
-            TestResult::Pass | TestResult::OverTime | TestResult::Skipped => {
+            TestResult::Pass | TestResult::OverTime => {
                 summary.passed = summary.passed.saturating_add(1);
+            }
+            // Counted apart, not as a pass: a skip is a test that observed
+            // nothing, and folding it into `passed` left the KTAP footer
+            // reporting `skip=0` however many declined. A skip surge is then
+            // indistinguishable from a green run.
+            TestResult::Skipped => {
+                summary.skipped = summary.skipped.saturating_add(1);
             }
             TestResult::Fail => {
                 summary.failed = summary.failed.saturating_add(1);

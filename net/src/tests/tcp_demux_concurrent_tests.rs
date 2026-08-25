@@ -2,6 +2,11 @@
 //!
 //! `stest!` runs each test on one CPU, so install/release races are covered
 //! only through deterministic interleavings, not real concurrency.
+//!
+//! Every test that reads the table holds a [`NetTestScope`]: `find`,
+//! `port_in_use` and the active-slot snapshot are global state the live ingress
+//! and net-timer threads mutate too. The epoch test asserts only on its own
+//! drop counter and takes none.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -11,8 +16,19 @@ use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::tcp::pcb::{ListenState, PcbState, SynSentState};
 use crate::tcp::seq::SeqNum;
-use crate::tcp::table::{self, NET_EPOCH};
+use crate::tcp::table::{self, ConnId, NET_EPOCH};
 use crate::tcp::tuple::TcpTuple;
+use crate::tests::net_scope::{NetTestScope, ScopeError};
+use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
+
+/// A peer no tuple here installs, so the listener match cannot be a full-tuple hit.
+const OTHER_REMOTE_IP: [u8; 4] = [REMOTE_IP[0], REMOTE_IP[1], REMOTE_IP[2], 99];
+
+#[cold]
+#[inline(never)]
+fn scope_error(e: ScopeError) -> TestResult {
+    fail!("net scope: {:?}", e)
+}
 
 fn reset() {
     table::clear_all();
@@ -28,14 +44,18 @@ fn listen_state() -> PcbState {
 
 fn shard_tuple(seed: u8) -> TcpTuple {
     TcpTuple {
-        local_ip: [10, 0, 0, 1],
+        local_ip: LOCAL_IP,
         local_port: 5000 + seed as u16,
-        remote_ip: [10, 0, 0, 2],
+        remote_ip: REMOTE_IP,
         remote_port: 60000 + seed as u16,
     }
 }
 
 pub fn test_demux_find_after_install_returns_some() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let tuple = shard_tuple(1);
     let id = match table::install_established(tuple, syn_sent_state(), |_| {}) {
@@ -48,6 +68,10 @@ pub fn test_demux_find_after_install_returns_some() -> TestResult {
 }
 
 pub fn test_demux_find_after_release_returns_none() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let tuple = shard_tuple(2);
     let id = match table::install_established(tuple, syn_sent_state(), |_| {}) {
@@ -61,6 +85,10 @@ pub fn test_demux_find_after_release_returns_none() -> TestResult {
 }
 
 pub fn test_demux_find_unknown_tuple_returns_none() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let known = shard_tuple(3);
     let unknown = shard_tuple(4);
@@ -74,9 +102,13 @@ pub fn test_demux_find_unknown_tuple_returns_none() -> TestResult {
 }
 
 pub fn test_demux_listener_fallback() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let listener_tuple = TcpTuple {
-        local_ip: [10, 0, 0, 1],
+        local_ip: LOCAL_IP,
         local_port: 6000,
         remote_ip: [0; 4],
         remote_port: 0,
@@ -90,9 +122,9 @@ pub fn test_demux_listener_fallback() -> TestResult {
     // Matching local port with a non-wildcard remote must fall back to the
     // listener table.
     let incoming = TcpTuple {
-        local_ip: [10, 0, 0, 1],
+        local_ip: LOCAL_IP,
         local_port: 6000,
-        remote_ip: [10, 0, 0, 99],
+        remote_ip: OTHER_REMOTE_IP,
         remote_port: 33333,
     };
     let found = table::find(&incoming);
@@ -101,6 +133,10 @@ pub fn test_demux_listener_fallback() -> TestResult {
 }
 
 pub fn test_demux_install_release_cycle_consistency() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let tuple = shard_tuple(5);
     for _ in 0..32 {
@@ -121,26 +157,57 @@ pub fn test_demux_install_release_cycle_consistency() -> TestResult {
     pass!()
 }
 
+/// How many of `ids` the table still lists as active. The snapshot array is
+/// this function's frame, not its caller's.
+fn active_among(ids: &[Option<ConnId>]) -> usize {
+    let mut live = [None; table::TOTAL_PCB_SLOTS];
+    let n = table::snapshot_shard_conn_ids(&mut live);
+    ids.iter()
+        .flatten()
+        .filter(|id| live[..n].contains(&Some(**id)))
+        .count()
+}
+
 pub fn test_demux_active_count_matches_installs() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
-    assert_eq_test!(table::active_count(), 0, "empty active_count");
-    let mut ids = [None; 4];
-    for i in 0..4 {
-        let id = match table::install_established(shard_tuple(10 + i), syn_sent_state(), |_| {}) {
-            Ok(id) => id,
-            Err(_) => return fail!("install failed"),
-        };
-        ids[i as usize] = Some(id);
+    let tuples = [
+        shard_tuple(10),
+        shard_tuple(11),
+        shard_tuple(12),
+        shard_tuple(13),
+    ];
+    for tuple in &tuples {
+        assert_eq_test!(table::find(tuple), None, "test tuple starts uninstalled");
     }
-    assert_eq_test!(table::active_count(), 4, "after 4 installs");
+
+    let mut ids = [None; 4];
+    for (slot, tuple) in ids.iter_mut().zip(tuples.iter()) {
+        match table::install_established(*tuple, syn_sent_state(), |_| {}) {
+            Ok(id) => *slot = Some(id),
+            Err(_) => return fail!("install failed"),
+        }
+    }
+    // The generation in a ConnId makes this count the test's own connections
+    // rather than the slots they occupy, so a concurrent install elsewhere in
+    // the table is neither counted nor mistaken for one of these.
+    assert_eq_test!(active_among(&ids), 4, "after 4 installs");
+
     for id in ids.iter().flatten() {
         table::release(*id);
     }
-    assert_eq_test!(table::active_count(), 0, "after release");
+    assert_eq_test!(active_among(&ids), 0, "after release");
     pass!()
 }
 
 pub fn test_demux_port_in_use_lock_free() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let tuple = shard_tuple(20);
     assert_test!(
@@ -173,10 +240,6 @@ impl Drop for DropProbe {
     }
 }
 
-/// Bound on waiting for a deferred drop that another CPU may be invoking.
-const DRAIN_DEADLINE_MS: u32 = 400;
-const DRAIN_POLL_MS: u32 = 10;
-
 pub fn test_epoch_defer_runs_after_grace_period() -> TestResult {
     DROP_COUNTER.store(0, Ordering::Release);
 
@@ -187,20 +250,11 @@ pub fn test_epoch_defer_runs_after_grace_period() -> TestResult {
 
     NET_EPOCH.defer_kbox::<DropProbe>(boxed);
 
+    // A grace period elapsing and the callback having been invoked are two
+    // separate facts; `rcu_barrier` is the one that reports the second, and it
+    // drives the drain itself rather than waiting on an idle peer.
     NET_EPOCH.wait();
-
-    // Poll for the effect rather than assume this call drained: an idle CPU
-    // drains concurrently and may already have detached the chain.
-    let mut waited = 0;
-    while DROP_COUNTER.load(Ordering::Acquire) == 0 && waited < DRAIN_DEADLINE_MS {
-        slopos_ostd::sync::rcu::rcu_raise_softirq();
-        slopos_ostd::sync::rcu::rcu_process_callbacks();
-        if DROP_COUNTER.load(Ordering::Acquire) != 0 {
-            break;
-        }
-        slopos_kernel_services::platform::timer_poll_delay_ms(DRAIN_POLL_MS);
-        waited += DRAIN_POLL_MS;
-    }
+    slopos_ostd::sync::rcu::rcu_barrier();
 
     let drops = DROP_COUNTER.load(Ordering::Acquire);
     assert_eq_test!(drops, 1, "deferred drop ran after grace period");
@@ -208,6 +262,10 @@ pub fn test_epoch_defer_runs_after_grace_period() -> TestResult {
 }
 
 pub fn test_epoch_enter_allows_rcucell_load() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let tuple = shard_tuple(30);
     let id = match table::install_established(tuple, syn_sent_state(), |_| {}) {

@@ -18,9 +18,6 @@ const PML4: u64 = 0x1_000;
 /// Return every frame the address spaces below borrowed, so the suite does not
 /// carry a growing quarantine from here to whatever runs next.
 fn settle_teardown() {
-    // Teardown stages a frame through three holds before it is reusable: the
-    // quiesce epoch has to close, then the quarantine rotates, then the
-    // per-CPU cache drains.
     let _ = crate::mmu::quiesce::force_close_epoch_for_test();
     for _ in 0..4 {
         crate::page_alloc::quarantine_rotate();

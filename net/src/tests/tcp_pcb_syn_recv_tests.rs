@@ -9,15 +9,16 @@ use crate::tcp::pcb::syn_recv::SynRecvState;
 use crate::tcp::pcb::{Pcb, PcbState};
 use crate::tcp::seq::SeqNum;
 use crate::tcp::tuple::TcpTuple;
+use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
 
 const OUR_ISS: u32 = 10_000;
 const PEER_IRS: u32 = 20_000;
 
 fn make_pcb() -> Pcb {
     let tuple = TcpTuple {
-        local_ip: [10, 0, 0, 1],
+        local_ip: LOCAL_IP,
         local_port: 80,
-        remote_ip: [10, 0, 0, 2],
+        remote_ip: REMOTE_IP,
         remote_port: 49_152,
     };
     Pcb::new(

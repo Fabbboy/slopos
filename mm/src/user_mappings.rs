@@ -22,11 +22,14 @@ use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 /// Bit shift for the AVL software-bits field (PTE bits 9..=11); legacy
 /// [`PageFlags::COW`] sits at bit 9, the low bit of `PageProperty::software`.
 const SOFTWARE_BITS_SHIFT: u32 = 9;
-/// One cache-line round trip, not a scheduling quantum. Past this the holder
-/// is descheduled, and every further iteration is spent with interrupts and
-/// preemption off under the per-process lock — burning the CPU the holder
-/// needs in order to release.
-const VM_SPACE_MUT_SPINS: usize = 64;
+/// Only two of this helper's callers can retry — the demand and COW fault
+/// paths, which return `MmError::Retry` and re-execute the faulting
+/// instruction. The other eight are syscall paths (`fork`'s COW marking,
+/// `mmap`, `brk`, `mprotect`, `munmap`) where a `WouldBlock` is a spurious
+/// failure with no recovery, so for them the spin is the only recourse there
+/// is. Both fault paths probe `vm_space_is_exclusive` before doing any work,
+/// so neither pays this budget in the case it exists for.
+const VM_SPACE_MUT_SPINS: usize = 1_000_000;
 
 /// Convert a legacy `PageFlags` bitfield (passed as `u64`) into an OSTD
 /// `PageProperty`.
@@ -155,14 +158,17 @@ pub fn ostd_replace_4kb_user(
     pa: PhysAddr,
     flags: u64,
 ) -> Result<Option<UFrame<AnonymousMeta>>, MapError> {
-    let vs = vm_space_get_mut(vm_space)?;
     let prop = page_flags_to_property(flags);
+    let vs = vm_space_get_mut(vm_space)?;
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
+    // Unmap before the wrap, so no fallible step between them can drop a
+    // `UFrame` over `pa` and free a page the caller also frees. The mirror
+    // hazard — an error after the unmap dropping `displaced` before a
+    // shootdown — is inert for the only caller, `cow::resolve_multi_ref`,
+    // which reaches here precisely because the old page's reference count is
+    // above one.
     let displaced = cursor.unmap::<Size4Kb, AnonymousMeta>()?;
-    // Wrapped only once every fallible step before the hand-off has passed:
-    // a `UFrame` dropped on an error path returns `pa` to the allocator, and
-    // the caller frees it too.
     let frame = UFrame::<AnonymousMeta>::wrap_user_paddr(Paddr::new(pa.as_u64()))
         .map_err(|_| MapError::PathCorrupt)?;
     cursor.map::<Size4Kb, AnonymousMeta>(frame, prop)?;

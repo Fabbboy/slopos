@@ -231,10 +231,12 @@ debug-monitor:
 
 # Record/replay needs TCG + smp=1 for icount, so it cannot capture SMP-only races.
 
-# These assert wall-clock timer calibration, which instruction-counted time
-# breaks, or are flaky under single-CPU TCG; skipping them lets the "tests" boot
-# step pass so recording reaches the userland phase.
-rr_skip := "slopos_core::syscall::tests::test_kill_process_group_semantics,slopos_drivers::tests::apic_timer_tests::test_lapic_timer_tick_rate_reasonable,slopos_drivers::tests::hpet_tests::test_hpet_delay_accuracy"
+# These compare one emulated clock against another, which icount decouples;
+# skipping them lets the "tests" boot step pass so recording reaches the
+# userland phase. `test_hpet_delay_accuracy` came off this list once it started
+# measuring the HPET against itself over a minimum of several rounds — an
+# exemption that stops describing a real failure is a dead exemption.
+rr_skip := "slopos_core::syscall::tests::test_kill_process_group_semantics,slopos_drivers::tests::apic_timer_tests::test_lapic_timer_tick_rate_reasonable"
 
 [doc("Record a deterministic test run to builddir/replay.bin (TCG, smp=1)")]
 rr-record:

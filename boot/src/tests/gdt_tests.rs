@@ -3,19 +3,58 @@
 use slopos_arch::arch::gdt::IstSlot;
 use slopos_arch::cpu;
 use slopos_arch::cpu::msr::{EFER_SCE, Msr};
+use slopos_arch::get_current_cpu;
 use slopos_hermetic::KernelStackTop;
+use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
 use slopos_ostd::klog_info;
-use slopos_ostd::test_support::{arch as ts_arch, gdt as ts_gdt};
+use slopos_ostd::test_support::{arch as ts_arch, gdt as ts_gdt, pcr as ts_pcr};
 use slopos_sched::test_fixture::KernelTestScope;
-use slopos_testing::TestResult;
+use slopos_testing::{TestResult, assert_test};
 
 use crate::gdt::{gdt_init, gdt_set_ist, gdt_set_kernel_rsp0, syscall_msr_init};
 use crate::idt::{IdtEntry, idt_get_gate};
+use crate::ist_stacks::{IST_STACK_COUNT, stack_bounds_for_cpu};
 
-/// Never used as a stack; exists only to give `KernelStackTop::from_slice` a real `&[u8]`.
-#[repr(align(16))]
-struct DummyStack([u8; 64]);
-static DUMMY_TEST_STACK: DummyStack = DummyStack([0u8; 64]);
+/// Probe stack top `n`, taken from `cpu`'s live IST stacks: `cli` masks only the
+/// IRQ-routed slots, so an installed probe still has to be guard-paged and
+/// inside the SafeStack IST region.
+fn probe_stack_top(cpu: usize, n: usize) -> KernelStackTop<'static> {
+    let (_guard_start, _guard_end, _stack_base, top) =
+        stack_bounds_for_cpu(cpu, n % IST_STACK_COUNT);
+    KernelStackTop::from_kernel_va(top - 16 * (n / IST_STACK_COUNT) as u64)
+}
+
+/// Slot `i` is probed with slot `i+1`'s stack, so a write landing one TSS entry
+/// over is a mismatch rather than a coincidence.
+fn ist_probe_top(cpu: usize, slot: IstSlot) -> KernelStackTop<'static> {
+    probe_stack_top(cpu, slot.as_tss_offset() + 1)
+}
+
+fn live_tss_base() -> Option<u64> {
+    let tr = read_tr();
+    if tr == 0 {
+        return None;
+    }
+    let (_limit, gdt_base) = read_gdtr();
+    let (tss_base, _tss_limit) = ts_gdt::read_tss_descriptor(gdt_base, (tr >> 3) as usize);
+    Some(tss_base)
+}
+
+/// IST1..IST7 are seven 8-byte entries at TSS64 offset 36; neither they nor
+/// `rsp0` at offset 4 are 8-aligned, hence the byte-array helper.
+fn live_tss_ist(tss_base: u64, slot: IstSlot) -> u64 {
+    u64::from_le_bytes(ts_gdt::read_bytes_at::<8>(
+        tss_base + 36 + slot.as_tss_offset() as u64 * 8,
+    ))
+}
+
+fn live_tss_rsp0(tss_base: u64) -> u64 {
+    u64::from_le_bytes(ts_gdt::read_bytes_at::<8>(tss_base + 4))
+}
+
+fn live_rsp0() -> Option<u64> {
+    live_tss_base().map(live_tss_rsp0)
+}
 
 fn read_gdtr() -> (u16, u64) {
     let g = ts_arch::read_gdtr();
@@ -125,46 +164,142 @@ pub fn test_tss_loaded() -> TestResult {
     TestResult::Pass
 }
 
-/// Writes a `.text` address as RSP0; the fixture's `TssRsp0Shadow` restores it on drop.
+const RSP0_PROBE_INDEX: usize = 0;
+
+struct Rsp0Probe {
+    probe: u64,
+    pcr_before: u64,
+    tss_before: u64,
+    tss_installed: u64,
+    tss_restored: u64,
+}
+
+/// One install-and-restore round trip of the live RSP0. `RSP0` is loaded only
+/// on a ring transition, which a kernel-mode window cannot take; the mask is
+/// what keeps the install and the restore adjacent.
+fn probe_kernel_rsp0() -> Option<Rsp0Probe> {
+    let tss_base = live_tss_base()?;
+    let probe = probe_stack_top(get_current_cpu(), RSP0_PROBE_INDEX).as_u64();
+    IrqDisabled::with(|irq| {
+        let pcr_before = ts_pcr::bsp_kernel_rsp_snapshot(irq)?;
+        let tss_before = live_tss_rsp0(tss_base);
+        gdt_set_kernel_rsp0(probe);
+        let tss_installed = live_tss_rsp0(tss_base);
+        ts_pcr::bsp_kernel_rsp_restore(irq, pcr_before);
+        Some(Rsp0Probe {
+            probe,
+            pcr_before,
+            tss_before,
+            tss_installed,
+            tss_restored: live_tss_rsp0(tss_base),
+        })
+    })
+}
+
+/// The value handed to `gdt_set_kernel_rsp0` reaches the live TSS, and the
+/// PCR's `kernel_rsp` and that TSS field name one stack rather than two.
 pub fn test_gdt_set_kernel_rsp0_valid() -> TestResult {
-    let _scope = KernelTestScope::enter();
-    let test_rsp0: u64 = 0xFFFF_FFFF_8010_0000;
-    gdt_set_kernel_rsp0(test_rsp0);
+    let Some(observed) = probe_kernel_rsp0() else {
+        klog_info!("GDT_TEST: BUG - no TSS loaded, or the BSP PCR is uninitialised");
+        return TestResult::Fail;
+    };
+
+    assert_test!(
+        observed.pcr_before == observed.tss_before,
+        "PCR kernel_rsp and TSS.RSP0 named different stacks before the write"
+    );
+    assert_test!(
+        observed.tss_installed == observed.probe,
+        "gdt_set_kernel_rsp0 did not reach the live TSS"
+    );
+    assert_test!(
+        observed.tss_restored == observed.tss_before,
+        "the round trip did not put the original RSP0 back"
+    );
     TestResult::Pass
 }
 
-/// Despite the name, null is never written: the runtime API has no validator.
-pub fn test_gdt_set_kernel_rsp0_null() -> TestResult {
-    let _scope = KernelTestScope::enter();
-    let safe_rsp0: u64 = 0xFFFF_FFFF_8010_0000;
-    gdt_set_kernel_rsp0(safe_rsp0);
+/// The setter has no validator, so whatever is installed is taken as a stack by
+/// the next ring transition. One test rather than three: null, a user address
+/// and a misaligned value are the same invariant read three ways, and split
+/// across tests none of them could fail without the others.
+///
+/// Alignment is the part that is not implied by the other two: `SS:RSP` is
+/// loaded verbatim and the CPU's first push is 8-byte, so a truncated or
+/// off-by-one write lands mid-frame rather than nowhere.
+pub fn test_gdt_kernel_rsp0_is_a_usable_stack_top() -> TestResult {
+    const KERNEL_HALF: u64 = 0xFFFF_8000_0000_0000;
+    let Some(rsp0) = live_rsp0() else {
+        klog_info!("GDT_TEST: BUG - no TSS loaded");
+        return TestResult::Fail;
+    };
+
+    assert_test!(rsp0 != 0, "the live TSS.RSP0 is NULL");
+    assert_test!(rsp0 >= KERNEL_HALF, "the live TSS.RSP0 is a user address");
+    assert_test!(
+        rsp0 % 16 == 0,
+        "the live TSS.RSP0 0x{:x} is not 16-byte aligned",
+        rsp0
+    );
     TestResult::Pass
 }
 
-/// `user_rsp0` is never passed in: the unvalidated runtime API would accept it.
-pub fn test_gdt_set_kernel_rsp0_user_address() -> TestResult {
-    let _scope = KernelTestScope::enter();
-    let user_rsp0: u64 = 0x0000_7FFF_FFFF_0000;
-    let _ = user_rsp0;
-    let safe_rsp0: u64 = 0xFFFF_FFFF_8010_0000;
-    gdt_set_kernel_rsp0(safe_rsp0);
-    TestResult::Pass
-}
+const IST_SLOTS: [IstSlot; 7] = [
+    IstSlot::DoubleFault,
+    IstSlot::StackFault,
+    IstSlot::GeneralProtection,
+    IstSlot::PageFault,
+    IstSlot::KeyboardIrq,
+    IstSlot::MouseIrq,
+    IstSlot::Reserved7,
+];
 
-/// The fixture's `TssIstShadow` restores the original IST entries on drop.
+/// Each IST slot takes the stack it was given, in its own TSS entry.
 pub fn test_gdt_set_ist_valid_indices() -> TestResult {
     let mut scope = KernelTestScope::enter();
-    let top = KernelStackTop::from_slice(&DUMMY_TEST_STACK.0);
-    for slot in [
-        IstSlot::DoubleFault,
-        IstSlot::StackFault,
-        IstSlot::GeneralProtection,
-        IstSlot::PageFault,
-        IstSlot::KeyboardIrq,
-        IstSlot::MouseIrq,
-        IstSlot::Reserved7,
-    ] {
-        scope.with_boot(|ctx| gdt_set_ist(ctx, slot, top));
+    let cpu = get_current_cpu();
+    let Some(tss_base) = live_tss_base() else {
+        klog_info!("GDT_TEST: BUG - no TSS loaded");
+        return TestResult::Fail;
+    };
+
+    let observed = IrqDisabled::with(|irq| {
+        let saved = ts_pcr::bsp_ist_snapshot(irq)?;
+        let mut installed = [0u64; 7];
+        // Reverse: the permutation is `slot i takes stack i+1`, so writing
+        // forward leaves each just-written slot transiently holding the boot
+        // value of the next, not-yet-written one — an alias between two
+        // vectors `cli` does not mask.
+        for slot in IST_SLOTS.iter().rev() {
+            let top = ist_probe_top(cpu, *slot);
+            scope.with_boot(|ctx| gdt_set_ist(ctx, *slot, top));
+        }
+        for (idx, slot) in IST_SLOTS.iter().enumerate() {
+            installed[idx] = live_tss_ist(tss_base, *slot);
+        }
+        ts_pcr::bsp_ist_restore(irq, saved);
+        Some((installed, saved))
+    });
+
+    let Some((installed, saved)) = observed else {
+        klog_info!("GDT_TEST: BUG - the BSP PCR is uninitialised");
+        return TestResult::Fail;
+    };
+
+    for (idx, slot) in IST_SLOTS.iter().enumerate() {
+        let expected = ist_probe_top(cpu, *slot).as_u64();
+        assert_test!(
+            installed[idx] == expected,
+            "IST{} holds 0x{:x}, expected 0x{:x}",
+            slot.as_index(),
+            installed[idx],
+            expected
+        );
+        assert_test!(
+            live_tss_ist(tss_base, *slot) == saved[slot.as_tss_offset()],
+            "IST{} was not restored to its boot-installed stack",
+            slot.as_index()
+        );
     }
     TestResult::Pass
 }
@@ -172,13 +307,11 @@ pub fn test_gdt_set_ist_valid_indices() -> TestResult {
 /// Empty by design: `IstSlot` has no zero variant; the rejection is a compile_fail
 /// doctest on the enum.
 pub fn test_gdt_set_ist_index_zero() -> TestResult {
-    let _scope = KernelTestScope::enter();
     TestResult::Pass
 }
 
 /// Empty for the same reason: `IstSlot` tops out at `Reserved7`.
 pub fn test_gdt_set_ist_index_overflow() -> TestResult {
-    let _scope = KernelTestScope::enter();
     TestResult::Pass
 }
 
@@ -698,8 +831,10 @@ slopos_testing::stest!(name = test_current_ss_is_kernel, suite = gdt);
 slopos_testing::stest!(name = test_data_segment_selectors, suite = gdt);
 slopos_testing::stest!(name = test_tss_loaded, suite = gdt);
 slopos_testing::stest!(name = test_gdt_set_kernel_rsp0_valid, suite = gdt);
-slopos_testing::stest!(name = test_gdt_set_kernel_rsp0_null, suite = gdt);
-slopos_testing::stest!(name = test_gdt_set_kernel_rsp0_user_address, suite = gdt);
+slopos_testing::stest!(
+    name = test_gdt_kernel_rsp0_is_a_usable_stack_top,
+    suite = gdt
+);
 slopos_testing::stest!(name = test_gdt_set_ist_valid_indices, suite = gdt);
 slopos_testing::stest!(name = test_gdt_set_ist_index_zero, suite = gdt);
 slopos_testing::stest!(name = test_gdt_set_ist_index_overflow, suite = gdt);

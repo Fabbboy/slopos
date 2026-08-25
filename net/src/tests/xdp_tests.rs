@@ -3,6 +3,13 @@
 //! Recording filters use atomics — never a `SpinLock` — because
 //! `XdpFilter::execute` runs under a `NET_EPOCH` read guard where acquiring a
 //! tracked lock is forbidden.
+//!
+//! [`crate::ingress::net_rx_inner`] reads [`XDP`] and no other chain, so a test
+//! of the ingress path has to publish into the kernel-wide one. Every such test
+//! holds [`Quiesced`] first: the physical NIC's frames reach the chain through
+//! that same funnel, and a `Drop` verdict standing over the live NIC is a
+//! disconnected machine for as long as the test runs. A test that only needs a
+//! verdict runs its filters through [`LOCAL_CHAIN`] and publishes nothing.
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use slopos_ostd::lock_class;
@@ -14,13 +21,13 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
 use crate::ETH_HEADER_LEN;
-use crate::ingress::net_rx;
+use crate::ingress::{self, net_rx_injected};
 use crate::neighbor::NEIGHBOR_CACHE;
 use crate::netdev::*;
 use crate::packetbuf::PacketBuf;
 use crate::pool::{PACKET_POOL, PacketPool};
 use crate::types::*;
-use crate::xdp::{PacketView, XDP, XdpAction, XdpFilter, xdp_filter};
+use crate::xdp::{PacketView, XDP, XdpAction, XdpFilter, XdpHookChain, xdp_filter};
 
 // Each `#[xdp_filter]` fn generates an upper-cased `'static` instance.
 
@@ -204,12 +211,81 @@ fn build_tcp_frame(dst_mac: [u8; 6], src_mac: [u8; 6], src_port: u16, dst_port: 
     build_frame(dst_mac, src_mac, EtherType::Ipv4.as_u16(), &payload)
 }
 
-fn install_chain(filters: &[&'static dyn XdpFilter]) {
+fn chain_of(filters: &[&'static dyn XdpFilter]) -> Option<KVec<&'static dyn XdpFilter>> {
     let mut v: KVec<&'static dyn XdpFilter> = KVec::new();
     for &f in filters {
-        v.push(f).expect("test alloc");
+        v.push(f).ok()?;
     }
-    XDP.install(v).expect("xdp install");
+    Some(v)
+}
+
+/// A chain nothing else executes, for the tests that assert on a verdict rather
+/// than on what the ingress path did with one.
+static LOCAL_CHAIN: XdpHookChain = XdpHookChain::new();
+
+/// Shuts the physical NIC's ingress funnel for as long as it lives, so a filter
+/// published in [`XDP`] below can only ever be reached by this test's own
+/// injected frame.
+struct Quiesced;
+
+impl Quiesced {
+    fn enter() -> Self {
+        ingress::quiesce_begin();
+        Self
+    }
+}
+
+impl Drop for Quiesced {
+    fn drop(&mut self) {
+        ingress::quiesce_end();
+    }
+}
+
+/// A kernel-wide install that cannot outlive the test that made it: an
+/// `assert_*` returning early must not leave a verdict standing over every
+/// device in the machine.
+struct GlobalChain;
+
+impl GlobalChain {
+    fn install(filters: &[&'static dyn XdpFilter]) -> Option<Self> {
+        XDP.install(chain_of(filters)?).ok()?;
+        Some(Self)
+    }
+}
+
+impl Drop for GlobalChain {
+    fn drop(&mut self) {
+        XDP.clear();
+    }
+}
+
+/// The one cache key a test needs absent beforehand and gone afterwards,
+/// established without emptying the table the live NIC's gateway entry is in.
+///
+/// The index is not private: `make_test_handle`'s private registry hands out
+/// `DevIndex(0)`, which in the global cache this writes to is loopback. Safe
+/// only because nothing else claims these addresses there.
+struct ScopedNeighbor {
+    dev: DevIndex,
+    ip: Ipv4Addr,
+}
+
+impl ScopedNeighbor {
+    fn cleared(dev: DevIndex, ip: Ipv4Addr) -> Self {
+        let scoped = Self { dev, ip };
+        scoped.remove();
+        scoped
+    }
+
+    fn remove(&self) {
+        drop(NEIGHBOR_CACHE.remove(self.dev, self.ip));
+    }
+}
+
+impl Drop for ScopedNeighbor {
+    fn drop(&mut self) {
+        self.remove();
+    }
 }
 
 const DEV_MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
@@ -233,63 +309,74 @@ pub fn test_xdp_empty_chain_passes() -> TestResult {
 
 pub fn test_xdp_filter_drop_drops_packet() -> TestResult {
     ensure_pool_init();
-    NEIGHBOR_CACHE.reset();
+    let _quiesced = Quiesced::enter();
     let handle = make_test_handle(MacAddr(DEV_MAC));
     let sender_ip = Ipv4Addr([192, 168, 1, 42]);
+    let _neighbor = ScopedNeighbor::cleared(handle.index(), sender_ip);
 
-    install_chain(&[&XDP_TEST_DROP_ALL]);
+    let Some(_chain) = GlobalChain::install(&[&XDP_TEST_DROP_ALL]) else {
+        return slopos_testing::fail!("xdp install");
+    };
 
     let frame = build_arp_request(BROADCAST, SENDER_MAC, sender_ip.0, [192, 168, 1, 1]);
     let pkt = match PacketBuf::from_raw_copy(&frame) {
         Some(p) => p,
         None => return slopos_testing::fail!("from_raw_copy should succeed"),
     };
-    net_rx(&handle, pkt);
+    net_rx_injected(&handle, pkt);
 
     assert_test!(
         NEIGHBOR_CACHE.lookup(handle.index(), sender_ip).is_none(),
         "drop filter suppresses stack dispatch"
     );
-
-    XDP.clear();
     pass!()
 }
 
 pub fn test_xdp_filter_pass_falls_through() -> TestResult {
     ensure_pool_init();
-    NEIGHBOR_CACHE.reset();
+    let _quiesced = Quiesced::enter();
     let handle = make_test_handle(MacAddr(DEV_MAC));
     let sender_ip = Ipv4Addr([192, 168, 1, 43]);
+    let _neighbor = ScopedNeighbor::cleared(handle.index(), sender_ip);
 
-    install_chain(&[&XDP_TEST_PASS_ALL]);
+    let Some(_chain) = GlobalChain::install(&[&XDP_TEST_PASS_ALL]) else {
+        return slopos_testing::fail!("xdp install");
+    };
 
     let frame = build_arp_request(BROADCAST, SENDER_MAC, sender_ip.0, [192, 168, 1, 1]);
     let pkt = match PacketBuf::from_raw_copy(&frame) {
         Some(p) => p,
         None => return slopos_testing::fail!("from_raw_copy should succeed"),
     };
-    net_rx(&handle, pkt);
+    net_rx_injected(&handle, pkt);
 
     match NEIGHBOR_CACHE.lookup(handle.index(), sender_ip) {
         Some(mac) => assert_eq_test!(mac, MacAddr(SENDER_MAC), "learned sender MAC"),
         None => return slopos_testing::fail!("pass filter should let the stack run"),
     }
-
-    XDP.clear();
     pass!()
 }
 
+/// Ordering is a property of `execute` walking a chain, so it is asserted
+/// against a chain of this test's own. `ORDER_LOG` records one entry per
+/// filter run: published in [`XDP`], every frame the live NIC received would
+/// append to it and the recorded order would be somebody else's traffic.
 pub fn test_xdp_filter_chain_order() -> TestResult {
     ensure_pool_init();
 
+    let Some(first) = chain_of(&[&REC_A, &REC_B, &XDP_TEST_DROP_ALL]) else {
+        return slopos_testing::fail!("test alloc");
+    };
+    if LOCAL_CHAIN.install(first).is_err() {
+        return slopos_testing::fail!("xdp install");
+    }
     ORDER_LOG.store(0, Ordering::Relaxed);
-    install_chain(&[&REC_A, &REC_B, &XDP_TEST_DROP_ALL]);
     let frame = build_arp_request(BROADCAST, SENDER_MAC, [192, 168, 1, 44], [192, 168, 1, 1]);
     let mut pkt = match PacketBuf::from_raw_copy(&frame) {
         Some(p) => p,
         None => return slopos_testing::fail!("from_raw_copy should succeed"),
     };
-    let verdict = XDP.execute(&mut PacketView::new(&mut pkt));
+    let verdict = LOCAL_CHAIN.execute(&mut PacketView::new(&mut pkt));
     assert_eq_test!(verdict, XdpAction::Drop, "first non-Pass (Drop) wins");
     assert_eq_test!(
         ORDER_LOG.load(Ordering::Relaxed),
@@ -297,13 +384,18 @@ pub fn test_xdp_filter_chain_order() -> TestResult {
         "filters ran in registration order A then B"
     );
 
+    let Some(second) = chain_of(&[&XDP_TEST_DROP_ALL, &REC_A]) else {
+        return slopos_testing::fail!("test alloc");
+    };
+    if LOCAL_CHAIN.install(second).is_err() {
+        return slopos_testing::fail!("xdp install");
+    }
     ORDER_LOG.store(0, Ordering::Relaxed);
-    install_chain(&[&XDP_TEST_DROP_ALL, &REC_A]);
     let mut pkt2 = match PacketBuf::from_raw_copy(&frame) {
         Some(p) => p,
         None => return slopos_testing::fail!("from_raw_copy should succeed"),
     };
-    let verdict2 = XDP.execute(&mut PacketView::new(&mut pkt2));
+    let verdict2 = LOCAL_CHAIN.execute(&mut PacketView::new(&mut pkt2));
     assert_eq_test!(verdict2, XdpAction::Drop, "leading Drop wins");
     assert_eq_test!(
         ORDER_LOG.load(Ordering::Relaxed),
@@ -311,36 +403,38 @@ pub fn test_xdp_filter_chain_order() -> TestResult {
         "filter after a Drop never runs"
     );
 
-    XDP.clear();
+    LOCAL_CHAIN.clear();
     pass!()
 }
 
 pub fn test_xdp_tx_action() -> TestResult {
     ensure_pool_init();
+    let _quiesced = Quiesced::enter();
     let handle = make_test_handle(MacAddr(DEV_MAC));
 
-    install_chain(&[&XDP_TEST_TX_ALL]);
+    let Some(_chain) = GlobalChain::install(&[&XDP_TEST_TX_ALL]) else {
+        return slopos_testing::fail!("xdp install");
+    };
 
     let frame = build_arp_request(BROADCAST, SENDER_MAC, [192, 168, 1, 45], [192, 168, 1, 1]);
     let pkt = match PacketBuf::from_raw_copy(&frame) {
         Some(p) => p,
         None => return slopos_testing::fail!("from_raw_copy should succeed"),
     };
-    net_rx(&handle, pkt);
+    net_rx_injected(&handle, pkt);
 
     assert_eq_test!(
         handle.stats().tx_packets,
         1,
         "Tx verdict re-transmits via the ingress device"
     );
-
-    XDP.clear();
     pass!()
 }
 
 pub fn test_xdp_redirect_action() -> TestResult {
     ensure_pool_init();
-    let ingress = make_test_handle(MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x10]));
+    let _quiesced = Quiesced::enter();
+    let ingress_handle = make_test_handle(MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x10]));
 
     // Target must live in the global registry: net_rx's Redirect arm transmits
     // via DEVICE_REGISTRY.tx_by_index.
@@ -352,22 +446,22 @@ pub fn test_xdp_redirect_action() -> TestResult {
     };
     REDIRECT_TARGET.store(target_handle.index().0, Ordering::Relaxed);
 
-    install_chain(&[&REDIRECT_FILTER]);
+    let Some(_chain) = GlobalChain::install(&[&REDIRECT_FILTER]) else {
+        DEVICE_REGISTRY.unregister(target_handle.index());
+        return slopos_testing::fail!("xdp install");
+    };
 
     let frame = build_arp_request(BROADCAST, SENDER_MAC, [192, 168, 1, 46], [192, 168, 1, 1]);
     let pkt = match PacketBuf::from_raw_copy(&frame) {
         Some(p) => p,
         None => {
-            XDP.clear();
             DEVICE_REGISTRY.unregister(target_handle.index());
             return slopos_testing::fail!("from_raw_copy should succeed");
         }
     };
-    net_rx(&ingress, pkt);
+    net_rx_injected(&ingress_handle, pkt);
 
     let tx = target_handle.stats().tx_packets;
-
-    XDP.clear();
     DEVICE_REGISTRY.unregister(target_handle.index());
 
     assert_eq_test!(tx, 1, "Redirect transmits via the target device");

@@ -22,9 +22,12 @@ use slopos_testing::assert_test;
 /// against a variant that always declined; the positive control below is the
 /// other side of that.
 pub fn test_rcu_interrupt_qs_declines_inside_a_reader() -> TestResult {
-    let cpu = slopos_arch::pcr::get_current_cpu();
-
+    // Inside the mask, with the reads it indexes: `rcu_note_qs` increments the
+    // slot of whichever CPU is *live*, so a `cpu` read before the window names
+    // a slot the report need not have touched, and the exact-count assertions
+    // below would be measuring a different CPU than the one that reported.
     let (reported, advance) = IrqDisabled::with(|_irq| {
+        let cpu = slopos_arch::pcr::get_current_cpu();
         let guard = rcu_read_lock();
         let before = rcu_qs_counter(cpu);
         let reported = rcu_note_qs_from_interrupt();
@@ -50,9 +53,8 @@ pub fn test_rcu_interrupt_qs_declines_inside_a_reader() -> TestResult {
 /// reporting. If the tick could never report, a grace period would have to wait
 /// for a context switch on every CPU.
 pub fn test_rcu_interrupt_qs_reports_outside_a_reader() -> TestResult {
-    let cpu = slopos_arch::pcr::get_current_cpu();
-
     let (reported, advance) = IrqDisabled::with(|_irq| {
+        let cpu = slopos_arch::pcr::get_current_cpu();
         let before = rcu_qs_counter(cpu);
         let reported = rcu_note_qs_from_interrupt();
         let after = rcu_qs_counter(cpu);
@@ -76,9 +78,8 @@ pub fn test_rcu_interrupt_qs_reports_outside_a_reader() -> TestResult {
 /// unbalanced decline could wedge a CPU's reporting for good and the first test
 /// would not notice.
 pub fn test_rcu_interrupt_qs_recovers_after_the_reader_ends() -> TestResult {
-    let cpu = slopos_arch::pcr::get_current_cpu();
-
     let (declined, reported, advance) = IrqDisabled::with(|_irq| {
+        let cpu = slopos_arch::pcr::get_current_cpu();
         let guard = rcu_read_lock();
         let declined = rcu_note_qs_from_interrupt();
         drop(guard);

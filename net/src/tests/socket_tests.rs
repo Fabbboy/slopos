@@ -6,11 +6,20 @@ use crate::socket::*;
 use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpHeader, TcpState};
 use crate::types::NetError;
 
+use super::net_scope::NetTestScope;
+
 fn reset() {
     socket_reset_all();
 }
 
-fn connect_and_establish() -> Result<(u32, tcp::ConnId), &'static str> {
+/// A synthetic PCB on a 4-tuple the wire can reach is a PCB the wire can tear
+/// down between an injection and the assertion about it. The scope's peer is
+/// TEST-NET-1 behind a blackhole device, so nothing leaves and nothing answers.
+fn scope() -> Result<NetTestScope, &'static str> {
+    NetTestScope::enter().map_err(|_| "net scope")
+}
+
+fn connect_and_establish(scope: &NetTestScope) -> Result<(u32, tcp::ConnId), &'static str> {
     let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return Err("socket_create failed");
@@ -20,7 +29,7 @@ fn connect_and_establish() -> Result<(u32, tcp::ConnId), &'static str> {
     // Non-blocking: the SYN-ACK can only arrive from the manual injection below.
     socket_set_nonblocking(sock, true);
 
-    let rc = socket_connect(sock, [10, 0, 0, 2], 80);
+    let rc = socket_connect(sock, scope.peer_ip(), scope.peer_port());
     // Non-blocking connect returns EINPROGRESS (-115) or 0.
     if rc < 0 && rc != -115 {
         return Err("socket_connect failed");
@@ -29,29 +38,9 @@ fn connect_and_establish() -> Result<(u32, tcp::ConnId), &'static str> {
     let Some(tcp_id) = socket_lookup_tcp_idx(sock) else {
         return Err("no tcp idx");
     };
-    let (tuple, iss) = tcp::with_pcb(tcp_id, |pcb| {
-        let iss = match &pcb.state {
-            tcp::PcbState::SynSent(s) => s.iss.raw(),
-            tcp::PcbState::Data(d) => d.iss.raw(),
-            _ => return Err("unexpected PCB state"),
-        };
-        Ok((pcb.tuple, iss))
-    })
-    .ok_or("no tcp conn")??;
-
-    let syn_ack = TcpHeader {
-        src_port: tuple.remote_port,
-        dst_port: tuple.local_port,
-        seq_num: 9000,
-        ack_num: iss.wrapping_add(1),
-        data_offset: 5,
-        flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
-        window_size: 32768,
-        checksum: 0,
-        urgent_ptr: 0,
-    };
-    let result = tcp::input(tuple.remote_ip, tuple.local_ip, &syn_ack, &[], &[], 0);
-    socket_notify_tcp_activity(&result);
+    scope
+        .inject_syn_ack(tcp_id, 9000)
+        .ok_or("unexpected PCB state")?;
 
     Ok((sock, tcp_id))
 }
@@ -149,8 +138,11 @@ pub fn test_socket_listen_without_bind() -> TestResult {
 }
 
 pub fn test_socket_listen_on_connected() -> TestResult {
-    reset();
-    let (sock, _) = match connect_and_establish() {
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+    let (sock, _) = match connect_and_establish(&scope) {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
@@ -162,10 +154,13 @@ pub fn test_socket_listen_on_connected() -> TestResult {
 }
 
 pub fn test_socket_connect_creates_tcp_connection() -> TestResult {
-    reset();
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
     let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     socket_set_nonblocking(sock, true);
-    let rc = socket_connect(sock, [10, 0, 0, 2], 80);
+    let rc = socket_connect(sock, scope.peer_ip(), scope.peer_port());
     assert_test!(
         rc == 0 || rc == -115,
         "non-blocking connect should succeed or EINPROGRESS"
@@ -185,13 +180,16 @@ pub fn test_socket_connect_invalid_socket() -> TestResult {
 }
 
 pub fn test_socket_connect_already_connected() -> TestResult {
-    reset();
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
     let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     socket_set_nonblocking(sock, true);
-    let rc = socket_connect(sock, [10, 0, 0, 2], 80);
+    let rc = socket_connect(sock, scope.peer_ip(), scope.peer_port());
     assert_test!(rc == 0 || rc == -115, "first non-blocking connect");
     assert_test!(
-        socket_connect(sock, [10, 0, 0, 2], 80) < 0,
+        socket_connect(sock, scope.peer_ip(), scope.peer_port()) < 0,
         "double connect fails"
     );
     pass!()
@@ -220,8 +218,11 @@ pub fn test_socket_recv_returns_error_not_connected() -> TestResult {
 }
 
 pub fn test_socket_send_buffer_space() -> TestResult {
-    reset();
-    let (sock, tcp_id) = match connect_and_establish() {
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+    let (sock, tcp_id) = match connect_and_establish(&scope) {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
@@ -235,8 +236,11 @@ pub fn test_socket_send_buffer_space() -> TestResult {
 }
 
 pub fn test_socket_recv_empty() -> TestResult {
-    reset();
-    let (sock, _) = match connect_and_establish() {
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+    let (sock, _) = match connect_and_establish(&scope) {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
@@ -276,8 +280,11 @@ pub fn test_socket_poll_readable_not_connected() -> TestResult {
 }
 
 pub fn test_socket_poll_writable_connected() -> TestResult {
-    reset();
-    let (sock, _) = match connect_and_establish() {
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+    let (sock, _) = match connect_and_establish(&scope) {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
@@ -304,13 +311,51 @@ pub fn test_socket_state_after_bind() -> TestResult {
 }
 
 pub fn test_socket_reset_all() -> TestResult {
-    reset();
-    let _ = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
-    let _ = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
-    assert_test!(socket_count_active() >= 2, "active before reset");
+    // The scope is what makes the *global* counts below assertable: it gates
+    // ingress, so no live thread can install a socket or a PCB between the
+    // reset and the reads. "Reset all" is the contract, and a version that only
+    // checks this test's own two sockets passes while leaving a stranger's.
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+    let listener = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
+    let datagram = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
+    if listener < 0 || datagram < 0 {
+        return fail!("socket_create failed");
+    }
+    let (listener, datagram) = (listener as u32, datagram as u32);
+
+    // Listen rather than connect: it installs a PCB without putting a SYN on
+    // the wire, so the connection this test owns is one nothing else can retire.
+    assert_eq_test!(socket_bind(listener, [0, 0, 0, 0], 8181), 0);
+    assert_eq_test!(socket_listen(listener, 4), 0);
+    let Some(conn) = socket_lookup_tcp_idx(listener) else {
+        return fail!("listening socket has no PCB");
+    };
+    assert_test!(
+        tcp::with_pcb(conn, |_| ()).is_some(),
+        "the listener's PCB is installed before the reset"
+    );
+
     socket_reset_all();
-    assert_eq_test!(socket_count_active(), 0);
-    assert_eq_test!(tcp::active_count(), 0);
+
+    assert_eq_test!(
+        socket_get_state(listener),
+        None,
+        "reset released the TCP socket"
+    );
+    assert_eq_test!(
+        socket_get_state(datagram),
+        None,
+        "reset released the UDP socket"
+    );
+    assert_test!(
+        tcp::with_pcb(conn, |_| ()).is_none(),
+        "and the PCB the TCP socket held"
+    );
+    assert_eq_test!(socket_count_active(), 0, "reset left a socket behind");
+    assert_eq_test!(tcp::active_count(), 0, "reset left a PCB behind");
     pass!()
 }
 
@@ -553,8 +598,11 @@ pub fn test_socket_new_defaults_and_helpers() -> TestResult {
 }
 
 pub fn test_tcp_send_on_established_returns_bytes() -> TestResult {
-    reset();
-    let (sock, _tcp_id) = match connect_and_establish() {
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+    let (sock, _tcp_id) = match connect_and_establish(&scope) {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
@@ -570,8 +618,11 @@ pub fn test_tcp_send_on_established_returns_bytes() -> TestResult {
 }
 
 pub fn test_tcp_recv_after_peer_data() -> TestResult {
-    reset();
-    let (sock, tcp_id) = match connect_and_establish() {
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+    let (sock, tcp_id) = match connect_and_establish(&scope) {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
@@ -605,8 +656,11 @@ pub fn test_tcp_recv_after_peer_data() -> TestResult {
 }
 
 pub fn test_tcp_shutdown_wr_transitions_to_fin_wait1() -> TestResult {
-    reset();
-    let (sock, tcp_id) = match connect_and_establish() {
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+    let (sock, tcp_id) = match connect_and_establish(&scope) {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
@@ -621,8 +675,11 @@ pub fn test_tcp_shutdown_wr_transitions_to_fin_wait1() -> TestResult {
 }
 
 pub fn test_tcp_shutdown_wr_recv_still_works() -> TestResult {
-    reset();
-    let (sock, tcp_id) = match connect_and_establish() {
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+    let (sock, tcp_id) = match connect_and_establish(&scope) {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
@@ -663,8 +720,11 @@ pub fn test_tcp_shutdown_wr_recv_still_works() -> TestResult {
 }
 
 pub fn test_tcp_send_after_shutdown_wr_fails() -> TestResult {
-    reset();
-    let (sock, _tcp_id) = match connect_and_establish() {
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+    let (sock, _tcp_id) = match connect_and_establish(&scope) {
         Ok(v) => v,
         Err(m) => return fail!("{}", m),
     };
@@ -677,14 +737,17 @@ pub fn test_tcp_send_after_shutdown_wr_fails() -> TestResult {
 }
 
 pub fn test_tcp_send_after_blocking_connect() -> TestResult {
-    reset();
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
 
     let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     assert_test!(sock >= 0, "socket_create succeeds");
     let sock = sock as u32;
 
     socket_set_nonblocking(sock, true);
-    let rc = socket_connect(sock, [10, 0, 0, 2], 80);
+    let rc = socket_connect(sock, scope.peer_ip(), scope.peer_port());
     assert_test!(rc == 0 || rc == -115, "non-blocking connect");
 
     let Some(tcp_id) = socket_lookup_tcp_idx(sock) else {
@@ -695,27 +758,9 @@ pub fn test_tcp_send_after_blocking_connect() -> TestResult {
         Some(TcpState::SynSent),
         "should be in SynSent"
     );
-    let Some((tuple, iss)) = tcp::with_pcb(tcp_id, |pcb| match &pcb.state {
-        tcp::PcbState::SynSent(s) => Some((pcb.tuple, s.iss.raw())),
-        _ => None,
-    })
-    .flatten() else {
+    if scope.inject_syn_ack(tcp_id, 5000).is_none() {
         return fail!("expected SynSent state");
-    };
-
-    let syn_ack = TcpHeader {
-        src_port: tuple.remote_port,
-        dst_port: tuple.local_port,
-        seq_num: 5000,
-        ack_num: iss.wrapping_add(1),
-        data_offset: 5,
-        flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
-        window_size: 32768,
-        checksum: 0,
-        urgent_ptr: 0,
-    };
-    let result = tcp::input(tuple.remote_ip, tuple.local_ip, &syn_ack, &[], &[], 0);
-    socket_notify_tcp_activity(&result);
+    }
 
     assert_eq_test!(
         tcp::get_state(tcp_id),
@@ -735,7 +780,10 @@ pub fn test_tcp_send_after_blocking_connect() -> TestResult {
 }
 
 pub fn test_tcp_send_before_handshake_complete() -> TestResult {
-    reset();
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
 
     let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     assert_test!(sock >= 0, "socket_create succeeds");
@@ -743,7 +791,7 @@ pub fn test_tcp_send_before_handshake_complete() -> TestResult {
 
     socket_set_nonblocking(sock, true);
 
-    let rc = socket_connect(sock, [10, 0, 0, 2], 80);
+    let rc = socket_connect(sock, scope.peer_ip(), scope.peer_port());
     assert_test!(rc == 0 || rc == -115, "non-blocking connect");
 
     let Some(tcp_id) = socket_lookup_tcp_idx(sock) else {
@@ -787,9 +835,17 @@ pub fn test_tcp_send_before_handshake_complete() -> TestResult {
 }
 
 pub fn test_tcp_listen_accept_incoming_syn() -> TestResult {
-    reset();
+    // A listener on a wire-reachable address is the one shape in this file that
+    // races *inbound*: a real SYN to the bound port would be accepted as this
+    // test's peer.
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
+    let local = scope.local_ip();
+    let peer = scope.peer_ip();
     let listen_sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
-    assert_eq_test!(socket_bind(listen_sock, [10, 0, 0, 1], 80), 0);
+    assert_eq_test!(socket_bind(listen_sock, local, 80), 0);
     assert_eq_test!(socket_listen(listen_sock, 4), 0);
 
     socket_set_nonblocking(listen_sock, true);
@@ -805,7 +861,7 @@ pub fn test_tcp_listen_accept_incoming_syn() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let syn_result = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &syn_hdr, &[], &[], 0);
+    let syn_result = tcp::input(peer, local, &syn_hdr, &[], &[], 0);
 
     let syn_ack_seg = match syn_result.segments().next() {
         Some(seg) => seg.clone(),
@@ -823,7 +879,7 @@ pub fn test_tcp_listen_accept_incoming_syn() -> TestResult {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let ack_result = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &ack_hdr, &[], &[], 0);
+    let ack_result = tcp::input(peer, local, &ack_hdr, &[], &[], 0);
     socket_notify_tcp_activity(&ack_result);
 
     let mut peer_addr = [0u8; 4];
@@ -834,7 +890,7 @@ pub fn test_tcp_listen_accept_incoming_syn() -> TestResult {
         &mut peer_port as *mut _,
     );
     assert_test!(new_sock >= 0, "accept should return a valid socket fd");
-    assert_eq_test!(peer_addr, [10, 0, 0, 2]);
+    assert_eq_test!(peer_addr, peer);
     assert_eq_test!(peer_port, 5000);
 
     assert_eq_test!(

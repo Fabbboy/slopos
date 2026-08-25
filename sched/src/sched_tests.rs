@@ -7232,6 +7232,44 @@ pub fn test_quota_charge_cost() -> TestResult {
     let restore = quota_mode();
     set_quota_mode(QuotaMode::Enforce);
 
+    // The same batch shape over a bare uncontended CAS, so the gate has a
+    // same-run scale for its ratio. An absolute cycle budget on this path is a
+    // measurement of the accelerator, not of the kernel: on a KVM host the
+    // charge costs ~1500 cycles and on a TCG one ~20000, and both are correct.
+    // A CAS is what `charge_row` and `release_row` each do once per level, so
+    // dividing by it cancels whatever factor the emulation applies.
+    let measure_reference = || -> u64 {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        let cell = AtomicU64::new(0);
+        for _ in 0..WARM_ITERATIONS {
+            let observed = cell.load(Ordering::Relaxed);
+            let _ = cell.compare_exchange_weak(
+                observed,
+                observed.wrapping_add(1),
+                Ordering::Release,
+                Ordering::Relaxed,
+            );
+        }
+        let mut best = u64::MAX;
+        for _ in 0..BATCHES {
+            let batch = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_| {
+                let start = slopos_arch::tsc::rdtsc();
+                for _ in 0..BATCH_LEN {
+                    let observed = cell.load(Ordering::Relaxed);
+                    let _ = cell.compare_exchange_weak(
+                        observed,
+                        observed.wrapping_add(1),
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    );
+                }
+                slopos_arch::tsc::rdtsc().wrapping_sub(start)
+            });
+            best = best.min(batch / BATCH_LEN as u64);
+        }
+        best.max(1)
+    };
+
     let measure = |account| -> u64 {
         // Warm first, unmeasured: otherwise the first loop absorbs the arena's
         // cold cache lines and reports a deeper chain as cheaper than a
@@ -7264,6 +7302,7 @@ pub fn test_quota_charge_cost() -> TestResult {
     let shallow_account = shallow.account();
     let deep_per_charge = measure(deepest);
     let shallow_per_charge = measure(shallow_account);
+    let reference_per_op = measure_reference();
     set_quota_mode(restore);
 
     for child in chain.iter() {
@@ -7277,7 +7316,12 @@ pub fn test_quota_charge_cost() -> TestResult {
     // TSC does not track one. Published through the quota report rather than
     // logged here, because per-test klog is shown only on failure and this line
     // has to reach the raw stream for the gate to parse it.
-    crate::quota_console::record_charge_cost(shallow_per_charge, depth, deep_per_charge);
+    crate::quota_console::record_charge_cost(
+        shallow_per_charge,
+        depth,
+        deep_per_charge,
+        reference_per_op,
+    );
     TestResult::Pass
 }
 

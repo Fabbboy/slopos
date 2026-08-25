@@ -23,19 +23,69 @@ pub fn test_quiesce_is_active() -> TestResult {
     TestResult::Pass
 }
 
-/// An epoch that never closes grows the quarantine until allocation fails.
+/// An epoch that never closes grows the quarantine until allocation fails, and
+/// one that closes twice discharges a quarantine an epoch early.
+///
+/// A closure must therefore report the epoch that was current when it ran and
+/// leave the counter exactly one higher. A peer's tick can close an epoch
+/// inside either window, which is what the retry is for; an attempt that
+/// brackets its own closure without one is the witness.
 pub fn test_quiesce_epoch_advances() -> TestResult {
-    let Some(closed) = quiesce::force_close_epoch_for_test() else {
-        klog_info!("QUIESCE_TEST: no epoch closed under a full set of acks");
-        return TestResult::Fail;
-    };
-    klog_info!("QUIESCE_TEST: closed epoch {}", closed);
-    assert_test!(
-        quiesce::current_epoch() > closed,
-        "epoch {} closed but the counter never passed it",
-        closed
+    let mut attempts = 0u32;
+    let mut last = (0u64, 0u64, 0u64);
+    while attempts < CLOSURE_BUDGET {
+        let before = quiesce::current_epoch();
+        let Some(closed) = quiesce::force_close_epoch_for_test() else {
+            klog_info!("QUIESCE_TEST: no epoch closed under a full set of acks");
+            return TestResult::Fail;
+        };
+        let after = quiesce::current_epoch();
+
+        assert_test!(
+            closed >= before,
+            "closed epoch {} after the counter had already reached {}",
+            closed,
+            before
+        );
+        assert_test!(
+            after > closed,
+            "epoch {} closed but the counter never passed it",
+            closed
+        );
+        if closed == before && after == closed + 1 {
+            klog_info!("QUIESCE_TEST: closed epoch {}", closed);
+            return TestResult::Pass;
+        }
+
+        last = (before, closed, after);
+        attempts += 1;
+    }
+
+    klog_info!(
+        "QUIESCE_TEST: {} attempts never bracketed one closure alone (last {} -> {} -> {})",
+        attempts,
+        last.0,
+        last.1,
+        last.2
     );
-    TestResult::Pass
+    TestResult::Fail
+}
+
+/// `quarantine_required` reads the epoch and the deferral stamp itself, so
+/// pairing its answer with those two counters takes a sample that brackets the
+/// call and agrees with itself — every CPU raises both.
+fn sample_quarantine() -> Option<(u64, u64, bool)> {
+    const SAMPLE_BUDGET: u32 = 64;
+
+    for _ in 0..SAMPLE_BUDGET {
+        let (epoch, _, stamp) = quiesce::stats();
+        let required = quiesce::quarantine_required();
+        let (epoch_again, _, stamp_again) = quiesce::stats();
+        if epoch_again == epoch && stamp_again == stamp {
+            return Some((epoch, stamp, required));
+        }
+    }
+    None
 }
 
 /// A deferral in epoch `D` is discharged only at `D + 2`. A "deferred this
@@ -43,47 +93,42 @@ pub fn test_quiesce_epoch_advances() -> TestResult {
 /// ordinary refcounted case — and releases it under a stale peer TLB.
 pub fn test_quarantine_spans_two_epochs_after_a_deferred_unmap() -> TestResult {
     let deferred_at = quiesce::note_deferred_unmap();
-    assert_test!(
-        quiesce::quarantine_required(),
-        "a frame freed in the epoch its unmap stamped ({}) must be quarantined",
-        deferred_at
-    );
 
     // The stamp is a `fetch_max`, so a peer's own deferral pushes the discharge
     // further out; re-reading it each round is what keeps this asserting the
     // window rather than a race against that peer.
     let mut closures = 0u32;
     loop {
-        let (epoch, _, stamp) = quiesce::stats();
-        if epoch >= stamp + 2 {
-            break;
-        }
-        assert_test!(
-            quiesce::quarantine_required(),
-            "epoch {} is within two of the deferral stamped at {}, yet the \
-             quarantine discharged -- this is the use-after-free",
-            epoch,
-            stamp
-        );
-        if quiesce::force_close_epoch_for_test().is_none() {
-            klog_info!("QUIESCE_TEST: no epoch closed under a full set of acks");
+        let Some((epoch, stamp, required)) = sample_quarantine() else {
+            klog_info!("QUIESCE_TEST: epoch and deferral stamp never held still");
             return TestResult::Fail;
+        };
+        assert_test!(
+            required == (epoch < stamp.saturating_add(2)),
+            "epoch {} against the deferral stamped at {} (this test's unmap \
+             stamped {}): quarantine_required() answered {} -- a false inside \
+             the window is the use-after-free",
+            epoch,
+            stamp,
+            deferred_at,
+            required
+        );
+        if !required {
+            return TestResult::Pass;
         }
-        closures += 1;
-        if closures > CLOSURE_BUDGET {
+        if closures >= CLOSURE_BUDGET {
             klog_info!(
                 "QUIESCE_TEST: window still open after {} closures",
                 closures
             );
             return TestResult::Fail;
         }
+        if quiesce::force_close_epoch_for_test().is_none() {
+            klog_info!("QUIESCE_TEST: no epoch closed under a full set of acks");
+            return TestResult::Fail;
+        }
+        closures += 1;
     }
-
-    assert_test!(
-        !quiesce::quarantine_required(),
-        "two closed epochs must discharge the deferral"
-    );
-    TestResult::Pass
 }
 
 /// Rotation runs from a timer interrupt: a splicing rotation would hold the

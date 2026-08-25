@@ -53,12 +53,13 @@ pub fn test_kernel_mapping_round_trip_returns_frame() -> TestResult {
         kernel_map_4kb(va, pa, PageFlags::KERNEL_RW.bits()) == 0,
         "kernel_map_4kb succeeded"
     );
-    assert_test!(kernel_is_mapped(va), "mapped VA resolves");
+    let mapped = kernel_is_mapped(va);
     let held = reference_count_at(pa);
 
     let unmapped = kernel_unmap_4kb(va);
     let second = kernel_unmap_4kb(va);
 
+    assert_test!(mapped, "mapped VA resolves");
     assert_test!(
         held == 1,
         "the leaf holds {} references to the page it maps, want the one it owns",
@@ -131,17 +132,13 @@ pub fn test_kernel_mapping_overlap_refused() -> TestResult {
         let _ = kernel_unmap_4kb(va);
         return fail!("second frame allocation");
     }
-    assert_test!(
-        kernel_map_4kb(va, second, PageFlags::KERNEL_RW.bits()) != 0,
-        "second map over a present leaf was refused"
-    );
-    // The refused map consumed the frame it was handed, so the page it named
-    // must be back with the allocator rather than owned by nobody.
+    let refused = kernel_map_4kb(va, second, PageFlags::KERNEL_RW.bits()) != 0;
     let refused_holds = reference_count_at(second);
 
     let resolved = walk_phys(kernel_pml4_phys(), va).map(|r| r.phys_addr);
     let unmapped = kernel_unmap_4kb(va);
 
+    assert_test!(refused, "second map over a present leaf was refused");
     assert_test!(
         resolved == Ok(first),
         "the refused map left the first translation intact"
@@ -170,12 +167,13 @@ pub fn test_kernel_map_frame_accepts_kernel_meta() -> TestResult {
         kernel_map_4kb_frame(va, frame, PageFlags::KERNEL_RW.bits()) == 0,
         "kernel_map_4kb_frame succeeded"
     );
-    assert_test!(kernel_is_mapped(va), "mapped VA resolves");
+    let mapped = kernel_is_mapped(va);
     let held = reference_count_at(expected);
 
     let unmapped = kernel_unmap_4kb(va);
     let second = kernel_unmap_4kb(va);
 
+    assert_test!(mapped, "mapped VA resolves");
     assert_test!(
         held == 1,
         "the cursor consumed the caller's frame but the slot holds {} references",
@@ -222,14 +220,16 @@ pub fn test_kernel_map_io_owns_no_frame() -> TestResult {
         kernel_map_io_4kb(va, device_pa, PageFlags::MMIO.bits()) == 0,
         "kernel_map_io_4kb succeeded"
     );
-    assert_test!(kernel_is_mapped(va), "mapped device VA resolves");
+    let mapped = kernel_is_mapped(va);
     let resolved = walk_phys(kernel_pml4_phys(), va).map(|r| r.phys_addr);
+
+    let unmapped = kernel_unmap_4kb(va);
+
+    assert_test!(mapped, "mapped device VA resolves");
     assert_test!(
         resolved == Ok(device_pa),
         "device VA resolves to the requested aperture"
     );
-
-    let unmapped = kernel_unmap_4kb(va);
     assert_test!(
         unmapped.is_null(),
         "unmapping a device leaf yields no page to free"

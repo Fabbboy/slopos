@@ -44,38 +44,81 @@ pub fn production_recovery_enabled() -> bool {
 /// per boot must be bounded. `0` disables the limit.
 const OOPS_LIMIT_DEFAULT: u64 = 100;
 
+/// A recovered-panic count and the budget it is judged against.
+///
+/// A type rather than a pair of statics so the arithmetic can be pinned on a
+/// private instance: every increment of the machine's own ledger spends part
+/// of the budget whose exhaustion is fatal.
+pub struct OopsLedger {
+    count: AtomicU64,
+    limit: AtomicU64,
+}
+
+impl OopsLedger {
+    pub const fn new(limit: u64) -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            limit: AtomicU64::new(limit),
+        }
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    pub fn limit(&self) -> u64 {
+        self.limit.load(Ordering::Relaxed)
+    }
+
+    /// `0` disables the limit.
+    pub fn set_limit(&self, limit: u64) {
+        self.limit.store(limit, Ordering::Relaxed);
+    }
+
+    /// Record one oops, returning the post-increment count and whether the
+    /// configured limit has been reached.
+    pub fn record(&self) -> (u64, bool) {
+        let count = self.count.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+        let limit = self.limit.load(Ordering::Relaxed);
+        (count, limit != 0 && count >= limit)
+    }
+
+    /// Hermetic-test use only: production code never lowers the count.
+    #[doc(hidden)]
+    pub fn restore(&self, count: u64, limit: u64) {
+        self.count.store(count, Ordering::SeqCst);
+        self.limit.store(limit, Ordering::SeqCst);
+    }
+}
+
 /// Counts only panics caught at a production recovery boundary; test-harness
 /// catches are expected control flow and never recorded.
-static OOPS_COUNT: AtomicU64 = AtomicU64::new(0);
-static OOPS_LIMIT: AtomicU64 = AtomicU64::new(OOPS_LIMIT_DEFAULT);
+static OOPS: OopsLedger = OopsLedger::new(OOPS_LIMIT_DEFAULT);
 
 pub fn oops_count() -> u64 {
-    OOPS_COUNT.load(Ordering::Relaxed)
+    OOPS.count()
 }
 
 pub fn oops_limit() -> u64 {
-    OOPS_LIMIT.load(Ordering::Relaxed)
+    OOPS.limit()
 }
 
 /// Set the recovered-panic budget (`panic.oops_limit=` boot knob); `0`
 /// disables the limit.
 pub fn set_oops_limit(limit: u64) {
-    OOPS_LIMIT.store(limit, Ordering::Relaxed);
+    OOPS.set_limit(limit);
 }
 
 /// Record one production oops, returning the post-increment count and whether
 /// the configured limit has been reached.
 pub fn oops_record() -> (u64, bool) {
-    let count = OOPS_COUNT.fetch_add(1, Ordering::SeqCst).saturating_add(1);
-    let limit = OOPS_LIMIT.load(Ordering::Relaxed);
-    (count, limit != 0 && count >= limit)
+    OOPS.record()
 }
 
 /// Hermetic-test use only: production code never lowers the count.
 #[doc(hidden)]
 pub fn restore_oops_ledger(count: u64, limit: u64) {
-    OOPS_COUNT.store(count, Ordering::SeqCst);
-    OOPS_LIMIT.store(limit, Ordering::SeqCst);
+    OOPS.restore(count, limit);
 }
 
 pub fn register_panic_cleanup(handler: PanicCleanupFn) {

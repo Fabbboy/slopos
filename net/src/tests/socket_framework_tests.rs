@@ -6,11 +6,8 @@ use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::packetbuf::PacketBuf;
 use crate::socket::*;
+use crate::tests::env_wait::errno_i64;
 use crate::types::{Ipv4Addr, Port, SockAddr};
-
-fn errno_i64(errno: u64) -> i64 {
-    errno as i64
-}
 
 fn reset() {
     socket_reset_all();

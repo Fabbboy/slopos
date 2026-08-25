@@ -179,6 +179,54 @@ pub fn miss_threshold() -> u32 {
     MISS_THRESHOLD.load(Ordering::Acquire)
 }
 
+/// Per-target override of [`miss_threshold`]; `0` means "no override".
+static MISS_THRESHOLD_OVERRIDE: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+
+/// The fuse `target` is judged on: its own override where one is installed,
+/// the machine-wide threshold otherwise.
+fn miss_threshold_for(target: usize) -> u32 {
+    match MISS_THRESHOLD_OVERRIDE
+        .get(target)
+        .map_or(0, |cell| cell.load(Ordering::Acquire))
+    {
+        0 => miss_threshold(),
+        samples => samples,
+    }
+}
+
+/// Judge one CPU on a shorter fuse than the rest of the machine, for the
+/// token's lifetime.
+///
+/// Lowering [`set_miss_threshold`] instead puts *every* CPU on the short fuse,
+/// and a CPU the host descheduled reads exactly like a wedged one — so a
+/// machine-wide lowering makes a stall report a function of host scheduling.
+pub struct MissThresholdOverride {
+    cpu: usize,
+    previous: u32,
+}
+
+impl MissThresholdOverride {
+    /// `None` for a `cpu` outside the tracked range, and for `samples == 0`,
+    /// which [`set_miss_threshold`] rejects for the same reason.
+    pub fn for_cpu(cpu: usize, samples: u32) -> Option<Self> {
+        if samples == 0 {
+            return None;
+        }
+        let previous = MISS_THRESHOLD_OVERRIDE
+            .get(cpu)?
+            .swap(samples, Ordering::AcqRel);
+        Some(Self { cpu, previous })
+    }
+}
+
+impl Drop for MissThresholdOverride {
+    fn drop(&mut self) {
+        if let Some(cell) = MISS_THRESHOLD_OVERRIDE.get(self.cpu) {
+            cell.store(self.previous, Ordering::Release);
+        }
+    }
+}
+
 /// Whether a sustained breach may take the machine down
 /// (`watchdog.panic=on|off`).
 pub fn set_panic_enabled(enabled: bool) {
@@ -196,16 +244,42 @@ pub fn clear_panic_override() {
     PANIC_OVERRIDE.store(PANIC_OVERRIDE_UNSET, Ordering::Release);
 }
 
+/// What `watchdog.panic=` asked for, if the operator asked for anything.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PanicOverride {
+    Unset,
+    ForcedOn,
+    ForcedOff,
+}
+
+pub fn panic_override() -> PanicOverride {
+    match PANIC_OVERRIDE.load(Ordering::Acquire) {
+        PANIC_OVERRIDE_ON => PanicOverride::ForcedOn,
+        PANIC_OVERRIDE_OFF => PanicOverride::ForcedOff,
+        _ => PanicOverride::Unset,
+    }
+}
+
 /// A watcher cannot tell a target the host descheduled from one that is wedged:
 /// both stop bumping their heartbeat. Under a hypervisor the sustained breach is
 /// therefore not evidence, and taking the machine down on it aborts a healthy
 /// kernel. `watchdog.panic=` overrides in both directions.
-pub fn fatal_escalation_permitted() -> bool {
-    match PANIC_OVERRIDE.load(Ordering::Acquire) {
-        PANIC_OVERRIDE_ON => true,
-        PANIC_OVERRIDE_OFF => false,
-        _ => !crate::arch::x86_64::cpuid::hypervisor_present(),
+///
+/// Separate from [`fatal_escalation_permitted`] so the policy can be exercised
+/// over both inputs without arming the live machine's escalation.
+pub const fn fatal_escalation_policy(configured: PanicOverride, hypervisor_present: bool) -> bool {
+    match configured {
+        PanicOverride::ForcedOn => true,
+        PanicOverride::ForcedOff => false,
+        PanicOverride::Unset => !hypervisor_present,
     }
+}
+
+pub fn fatal_escalation_permitted() -> bool {
+    fatal_escalation_policy(
+        panic_override(),
+        crate::arch::x86_64::cpuid::hypervisor_present(),
+    )
 }
 
 /// Record that this CPU has made progress.
@@ -294,11 +368,15 @@ fn check_neighbour(me: usize) {
     } else {
         let Some(found) = scan_for_target(me) else {
             slot.target.store(NO_CPU, Ordering::Relaxed);
-            reset(slot, 0);
+            reset(slot, 0, miss_threshold());
             return;
         };
         slot.target.store(found as u32, Ordering::Relaxed);
-        reset(slot, pcr::heartbeat_for_cpu(found));
+        reset(
+            slot,
+            pcr::heartbeat_for_cpu(found),
+            miss_threshold_for(found),
+        );
         return;
     };
 
@@ -306,7 +384,7 @@ fn check_neighbour(me: usize) {
         slot,
         target,
         pcr::heartbeat_for_cpu(target),
-        miss_threshold(),
+        miss_threshold_for(target),
     );
     if stale == 0 || stale < slot.next_report.load(Ordering::Relaxed) {
         return;
@@ -325,10 +403,10 @@ pub fn watcher_of(target: usize) -> Option<usize> {
     })
 }
 
-fn reset(slot: &CpuSlot, beat: u64) {
+fn reset(slot: &CpuSlot, beat: u64, threshold: u32) {
     slot.last_seen.store(beat, Ordering::Relaxed);
     slot.stale.store(0, Ordering::Relaxed);
-    slot.next_report.store(miss_threshold(), Ordering::Relaxed);
+    slot.next_report.store(threshold, Ordering::Relaxed);
 }
 
 /// Fold one sample of `target` into `slot`, returning the consecutive-stale
@@ -353,7 +431,7 @@ fn accumulate(slot: &CpuSlot, target: usize, beat: u64, threshold: u32) -> u32 {
 /// nobody else can see its registers.
 fn report_stalled_cpu(me: usize, target: usize, stale: u32) {
     let cycle = wait_chain_closes_cycle(target);
-    let fatal_at = miss_threshold().saturating_mul(if cycle {
+    let fatal_at = miss_threshold_for(target).saturating_mul(if cycle {
         FATAL_MULTIPLE_CYCLE
     } else {
         FATAL_MULTIPLE
@@ -707,7 +785,6 @@ pub fn report_max_stalls() {
     }
     let snapshot = SNAPSHOT_READY.load(Ordering::Acquire);
     let count = pcr::get_cpu_count().min(MAX_CPUS);
-    let threshold = miss_threshold();
     for cpu in 0..count {
         let packed = if snapshot {
             SNAPSHOT[cpu].load(Ordering::Relaxed)
@@ -724,7 +801,7 @@ pub fn report_max_stalls() {
         nmi_emit(": ");
         nmi_emit_dec(samples as u64);
         nmi_emit(" of ");
-        nmi_emit_dec(threshold as u64);
+        nmi_emit_dec(miss_threshold_for(target) as u64);
         nmi_emit(" samples before report (watcher cpu ");
         nmi_emit_dec(cpu as u64);
         nmi_emit_line(")");
@@ -751,7 +828,7 @@ pub mod test_support {
     pub fn retarget(watcher: usize, target: usize, beat: u64) {
         let slot = &SLOTS[watcher];
         slot.target.store(target as u32, Ordering::Relaxed);
-        reset(slot, beat);
+        reset(slot, beat, miss_threshold_for(target));
     }
 
     /// Plant a wait-for edge as if `cpu` were spinning on a lock held by

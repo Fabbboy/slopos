@@ -58,24 +58,41 @@ pub fn test_run_recoverable_cleanup() -> TestResult {
     TestResult::Pass
 }
 
+/// The budget arithmetic, on a private ledger: recording against the machine's
+/// own spends the budget whose exhaustion makes the next recovered panic fatal.
 pub fn test_oops_ledger_accessors() -> TestResult {
-    let (count0, limit0) = (panic_recovery::oops_count(), panic_recovery::oops_limit());
+    // The machine's own ledger, read-only, so the accessors under test are
+    // still known to be the ones delegating to it.
+    let live_limit = panic_recovery::oops_limit();
+    assert_test!(
+        live_limit == 0 || panic_recovery::oops_count() < live_limit,
+        "the machine's own ledger is already past its budget"
+    );
 
-    panic_recovery::set_oops_limit(0);
-    let (c1, reached1) = panic_recovery::oops_record();
-    assert_test!(c1 == count0 + 1, "count did not increment");
+    let ledger = panic_recovery::OopsLedger::new(0);
+    assert_test!(ledger.count() == 0, "a fresh ledger has recorded nothing");
+
+    let (c1, reached1) = ledger.record();
+    assert_test!(c1 == 1, "count did not increment");
     assert_test!(!reached1, "limit 0 must mean unlimited");
 
-    panic_recovery::set_oops_limit(c1 + 1);
-    let (c2, reached2) = panic_recovery::oops_record();
+    ledger.set_limit(c1 + 1);
+    let (c2, reached2) = ledger.record();
     assert_test!(c2 == c1 + 1, "second record did not increment");
     assert_test!(reached2, "boundary count did not report limit-reached");
 
-    panic_recovery::restore_oops_ledger(count0, limit0);
+    let (c3, reached3) = ledger.record();
+    assert_test!(c3 == c2 + 1, "third record did not increment");
+    assert_test!(reached3, "a count past the limit is still limit-reached");
+
+    ledger.restore(c1, 0);
     assert_test!(
-        panic_recovery::oops_count() == count0 && panic_recovery::oops_limit() == limit0,
+        ledger.count() == c1 && ledger.limit() == 0,
         "ledger restore did not return the snapshot"
     );
+    let (c4, reached4) = ledger.record();
+    assert_test!(c4 == c1 + 1, "a restored ledger did not resume counting");
+    assert_test!(!reached4, "a restored limit of 0 must mean unlimited");
     TestResult::Pass
 }
 

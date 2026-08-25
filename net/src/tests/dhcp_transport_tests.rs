@@ -253,6 +253,10 @@ fn reply(
     at + 1
 }
 
+fn position_of(events: &[MockEvent], wanted: MockEvent) -> Option<usize> {
+    events.iter().position(|e| *e == wanted)
+}
+
 fn routes_for(dev: DevIndex) -> usize {
     ROUTE_TABLE
         .all_routes()
@@ -273,12 +277,10 @@ fn test_dhcp_tx_binds_address_and_routes() -> TestResult {
 
     let mut events = [MockEvent::SetUp; MAX_EVENTS];
     let n = f.mock.snapshot(&mut events);
-    assert_test!(n >= 1, "starting the client transmits something");
-    assert_eq_test!(
-        events[0],
-        MockEvent::Tx(codec::MSG_DISCOVER),
-        "and the first thing on the wire is a DISCOVER"
-    );
+    let Some(discover) = position_of(&events[..n], MockEvent::Tx(codec::MSG_DISCOVER)) else {
+        f.teardown();
+        return fail!("starting the client puts a DISCOVER on the wire");
+    };
 
     let Some(xid) = current_xid(f.dev) else {
         f.teardown();
@@ -289,11 +291,15 @@ fn test_dhcp_tx_binds_address_and_routes() -> TestResult {
     crate::dhcp::transport::on_udp_receive(SERVER, codec::UDP_PORT_SERVER, &buf[..len]);
 
     let n = f.mock.snapshot(&mut events);
-    assert_test!(n >= 2, "the offer produces a request");
-    assert_eq_test!(
-        events[1],
-        MockEvent::Tx(codec::MSG_REQUEST),
-        "and it is a REQUEST"
+    let Some(request) = position_of(&events[..n], MockEvent::Tx(codec::MSG_REQUEST)) else {
+        f.teardown();
+        return fail!("the offer produces a REQUEST");
+    };
+    // By position, not by index: a retransmit timer may have put a second
+    // DISCOVER between the two.
+    assert_test!(
+        discover < request,
+        "the DISCOVER precedes the REQUEST it answers"
     );
 
     let Some(xid) = current_xid(f.dev) else {
@@ -324,13 +330,34 @@ fn test_dhcp_tx_binds_address_and_routes() -> TestResult {
     pass!()
 }
 
+/// Two clients answering on port 68 would each see the other's replies, so the
+/// claim has to be exclusive rather than last-writer-wins.
 fn test_dhcp_port_listener_is_claimed() -> TestResult {
-    // The client claimed port 68 on first start; a second claim must be refused
-    // rather than silently shadowing the first.
-    assert_test!(
-        !crate::udp::register_port_listener(codec::UDP_PORT_CLIENT, |_, _, _| {}),
-        "port 68 is already claimed by the DHCP client"
-    );
+    let Some(f) = Fixture::new(MacAddr([2, 0, 0, 0, 77, 5])) else {
+        return fail!("could not register a mock device");
+    };
+
+    // `transport::start` registers through `LISTENER.init_once_then`, so the
+    // boot client already made the claim and this call renews nothing — the
+    // claim under test is the live one, which is why the failure branch has to
+    // put it back rather than leave the port vacant.
+    if !crate::dhcp::start(f.dev) {
+        f.teardown();
+        return fail!("start failed");
+    }
+
+    let claimed_twice = crate::udp::register_port_listener(codec::UDP_PORT_CLIENT, |_, _, _| {});
+    if claimed_twice {
+        crate::udp::unregister_port_listener(codec::UDP_PORT_CLIENT);
+        crate::udp::register_port_listener(
+            codec::UDP_PORT_CLIENT,
+            crate::dhcp::transport::on_udp_receive,
+        );
+        f.teardown();
+        return fail!("a second claim on port 68 was accepted");
+    }
+
+    f.teardown();
     pass!()
 }
 

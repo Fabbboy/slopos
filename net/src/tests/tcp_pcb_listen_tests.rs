@@ -13,11 +13,10 @@ use crate::tcp::header::{
 use crate::tcp::listener::{SYN_QUEUE_MAX, SynQueue};
 use crate::tcp::pcb::{ListenState, Pcb, PcbState};
 use crate::tcp::tuple::TcpTuple;
+use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
 use crate::types::{Ipv4Addr, Port, SockAddr};
 
-const LOCAL_IP: [u8; 4] = [10, 0, 0, 1];
 const LOCAL_PORT: u16 = 80;
-const REMOTE_IP: [u8; 4] = [10, 0, 0, 2];
 
 fn make_pcb() -> Pcb {
     let tuple = TcpTuple {

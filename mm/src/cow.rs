@@ -24,17 +24,8 @@ pub fn handle_cow_fault(vm_space: &mut KArc<VmSpace>, fault_addr: u64) -> Result
     let vaddr = VirtAddr::new(fault_addr);
     let aligned_vaddr = VirtAddr::new(fault_addr & !(PAGE_SIZE_4KB - 1));
 
-    // The caller decided this was a COW fault under a *previous* acquisition of
-    // the per-process lock, so a sibling thread of the same process can have
-    // resolved the page in between. A leaf that is now present and writable is
-    // that race, and the work is already done: re-executing the store is
-    // correct. Reporting a failure here instead is a `SIGSEGV` for a correct
-    // program, which is the defect `MmError::Retry` exists to remove.
     match ostd_get_pte_flags_4kb(vm_space, vaddr) {
         Some(f) if f.contains(PageFlags::COW) => {}
-        Some(f) if f.contains(PageFlags::PRESENT) && f.contains(PageFlags::WRITABLE) => {
-            return Ok(());
-        }
         _ => return Err(MmError::NotCowPage),
     }
 
@@ -58,10 +49,7 @@ fn resolve_single_ref(
 ) -> Result<(), MmError> {
     match ostd_resolve_cow_4kb(vm_space, aligned_vaddr) {
         Ok(true) => Ok(()),
-        // The leaf was emptied under us by a concurrent unmap, which is
-        // transient by the same argument as the race above: re-execute and
-        // decide again against whatever is mapped then.
-        Ok(false) => Err(MmError::Retry),
+        Ok(false) => Err(MmError::MappingFailed),
         Err(MapError::WouldBlock) => Err(MmError::Retry),
         Err(_) => Err(MmError::MappingFailed),
     }

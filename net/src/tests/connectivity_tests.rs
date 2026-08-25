@@ -20,6 +20,7 @@ use slopos_ostd::{KArc, KVec};
 
 use crate::connectivity::{self, Connectivity, Evidence, classify};
 use crate::iface::{self, IfaceKind};
+use crate::ingress;
 use crate::netdev::{DEVICE_REGISTRY, NetDevice, NetDeviceFeatures, NetDeviceStats};
 use crate::netmon::NETMON_TABLE;
 use crate::packetbuf::PacketBuf;
@@ -36,6 +37,77 @@ static SCRATCH: Connectivity = Connectivity::new();
 fn fresh() -> &'static Connectivity {
     SCRATCH.reset();
     &SCRATCH
+}
+
+/// Holds the kernel's own net threads out of the tables a test is reading:
+/// physical ingress and the net timer thread both check this gate, so DHCP
+/// cannot bind an address, and ARP cannot learn a neighbour, in the middle of an
+/// observation.
+struct Quiesced;
+
+impl Quiesced {
+    fn enter() -> Self {
+        ingress::quiesce_begin();
+        Self
+    }
+}
+
+impl Drop for Quiesced {
+    fn drop(&mut self) {
+        ingress::quiesce_end();
+    }
+}
+
+/// Released on drop, so a failing assertion cannot leak a monitor slot.
+struct Monitor {
+    handle: usize,
+}
+
+impl Monitor {
+    fn open(mask: u32) -> Option<Self> {
+        NETMON_TABLE
+            .open(TEST_OWNER, mask)
+            .ok()
+            .map(|handle| Self { handle })
+    }
+
+    /// Keep only the connectivity records whose transition started at `old`.
+    ///
+    /// A connectivity record addresses the stack rather than an interface, so
+    /// there is no ifindex to filter a monitor on the way
+    /// `netmon_producer_tests` does: the transition itself is the only
+    /// discriminator the record carries.
+    ///
+    /// Chunked through a small stack array to stay under the 2 KiB frame gate.
+    fn drain_from(&self, old: u8, out: &mut [NetEvent]) -> usize {
+        let mut chunk = [NetEvent::default(); 8];
+        let mut kept = 0usize;
+        loop {
+            let n = match NETMON_TABLE.drain(self.handle, &mut chunk) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if n == 0 {
+                break;
+            }
+            for event in &chunk[..n] {
+                if event.kind == NET_EV_CONNECTIVITY
+                    && event.as_connectivity().old == old
+                    && kept < out.len()
+                {
+                    out[kept] = *event;
+                    kept += 1;
+                }
+            }
+        }
+        kept
+    }
+}
+
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        NETMON_TABLE.close(self.handle);
+    }
 }
 
 /// Evidence for a fully working stack, which each test then breaks one rung of.
@@ -269,23 +341,28 @@ fn test_conn_off_link_needs_a_cached_prefix() -> TestResult {
     pass!()
 }
 
+/// The live classifier posts to the same registry, so the count below is taken
+/// over the records this test can prove are its own: `fresh()` puts the scratch
+/// classifier back at `Unknown`, the ladder never returns there, and the live
+/// one is driven out of it before the monitor is opened. From that point a
+/// record whose transition begins at `Unknown` can only be the scratch one's.
 fn test_conn_transition_posts_one_event() -> TestResult {
-    let handle = match NETMON_TABLE.open(TEST_OWNER, NET_MON_CONN) {
-        Ok(h) => h,
-        Err(_) => return fail!("the kernel registry must have a free slot"),
+    connectivity::recheck();
+    assert_test!(
+        connectivity::state() != NET_CONN_UNKNOWN,
+        "the live classifier has evaluated, so the filter below discriminates"
+    );
+
+    let Some(monitor) = Monitor::open(NET_MON_CONN) else {
+        return fail!("the kernel registry must have a free slot");
     };
     let c = fresh();
-
-    // Drain anything the live system posted between the open and here.
-    let mut sink = [NetEvent::default(); 8];
-    let _ = NETMON_TABLE.drain(handle, &mut sink);
 
     c.apply_and_announce(WORKING);
     c.apply_and_announce(WORKING); // not a transition, so not an event
 
-    let mut events = [NetEvent::default(); 8];
-    let n = NETMON_TABLE.drain(handle, &mut events).unwrap_or(0);
-    NETMON_TABLE.close(handle);
+    let mut events = [NetEvent::default(); 4];
+    let n = monitor.drain_from(NET_CONN_UNKNOWN, &mut events);
 
     assert_eq_test!(n, 1, "one transition, one record");
     assert_eq_test!(
@@ -304,8 +381,9 @@ fn test_conn_transition_posts_one_event() -> TestResult {
     pass!()
 }
 
-/// The only test here that touches a global table, and it does so the way
-/// `iface_ctl_tests` does: its own mock, registered and removed.
+/// Asserts that the dark interface moves nothing, not that it is the only
+/// contributor: the real NIC already raises both rungs, and separating them
+/// would need `gather_evidence` made pure over a supplied row set.
 fn test_conn_gather_ignores_a_carrierless_device() -> TestResult {
     struct DarkMock {
         mac: MacAddr,
@@ -343,6 +421,10 @@ fn test_conn_gather_ignores_a_carrierless_device() -> TestResult {
         }
     }
 
+    // Held across both gathers: without it a DHCP bind or a learned neighbour
+    // lands between them and the delta reads as the mock's doing.
+    let _quiesced = Quiesced::enter();
+
     let mac = MacAddr([2, 0, 0, 0, 11, 1]);
     let Ok(mock) = KArc::try_new(DarkMock {
         mac,
@@ -373,7 +455,8 @@ fn test_conn_gather_ignores_a_carrierless_device() -> TestResult {
     );
 
     // `gather_evidence` reads the real tables, so it also sees the live NIC:
-    // only the delta a dark interface makes can be asserted on.
+    // only the delta a dark interface makes can be asserted on. Nothing else may
+    // write those tables inside this window — see the guard above.
     let before = connectivity::gather_evidence();
     iface::detach(dev);
     DEVICE_REGISTRY.unregister(dev);

@@ -17,11 +17,13 @@ use slopos_ostd::{KArc, KVec, lock_class};
 
 use crate::iface::{self, AddrOrigin, AddrScope, IfaceAddr, IfaceError, IfaceKind, OperState};
 use crate::iface_ctl;
+use crate::ingress;
 use crate::neighbor::{NEIGHBOR_CACHE, NeighborSnapshot};
 use crate::netdev::{DEVICE_REGISTRY, NetDevice, NetDeviceFeatures, NetDeviceStats};
 use crate::packetbuf::PacketBuf;
-use crate::pool::{PACKET_POOL, PacketPool};
+use crate::pool::PacketPool;
 use crate::route::{ROUTE_TABLE, RouteEntry};
+use crate::tests::packetbuf_tests::{TEST_PACKET_POOL, ensure_test_pool};
 use crate::types::{DevIndex, Ipv4Addr, MacAddr, NetError};
 
 /// A device that records what the control plane did to it: whether a transition
@@ -383,18 +385,23 @@ fn test_admin_guard_refuses_a_second_entrant() -> TestResult {
     pass!()
 }
 
-/// `flush_device` hands the packets back rather than dropping them under the
-/// cache lock, because `PacketBuf::drop` takes the pool's lock; the pool's free
-/// count is how that shows up from outside.
+/// An administrative down flushes the device's neighbour entries and the
+/// packets they were holding for an address that never resolved.
+///
+/// Both halves are asserted. Where the packet is comes from the cache snapshot;
+/// that it was *handed back* rather than dropped under the cache lock comes
+/// from the pool's free count — and that count is only assertable because the
+/// buffer is drawn from the tests' own pool, which no live receive path
+/// allocates from.
 fn test_admin_down_flushes_neighbours_and_frees_packets() -> TestResult {
-    PACKET_POOL.init();
+    ensure_test_pool();
 
     let Some(f) = Fixture::new(IfaceKind::Ethernet, MacAddr([2, 0, 0, 0, 9, 6])) else {
         return fail!("could not register a mock device");
     };
 
-    let pool_before = PACKET_POOL.available();
-    let Some(pkt) = PacketBuf::from_raw_copy(&[0xAA_u8; 64]) else {
+    let pool_before = TEST_PACKET_POOL.available();
+    let Some(pkt) = PacketBuf::from_raw_copy_in(&TEST_PACKET_POOL, &[0xAA_u8; 64]) else {
         f.teardown();
         return fail!("packet pool has no capacity");
     };
@@ -402,13 +409,14 @@ fn test_admin_down_flushes_neighbours_and_frees_packets() -> TestResult {
     // entry and its queued packet are the state under test.
     drop(NEIGHBOR_CACHE.resolve(f.dev, Ipv4Addr([10, 9, 6, 9]), pkt));
 
-    let pool_queued = PACKET_POOL.available();
     let queued = queued_pkts_for(f.dev);
+    let pool_queued = TEST_PACKET_POOL.available();
 
     let result = iface_ctl::set_admin_up(f.ifindex, false);
 
-    let pool_after = PACKET_POOL.available();
     let neigh_after = neighbours_for(f.dev);
+    let queued_after = queued_pkts_for(f.dev);
+    let pool_after = TEST_PACKET_POOL.available();
 
     f.teardown();
 
@@ -419,16 +427,19 @@ fn test_admin_down_flushes_neighbours_and_frees_packets() -> TestResult {
         "the resolve created one entry holding one packet"
     );
     assert_eq_test!(neigh_after, 0, "the down flushed the neighbour entry");
+    assert_eq_test!(
+        queued_after,
+        None,
+        "and no entry of this device's is left holding a packet"
+    );
     assert_test!(
         pool_queued < pool_before,
-        "the queued packet is held out of the pool"
+        "the queued packet was never held out of the pool"
     );
-    // The pool is shared with live NIC receive, so an exact count would flake on
-    // a frame landing mid-test; `>=` still catches a leak, which would leave
-    // `pool_after == pool_queued`.
-    assert_test!(
-        pool_after >= pool_queued + 1,
-        "the queued packet was returned to the pool"
+    assert_eq_test!(
+        pool_after,
+        pool_before,
+        "the flush dropped the packet instead of handing it back"
     );
     pass!()
 }
@@ -483,30 +494,52 @@ fn test_admin_intent_survives_carrier_loss() -> TestResult {
 // restoring global state and asserts *after*, so a failing assertion cannot
 // leave networking switched off for every later test.
 
-/// Park every live non-loopback interface's admin intent, recording them in
-/// `out` and returning how many.
-fn park_live_ifaces(keep: &[u32], out: &mut [u32; NET_MAX_IFACES]) -> usize {
-    let mut n = 0usize;
-    // Collect under the table lock, mutate outside it: `set_admin_intent` takes
-    // the same lock `for_each` is holding.
-    iface::for_each(|i| {
-        if matches!(i.kind, IfaceKind::Loopback) || !i.admin_up || keep.contains(&i.ifindex) {
-            return;
-        }
-        if n < out.len() {
-            out[n] = i.ifindex;
-            n += 1;
-        }
-    });
-    for ifindex in &out[..n] {
-        let _ = iface::set_admin_intent(*ifindex, false);
-    }
-    n
+/// Every live non-loopback interface's administrative intent, cleared for as
+/// long as the guard lives, so the master switch acts on the test's own devices
+/// and on nothing else.
+///
+/// The flag alone is not quiescence: the DHCP client would still bind or renew
+/// a lease onto an interface the switch has been told to skip. So the guard
+/// shuts the data plane first, which both physical ingress and the net timer
+/// thread check. `Drop` reopens it, so an early `assert_*` cannot leave the
+/// live NIC parked for the rest of the boot.
+struct ParkedIfaces {
+    parked: [u32; NET_MAX_IFACES],
+    n: usize,
 }
 
-fn unpark_live_ifaces(parked: &[u32]) {
-    for ifindex in parked {
-        let _ = iface::set_admin_intent(*ifindex, true);
+impl ParkedIfaces {
+    fn park(keep: &[u32]) -> Self {
+        ingress::quiesce_begin();
+
+        let mut parked = [0u32; NET_MAX_IFACES];
+        let mut n = 0usize;
+        // Collect under the table lock, mutate outside it: `set_admin_intent`
+        // takes the same lock `for_each` is holding.
+        iface::for_each(|i| {
+            if matches!(i.kind, IfaceKind::Loopback) || !i.admin_up || keep.contains(&i.ifindex) {
+                return;
+            }
+            if n < parked.len() {
+                parked[n] = i.ifindex;
+                n += 1;
+            }
+        });
+        for ifindex in &parked[..n] {
+            let _ = iface::set_admin_intent(*ifindex, false);
+        }
+        Self { parked, n }
+    }
+}
+
+impl Drop for ParkedIfaces {
+    fn drop(&mut self) {
+        for ifindex in &self.parked[..self.n] {
+            let _ = iface::set_admin_intent(*ifindex, true);
+        }
+        // Last: the kernel's net threads stay out until every interface they
+        // read is back to the intent it was found with.
+        ingress::quiesce_end();
     }
 }
 
@@ -553,8 +586,7 @@ fn test_disable_preserves_admin_intent() -> TestResult {
         return fail!("could not register a mock device");
     };
 
-    let mut parked = [0u32; NET_MAX_IFACES];
-    let n_parked = park_live_ifaces(&[f.ifindex], &mut parked);
+    let _parked = ParkedIfaces::park(&[f.ifindex]);
 
     iface_ctl::set_networking_enabled(false);
     let while_off = iface::get(f.ifindex).map(|i| (i.admin_up, i.is_realised(false)));
@@ -562,7 +594,6 @@ fn test_disable_preserves_admin_intent() -> TestResult {
     let down_calls = f.down_calls();
 
     iface_ctl::set_networking_enabled(true);
-    unpark_live_ifaces(&parked[..n_parked]);
     f.teardown();
 
     assert_test!(
@@ -585,8 +616,7 @@ fn test_loopback_is_exempt_from_master_switch() -> TestResult {
         return fail!("no loopback interface is attached");
     };
 
-    let mut parked = [0u32; NET_MAX_IFACES];
-    let n_parked = park_live_ifaces(&[], &mut parked);
+    let _parked = ParkedIfaces::park(&[]);
 
     let addrs_before = iface::get(lo).map(|i| i.addrs().len());
 
@@ -594,7 +624,6 @@ fn test_loopback_is_exempt_from_master_switch() -> TestResult {
     let while_off = iface::get(lo).map(|i| (i.admin_up, i.is_realised(false), i.addrs().len()));
 
     iface_ctl::set_networking_enabled(true);
-    unpark_live_ifaces(&parked[..n_parked]);
 
     assert_eq_test!(
         while_off,
@@ -608,14 +637,12 @@ fn test_loopback_is_exempt_from_master_switch() -> TestResult {
 /// nobody's snapshot when the switch moved, so an enable that only re-realises
 /// what the disable recorded leaves it dark forever.
 fn test_attach_while_disabled_realises_on_enable() -> TestResult {
-    let mut parked = [0u32; NET_MAX_IFACES];
-    let n_parked = park_live_ifaces(&[], &mut parked);
+    let _parked = ParkedIfaces::park(&[]);
 
     iface_ctl::set_networking_enabled(false);
 
     let Some(f) = Fixture::new(IfaceKind::Ethernet, MacAddr([2, 0, 0, 0, 9, 9])) else {
         iface_ctl::set_networking_enabled(true);
-        unpark_live_ifaces(&parked[..n_parked]);
         return fail!("could not register a mock device");
     };
 
@@ -627,7 +654,6 @@ fn test_attach_while_disabled_realises_on_enable() -> TestResult {
     let after_enable = iface::get(f.ifindex).map(|i| (i.admin_up, i.is_realised(true)));
     let up_calls_after = f.up_calls();
 
-    unpark_live_ifaces(&parked[..n_parked]);
     f.teardown();
 
     assert_eq_test!(
@@ -674,8 +700,7 @@ fn test_disable_then_enable_is_identity() -> TestResult {
     // "flags preserved" from "everything ended up up".
     let pre_down = iface_ctl::set_admin_up(down.ifindex, false);
 
-    let mut parked = [0u32; NET_MAX_IFACES];
-    let n_parked = park_live_ifaces(&[down.ifindex, up.ifindex], &mut parked);
+    let _parked = ParkedIfaces::park(&[down.ifindex, up.ifindex]);
 
     let before = (
         iface::get(down.ifindex).map(|i| i.admin_up),
@@ -696,7 +721,6 @@ fn test_disable_then_enable_is_identity() -> TestResult {
     let routes_after = routes_for(up.dev);
     let down_calls_after = down.down_calls();
 
-    unpark_live_ifaces(&parked[..n_parked]);
     up.teardown();
     down.teardown();
 

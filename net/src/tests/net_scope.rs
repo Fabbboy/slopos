@@ -2,13 +2,16 @@
 //!
 //! Holds four things as one unit because they are one decision: where a packet
 //! a test sends goes, which wheel a `schedule` lands in, what `now_ms()`
-//! returns, and whether the kernel's own net threads may run. Splitting them
-//! leaves a window in which a timer is scheduled against one clock and fired
-//! against another, or in which a synthetic PCB shares a 4-tuple with the wire.
+//! returns, and whether the kernel's own net threads may deliver a frame or
+//! fire a timer. Splitting them leaves a window in which a timer is scheduled
+//! against one clock and fired against another, or in which a synthetic PCB
+//! shares a 4-tuple with the wire.
 //!
 //! The destination is RFC 5737 TEST-NET-1, which no host network may source, so
 //! the fixture's 4-tuple is unreachable from the wire even with the ingress gate
 //! open.
+
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_ostd::sync::StateFlag;
 use slopos_ostd::{KArc, KVec, klog_info};
@@ -23,6 +26,7 @@ use crate::netdev::{DEVICE_REGISTRY, NetDevice};
 use crate::route::{self, ROUTE_TABLE, RouteEntry};
 use crate::socket;
 use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpHeader};
+use crate::tests::env_wait::errno_i32;
 use crate::timer::{self, FiredTimer, TimerKind};
 use crate::types::{DevIndex, Ipv4Addr, MacAddr};
 
@@ -38,6 +42,9 @@ const TEST_PEER_MAC: MacAddr = MacAddr([0x02, 0x00, 0x5f, 0x00, 0x02, 0x02]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeError {
+    /// The fixture's route could not be installed, so its address would fall
+    /// through to the live default route.
+    NoRoute,
     Alloc,
     NoDeviceSlot,
     Attach,
@@ -45,20 +52,41 @@ pub enum ScopeError {
 
 static PANIC_CLEANUP_REGISTERED: StateFlag = StateFlag::new();
 
+/// The live scope's sink, for the panic hook to retire. `NO_DEV` when no scope
+/// is up. A `Drop` that never ran is the only way this is read, and only one
+/// scope exists at a time, so a plain atomic is the whole synchronisation.
+const NO_DEV: u32 = u32::MAX;
+static LIVE_SINK: AtomicU32 = AtomicU32::new(NO_DEV);
+
 fn ensure_panic_cleanup_registered() {
     if PANIC_CLEANUP_REGISTERED.enter() {
         slopos_ostd::panic_recovery::register_panic_cleanup(panic_reopen_dataplane);
     }
 }
 
-/// A test that panicked inside a scope never ran its `Drop`. Only the three
-/// process-global switches are reset here: each one, left set, silently
-/// disables networking for the rest of the boot, and all three are atomics, so
-/// this takes no lock a panicking context might already hold.
+/// A test that panicked inside a scope never ran its `Drop`.
+///
+/// The three process-global switches come first because each one, left set,
+/// silently disables networking for the rest of the boot, and all three are
+/// atomics that take no lock a panicking context might hold. The sink is
+/// retired after them, because leaving it registered is not cosmetic: the next
+/// scope installs a *second* `192.0.2.0/24` at equal prefix and metric, and a
+/// lookup that returns the stale device hands the SYN to whatever now occupies
+/// that slot. The three calls take ordinary registry locks, which the panic
+/// path has already unwound out of.
 fn panic_reopen_dataplane() {
     ingress::quiesce_clear();
     timer::select_test_wheel(false);
     MockClock::clear();
+
+    let dev = LIVE_SINK.swap(NO_DEV, Ordering::AcqRel);
+    if dev != NO_DEV {
+        let dev = DevIndex(dev as usize);
+        drop(NEIGHBOR_CACHE.flush_device(dev));
+        route::remove_device_routes(dev);
+        let _ = iface::detach(dev);
+        DEVICE_REGISTRY.unregister(dev);
+    }
 }
 
 #[must_use = "the fixture is torn down when the guard drops; bind it to a named local"]
@@ -113,6 +141,8 @@ impl NetTestScope {
             TEST_PEER_MAC,
             clock::now_ms(),
         );
+
+        LIVE_SINK.store(dev.0 as u32, Ordering::Release);
 
         Ok(Self {
             sink,
@@ -195,22 +225,31 @@ impl Drop for NetTestScope {
         // Still on the test wheel, so the tokens this cancels are the ones it
         // minted.
         socket::socket_reset_all();
-        drop(NEIGHBOR_CACHE.remove(self.dev, Ipv4Addr(TEST_PEER_IP)));
+        // The whole device, not just the pre-seeded peer: a send to any other
+        // address in the fixture's /24 creates a pending entry holding queued
+        // buffers and an ArpRetransmit token minted in the test wheel, and the
+        // clear below would leave that entry naming an index in a wheel that no
+        // longer holds it.
+        drop(NEIGHBOR_CACHE.flush_device(self.dev));
 
         // Emptied before the swap back, so no token minted here can later be
         // cancelled against the live stack's wheel.
         timer::TEST_TIMER_WHEEL.clear();
-        timer::select_test_wheel(false);
 
+        // Clock before wheel: deselecting first leaves a window in which the
+        // live wheel is selected while `now_ms()` still reads the test's
+        // fast-forwarded time, and every deadline in that wheel looks due.
         if self.mock_clock {
             MockClock::clear();
         }
+        timer::select_test_wheel(false);
 
         route::remove_device_routes(self.dev);
-        iface::detach(self.dev);
+        let _ = iface::detach(self.dev);
         if !DEVICE_REGISTRY.unregister(self.dev) {
             klog_info!("net_scope: blackhole dev {} already gone", self.dev);
         }
+        LIVE_SINK.store(NO_DEV, Ordering::Release);
 
         // Last: the live threads stay out until the tables they read are whole.
         ingress::quiesce_end();
@@ -229,7 +268,7 @@ fn arm_sink() -> Result<(KArc<BlackholeDev>, DevIndex), ScopeError> {
         Ok(()) => Ok((sink, dev)),
         Err(e) => {
             route::remove_device_routes(dev);
-            iface::detach(dev);
+            let _ = iface::detach(dev);
             DEVICE_REGISTRY.unregister(dev);
             Err(e)
         }
@@ -253,19 +292,20 @@ fn arm_addressing(dev: DevIndex) -> Result<(), ScopeError> {
     // `ROUTE_TABLE.add` rather than `route::add`: the fixture posts no netmon
     // event on the way in, and `route::remove_device_routes` on the way out
     // pairs with the `iface::detach` and `unregister` that do announce.
-    ROUTE_TABLE.add(RouteEntry {
+    // Checked: an unrouted fixture address falls through to whatever default
+    // route the live stack has, which is the physical NIC — the one outcome the
+    // scope exists to make impossible.
+    if !ROUTE_TABLE.add(RouteEntry {
         prefix: Ipv4Addr(TEST_LOCAL_IP).masked(TEST_PREFIX_LEN),
         prefix_len: TEST_PREFIX_LEN,
         gateway: Ipv4Addr::UNSPECIFIED,
         dev,
         metric: 0,
-    });
+    }) {
+        return Err(ScopeError::NoRoute);
+    }
 
     Ok(())
-}
-
-fn errno_i32(errno: u64) -> i32 {
-    errno as i64 as i32
 }
 
 /// Nothing the fixture sends can reach a real device, and nothing a real device

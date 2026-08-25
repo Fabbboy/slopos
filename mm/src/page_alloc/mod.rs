@@ -243,6 +243,13 @@ impl slopos_ostd::mm::reclaim::Reclaimable for QuarantineReclaim {
 
 static QUARANTINE_RECLAIM: QuarantineReclaim = QuarantineReclaim;
 
+/// Pages in the largest block a single reclaim step can release, and so the
+/// bound on how far a page budget may be overshot.
+#[cfg(feature = "test-hooks")]
+pub fn max_reclaim_unit_pages() -> u32 {
+    BUDDY_ALLOCATOR.max_block_pages()
+}
+
 /// Register the quarantine with the reclaim tier. Boot only.
 pub fn register_reclaim(token: &slopos_ostd::sync::BspToken<'_>) {
     slopos_ostd::mm::reclaim::register(token, &QUARANTINE_RECLAIM);

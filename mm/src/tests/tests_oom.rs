@@ -21,19 +21,51 @@ use crate::slab::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_ostd::mm::frame::FrameAllocOptions;
 
-/// Free `pa` and report whether the buddy took it back off the handed-out
-/// books.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FreeOutcome {
+    NotHandedOut,
+    StillHandedOut,
+    Returned,
+}
+
+impl FreeOutcome {
+    fn describe(self) -> &'static str {
+        match self {
+            FreeOutcome::NotHandedOut => "was not handed out to begin with, so it was never freed",
+            FreeOutcome::StillHandedOut => "did not come back off the allocator's books",
+            FreeOutcome::Returned => "came back off the allocator's books",
+        }
+    }
+}
+
+/// Free `pa` and report what that did to the buddy's books.
 ///
-/// A leak check against the global free count is a race with three other CPUs:
-/// this asks about a frame the test itself holds, whose accounting nothing
-/// else moves while it is held.
-fn frame_returns_to_the_allocator(pa: PhysAddr) -> bool {
+/// Asks about a frame the test itself holds rather than about the global free
+/// count, which three other CPUs move. The post-free read is the one place a
+/// peer can intrude — it may already have taken the frame back out — so
+/// `Returned` is spelled as the states that mean the buddy accounted for it,
+/// and `HandedOut` is only believed after a second read, since a peer's
+/// reallocation is indistinguishable from a free that did nothing.
+fn free_and_observe(pa: PhysAddr) -> FreeOutcome {
     if frame_accounting(pa) != FrameAccounting::HandedOut {
-        return false;
+        return FreeOutcome::NotHandedOut;
     }
     free_page_frame(pa);
-    frame_accounting(pa) != FrameAccounting::HandedOut
+    for _ in 0..FREE_CONFIRM_READS {
+        match frame_accounting(pa) {
+            FrameAccounting::Free
+            | FrameAccounting::Cached
+            | FrameAccounting::Quarantined
+            | FrameAccounting::Withheld => return FreeOutcome::Returned,
+            _ => core::hint::spin_loop(),
+        }
+    }
+    FreeOutcome::StillHandedOut
 }
+
+/// A peer can hand the frame straight back out, so `HandedOut` after a free has
+/// to be seen more than once before it is a leak rather than a reallocation.
+const FREE_CONFIRM_READS: u32 = 64;
 
 pub fn test_page_alloc_until_oom() -> TestResult {
     let free_before = get_page_allocator_stats().free;
@@ -64,13 +96,20 @@ pub fn test_page_alloc_until_oom() -> TestResult {
 
     assert_test!(count > 0, "failed to allocate any pages");
 
+    let mut first_bad: Option<(usize, FreeOutcome)> = None;
     for i in 0..count {
-        if !frame_returns_to_the_allocator(allocated[i]) {
-            return fail!(
-                "the frame at {:#x} did not come back off the allocator's books",
-                allocated[i].as_u64()
-            );
+        let outcome = free_and_observe(allocated[i]);
+        if outcome != FreeOutcome::Returned && first_bad.is_none() {
+            first_bad = Some((i, outcome));
         }
+    }
+
+    if let Some((i, outcome)) = first_bad {
+        return fail!(
+            "the frame at {:#x} {}",
+            allocated[i].as_u64(),
+            outcome.describe()
+        );
     }
 
     pass!()
@@ -381,14 +420,21 @@ pub fn test_alloc_free_cycles_no_leak() -> TestResult {
             allocated += 1;
         }
 
+        let mut first_bad: Option<(usize, FreeOutcome)> = None;
         for i in 0..allocated {
-            if !frame_returns_to_the_allocator(pages[i]) {
-                return fail!(
-                    "cycle {} leaked the frame at {:#x}",
-                    cycle,
-                    pages[i].as_u64()
-                );
+            let outcome = free_and_observe(pages[i]);
+            if outcome != FreeOutcome::Returned && first_bad.is_none() {
+                first_bad = Some((i, outcome));
             }
+        }
+
+        if let Some((i, outcome)) = first_bad {
+            return fail!(
+                "cycle {}: the frame at {:#x} {}",
+                cycle,
+                pages[i].as_u64(),
+                outcome.describe()
+            );
         }
     }
 

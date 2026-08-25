@@ -377,12 +377,18 @@ impl BuddyInner {
         parked_before.saturating_sub(self.quarantine_frames)
     }
 
-    /// Splice at most `limit` blocks from the releasable backlog into the free
-    /// lists.
+    /// Splice blocks from the releasable backlog into the free lists until
+    /// `limit` **pages** have been released.
+    ///
+    /// Pages, not blocks, because that is what `Reclaimable::reclaim` is
+    /// specified in and what every caller budgets in. A block is indivisible
+    /// here, so the last one may carry the total past `limit` — by less than
+    /// one block, and never by refusing to release at all: a budget that could
+    /// decline the head block would report zero forever while
+    /// `reclaimable_pages` kept saying there was work.
     fn quarantine_release_some(&mut self, table: &RawTable<PageFrame>, limit: u32) -> u32 {
         let mut released = 0u32;
-        let mut done = 0u32;
-        while done < limit {
+        while released < limit {
             let cursor = self.quarantine_releasable;
             if cursor == INVALID_PAGE_FRAME {
                 self.quarantine_releasable_tail = INVALID_PAGE_FRAME;
@@ -405,7 +411,6 @@ impl BuddyInner {
             }
             self.insert_block_coalescing(table, cursor, order);
             released = released.saturating_add(Self::order_block_pages(order));
-            done += 1;
         }
         if released > 0 {
             self.quarantine_frames = self.quarantine_frames.saturating_sub(released);
@@ -777,9 +782,14 @@ impl BuddyAllocator {
     /// Snapshot `(total, free, allocated)`. `free` folds in the PCP cached
     /// frames and `allocated` subtracts them, so the two still sum to a
     /// stable total.
+    ///
+    /// The cache total is read under the lock because every path that moves a
+    /// frame out of a magazine and into the free lists does both halves under
+    /// it; read outside, a peer's drain lands in `free_frames` while the frame
+    /// is still counted as cached, and the sum exceeds `total_frames`.
     pub fn stats(&self) -> (u32, u32, u32) {
-        let pcp_cached = pcp::total_cached();
         let inner = self.inner.lock();
+        let pcp_cached = pcp::total_cached();
         (
             inner.total_frames,
             inner.free_frames.saturating_add(pcp_cached),
@@ -1089,6 +1099,13 @@ impl BuddyAllocator {
 
     pub fn quarantine_frames(&self) -> u32 {
         QUARANTINE_FRAMES.load(Ordering::Relaxed)
+    }
+
+    /// Pages in the largest block the allocator can hand back in one step, and
+    /// so the bound on how far a page-budgeted release may overshoot.
+    #[cfg(feature = "test-hooks")]
+    pub fn max_block_pages(&self) -> u32 {
+        self.with_locked(|inner, _table| BuddyInner::order_block_pages(inner.max_order))
     }
 
     pub fn quarantine_allocated_phys(&self, phys_addr: PhysAddr) {

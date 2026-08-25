@@ -22,7 +22,13 @@ pub trait Reclaimable: Sync {
     /// An over-estimate is fine: this decides whether a pass is worth making.
     fn reclaimable_pages(&self) -> u32;
 
-    /// Release at most `want` pages. Returns how many were actually released.
+    /// Release `want` pages. Returns how many were actually released.
+    ///
+    /// A budget, not a ceiling: a reclaimer whose unit is indivisible — the
+    /// quarantine releases whole buddy blocks — stops as soon as the budget is
+    /// met, so the total may exceed `want` by less than one of its units. The
+    /// alternative, declining a unit that would overshoot, is a reclaimer that
+    /// reports zero forever while `reclaimable_pages` says there is work.
     ///
     /// Must not block, must not allocate, and must return zero rather than
     /// wait for a lock.
@@ -104,6 +110,12 @@ pub fn reclaimable_pages() -> u32 {
 }
 
 /// Try to release `want` pages, returning how many actually came back.
+/// Ask the registrants for `want` pages, stopping at the first pass that meets
+/// the budget or frees nothing.
+///
+/// The total may exceed `want` by less than one reclaimer unit, for the reason
+/// [`Reclaimable::reclaim`] gives. `run` stops asking the moment the budget is
+/// met, so the overshoot is one unit for the whole call, not one per pass.
 pub fn run(want: u32) -> u32 {
     if want == 0 {
         return 0;

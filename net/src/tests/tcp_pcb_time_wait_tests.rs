@@ -11,15 +11,16 @@ use crate::tcp::pcb::time_wait::TimeWaitState;
 use crate::tcp::pcb::{Pcb, PcbState};
 use crate::tcp::seq::SeqNum;
 use crate::tcp::tuple::TcpTuple;
+use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
 
 const LAST_RCV_NXT: u32 = 12_345;
 const LAST_SND_NXT: u32 = 67_890;
 
 fn make_pcb() -> Pcb {
     let tuple = TcpTuple {
-        local_ip: [10, 0, 0, 1],
+        local_ip: LOCAL_IP,
         local_port: 49_152,
-        remote_ip: [10, 0, 0, 2],
+        remote_ip: REMOTE_IP,
         remote_port: 80,
     };
     Pcb::new(

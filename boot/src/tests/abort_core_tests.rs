@@ -92,26 +92,40 @@ pub fn test_emergency_guard_classifier() -> TestResult {
     TestResult::Pass
 }
 
-/// Resets afterwards, so the test leaves no claimed owner implying a real panic.
+/// On a private election, not the machine's: claiming that one tells the IDT's
+/// NMI stop and the TLB ack wait that a fatal panic is in flight.
 pub fn test_panic_owner_election() -> TestResult {
-    use slopos_ostd::panic::{
-        claim_panic_owner, panic_owner_claimed, panic_owner_is, reset_panic_owner_for_test,
-    };
-    reset_panic_owner_for_test();
-    assert_test!(!panic_owner_claimed(), "owner claimed before any election");
+    use slopos_ostd::panic::{PanicOwner, panic_owner_claimed, panic_owner_is};
 
-    assert_test!(claim_panic_owner(7), "first claim did not win");
-    assert_test!(panic_owner_claimed(), "owner not claimed after a win");
-    assert_test!(panic_owner_is(7), "owner mismatch after claim");
+    // The machine's own election, read-only, so the free functions under test
+    // are still known to be the ones delegating to it.
+    let me = slopos_arch::pcr::get_current_cpu() as u32;
     assert_test!(
-        !claim_panic_owner(9),
-        "a second CPU wrongly won the election"
+        !panic_owner_claimed(),
+        "the machine's fatal-panic election is claimed outside a panic"
     );
-    assert_test!(panic_owner_is(7), "owner changed after a losing claim");
-    assert_test!(!panic_owner_is(9), "loser reported as owner");
+    assert_test!(
+        !panic_owner_is(me),
+        "this CPU is the fatal-panic owner outside a panic"
+    );
 
-    reset_panic_owner_for_test();
-    assert_test!(!panic_owner_claimed(), "reset did not clear the owner");
+    let election = PanicOwner::new();
+    assert_test!(!election.claimed(), "owner claimed before any election");
+
+    assert_test!(election.claim(7), "first claim did not win");
+    assert_test!(election.claimed(), "owner not claimed after a win");
+    assert_test!(election.is_owner(7), "owner mismatch after claim");
+    assert_test!(!election.claim(9), "a second CPU wrongly won the election");
+    assert_test!(election.is_owner(7), "owner changed after a losing claim");
+    assert_test!(!election.is_owner(9), "loser reported as owner");
+    assert_test!(
+        !election.claim(7),
+        "the winner re-claiming its own election won a second time"
+    );
+
+    election.reset_for_test();
+    assert_test!(!election.claimed(), "reset did not clear the owner");
+    assert_test!(election.claim(9), "a reset election refused a fresh claim");
     TestResult::Pass
 }
 

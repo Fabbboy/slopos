@@ -8,11 +8,14 @@ use crate::tcp::{
     self, Actions, ConnId, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN,
     TcpHeader, TcpOutSegment, TcpTuple,
 };
-#[cfg(feature = "test-hooks")]
-use crate::timer::NET_TIMER_WHEEL;
 
-pub const LOCAL_IP: [u8; 4] = [10, 0, 0, 1];
-pub const REMOTE_IP: [u8; 4] = [10, 0, 0, 2];
+/// RFC 5737 TEST-NET-1, matching [`crate::tests::net_scope`]. Deliberately not
+/// `10.0.0.x`: that subnet is reachable through the boot default route, so a
+/// retransmit or a delayed ACK really left the guest, QEMU's gateway really
+/// answered it, and the answer tore down a PCB the test was still asserting on.
+/// Unroutable without a scope, and routed at the scope's sink with one.
+pub const LOCAL_IP: [u8; 4] = crate::tests::net_scope::TEST_LOCAL_IP;
+pub const REMOTE_IP: [u8; 4] = crate::tests::net_scope::TEST_PEER_IP;
 pub const REMOTE_PORT: u16 = 80;
 /// Peer's Initial Send Sequence number for synthetic SYN+ACKs, so tests can
 /// compute expected `rcv_nxt` values.
@@ -417,11 +420,15 @@ pub fn tick_ms(ms: u64) -> usize {
 
 /// Drive the net timer wheel once and dispatch every expired TCP timer through
 /// its real callback. Mirrors the production dispatcher in `net/src/timer.rs`.
+///
+/// `timer::wheel()`, not `NET_TIMER_WHEEL`: under a scope a `schedule` lands in
+/// the test wheel, and draining the live one would fire nothing the test armed
+/// while leaving what it armed for the live thread to fire instead.
 #[cfg(feature = "test-hooks")]
 pub fn dispatch_fired_timers() -> usize {
     use crate::timer::TimerKind;
 
-    let fired = NET_TIMER_WHEEL.process_due();
+    let fired = crate::timer::wheel().process_due();
     let mut count = 0usize;
     for timer in fired {
         match timer.kind {
