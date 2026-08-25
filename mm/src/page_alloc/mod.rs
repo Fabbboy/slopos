@@ -237,18 +237,28 @@ impl slopos_ostd::mm::reclaim::Reclaimable for QuarantineReclaim {
     }
 
     fn reclaim(&self, want: u32) -> u32 {
+        #[cfg(feature = "test-hooks")]
+        QUARANTINE_RECLAIM_ASKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         BUDDY_ALLOCATOR.quarantine_release_some(want)
     }
 }
 
-static QUARANTINE_RECLAIM: QuarantineReclaim = QuarantineReclaim;
-
-/// Pages in the largest block a single reclaim step can release, and so the
-/// bound on how far a page budget may be overshot.
 #[cfg(feature = "test-hooks")]
-pub fn max_reclaim_unit_pages() -> u32 {
-    BUDDY_ALLOCATOR.max_block_pages()
+static QUARANTINE_RECLAIM_ASKS: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Test hook: asks the reclaim tier has put to the quarantine so far. Wraps;
+/// a caller takes differences.
+///
+/// A budget governs how many times a registrant is approached, and nothing
+/// else reports that: `run` hands over what is left of the budget, so an ask
+/// made past it is an ask for zero pages and moves no counter a caller sees.
+#[cfg(feature = "test-hooks")]
+pub fn quarantine_reclaim_asks() -> u32 {
+    QUARANTINE_RECLAIM_ASKS.load(core::sync::atomic::Ordering::Relaxed)
 }
+
+static QUARANTINE_RECLAIM: QuarantineReclaim = QuarantineReclaim;
 
 /// Register the quarantine with the reclaim tier. Boot only.
 pub fn register_reclaim(token: &slopos_ostd::sync::BspToken<'_>) {

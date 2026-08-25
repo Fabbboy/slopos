@@ -859,7 +859,17 @@ fn transmit_udp_packet_locked(
         frame[udp + 6..udp + 8].copy_from_slice(&udp_csum.to_be_bytes());
     }
 
-    submit_tx(state, tx_page, total_len as u32)
+    // Counted for the same reason as `virtio_net_transmit`: this is the other
+    // path that reaches the ring without going through `NetDevice::tx`, and a
+    // DNS query sent through it was invisible to every TX statistic.
+    if submit_tx(state, tx_page, total_len as u32) {
+        counters::bump(&counters::TX_PACKETS, 1);
+        counters::bump(&counters::TX_BYTES, frame_len as u64);
+        true
+    } else {
+        counters::bump(&counters::TX_DROPPED, 1);
+        false
+    }
 }
 
 pub fn transmit_udp_packet(

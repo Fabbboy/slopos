@@ -1,5 +1,6 @@
 use slopos_abi::net::{AF_INET, SOCK_DGRAM};
 use slopos_abi::syscall::{ERRNO_EAGAIN, POLLIN, POLLOUT};
+use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
@@ -54,15 +55,42 @@ pub fn test_udp_t2_dispatch_delivery_and_unbound_drop() -> TestResult {
     pass!()
 }
 
+/// `transmit_udp_packet` builds its own frame and submits straight to the ring,
+/// so it consults no route and no scope can blackhole it — the frame leaves the
+/// guest whatever a test does. The destination is therefore TEST-NET-1, which
+/// no host network routes, rather than a live resolver.
+///
+/// The assertion was `ok || !ok`. It is now the TX counter, which the same
+/// commit that found this made observable: a submit that reported success must
+/// have advanced it by exactly one.
 pub fn test_udp_t3_generic_udp_tx_no_crash() -> TestResult {
+    use crate::tests::net_scope::{TEST_LOCAL_IP, TEST_PEER_IP};
+
     reset();
 
-    let payload = [1u8, 2, 3, 4];
-    let ok = crate::net_driver_service::net_driver()
-        .map(|d| (d.transmit_udp_packet)([10, 0, 2, 15], [8, 8, 8, 8], 50000, 53, &payload))
-        .unwrap_or(false);
-    assert_test!(ok || !ok, "transmit call returns without panic");
+    let Some(driver) = crate::net_driver_service::net_driver() else {
+        klog_info!("UDP_TEST: SKIP - no net driver registered");
+        return TestResult::Skipped;
+    };
+    let Some(handle) = (driver.get_device_handle)() else {
+        klog_info!("UDP_TEST: SKIP - no device handle");
+        return TestResult::Skipped;
+    };
 
+    let payload = [1u8, 2, 3, 4];
+    let before = handle.stats().tx_packets;
+    let ok = (driver.transmit_udp_packet)(TEST_LOCAL_IP, TEST_PEER_IP, 50000, 53, &payload);
+    let advanced = handle.stats().tx_packets.wrapping_sub(before);
+
+    if !ok {
+        klog_info!("UDP_TEST: SKIP - the device refused the submit");
+        return TestResult::Skipped;
+    }
+    assert_eq_test!(
+        advanced,
+        1,
+        "a successful UDP submit did not advance the device's tx_packets"
+    );
     pass!()
 }
 

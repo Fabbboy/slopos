@@ -10,8 +10,22 @@ fn reset() {
     UDP_DEMUX.lock().clear();
 }
 
+/// Clears the demux table however the test leaves, not only on the way in.
+///
+/// These register wildcards on ports they do not own, at socket indices that do
+/// not exist. Left behind, the next inbound datagram on that port demuxes onto a
+/// stranger — and unlike a PCB, nothing ages a demux entry out.
+struct ClearOnExit;
+
+impl Drop for ClearOnExit {
+    fn drop(&mut self) {
+        UDP_DEMUX.lock().clear();
+    }
+}
+
 pub fn test_udp_demux_register_lookup() -> TestResult {
     reset();
+    let _clear = ClearOnExit;
 
     let mut demux = UDP_DEMUX.lock();
     let rc = demux.register(Ipv4Addr(LOCAL_IP), Port(5000), 3, false);
@@ -33,6 +47,7 @@ pub fn test_udp_demux_register_lookup() -> TestResult {
 
 pub fn test_udp_demux_inaddr_any() -> TestResult {
     reset();
+    let _clear = ClearOnExit;
 
     let mut demux = UDP_DEMUX.lock();
     let rc = demux.register(Ipv4Addr::UNSPECIFIED, Port(6000), 7, false);
@@ -54,6 +69,7 @@ pub fn test_udp_demux_inaddr_any() -> TestResult {
 
 pub fn test_udp_demux_exact_over_wildcard() -> TestResult {
     reset();
+    let _clear = ClearOnExit;
 
     let mut demux = UDP_DEMUX.lock();
     let rc_a = demux.register(Ipv4Addr(LOCAL_IP), Port(7000), 11, false);
@@ -76,6 +92,7 @@ pub fn test_udp_demux_exact_over_wildcard() -> TestResult {
 
 pub fn test_udp_demux_reuse_addr() -> TestResult {
     reset();
+    let _clear = ClearOnExit;
 
     let mut demux = UDP_DEMUX.lock();
     let first = demux.register(Ipv4Addr(LOCAL_IP), Port(8000), 20, false);
@@ -96,6 +113,7 @@ pub fn test_udp_demux_reuse_addr() -> TestResult {
 
 pub fn test_udp_demux_unregister() -> TestResult {
     reset();
+    let _clear = ClearOnExit;
 
     let mut demux = UDP_DEMUX.lock();
     let rc = demux.register(Ipv4Addr(LOCAL_IP), Port(9000), 30, false);
@@ -113,6 +131,7 @@ pub fn test_udp_demux_unregister() -> TestResult {
 
 pub fn test_udp_demux_clear() -> TestResult {
     reset();
+    let _clear = ClearOnExit;
 
     let mut demux = UDP_DEMUX.lock();
     let _ = demux.register(Ipv4Addr(LOCAL_IP), Port(9100), 31, false);

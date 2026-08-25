@@ -61,14 +61,7 @@ const QUARANTINE_ADVANCE_FRAMES: u32 = 1024;
 const QUARANTINE_RELEASE_BATCH: u32 = 64;
 
 /// Release budget charged against every quarantining free, in **pages** — the
-/// unit `quarantine_release_some` counts.
-///
-/// Sized to converge rather than merely keep pace: a free pushes one block of
-/// `order_block_pages(order)`, and the loop releases whole blocks until the
-/// budget is met, so a budget of one block's worth pays back at least what the
-/// free parked and usually more (the loop's last block overshoots). Stated in
-/// pages because the same number read as blocks would drain a single order-0
-/// block per free while the backlog grew in order-2 ones.
+/// unit `quarantine_release_some` counts, not blocks.
 const QUARANTINE_RELEASE_PER_FREE: u32 = 8;
 
 /// Written under the buddy lock, read from the timer tick — which must not take
@@ -363,12 +356,15 @@ impl BuddyInner {
     }
 
     /// Close one epoch: `draining` joins the releasable backlog, `incoming`
-    /// takes its place. Reports the frames it released.
+    /// takes its place. Splices nothing — a splice is O(blocks × free-list
+    /// length), and this runs from whichever CPU's timer interrupt observes
+    /// the last ack.
     ///
-    /// Splices nothing — a splice is O(blocks × free-list length), and this
-    /// runs from whichever CPU's timer interrupt observes the last ack.
+    /// The return is that claim measured: free-list growth, which a splice
+    /// necessarily moves and nothing else can move while this `&mut self`
+    /// runs.
     fn quarantine_rotate(&mut self, table: &RawTable<PageFrame>) -> u32 {
-        let parked_before = self.quarantine_frames;
+        let free_before = self.free_frames;
         let releasable = Self::quarantine_concat(
             table,
             (self.quarantine_draining, self.quarantine_draining_tail),
@@ -382,7 +378,7 @@ impl BuddyInner {
         self.quarantine_incoming = INVALID_PAGE_FRAME;
         self.quarantine_incoming_tail = INVALID_PAGE_FRAME;
 
-        parked_before.saturating_sub(self.quarantine_frames)
+        self.free_frames.saturating_sub(free_before)
     }
 
     /// Splice blocks from the releasable backlog into the free lists until
@@ -1107,13 +1103,6 @@ impl BuddyAllocator {
 
     pub fn quarantine_frames(&self) -> u32 {
         QUARANTINE_FRAMES.load(Ordering::Relaxed)
-    }
-
-    /// Pages in the largest block the allocator can hand back in one step, and
-    /// so the bound on how far a page-budgeted release may overshoot.
-    #[cfg(feature = "test-hooks")]
-    pub fn max_block_pages(&self) -> u32 {
-        self.with_locked(|inner, _table| BuddyInner::order_block_pages(inner.max_order))
     }
 
     pub fn quarantine_allocated_phys(&self, phys_addr: PhysAddr) {

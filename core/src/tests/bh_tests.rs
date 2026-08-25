@@ -140,12 +140,13 @@ pub fn test_bh_runs_at_the_outermost_unlock() -> TestResult {
 /// the only difference between the two.
 pub fn test_bh_is_not_re_entered() -> TestResult {
     // `bh_active` is the live per-CPU claim, and the swap is gs-relative. The
-    // window below has interrupts and preemption on, so a migration would
-    // restore the claim on one CPU and leave the other marked as draining for
-    // the rest of the boot — its RCU callback invocation and graveyard drain
-    // stopped, silently. The kernel phase does not migrate today; this makes
-    // that a test failure rather than an assumption, and the restore still runs
-    // first so the reported case is never the stranded one.
+    // window below has interrupts and preemption on, so a migration would leave
+    // the claiming CPU marked as draining for the rest of the boot — its RCU
+    // callback invocation and graveyard drain stopped, silently. The restore is
+    // gs-relative too, so it lands on whichever CPU the test ended up on and
+    // cannot reach the stranded one: the check below reports that strand, it
+    // does not repair it. The kernel phase does not migrate today; this makes
+    // that a test failure rather than an assumption.
     let claimed_on = slopos_arch::pcr::get_current_cpu();
     let claimed_before = slopos_arch::pcr::bh_active_swap(true);
 
@@ -162,9 +163,11 @@ pub fn test_bh_is_not_re_entered() -> TestResult {
 
     if restored_on != claimed_on {
         return fail!(
-            "the test migrated from CPU {} to {} holding the bottom-half claim",
+            "the test migrated from CPU {} to {} holding the bottom-half claim — CPU {} is \
+             left marked as draining and no restore from here can reach it",
             claimed_on,
-            restored_on
+            restored_on,
+            claimed_on
         );
     }
     if claimed_before {

@@ -27,8 +27,10 @@ const SOFTWARE_BITS_SHIFT: u32 = 9;
 /// instruction. The other eight are syscall paths (`fork`'s COW marking,
 /// `mmap`, `brk`, `mprotect`, `munmap`) where a `WouldBlock` is a spurious
 /// failure with no recovery, so for them the spin is the only recourse there
-/// is. Both fault paths probe `vm_space_is_exclusive` before doing any work,
-/// so neither pays this budget in the case it exists for.
+/// is. Both fault paths probe `vm_space_is_exclusive` and return `Retry`
+/// before doing any work, so a reader already outstanding costs them nothing;
+/// one minted between that probe and the spin below still costs the full
+/// budget, with interrupts masked by the per-process lock.
 const VM_SPACE_MUT_SPINS: usize = 1_000_000;
 
 /// Convert a legacy `PageFlags` bitfield (passed as `u64`) into an OSTD

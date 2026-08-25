@@ -110,7 +110,14 @@ pub fn test_ring_buffer_write_full() -> TestResult {
 }
 
 pub fn test_ring_buffer_wrap_around() -> TestResult {
-    reset();
+    // The even-segment-count argument that would clear the delayed-ACK latch
+    // holds only for an uninterrupted loop: a concurrent `socket_process_timers`
+    // both transmits an ACK and flips the parity, so the test returns latched.
+    // The scope is what makes the loop uninterrupted.
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     let (id, server_iss, client_port) = establish_connection();
     let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let mut seq = server_iss.wrapping_add(1);

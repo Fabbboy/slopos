@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_arch::pcr::MAX_CPUS;
+use slopos_arch::pcr::{MAX_CPUS, get_cpu_count};
 use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
 use slopos_ostd::sync::{InitFlag, PreemptGuard};
 
@@ -89,9 +89,13 @@ pub(super) fn snapshot(cpu: usize) -> Option<(u32, u32, u32)> {
 
 /// Sum cached frame counts across every CPU; global stats fold these back
 /// into the "free" tally.
+///
+/// Bounded by the registered CPU count rather than `MAX_CPUS` because it runs
+/// under the buddy's machine-wide cli-lock; a slot past that count belongs to
+/// a CPU that has never run, and only the owning CPU fills one.
 pub(super) fn total_cached() -> u32 {
     let mut total = 0u32;
-    for cpu in 0..MAX_CPUS {
+    for cpu in 0..get_cpu_count().min(MAX_CPUS) {
         if let Some(cache) = PER_CPU_CACHES.snapshot_for_cpu(cpu) {
             total = total.saturating_add(cache.count);
         }

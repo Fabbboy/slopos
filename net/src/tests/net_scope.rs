@@ -7,9 +7,14 @@
 //! against one clock and fired against another, or in which a synthetic PCB
 //! shares a 4-tuple with the wire.
 //!
-//! The destination is RFC 5737 TEST-NET-1, which no host network may source, so
-//! the fixture's 4-tuple is unreachable from the wire even with the ingress gate
-//! open.
+//! Two mechanisms make a fixture PCB unreachable, and neither is the address
+//! class. Outbound: the fixture installs a metric-0 `/24` at the blackhole sink,
+//! which wins longest-prefix over the DHCP default route — without it,
+//! `192.0.2.2` falls through to the physical NIC exactly as any other address
+//! would. Inbound: `ingress::quiesce_begin` gates the physical RX path and both
+//! net kthreads for the scope's life. RFC 5737 TEST-NET-1 is chosen so the
+//! fixture's 4-tuple is one no host network sources, which is a second line of
+//! defence and not the first.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -75,6 +80,12 @@ fn ensure_panic_cleanup_registered() {
 /// that slot. The three calls take ordinary registry locks, which the panic
 /// path has already unwound out of.
 fn panic_reopen_dataplane() {
+    // Before the gate reopens: a PCB the panicking test left with a latched
+    // delayed ACK would otherwise survive into a live dataplane, and the
+    // kthread would transmit it. Ordinary registry locks, which the panic path
+    // has already unwound out of.
+    socket::socket_reset_all();
+
     ingress::quiesce_clear();
     timer::select_test_wheel(false);
     MockClock::clear();
@@ -357,7 +368,7 @@ pub fn test_net_scope_is_hermetic() -> TestResult {
     assert_eq_test!(
         tuple.remote_ip,
         scope.peer_ip(),
-        "peer is TEST-NET-1, which no host network sources"
+        "peer is the address the fixture's /24 routes at the sink"
     );
 
     // Exactly one: the SYN. A second would mean the pre-seeded neighbour was
