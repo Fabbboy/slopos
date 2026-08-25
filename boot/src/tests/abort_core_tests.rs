@@ -97,16 +97,29 @@ pub fn test_emergency_guard_classifier() -> TestResult {
 pub fn test_panic_owner_election() -> TestResult {
     use slopos_ostd::panic::{PanicOwner, panic_owner_claimed, panic_owner_is};
 
-    // The machine's own election, read-only, so the free functions under test
-    // are still known to be the ones delegating to it.
-    let me = slopos_arch::pcr::get_current_cpu() as u32;
+    // A round trip through the free functions, not a health check: what has to
+    // be pinned is that each one reaches the machine's own election, and a read
+    // that merely looks reasonable passes just as well when the delegation is
+    // wired to the wrong static. The election is unclaimed outside a panic, so
+    // this claims it, observes it through the accessors, and releases it —
+    // with nothing between the claim and the reset that can panic.
     assert_test!(
         !panic_owner_claimed(),
         "the machine's fatal-panic election is claimed outside a panic"
     );
+    const PROBE_CPU: u32 = 0x5150;
+    let won = slopos_ostd::panic::claim_panic_owner(PROBE_CPU);
+    let claimed = panic_owner_claimed();
+    let is_probe = panic_owner_is(PROBE_CPU);
+    let is_other = panic_owner_is(PROBE_CPU ^ 1);
+    slopos_ostd::panic::reset_panic_owner_for_test();
+    assert_test!(won, "claiming an unclaimed election did not win");
+    assert_test!(claimed, "panic_owner_claimed() did not see the claim");
+    assert_test!(is_probe, "panic_owner_is() did not name the claimant");
+    assert_test!(!is_other, "panic_owner_is() named a CPU that never claimed");
     assert_test!(
-        !panic_owner_is(me),
-        "this CPU is the fatal-panic owner outside a panic"
+        !panic_owner_claimed(),
+        "reset_panic_owner_for_test left the election claimed"
     );
 
     let election = PanicOwner::new();

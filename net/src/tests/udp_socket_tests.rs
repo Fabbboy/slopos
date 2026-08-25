@@ -5,14 +5,26 @@ use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::socket::*;
 use crate::tests::env_wait::errno_i64;
+use crate::tests::net_scope::NetTestScope;
 use crate::types::{Ipv4Addr, Port, SockAddr};
 
 fn reset() {
     socket_reset_all();
 }
 
+/// A bound UDP port is a demux target: the ingress path enqueues into it, so a
+/// test that asserts on its own queue needs the gate shut. `enter` does the
+/// `socket_reset_all` itself, before seeding the fixture's neighbour, so a
+/// scoped test must not call [`reset`] as well.
+fn scope() -> Result<NetTestScope, &'static str> {
+    NetTestScope::enter().map_err(|_| "net scope")
+}
+
 pub fn test_udp_t2_dispatch_delivery_and_unbound_drop() -> TestResult {
-    reset();
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
 
     let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
@@ -55,7 +67,13 @@ pub fn test_udp_t3_generic_udp_tx_no_crash() -> TestResult {
 }
 
 pub fn test_udp_t4_sendto_recvfrom_kernel_level() -> TestResult {
-    reset();
+    // The datagram is routed, and the ephemeral port `sendto` auto-binds is
+    // exactly where a reply to it would land — which is what "empty recvfrom"
+    // below asserts did not happen.
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
 
     let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
@@ -64,7 +82,7 @@ pub fn test_udp_t4_sendto_recvfrom_kernel_level() -> TestResult {
     let sock = sock as u32;
 
     let payload = [9u8, 8, 7, 6];
-    let sent = socket_sendto(sock, &payload, [1, 1, 1, 1], 9999);
+    let sent = socket_sendto(sock, &payload, scope.peer_ip(), 9999);
     assert_test!(sent > 0, "sendto returns positive length");
 
     let mut out = [0u8; 16];
@@ -75,7 +93,10 @@ pub fn test_udp_t4_sendto_recvfrom_kernel_level() -> TestResult {
 }
 
 pub fn test_udp_t5_connected_udp_send_and_peer_filter_recv() -> TestResult {
-    reset();
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
 
     let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
@@ -83,7 +104,8 @@ pub fn test_udp_t5_connected_udp_send_and_peer_filter_recv() -> TestResult {
     }
     let sock = sock as u32;
 
-    assert_eq_test!(socket_connect(sock, [7, 7, 7, 7], 7000), 0);
+    let peer = scope.peer_ip();
+    assert_eq_test!(socket_connect(sock, peer, 7000), 0);
 
     let tx = [1u8, 2, 3];
     let sent = socket_send(sock, &tx);
@@ -96,7 +118,7 @@ pub fn test_udp_t5_connected_udp_send_and_peer_filter_recv() -> TestResult {
     let bad = [0xBAu8, 0xD0];
     let good = [0xAAu8, 0x55, 0x11];
     socket_deliver_udp(sock, [9, 9, 9, 9], 9000, &bad);
-    socket_deliver_udp(sock, [7, 7, 7, 7], 7000, &good);
+    socket_deliver_udp(sock, peer, 7000, &good);
 
     let mut out = [0u8; 8];
     let got = socket_recv(sock, &mut out);
@@ -170,7 +192,10 @@ pub fn test_udp_t7_nonblocking_recvfrom_eagain() -> TestResult {
 }
 
 pub fn test_udp_t8_sendto_auto_bind_ephemeral_port() -> TestResult {
-    reset();
+    let scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
 
     let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
@@ -179,7 +204,7 @@ pub fn test_udp_t8_sendto_auto_bind_ephemeral_port() -> TestResult {
     let sock = sock as u32;
 
     let payload = [0x10u8, 0x20];
-    let sent = socket_sendto(sock, &payload, [10, 0, 2, 1], 8080);
+    let sent = socket_sendto(sock, &payload, scope.peer_ip(), 8080);
     assert_test!(sent > 0, "sendto succeeds");
 
     let snap = match socket_snapshot(sock) {

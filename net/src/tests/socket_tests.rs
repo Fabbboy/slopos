@@ -123,7 +123,12 @@ pub fn test_socket_bind_already_bound() -> TestResult {
 }
 
 pub fn test_socket_listen_after_bind() -> TestResult {
-    reset();
+    // The listener is still installed on the wildcard address when this
+    // returns, and an inbound SYN to 8080 would demux onto it and be answered.
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
     let idx = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_eq_test!(socket_bind(idx, [0, 0, 0, 0], 8080), 0);
     assert_eq_test!(socket_listen(idx, 16), 0);
@@ -264,7 +269,12 @@ pub fn test_socket_close_invalid() -> TestResult {
 }
 
 pub fn test_socket_close_frees_slot() -> TestResult {
-    reset();
+    // Slot identity, not just "a slot": a socket opened by a live thread
+    // between the close and the re-create takes the freed index first.
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
     let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     assert_eq_test!(socket_close(sock as u32), 0);
     let next = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
@@ -360,7 +370,12 @@ pub fn test_socket_reset_all() -> TestResult {
 }
 
 pub fn test_socket_accept_no_pending_returns_eagain() -> TestResult {
-    reset();
+    // "No pending" is the assertion, and an inbound SYN completing a handshake
+    // on 8080 is what would put one there.
+    let _scope = match scope() {
+        Ok(s) => s,
+        Err(m) => return fail!("{}", m),
+    };
     let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_eq_test!(socket_bind(sock, [0, 0, 0, 0], 8080), 0);
     assert_eq_test!(socket_listen(sock, 8), 0);

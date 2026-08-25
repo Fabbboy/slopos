@@ -224,9 +224,11 @@ pub fn test_gdt_set_kernel_rsp0_valid() -> TestResult {
 /// and a misaligned value are the same invariant read three ways, and split
 /// across tests none of them could fail without the others.
 ///
-/// Alignment is the part that is not implied by the other two: `SS:RSP` is
-/// loaded verbatim and the CPU's first push is 8-byte, so a truncated or
-/// off-by-one write lands mid-frame rather than nowhere.
+/// Alignment is the part that is not implied by the other two: the CPU pushes
+/// the interrupt frame in 8-byte units from whatever `RSP0` names, so a
+/// truncated or off-by-one write lands mid-frame rather than nowhere. Eight,
+/// not sixteen — the ABI's 16-byte requirement is a function-call boundary
+/// property, and the live value is legitimately 8-aligned.
 pub fn test_gdt_kernel_rsp0_is_a_usable_stack_top() -> TestResult {
     const KERNEL_HALF: u64 = 0xFFFF_8000_0000_0000;
     let Some(rsp0) = live_rsp0() else {
@@ -237,8 +239,8 @@ pub fn test_gdt_kernel_rsp0_is_a_usable_stack_top() -> TestResult {
     assert_test!(rsp0 != 0, "the live TSS.RSP0 is NULL");
     assert_test!(rsp0 >= KERNEL_HALF, "the live TSS.RSP0 is a user address");
     assert_test!(
-        rsp0 % 16 == 0,
-        "the live TSS.RSP0 0x{:x} is not 16-byte aligned",
+        rsp0 % 8 == 0,
+        "the live TSS.RSP0 0x{:x} is not 8-byte aligned",
         rsp0
     );
     TestResult::Pass

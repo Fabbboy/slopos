@@ -4,11 +4,16 @@
 //! the TCP state machine, delayed ACK, retransmission, flow control, and
 //! zero-window probing.
 //!
-//! A test that asserts on TCP timer state — the delayed-ACK latch, an armed
-//! RTO, cwnd after loss — holds a [`NetTestScope`], because the live net-timer
-//! kthread walks the same global tables and otherwise consumes what the test
-//! armed. The scope resets the socket and TCP tables on both edges, in the
-//! wheel that minted their tokens, so those tests take no separate `reset()`.
+//! A test holds a [`NetTestScope`] when it leaves live PCB state the kernel's
+//! own threads can act on: a latched delayed ACK (whose deadline, computed from
+//! a test's `now_ms`, is already past against the real uptime the net-timer
+//! kthread reads), unacknowledged inflight data with an RTO armed in the live
+//! wheel, or a PCB still in `SYN_SENT`. Reading a global table is not by itself
+//! the criterion, and neither is the TEST-NET-1 address: the boot default route
+//! carries 192.0.2.2 to the physical NIC exactly as it did 10.0.0.2, and only
+//! the scope's own metric-0 `/24` wins longest-prefix over it. The scope resets
+//! the socket and TCP tables on both edges, in the wheel that minted their
+//! tokens, so those tests take no separate `reset()`.
 
 use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::{KeepaliveFrames, UFrame};
@@ -22,7 +27,7 @@ use crate::tcp::{
     TCP_FLAG_FIN, TCP_FLAG_PSH, TcpError, TcpHeader, TcpSendState, TcpState,
 };
 use crate::tests::net_scope::{NetTestScope, ScopeError};
-use crate::tests::tcp_common::{self, LOCAL_IP, REMOTE_IP, reset_all as reset};
+use crate::tests::tcp_common::{self, LOCAL_IP, REMOTE_IP, REMOTE_PORT, reset_all as reset};
 use crate::with_data_state;
 
 #[cold]
@@ -70,7 +75,10 @@ pub fn test_ring_buffer_new_empty() -> TestResult {
 }
 
 pub fn test_ring_buffer_write_read_basic() -> TestResult {
-    reset();
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     let (id, _, _) = establish_connection();
     let n = tcp::send(id, b"hello").unwrap();
     assert_eq_test!(n, 5, "write hello");
@@ -115,7 +123,7 @@ pub fn test_ring_buffer_wrap_around() -> TestResult {
         let _ = inject_data_segment(
             REMOTE_IP,
             LOCAL_IP,
-            80,
+            REMOTE_PORT,
             client_port,
             seq,
             snd_nxt,
@@ -146,7 +154,7 @@ pub fn test_ring_buffer_wrap_around() -> TestResult {
         let _ = inject_data_segment(
             REMOTE_IP,
             LOCAL_IP,
-            80,
+            REMOTE_PORT,
             client_port,
             seq,
             snd_nxt,
@@ -200,7 +208,7 @@ pub fn test_ring_buffer_peek_offset() -> TestResult {
     );
 
     let ack = TcpHeader {
-        src_port: 80,
+        src_port: REMOTE_PORT,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
         ack_num: seg1.seq_num.wrapping_add(8),
@@ -231,7 +239,7 @@ pub fn test_ring_buffer_consume() -> TestResult {
     assert_eq_test!(n, 6, "initial send");
 
     let ack = TcpHeader {
-        src_port: 80,
+        src_port: REMOTE_PORT,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
         ack_num: seg.seq_num.wrapping_add(2),
@@ -300,7 +308,10 @@ pub fn test_ring_buffer_partial_write() -> TestResult {
 }
 
 pub fn test_send_enqueue_and_peek() -> TestResult {
-    reset();
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     let (id, _, _) = establish_connection();
     let n = tcp::send(id, b"payload").unwrap();
     assert_eq_test!(n, 7, "enqueue len");
@@ -322,7 +333,7 @@ pub fn test_send_mark_sent_and_ack() -> TestResult {
     assert_eq_test!(n, 6, "inflight after mark_sent");
 
     let ack = TcpHeader {
-        src_port: 80,
+        src_port: REMOTE_PORT,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
         ack_num: seg.seq_num.wrapping_add(6),
@@ -383,7 +394,7 @@ pub fn test_send_partial_ack() -> TestResult {
     assert_eq_test!(n, 1000, "sent full test payload");
 
     let ack = TcpHeader {
-        src_port: 80,
+        src_port: REMOTE_PORT,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
         ack_num: seg.seq_num.wrapping_add(500),
@@ -422,7 +433,7 @@ pub fn test_send_ack_stops_rto_timer() -> TestResult {
     assert_eq_test!(n, 4, "sent payload");
 
     let ack = TcpHeader {
-        src_port: 80,
+        src_port: REMOTE_PORT,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
         ack_num: seg.seq_num.wrapping_add(4),
@@ -447,7 +458,7 @@ pub fn test_recv_enqueue_dequeue() -> TestResult {
     let res = inject_data_segment(
         REMOTE_IP,
         LOCAL_IP,
-        80,
+        REMOTE_PORT,
         client_port,
         server_iss.wrapping_add(1),
         snd_nxt,
@@ -467,17 +478,21 @@ pub fn test_recv_enqueue_dequeue() -> TestResult {
 }
 
 pub fn test_recv_window_decreases() -> TestResult {
-    reset();
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     let (id, server_iss, client_port) = establish_connection();
     let before = with_data_state!(id, |d| d.rcv_wnd);
     let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
-    let _ = inject_data_segment(
+    tcp_common::inject_discarding(
         REMOTE_IP,
         LOCAL_IP,
-        80,
+        REMOTE_PORT,
         client_port,
         server_iss.wrapping_add(1),
         snd_nxt,
+        TCP_FLAG_ACK | TCP_FLAG_PSH,
         &[1u8; 256],
         0,
     );
@@ -501,7 +516,7 @@ pub fn test_recv_ack_tracking() -> TestResult {
     let res = inject_data_segment(
         REMOTE_IP,
         LOCAL_IP,
-        80,
+        REMOTE_PORT,
         client_port,
         server_iss.wrapping_add(1),
         snd_nxt,
@@ -528,7 +543,7 @@ pub fn test_recv_delayed_ack_segments() -> TestResult {
     let first = inject_data_segment(
         REMOTE_IP,
         LOCAL_IP,
-        80,
+        REMOTE_PORT,
         client_port,
         server_iss.wrapping_add(1),
         snd_nxt,
@@ -539,7 +554,7 @@ pub fn test_recv_delayed_ack_segments() -> TestResult {
     let second = inject_data_segment(
         REMOTE_IP,
         LOCAL_IP,
-        80,
+        REMOTE_PORT,
         client_port,
         server_iss.wrapping_add(2),
         snd_nxt,
@@ -563,7 +578,7 @@ pub fn test_recv_delayed_ack_timeout() -> TestResult {
     let res = inject_data_segment(
         REMOTE_IP,
         LOCAL_IP,
-        80,
+        REMOTE_PORT,
         client_port,
         server_iss.wrapping_add(1),
         snd_nxt,
@@ -602,7 +617,7 @@ pub fn test_tcp_recv_in_established() -> TestResult {
     let res = inject_data_segment(
         REMOTE_IP,
         LOCAL_IP,
-        80,
+        REMOTE_PORT,
         client_port,
         server_iss.wrapping_add(1),
         snd_nxt,
@@ -619,15 +634,21 @@ pub fn test_tcp_recv_in_established() -> TestResult {
 }
 
 pub fn test_tcp_send_wrong_state() -> TestResult {
-    reset();
-    let (id, _) = tcp::connect(LOCAL_IP, REMOTE_IP, tcp_common::REMOTE_PORT).unwrap();
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
+    let (id, _) = tcp::connect(LOCAL_IP, REMOTE_IP, REMOTE_PORT).unwrap();
     let err = tcp::send(id, b"x").unwrap_err();
     assert_eq_test!(err, TcpError::InvalidState, "send in SYN_SENT rejected");
     pass!()
 }
 
 pub fn test_tcp_poll_transmit_basic() -> TestResult {
-    reset();
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     let (id, _, _) = establish_connection();
     let _ = tcp::send(id, b"abcd").unwrap();
     let (snd_nxt, rcv_nxt) = with_data_state!(id, |d| (d.snd_nxt.raw(), d.rcv_nxt.raw()));
@@ -680,7 +701,7 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
     assert_eq_test!(n, 5, "sent len");
 
     let ack = TcpHeader {
-        src_port: 80,
+        src_port: REMOTE_PORT,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
         ack_num: seg.seq_num.wrapping_add(n as u32),
@@ -712,7 +733,7 @@ pub fn test_tcp_recv_updates_window() -> TestResult {
     let first = inject_data_segment(
         REMOTE_IP,
         LOCAL_IP,
-        80,
+        REMOTE_PORT,
         client_port,
         server_iss.wrapping_add(1),
         snd_nxt,
@@ -724,7 +745,7 @@ pub fn test_tcp_recv_updates_window() -> TestResult {
     let second = inject_data_segment(
         REMOTE_IP,
         LOCAL_IP,
-        80,
+        REMOTE_PORT,
         client_port,
         server_iss.wrapping_add(2),
         snd_nxt,
@@ -819,7 +840,7 @@ pub fn test_tcp_retransmit_canceled_by_ack() -> TestResult {
     let (seg, n, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let ack = TcpHeader {
-        src_port: 80,
+        src_port: REMOTE_PORT,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
         ack_num: seg.seq_num.wrapping_add(n as u32),
@@ -835,7 +856,10 @@ pub fn test_tcp_retransmit_canceled_by_ack() -> TestResult {
 }
 
 pub fn test_retx_queue_populated_by_poll_transmit() -> TestResult {
-    reset();
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     let c = tcp_common::establish_connection();
     let _ = tcp::send(c.id, &[0xAA; 100]).unwrap();
     let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
@@ -907,7 +931,7 @@ fn inject_sack_dup_ack(c: &tcp_common::EstablishedConn, snd_una: u32, segs: &[(u
         &mut *actions,
         REMOTE_IP,
         LOCAL_IP,
-        tcp_common::REMOTE_PORT,
+        REMOTE_PORT,
         c.local_port,
         peer_seq,
         snd_una,
@@ -1007,7 +1031,7 @@ pub fn test_fast_retransmit_cwnd_reduction() -> TestResult {
     let _ = tcp_common::inject_with_options(
         REMOTE_IP,
         LOCAL_IP,
-        tcp_common::REMOTE_PORT,
+        REMOTE_PORT,
         c.local_port,
         peer_seq,
         snd_una,
@@ -1064,7 +1088,7 @@ pub fn test_fast_retransmit_not_during_recovery() -> TestResult {
         &mut *actions,
         REMOTE_IP,
         LOCAL_IP,
-        tcp_common::REMOTE_PORT,
+        REMOTE_PORT,
         c.local_port,
         peer_seq,
         snd_una,
@@ -1088,7 +1112,7 @@ pub fn test_fast_retransmit_not_during_recovery() -> TestResult {
         &mut *actions,
         REMOTE_IP,
         LOCAL_IP,
-        tcp_common::REMOTE_PORT,
+        REMOTE_PORT,
         c.local_port,
         peer_seq,
         snd_una,
@@ -1135,8 +1159,7 @@ pub fn test_rto_resets_cwnd_and_marks_lost() -> TestResult {
 
 pub fn test_sack_permitted_negotiated_active_open() -> TestResult {
     reset();
-    let (id, syn_seg) =
-        tcp::connect(LOCAL_IP, REMOTE_IP, tcp_common::REMOTE_PORT).expect("connect");
+    let (id, syn_seg) = tcp::connect(LOCAL_IP, REMOTE_IP, REMOTE_PORT).expect("connect");
     let local_port = syn_seg.tuple.local_port;
     let our_iss = syn_seg.seq_num;
     assert_test!(syn_seg.sack_permitted, "SYN carries SACK-Permitted");
@@ -1146,7 +1169,7 @@ pub fn test_sack_permitted_negotiated_active_open() -> TestResult {
         4, 2, // SACK-Permitted
     ];
     let syn_ack = TcpHeader {
-        src_port: tcp_common::REMOTE_PORT,
+        src_port: REMOTE_PORT,
         dst_port: local_port,
         seq_num: tcp_common::PEER_ISS,
         ack_num: our_iss.wrapping_add(1),
@@ -1189,7 +1212,7 @@ pub fn test_sack_blocks_sent_on_ooo() -> TestResult {
     let actions = tcp_common::inject(
         REMOTE_IP,
         LOCAL_IP,
-        tcp_common::REMOTE_PORT,
+        REMOTE_PORT,
         c.local_port,
         peer_seq.wrapping_add(100),
         snd_nxt,
@@ -1207,7 +1230,10 @@ pub fn test_sack_blocks_sent_on_ooo() -> TestResult {
 }
 
 pub fn test_sack_blocks_parsed_from_peer_ack() -> TestResult {
-    reset();
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     let c = tcp_common::establish_connection();
     let id = c.id;
     tcp::table::with_pcb_mut(id, |pcb| {
@@ -1233,7 +1259,7 @@ pub fn test_sack_blocks_parsed_from_peer_ack() -> TestResult {
     opts[8..12].copy_from_slice(&sack_right.to_be_bytes());
 
     let hdr = tcp_common::make_header(
-        tcp_common::REMOTE_PORT,
+        REMOTE_PORT,
         c.local_port,
         c.peer_iss.wrapping_add(1),
         snd_una, // dup ACK
@@ -1258,7 +1284,7 @@ pub fn test_sack_scoreboard_cleared_on_forward_ack() -> TestResult {
     let (seg, _, _) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
 
     let ack = tcp_common::make_header(
-        tcp_common::REMOTE_PORT,
+        REMOTE_PORT,
         c.local_port,
         c.peer_iss.wrapping_add(1),
         seg.seq_num.wrapping_add(50), // forward ACK
@@ -1336,7 +1362,10 @@ pub fn test_nagle_defers_sub_mss_when_inflight() -> TestResult {
 }
 
 pub fn test_nagle_sends_when_nothing_inflight() -> TestResult {
-    reset();
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     let (id, _, _) = establish_connection();
     let _ = tcp::send(id, &[0xCC; 10]).unwrap();
     let mut buf = assert_ok!(KVec::<u8>::zeroed(1500), "tx scratch buffer");
@@ -1381,7 +1410,7 @@ pub fn test_tcp_respects_peer_window() -> TestResult {
     let (first_seg, first_len, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let shrink = TcpHeader {
-        src_port: 80,
+        src_port: REMOTE_PORT,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
         ack_num: first_seg.seq_num.wrapping_add(first_len as u32),
@@ -1410,7 +1439,7 @@ pub fn test_tcp_zero_window_blocks_send() -> TestResult {
     let (seg, len, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let zero_wnd = TcpHeader {
-        src_port: 80,
+        src_port: REMOTE_PORT,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
         ack_num: seg.seq_num.wrapping_add(len as u32),
@@ -1438,7 +1467,7 @@ pub fn test_tcp_zero_window_probe() -> TestResult {
     let (seg, len, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let zero_wnd = TcpHeader {
-        src_port: 80,
+        src_port: REMOTE_PORT,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
         ack_num: seg.seq_num.wrapping_add(len as u32),
@@ -1472,7 +1501,7 @@ pub fn test_tcp_window_update_resumes_send() -> TestResult {
     let (seg, len, _) = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     let ack_half_zero = TcpHeader {
-        src_port: 80,
+        src_port: REMOTE_PORT,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
         ack_num: seg.seq_num.wrapping_add(25),
@@ -1488,18 +1517,15 @@ pub fn test_tcp_window_update_resumes_send() -> TestResult {
         "send blocked at wnd=0"
     );
 
-    let ack_rest_open = TcpHeader {
-        src_port: 80,
-        dst_port: client_port,
-        seq_num: server_iss.wrapping_add(1),
-        ack_num: seg.seq_num.wrapping_add(len as u32),
-        data_offset: 5,
-        flags: TCP_FLAG_ACK,
-        window_size: 200,
-        checksum: 0,
-        urgent_ptr: 0,
-    };
-    let _ = tcp::input(REMOTE_IP, LOCAL_IP, &ack_rest_open, &[], &[], 3);
+    // Through the out-of-line helper: a second inline `Actions` return slot in
+    // this frame puts it over the 2 KiB stack gate.
+    tcp_common::inject_window_update(
+        client_port,
+        server_iss.wrapping_add(1),
+        seg.seq_num.wrapping_add(len as u32),
+        200,
+        3,
+    );
 
     let _ = tcp::send(id, &[0x44u8; 80]).unwrap();
     let resumed = tcp::poll_transmit(id, &mut payload, 4);
@@ -1518,7 +1544,7 @@ pub fn test_tcp_delayed_ack_after_two_segments() -> TestResult {
     let r1 = inject_data_segment(
         REMOTE_IP,
         LOCAL_IP,
-        80,
+        REMOTE_PORT,
         client_port,
         server_iss.wrapping_add(1),
         snd_nxt,
@@ -1530,7 +1556,7 @@ pub fn test_tcp_delayed_ack_after_two_segments() -> TestResult {
     let r2 = inject_data_segment(
         REMOTE_IP,
         LOCAL_IP,
-        80,
+        REMOTE_PORT,
         client_port,
         server_iss.wrapping_add(2),
         snd_nxt,
@@ -1554,7 +1580,7 @@ pub fn test_tcp_delayed_ack_timeout() -> TestResult {
     let r = inject_data_segment(
         REMOTE_IP,
         LOCAL_IP,
-        80,
+        REMOTE_PORT,
         client_port,
         server_iss.wrapping_add(1),
         snd_nxt,
@@ -1576,7 +1602,7 @@ pub fn test_tcp_immediate_ack_for_fin() -> TestResult {
     let (id, server_iss, client_port) = establish_connection();
     let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let fin = TcpHeader {
-        src_port: 80,
+        src_port: REMOTE_PORT,
         dst_port: client_port,
         seq_num: server_iss.wrapping_add(1),
         ack_num: snd_nxt,

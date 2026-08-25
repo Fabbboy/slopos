@@ -110,32 +110,43 @@ post-userland-tests	task	10
 # a gate measuring the host and calling it the kernel -- the same defect the
 # suite's own wall-clock assertions had.
 #
-# Two ratios, each x100, so 420 reads as 4.20:
+# One cap and two floors. All ratio values are x100, so 420 reads as 4.20.
 #
-#   max-charge-over-reference <depth> <cap>
-#       One charge+refund round trip against one bare uncontended CAS round
-#       trip, measured in the same run, the same batch shape and the same
-#       interrupts-off window. A CAS is what `charge_row` and `release_row` each
-#       do once per level, so dividing by it cancels the emulation factor. This
-#       is what catches a uniform slowdown of the whole path.
-#
-#   max-depth-cost-ratio <depth> <cap>
+#   max-depth-cost-ratio <depth> <cap>          -- the check
 #       Depth 7 against depth 1. Each level is meant to add a bounded constant,
 #       so this stays near 4 and a walk that stopped amortising goes to 7 or
-#       beyond. Measured at 3.75-3.99 across four TCG runs spanning two tree
-#       states, which is the tightest quantity anywhere in this file -- and it
-#       is tight *because* it is a ratio.
+#       beyond. It is the only quantity here that is invariant under a change
+#       of accelerator, which is why it is the only one carrying a ceiling.
 #
-# What this gives up: a slowdown that scales both the charge path and a bare
-# CAS by the same factor is invisible to the first ratio, and one that scales
-# every depth equally is invisible to the second. The alternative was a number
-# that fails on a developer's machine for having no KVM, which is worse: a gate
-# nobody can run green is a gate nobody runs.
+#   min-charge-over-reference <depth> <floor>   -- a measurement floor
+#       One charge+refund round trip against one bare uncontended CAS round
+#       trip, measured in the same run, the same batch shape and the same
+#       interrupts-off window. This is deliberately a FLOOR and not a cap: the
+#       ratio itself moves with the accelerator (a CAS is relatively dearer
+#       under TCG than natively, so the same tree reads ~18x here and would read
+#       far more under KVM), so a ceiling measured on one accelerator would fail
+#       on the other -- the exact defect this file's history is about. What a
+#       floor can do is prove the charge path still performs the atomic work it
+#       is supposed to.
+#
+#   min-reference-cycles <floor>                -- a measurement floor
+#       An absolute floor on the reference itself, because the two floors above
+#       are ratios over it and a reference that collapsed to 1 satisfies both.
+#       Not a measurement: a `lock cmpxchg` round trip through memory is not
+#       under a couple of dozen cycles on any real or emulated x86, so this is
+#       a physical bound and stays valid whatever runs the guest.
+#
+# **What is NOT checked, stated plainly:** a slowdown that scales the whole
+# charge path uniformly -- every depth, and a bare CAS with it -- passes every
+# line above. Catching that needs an absolute cycle ceiling, and an absolute
+# cycle ceiling is what this file used to carry and what failed on every machine
+# without /dev/kvm. Restoring one costs a measurement on each accelerator CI
+# might use, which nobody has; a gate nobody can run green is worse than a gate
+# with a stated hole.
 
-# Measured over five TCG runs spanning three tree states. The depth ratio is
-# 3.69-3.99 across all of them -- the tightest quantity in this file, and tight
-# *because* it is a ratio. The cap is 5.00; a walk that stopped amortising goes
-# to 7.00 (one full charge per level) or beyond.
+# The tightest quantity in this file: 3.77 and 3.86 in the two pinned runs that
+# reached the report, 3.69-3.99 across the earlier runs. The cap is 5.00; a walk
+# that stopped amortising goes to 7.00 (one full charge per level) or beyond.
 max-depth-cost-ratio 7 500
 
 # Floors, emitted at half the TCG observation. TCG is the conservative source
@@ -143,3 +154,6 @@ max-depth-cost-ratio 7 500
 # charge-over-CAS is *lower* here (18.5x at depth 1) than it would be natively.
 min-charge-over-reference 1 900
 min-charge-over-reference 7 3400
+
+# The denominator those two divide by. A physical bound, not a measurement.
+min-reference-cycles 20

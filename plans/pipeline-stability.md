@@ -9,23 +9,27 @@ ships in. §5 records what the fixes measure.
 
 ## 0. What is actually failing
 
-`ci.yml` on `develop`, 2026-08-10 → 2026-08-24: 30 runs, 14 green, 7 cancelled
-(superseded force-pushes), **11 failed**. Grouped by cause rather than by test
-name:
+`ci.yml` on `develop`, 2026-08-10 → 2026-08-24 (runs 681–711): **30 runs, 14
+green, 7 cancelled** (superseded force-pushes), **9 failed** — 686, 687, 692,
+696, 697, 698, 705, 708, 711. Grouped by cause rather than by test name; a run
+that failed for two reasons appears twice:
 
 | Cause | Failing runs | Class |
 |---|---|---|
 | The kernel-I/O freeze window | 708, 711 (3 distinct tests) | flake |
 | `utest_percore_reactor` — spurious `SIGSEGV` from a demand fault | 705 | flake, and a **kernel bug** |
 | `utest_dns_resolve` — resolution through QEMU user-net | 697, 698 | non-hermetic |
-| Lockdep **class** cap growth | 674, 686, 687, 692 | gate working; needed a rebaseline |
+| Lockdep **class** cap growth | 686, 687, 692 | gate working; needed a rebaseline |
 | `check_stack_sizes` on the release ELF | 692 | gate working |
 | `utest_image` — a deleted asset | 696, 697 | ordinary breakage |
-| `extractions/setup-just@v4` socket hang up | 678 | CI infrastructure |
 
 Only the first three are flakes. The freeze family is the one that has `develop`
 red now, and two successive fixes for it have each removed the assertion from one
 test and watched the flake surface in the next test that freezes kernel-I/O.
+
+(An earlier draft of this section said "11 failed" and cited runs 674 and 678,
+which are outside the window it names. The numbers above are read back from
+`ci.yml`'s run list.)
 
 ## 1. The reproduction
 
@@ -54,11 +58,18 @@ grows. Four plain TCG runs of the unmodified tree (no `/dev/kvm`, `-cpu max`,
 | 4 | `napi_tests::test_recv_timeout`, `napi_tests::test_send_backpressure`, `tcp_keepalive_tests::test_keepalive_max_probes_rst`, **`sched_tests::test_remote_inbox_drops_non_ready_tasks`** |
 
 Run 3 and run 4 reproduce the exact CI failure that has `develop` red, with the
-same log lines. Under 12 host spinners the same runs additionally reach
+same log lines. A run under 12 host spinners additionally reached
 `unwind_index_tests::test_unwind_lookup_is_indexed` and
-`rcu_cb_tests::test_synchronize_rcu_allocates_nothing`.
+`rcu_cb_tests::test_synchronize_rcu_allocates_nothing` before it was cut short —
+so those two are reproductions, not a claim about the whole contended suite. (12
+spinners, not the 24 the recipe above shows: the recipe is the published one,
+the number used here was halved to keep the run finishing.)
 
 ## 2. Root causes
+
+*Line references in this section are as of `455102f9`, the commit the analysis
+was written against. Several of the files named have since been changed by the
+fixes in §3.*
 
 ### 2.1 The kernel-I/O freeze is cooperative, and no amount of waiting fixes that
 
@@ -160,10 +171,10 @@ that is both sound and more sensitive.
 `userland/src/bin/tests/dns_resolve_test.rs` carries a header saying the test is
 **"Known-failing in a full-suite boot, and deliberately not excused"**, because
 "running the kernel-phase AF_UNIX socket tests first leaves UDP DNS dead for the
-rest of the run". That does not reproduce. Three probes — the DNS utest alone,
-`test_unix_socket_send_recv_basic` then the DNS utest, and the whole
-`test_unix_socket_*` group then the DNS utest — all resolved, in 71 ms and
-80 ms. The most likely explanation is `e066c7d` ("Reapply fix(virtio-net): drain
+rest of the run". That does not reproduce. Two probes — `test_unix_socket_send_recv_basic`
+then the DNS utest, and the whole `test_unix_socket_*` group then the DNS utest
+— both resolved, in 71 ms and 80 ms. (A third, the DNS utest alone, is what an
+earlier draft counted; it never ran, because that build failed.) The most likely explanation is `e066c7d` ("Reapply fix(virtio-net): drain
 RX while waiting for a DNS reply"), which landed after that header was written.
 
 A comment telling the next reader that a green test is known-failing is a defect
@@ -270,16 +281,31 @@ so they neither observe nor starve the global one, and the timer-wheel and mock
 clock are scoped so a test that advances mock time by two hours cannot fire and
 discard the live stack's timers.
 
-`10.0.0.1`/`10.0.0.2` were the last hole, and a wide one: both are reachable
-through the boot default route, so every connect in `socket_tests.rs` and every
-retransmit driven by `tcp_common.rs` really put a frame on the virtio device and
-QEMU's gateway really answered it. A synthetic PCB on a 4-tuple the wire can
-reach is a PCB the wire can tear down between the injection and the assertion —
-which is what `test_tcp_shutdown_wr_recv_still_works` was losing to. Those
-addresses are now TEST-NET-1 throughout, `socket_tests.rs`'s shared
-`connect_and_establish` takes the scope, and so does the one *inbound*-racing
-shape in the file: a listener bound to a wire-reachable port, which a real SYN
-would be accepted on.
+`10.0.0.1`/`10.0.0.2` were the last hole, and a wide one: every connect in
+`socket_tests.rs` and every retransmit driven by `tcp_common.rs` really put a
+frame on the virtio device and QEMU's gateway really answered it. A synthetic
+PCB on a 4-tuple the wire can reach is a PCB the wire can tear down between the
+injection and the assertion — which is what
+`test_tcp_shutdown_wr_recv_still_works` was losing to.
+
+**The address class is not what fixes that**, and the first cut of this work got
+it wrong. DHCP installs a `0.0.0.0/0` default route, so `192.0.2.2` falls
+through to the physical NIC exactly as `10.0.0.2` did; longest-prefix finds no
+`/24` for either. The only thing that changes the outcome is the scope's own
+metric-0 `/24` at the blackhole sink. The constants matter because a test's
+4-tuple has to match the one the scope routes — they are not, by themselves, a
+hermeticity property, and a comment claiming otherwise was in the tree until an
+adversarial review of the sweep caught it.
+
+So the criterion is not "does this test read a global table" but **"does this
+test leave live PCB state the kernel's own threads can act on after it
+returns"**. One injected data segment sets `delayed_ack_deadline_ms = now_ms +
+DELAYED_ACK_MS`, and the net-timer kthread compares that against *real* uptime —
+so a deadline computed from a test's `now_ms = 0` is already in the past when
+the test returns, and the ACK goes out within one 50 ms kthread period, every
+run. Inflight data with an armed `TcpRetransmit` is the same shape bounded by
+`INITIAL_RTO_MS`. Both are transmits attributable to a test that has already
+reported `ok`.
 
 Two more mechanisms had to move with them, both found by reproducing the flake
 under host contention rather than by reading:
@@ -396,6 +422,17 @@ everything can no longer report as a run that passed everything.
 - **The net stack had two time bases**: `socket_process_timers` read
   `kernel_services::clock::uptime_ms()` while the deadlines it compared against
   came from `net::clock::now_ms()`.
+- **`BuddyAllocator::stats()` read the per-CPU cache total outside the buddy
+  lock**, while every path that drains a magazine into the free lists does both
+  halves under it — so a peer draining in that window was counted twice and
+  `free` could exceed `total`.
+- **`virtio_net_transmit` never counted what it sent.** `NetDevice::tx` and
+  `submit_tx_zerocopy` both bump `TX_PACKETS`/`TX_BYTES`; the service path — DNS
+  queries, `transmit_udp_packet`, everything reaching the ring through
+  `virtio_net_transmit` — submitted the frame and returned without touching
+  either, so every one of those frames was invisible to `ip -s` and to `sysmon`.
+  Found by a rewritten `test_tx_fire_and_forget` asserting on the counter the
+  submit was supposed to move, and failing deterministically in three runs.
 - **The reclaim tier's budget was specified in pages and enforced in blocks.**
   `Reclaimable::reclaim`'s contract is "at most `want` pages";
   `QuarantineReclaim::reclaim` forwarded `want` straight to
@@ -458,13 +495,6 @@ it. Making them `Skipped` on a timeout is deliberately *not* done: a timeout is
 what a real regression looks like too, and a test that skips itself on the
 symptom of the bug it exists to catch is worse than one that fails in a sandbox.
 
-**`BuddyAllocator::stats()` read the per-CPU cache total outside the lock.**
-Every path that moves a frame from a magazine into the free lists does both
-halves under it, so a peer draining in that window was counted twice and `free`
-could exceed `total`. Fixed here — the read moved inside the lock — because it
-is a kernel-side inconsistency, not a test artefact, and a test had just started
-asserting on it.
-
 **An unprotected window in `__spawn_kernel_io`.** The task is published to the
 registry before its id is bound to the stop, so between those two lines a live
 kernel-I/O thread is preserved by neither `task_registry_reset` nor
@@ -492,10 +522,32 @@ measuring the accelerator rather than the kernel, which only a run without KVM
 could show.
 
 **Before.** Four TCG runs of the unmodified tree produced eleven failures across
-five distinct tests (§1's table), including the exact failure that had `develop`
-red.
+seven distinct tests (§1's table), including the exact failure that had
+`develop` red.
 
-**After.** [filled in below from the ratchet runs]
+**After.** Three runs of one pinned ISO — the harness now snapshots the image
+and the binary before a sweep, because a concurrent rebuild silently changed
+what two earlier runs measured — produced **the same two failures in all three,
+and nothing else**. Neither is a flake and neither is in any family above: both
+are bugs in tests written during this work, caught by running them.
+
+  - `test_gdt_kernel_rsp0_is_a_usable_stack_top` asserted 16-byte alignment on
+    the live `TSS.RSP0`. The value is `0xffffffff816ca158` — 8-aligned, and 8 is
+    all the architecture needs, since the CPU pushes the interrupt frame in
+    8-byte units. The 16-byte rule is a function-call boundary property. The
+    assertion was simply wrong.
+  - `test_tx_fire_and_forget` asserted that eight back-to-back submits advance
+    the device's `tx_packets`. They advanced it by zero — and that turned out to
+    be a **kernel bug**, not a bad observable: `virtio_net_transmit` submits to
+    the ring and never counts, while the two other TX paths do (§3.7).
+
+The five flake families §0 names produced no failure across the three runs.
+`utest_curl_e2e` and `utest_ip_e2e` fail in this sandbox for want of egress
+(§4), which is why the runs stop before the userland phase completes.
+
+Boot's lock-class count was 71 in all three, which settles a question §3.6 left
+open: it is deterministic per build, and the 71/72/73 spread seen earlier was
+across *different* builds. The exact cap is the right instrument for it.
 
 ### Two gates that were measuring the host
 
@@ -505,11 +557,33 @@ Both were found by running them here rather than by reading them.
   *unmodified* tree in all four baseline runs: the caps (3000 and 9000 cycles)
   were taken on a KVM host, and the same tree reports 20631 and 81886 under TCG.
   A gate that fails on every machine without `/dev/kvm` is a gate nobody can run
-  green, which is how a documented pre-commit step stops being run. It is now
-  two ratios — the charge against a bare CAS measured in the same run and the
-  same batch shape, and depth 7 against depth 1 — neither of which moves with
-  the accelerator. The self-test now includes the case that proves it: the same
-  verdict from a ten-times-slower host.
+  green, which is how a documented pre-commit step stops being run.
+
+  It is now one cap and two floors. The cap is depth 7 against depth 1 — the
+  only quantity here invariant under a change of accelerator, measured at
+  3.77 and 3.86 in the two pinned runs that reached the report, and at 3.69–3.99
+  across the earlier runs whose logs have since been pruned. The floors are the charge
+  against a same-run bare CAS, and an absolute physical bound on that CAS,
+  because the first is a ratio over the second and a collapsed reference would
+  satisfy it. The charge-against-CAS ratio is deliberately *not* a ceiling: a
+  CAS is relatively dearer under TCG than natively, so a ceiling measured on one
+  accelerator fails on the other — the very defect being removed. An earlier
+  draft of this work documented that ratio as a cap in three places and
+  implemented it in none; two independent reviews caught it.
+
+  What that leaves uncaught, stated because a gate trusted for something it does
+  not do is worse than no gate: a slowdown that scales the *whole* charge path
+  uniformly — every depth, and a bare CAS with it — passes all three lines.
+  Catching it needs an absolute cycle ceiling, and an absolute cycle ceiling
+  needs a measurement on every accelerator CI might use.
+
+  The self-test carries the cases that pin the design: the same verdict from a
+  ten-times-slower host, the same rejection of a non-amortising walk from one, a
+  collapsed reference rejected — and a round trip proving `--emit-allowlist`
+  produces a gate file the check path then accepts, which is the property that
+  makes the documented remedy for a ratchet failure actually usable. That last
+  case found a real bug on its first run: the emitter wrote a `min-kinds-for`
+  line unconditionally, for a phase the log need not contain.
 
 - **`check_lockdep_headroom.sh`'s exact edge and chain caps** were the four
   ratchet failures in §0's table, on runs whose tests were green. Those are

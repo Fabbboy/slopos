@@ -61,12 +61,24 @@ pub fn test_run_recoverable_cleanup() -> TestResult {
 /// The budget arithmetic, on a private ledger: recording against the machine's
 /// own spends the budget whose exhaustion makes the next recovered panic fatal.
 pub fn test_oops_ledger_accessors() -> TestResult {
-    // The machine's own ledger, read-only, so the accessors under test are
-    // still known to be the ones delegating to it.
-    let live_limit = panic_recovery::oops_limit();
+    // A round trip through the free functions, not a health check: what has to
+    // be pinned is that each one reaches the machine's own ledger, and a read
+    // that merely looks reasonable passes just as well when the delegation is
+    // wired to the wrong static. Budget-neutral — `set_oops_limit` writes only
+    // the limit, and the count is put back exactly as it was found.
+    let (live_count, live_limit) = (panic_recovery::oops_count(), panic_recovery::oops_limit());
+    const SENTINEL: u64 = 0xFEED_5EED;
+    panic_recovery::set_oops_limit(SENTINEL);
+    let observed_limit = panic_recovery::oops_limit();
+    panic_recovery::restore_oops_ledger(live_count, live_limit);
     assert_test!(
-        live_limit == 0 || panic_recovery::oops_count() < live_limit,
-        "the machine's own ledger is already past its budget"
+        observed_limit == SENTINEL,
+        "oops_limit() did not observe what set_oops_limit() wrote — the accessors \
+         name different ledgers"
+    );
+    assert_test!(
+        panic_recovery::oops_limit() == live_limit && panic_recovery::oops_count() == live_count,
+        "restore_oops_ledger did not put the machine's ledger back"
     );
 
     let ledger = panic_recovery::OopsLedger::new(0);

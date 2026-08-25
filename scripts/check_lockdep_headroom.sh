@@ -276,6 +276,22 @@ run_gate() {
         fi
     done
 
+    # A banded pool has no upper failure of its own, so the floor is the only
+    # thing standing between it and a validator that recorded nothing. Declaring
+    # the band without the floor is that hole, and it is a gate-file error
+    # rather than a run failure because no run can tell you the line is missing.
+    for bkey in "${!BAND_LO[@]}"; do
+        case "${bkey##*/}" in
+            edges)  [ "$MIN_EDGES" -gt 0 ] && continue
+                    echo "check_lockdep_headroom: $gate: 'band $bkey' with no min-edges — a pool" >&2 ;;
+            chains) [ "$MIN_CHAINS" -gt 0 ] && continue
+                    echo "check_lockdep_headroom: $gate: 'band $bkey' with no min-chains — a pool" >&2 ;;
+            *)      continue ;;
+        esac
+        echo "check_lockdep_headroom: that stopped being counted would pass every ceiling above it." >&2
+        return 2
+    done
+
     for phase in "${REQUIRED[@]}"; do
         if [ -z "${OBSERVED[$phase]+x}" ]; then
             echo "FAIL: gate requires phase '$phase' but the boot never printed it." >&2
@@ -316,7 +332,9 @@ run_gate() {
                 chains)  val=$h; pool_size=$pool_h ;;
             esac
             pct=$(( val * 100 / pool_size ))
-            if [ "$pct" -gt "$MAX_FILL" ]; then
+            # Compared without the truncation the percentage carries, so the
+            # ceiling the gate file states is the ceiling that is enforced.
+            if [ $(( val * 100 )) -gt $(( MAX_FILL * pool_size )) ]; then
                 echo "FAIL: LOCKDEP[$phase] $pool pool ${pct}% full ($val/$pool_size), over max-fill-pct $MAX_FILL." >&2
                 fail=1
             fi
@@ -436,7 +454,7 @@ self_test() {
     # that rejects unconditionally. It carries a band as well as a cap, so the
     # band parser is exercised on the accept path and an in-band value is
     # proven silent.
-    printf 'min-classes 32\nmax-fill-pct 70\nrequire-phase boot\nboot\tclasses\t65\nband boot edges 40 60\n' > "$tmp/gates/$VARIANT.txt"
+    printf 'min-classes 32\nmin-edges 16\nmin-chains 32\nmax-fill-pct 70\nrequire-phase boot\nboot\tclasses\t65\nband boot edges 40 60\n' > "$tmp/gates/$VARIANT.txt"
     _expect 0 "OK: LOCKDEP[boot]" "$tmp/clean.log" "clean log accepted" "DRIFT:"
 
     : > "$tmp/empty.log"
@@ -454,20 +472,20 @@ self_test() {
 
     # A band matching nothing is the same hole as a dead cap: the phase that
     # stopped reporting is the one whose edges nobody will miss.
-    printf 'min-classes 32\nmax-fill-pct 70\nrequire-phase boot\nboot\tclasses\t65\nband ghost chains 1 2\n' > "$tmp/gates/$VARIANT.txt"
+    printf 'min-classes 32\nmin-edges 16\nmin-chains 32\nmax-fill-pct 70\nrequire-phase boot\nboot\tclasses\t65\nband ghost chains 1 2\n' > "$tmp/gates/$VARIANT.txt"
     _expect 1 "dead entry" "$tmp/clean.log" "dead band entry rejected"
 
     printf 'min-classes 32\nmax-fill-pct 70\nrequire-phase boot\nboot\tclasses\t64\n' > "$tmp/gates/$VARIANT.txt"
     _expect 1 "over the recorded cap" "$tmp/clean.log" "over-cap rejected"
 
     # Grading one pool both ways is a policy nobody decided.
-    printf 'min-classes 32\nmax-fill-pct 70\nrequire-phase boot\nboot\tchains\t120\nband boot chains 100 120\n' > "$tmp/gates/$VARIANT.txt"
+    printf 'min-classes 32\nmin-edges 16\nmin-chains 32\nmax-fill-pct 70\nrequire-phase boot\nboot\tchains\t120\nband boot chains 100 120\n' > "$tmp/gates/$VARIANT.txt"
     _expect 2 "carries both a cap and a band" "$tmp/clean.log" "cap and band on one pool rejected"
 
     # The pool ceiling must still bite for exactly the pools whose caps were
     # replaced by bands. 1600/2048 = 78% > 70%. The drift-accepted case below is
     # the control proving the band alone did not cause this rejection.
-    printf 'min-classes 32\nmax-fill-pct 70\nrequire-phase boot\nband boot chains 100 120\n' > "$tmp/gates/$VARIANT.txt"
+    printf 'min-classes 32\nmin-edges 16\nmin-chains 32\nmax-fill-pct 70\nrequire-phase boot\nband boot chains 100 120\n' > "$tmp/gates/$VARIANT.txt"
     _line boot ACTIVE 65 12 48 1600 0 > "$tmp/full.log"
     _expect 1 "over max-fill-pct" "$tmp/full.log" "fill ceiling rejected"
 
@@ -503,7 +521,24 @@ self_test() {
     _assert_hasnt "$out" "OK: LOCKDEP[boot]" "drifted phase is not summarised OK"
     _assert_has "$out" "DRIFT: LOCKDEP[boot] ACTIVE" "drifted phase is summarised DRIFT"
 
-    printf 'min-classes 32\nmax-fill-pct 70\nrequire-phase boot\nband boot chains 100 120\n' > "$tmp/gates/$VARIANT.txt"
+    printf 'min-classes 32\nmin-edges 16\nmin-chains 32\nmax-fill-pct 70\nrequire-phase boot\nband boot chains 100 120\n' > "$tmp/gates/$VARIANT.txt"
+
+    # A band with no floor is the hole the floors exist to plug, and no run can
+    # tell you the line is missing -- so it is a gate-file error, not a failure.
+    printf 'min-classes 32\nmax-fill-pct 70\nrequire-phase boot\nboot\tclasses\t65\nband boot edges 40 60\n' > "$tmp/gates/$VARIANT.txt"
+    _expect 2 "with no min-edges" "$tmp/clean.log" "band without a floor rejected"
+    printf 'min-classes 32\nmin-edges 16\nmax-fill-pct 70\nrequire-phase boot\nboot\tclasses\t65\nband boot chains 100 120\n' > "$tmp/gates/$VARIANT.txt"
+    _expect 2 "with no min-chains" "$tmp/clean.log" "chain band without a floor rejected"
+
+    printf 'min-classes 32\nmin-edges 16\nmin-chains 32\nmax-fill-pct 70\nrequire-phase boot\nband boot chains 100 120\n' > "$tmp/gates/$VARIANT.txt"
+
+    # The fill ceiling is compared without truncation, so the number the gate
+    # file states is the number enforced: 70% of 2048 is 1433.6, and 1434 must
+    # fail where a truncated comparison would have let it through.
+    _line boot ACTIVE 65 12 48 1434 0 > "$tmp/edge-fill.log"
+    _expect 1 "over max-fill-pct" "$tmp/edge-fill.log" "the stated fill ceiling is the enforced one"
+    _line boot ACTIVE 65 12 48 1433 0 > "$tmp/under-fill.log"
+    _expect 0 "LOCKDEP[boot]" "$tmp/under-fill.log" "one under the ceiling passes"
 
     # A validator that turned itself off still reports; it must not pass.
     _line boot "DISABLED (pool overflow)" 65 12 48 112 0 > "$tmp/disabled.log"

@@ -88,6 +88,16 @@ impl KernelTestScope {
         self.kernel_io_freeze.as_ref().map(KernelIoFreeze::outcome)
     }
 
+    /// Threads a container still owned when the hold's settle loop gave up.
+    /// Non-zero means this scope does not have the property it was entered for,
+    /// and a test that cares can say so itself instead of failing later for a
+    /// reason that does not name this.
+    pub fn kernel_io_unsettled(&self) -> usize {
+        self.kernel_io_hold
+            .as_ref()
+            .map_or(0, super::task::KernelIoHold::unsettled)
+    }
+
     /// Enter the scope: freeze the kernel-I/O threads, snapshot kernel-wide
     /// state via the hermetic registry, pause APs, and reset the task
     /// population + scheduler so the test starts from a clean slate.

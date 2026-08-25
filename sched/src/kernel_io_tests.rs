@@ -374,7 +374,14 @@ pub fn test_the_sweep_takes_a_queued_task_off_the_queue() -> TestResult {
         let _ = task_terminate(id);
         return fail!("nested AP pause failed");
     };
+    // The test helper's cover is additive, so this sweep also covers the
+    // enclosing scope's real kernel-I/O threads. They are already `Held` and off
+    // every queue, so a settled outer hold contributes nothing and the count is
+    // this task alone. The second call is what separates the two causes: a
+    // repeat that takes anything more is the outer hold having not settled, and
+    // says so rather than reporting it against this task.
     let swept = hold_kernel_io_off_all_runqueues(&paused);
+    let residual = hold_kernel_io_off_all_runqueues(&paused);
     resume_all_aps_if_not_nested(paused);
 
     let placement = task.sched_placement();
@@ -384,7 +391,16 @@ pub fn test_the_sweep_takes_a_queued_task_off_the_queue() -> TestResult {
     republish_held_kernel_io(&held);
     let _ = task_terminate(id);
 
-    assert_test!(swept == 1, "the sweep did not take exactly one task");
+    assert_test!(
+        residual == 0,
+        "a repeat sweep took {} more task(s) — the enclosing scope's hold never settled",
+        residual
+    );
+    assert_test!(
+        swept == 1,
+        "the sweep took {} task(s), want exactly this test's one",
+        swept
+    );
     assert_test!(!linked, "the swept task was still linked");
     assert_test!(
         placement == SchedPlacement::Held,

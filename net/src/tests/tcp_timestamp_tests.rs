@@ -10,8 +10,8 @@ use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_PSH, TCP_FLAG_RST};
 /// `now_ms` is the one clock the whole net stack reads, so a test may only pin
 /// it from inside a [`NetTestScope`]: the fixture holds the live data plane
 /// still, and every timer scheduled against the pinned value lands in its own
-/// wheel instead of the live one. Entered after `reset_all`, which clears the
-/// mock clock.
+/// wheel instead of the live one. It clears the mock clock on both edges, so no
+/// separate reset belongs in front of it.
 macro_rules! pinned_scope {
     ($ms:expr) => {
         match NetTestScope::enter_at_mock_ms($ms) {
@@ -62,7 +62,6 @@ fn is_reset(id: tcp::ConnId) -> bool {
 }
 
 pub fn test_active_open_ts_negotiation() -> TestResult {
-    reset_all();
     let _scope = pinned_scope!(100);
 
     let conn = establish_connection_with_ts();
@@ -73,7 +72,6 @@ pub fn test_active_open_ts_negotiation() -> TestResult {
 }
 
 pub fn test_ts_declined_by_peer() -> TestResult {
-    reset_all();
     let _scope = pinned_scope!(100);
 
     let conn = establish_connection();
@@ -91,7 +89,6 @@ pub fn test_ts_declined_by_peer() -> TestResult {
 }
 
 pub fn test_data_segments_carry_tsopt() -> TestResult {
-    reset_all();
     let _scope = pinned_scope!(500);
 
     let conn = establish_connection_with_ts();
@@ -106,7 +103,6 @@ pub fn test_data_segments_carry_tsopt() -> TestResult {
 }
 
 pub fn test_paws_rejects_old_duplicate() -> TestResult {
-    reset_all();
     let _scope = pinned_scope!(100);
 
     let conn = establish_connection_with_ts();
@@ -146,7 +142,6 @@ pub fn test_paws_rejects_old_duplicate() -> TestResult {
 }
 
 pub fn test_paws_allows_rst() -> TestResult {
-    reset_all();
     let _scope = pinned_scope!(100);
 
     let conn = establish_connection_with_ts();
@@ -183,7 +178,6 @@ pub fn test_paws_allows_rst() -> TestResult {
 }
 
 pub fn test_rttm_samples_every_ack() -> TestResult {
-    reset_all();
     let _scope = pinned_scope!(1000);
 
     let conn = establish_connection_with_ts();
@@ -212,7 +206,6 @@ pub fn test_rttm_samples_every_ack() -> TestResult {
 }
 
 pub fn test_non_ts_fallback_karn_sampling() -> TestResult {
-    reset_all();
     let _scope = pinned_scope!(1000);
 
     let conn = establish_connection();

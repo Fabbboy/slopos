@@ -93,7 +93,6 @@ fn panic_reopen_dataplane() {
 pub struct NetTestScope {
     sink: KArc<BlackholeDev>,
     dev: DevIndex,
-    mock_clock: bool,
 }
 
 impl NetTestScope {
@@ -124,6 +123,13 @@ impl NetTestScope {
             }
         };
 
+        // Cleared unconditionally, so the scope is a strict superset of
+        // `tcp_common::reset_all()` and a caller can use it in place of one. A
+        // predecessor's mock time surviving into an `enter()` scope would make
+        // `check_zero_window_probe` and the timestamp option — both of which
+        // read `now_ms()` directly rather than taking it as an argument — read
+        // a clock nothing in this test set.
+        MockClock::clear();
         if let Some(ms) = mock_ms {
             MockClock::install_at(ms);
         }
@@ -144,11 +150,7 @@ impl NetTestScope {
 
         LIVE_SINK.store(dev.0 as u32, Ordering::Release);
 
-        Ok(Self {
-            sink,
-            dev,
-            mock_clock: mock_ms.is_some(),
-        })
+        Ok(Self { sink, dev })
     }
 
     /// The sink the fixture's routes point at.
@@ -236,12 +238,11 @@ impl Drop for NetTestScope {
         // cancelled against the live stack's wheel.
         timer::TEST_TIMER_WHEEL.clear();
 
-        // Clock before wheel: deselecting first leaves a window in which the
-        // live wheel is selected while `now_ms()` still reads the test's
-        // fast-forwarded time, and every deadline in that wheel looks due.
-        if self.mock_clock {
-            MockClock::clear();
-        }
+        // Clock before wheel, and unconditional: deselecting first leaves a
+        // window in which the live wheel is selected while `now_ms()` still
+        // reads the test's fast-forwarded time, and every deadline in that
+        // wheel looks due.
+        MockClock::clear();
         timer::select_test_wheel(false);
 
         route::remove_device_routes(self.dev);
