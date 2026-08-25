@@ -7183,7 +7183,15 @@ pub fn test_quota_charge_cost() -> TestResult {
     use slopos_abi::quota::{FdSlot, QuotaMode, ResourceKind};
     use slopos_ostd::process::quota::{Charge, quota_mode, set_quota_mode, try_charge};
 
-    const ITERATIONS: u32 = 10_000;
+    /// Charges per measured batch, and batches per account. The published
+    /// number is the *minimum* over batches: `rdtsc` counts host wall time, so
+    /// a mean over one long loop reports whatever the host stole during it,
+    /// while a minimum needs only one batch to run clean and no number of
+    /// stolen batches can lower it. Each batch runs with interrupts masked so
+    /// an IRQ cannot land inside the window either.
+    const BATCH_LEN: u32 = 128;
+    const BATCHES: u32 = 64;
+    const WARM_ITERATIONS: u32 = 1_000;
 
     let Some(shallow) = QuotaScratch::new() else {
         klog_info!("QUOTACOST: could not register a process");
@@ -7228,27 +7236,34 @@ pub fn test_quota_charge_cost() -> TestResult {
         // Warm first, unmeasured: otherwise the first loop absorbs the arena's
         // cold cache lines and reports a deeper chain as cheaper than a
         // shallow one.
-        for _ in 0..ITERATIONS / 10 {
+        for _ in 0..WARM_ITERATIONS {
             if let Ok(reservation) = try_charge::<FdSlot>(account, 1) {
                 drop(Charge::commit(reservation));
             }
         }
-        let start = slopos_arch::tsc::rdtsc();
-        for _ in 0..ITERATIONS {
-            // Commit and drop, so the measurement covers the walk up, the
-            // token, and the walk back down on refund.
-            if let Ok(reservation) = try_charge::<FdSlot>(account, 1) {
-                drop(Charge::commit(reservation));
-            }
+        let mut best = u64::MAX;
+        for _ in 0..BATCHES {
+            let batch = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_| {
+                let start = slopos_arch::tsc::rdtsc();
+                for _ in 0..BATCH_LEN {
+                    // Commit and drop, so the measurement covers the walk up,
+                    // the token, and the walk back down on refund.
+                    if let Ok(reservation) = try_charge::<FdSlot>(account, 1) {
+                        drop(Charge::commit(reservation));
+                    }
+                }
+                slopos_arch::tsc::rdtsc().wrapping_sub(start)
+            });
+            best = best.min(batch / BATCH_LEN as u64);
         }
-        slopos_arch::tsc::rdtsc().wrapping_sub(start)
+        best
     };
 
     // The deep one is measured first: the loop that runs first pays for the
     // arena's cold cache lines however much warming precedes it.
     let shallow_account = shallow.account();
-    let deep_cycles = measure(deepest);
-    let shallow_cycles = measure(shallow_account);
+    let deep_per_charge = measure(deepest);
+    let shallow_per_charge = measure(shallow_account);
     set_quota_mode(restore);
 
     for child in chain.iter() {
@@ -7259,17 +7274,10 @@ pub fn test_quota_charge_cost() -> TestResult {
     drop(chain);
 
     // Cycles, not nanoseconds: converting needs a frequency, and under TCG the
-    // TSC does not track one.
-    let per_charge = |cycles: u64| -> u64 { cycles / ITERATIONS as u64 };
-
-    // Published through the quota report rather than logged here: per-test klog
-    // is shown only on failure, and this line has to reach the raw stream for
-    // the gate to parse it.
-    crate::quota_console::record_charge_cost(
-        per_charge(shallow_cycles),
-        depth,
-        per_charge(deep_cycles),
-    );
+    // TSC does not track one. Published through the quota report rather than
+    // logged here, because per-test klog is shown only on failure and this line
+    // has to reach the raw stream for the gate to parse it.
+    crate::quota_console::record_charge_cost(shallow_per_charge, depth, deep_per_charge);
     TestResult::Pass
 }
 

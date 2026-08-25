@@ -12,9 +12,16 @@ use slopos_testing::{TestResult, assert_test};
 const DEPTH_DELTA: u32 = 20;
 const SHALLOW_DEPTH: u32 = 2;
 
-/// Budget for the extra frames' lookups: a linear scan costs tens of ms each at
-/// opt-level 0, an indexed lookup microseconds — one bound fits any accelerator.
-const DELTA_BUDGET_NS: u64 = 200_000_000;
+/// A ratio, not a nanosecond budget: an absolute bound measures the host as
+/// much as the unwinder, and a vCPU the host deschedules inside one catch
+/// blows any budget wide enough to be portable. Scan-shaped lookup puts the
+/// deep catch an order of magnitude above the shallow one; indexed lookup
+/// leaves it under twice.
+const DEPTH_COST_RATIO_LIMIT: u64 = 4;
+
+/// Repetitions per depth. The minimum is the only steal-immune statistic here:
+/// one clean pass is enough, and no number of stolen ones can lower it.
+const TIMED_CATCHES: u32 = 3;
 
 #[inline(never)]
 fn recurse_then_panic(depth: u32) {
@@ -26,11 +33,16 @@ fn recurse_then_panic(depth: u32) {
     core::hint::black_box(depth);
 }
 
-/// Elapsed nanoseconds for one caught panic thrown `depth` frames down.
+/// Fastest of [`TIMED_CATCHES`] caught panics thrown `depth` frames down.
 fn time_catch(depth: u32) -> u64 {
-    let start = clock::monotonic_ns();
-    let _ = panic_recovery::run_recoverable(|| recurse_then_panic(depth));
-    clock::monotonic_ns().saturating_sub(start)
+    let mut best = u64::MAX;
+    for _ in 0..TIMED_CATCHES {
+        let start = clock::monotonic_ns();
+        let _ = panic_recovery::run_recoverable(|| recurse_then_panic(depth));
+        let elapsed = clock::monotonic_ns().saturating_sub(start);
+        best = best.min(elapsed);
+    }
+    best
 }
 
 /// `.eh_frame_hdr` holds a `datarel|sdata4` search table, and the finder uses it.
@@ -93,17 +105,16 @@ pub fn test_unwind_lookup_is_indexed() -> TestResult {
         "monotonic clock did not advance across a caught panic"
     );
 
-    let delta = deep.saturating_sub(shallow);
     slopos_ostd::klog_info!(
-        "unwind catch: depth {} took {} ns, depth {} took {} ns, delta {} ns",
+        "unwind catch: depth {} took {} ns, depth {} took {} ns, ratio limit {}",
         SHALLOW_DEPTH,
         shallow,
         SHALLOW_DEPTH + DEPTH_DELTA,
         deep,
-        delta
+        DEPTH_COST_RATIO_LIMIT
     );
     assert_test!(
-        delta < DELTA_BUDGET_NS,
+        deep < shallow.saturating_mul(DEPTH_COST_RATIO_LIMIT),
         "per-frame unwind cost is scan-shaped, not index-shaped"
     );
     TestResult::Pass
