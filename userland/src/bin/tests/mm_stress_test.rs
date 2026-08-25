@@ -28,6 +28,15 @@ const WORKER_ITERS: usize = 400;
 /// Bounded reap so a wedged child fails the case instead of hanging.
 const REAP_SPINS: usize = 400_000;
 
+/// Iterations between progress lines.
+///
+/// Both cases below run for tens of seconds and, until this, said nothing while
+/// they did. The harness aborts the run — not the test, the run — after
+/// `--silence-secs` of no output, so a stress case that reports only at its end
+/// is one host slowdown away from taking every later test with it. Chosen so
+/// the gap between lines stays in the low seconds under TCG.
+const PROGRESS_EVERY: usize = 25;
+
 const EXIT_OK: i32 = 0;
 const EXIT_MMAP_FAIL: i32 = 2;
 const EXIT_MEMFD_FAIL: i32 = 3;
@@ -131,6 +140,9 @@ fn memfd_cycle(iter: usize) -> i32 {
 
 fn test_memfd_survives_unmap_while_open() -> bool {
     for iter in 0..INTEGRITY_ITERS {
+        if iter % PROGRESS_EVERY == 0 {
+            println!("mm_stress: integrity iter {iter}/{INTEGRITY_ITERS}");
+        }
         match memfd_cycle(iter) {
             EXIT_OK => {}
             EXIT_CORRUPT => {
@@ -182,6 +194,9 @@ fn test_concurrent_memfd_churn() -> bool {
 
     let mut ok = true;
     for iter in 0..WORKER_ITERS {
+        if iter % PROGRESS_EVERY == 0 {
+            println!("mm_stress: churn iter {iter}/{WORKER_ITERS} ({spawned} workers)");
+        }
         if memfd_cycle(iter) != EXIT_OK {
             eprintln!("mm_stress: parent worker failed at iter {iter}");
             ok = false;

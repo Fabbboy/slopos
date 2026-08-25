@@ -452,6 +452,31 @@ everything can no longer report as a run that passed everything.
   answer — that reclaimer would report zero forever while `reclaimable_pages`
   said there was work — so the contract states the residual instead: the total
   may exceed `want` by less than one unit, once for the whole call.
+- **An active-open TCP connection never retransmitted its SYN.**
+  `SynSentState` has carried `retransmits` and `retransmit_token` since it was
+  written and nothing ever moved either: `tcp::connect` armed no timer, and
+  `on_retransmit` matched `PcbState::Data` alone, so a `SynSent` PCB whose timer
+  did fire fell through to `Outcome::Skip`. The SYN went out exactly once. One
+  SYN lost to a full queue therefore stalled the connect for the socket layer's
+  entire 30 s deadline, and an unreachable peer for all of it — the failure mode
+  looked like a slow network rather than a missing retransmission. `connect` now
+  arms the timer once the SYN is on the wire (the RTO is measured from the
+  transmission, and the wheel must not be entered under the socket table lock),
+  `on_retransmit` rebuilds and re-sends the SYN under the original ISS with the
+  RTO doubling each time, and the attempt is abandoned after
+  `ACTIVE_SYN_RETRIES_MAX` — releasing the PCB, which a `SynSent` entry nothing
+  retires would otherwise hold along with its ephemeral port for the life of the
+  boot. `on_retransmit`'s `Option<ConnId>` return became a three-way
+  `RetransmitAction`: collapsing "re-send these buffered bytes" and "re-send
+  this rebuilt segment" into one `Option` is what let the SYN case go unwritten
+  without a compile error.
+- **`utest_curl_e2e` could lose the whole run rather than fail.** Each of its two
+  cases dials three unreachable-in-CI addresses in series with a blocking
+  `connect`, and printed nothing until the case ended — so on a machine with no
+  egress the harness saw more silence than its budget allows and killed QEMU,
+  taking every test after it. The attempt is now announced before it blocks. The
+  test still fails where there is no egress, which is correct; what it no longer
+  does is convert an environment limitation into a lost run.
 
 ---
 
@@ -475,6 +500,19 @@ walks, and reading children-first has the symmetric problem with refunds.
 `AncestorUnderCount` is a quiescent-ledger check, full stop — unlike
 `UsedAbovePeak`, which the packing above makes instantaneously true and which is
 therefore the one invariant of the four a lock-free reader may hold to.
+
+**A simultaneous open's SYN-ACK is never retransmitted.** `SynRecvState` carries
+the same pair of dead fields the active-open fix revives — `retransmits` and
+`retransmit_token`, written once at construction and never read — and the
+`SynSent` → `SynRecv` transition arms nothing. The ordinary passive open is not
+affected: a listener's SYN-ACKs go through `SynQueue::on_retransmit` on a
+`TcpSynAck` timer, which does back off and does give up. What is uncovered is
+only the simultaneous open, where both peers send a SYN and neither is a
+listener. Fixing it is the same shape as the active-open fix, but the case it
+serves is a pair of hosts dialling each other in the same round trip, and this
+tree has no test that reaches `SynRecv` from `SynSent` on a live stack — so the
+fix would ship with the same unfalsifiable assertion §6 exists to reject. Left
+here with its shape written down rather than guessed at.
 
 The two costs are real but secondary: `refused_by` would flip from the nearest
 refusing row to the outermost one, taking `denials` attribution with it; and
@@ -595,3 +633,101 @@ Both were found by running them here rather than by reading them.
 - **`check_lockdep_headroom.sh`'s exact edge and chain caps** were the four
   ratchet failures in §0's table, on runs whose tests were green. Those are
   bands now (§3.6).
+
+---
+
+## 6. What the second review round found
+
+Every fix above ships with an assertion. Reviewers were asked to build the
+broken kernel each assertion names and check that it actually fails — the one
+question a green suite cannot answer. Four assertions did not survive that, and
+each failure was the same defect in a different place: an observable that a
+correct kernel and a broken one both produce.
+
+- **`test_quarantine_rotate_does_not_splice` passed on a rotate that spliced
+  64 pages.** Rotating an empty quarantine cannot splice whatever the code does,
+  and by the time the test called rotate the backlog was empty — the per-free
+  paydown and every idle CPU's bottom half keep it that way. The test now parks
+  a frame and drives it through both epoch closures first, and the observable is
+  a counter inside `quarantine_rotate` rather than the call's return value,
+  because the rotations that move a parked frame along run inside
+  `quiesce`'s closure, not in the test's own call. That also makes it
+  peer-proof: the claim holds for every CPU's rotations, so a peer rotating
+  mid-test strengthens the assertion instead of racing it.
+
+- **`test_reclaim_run_respects_its_bound`'s `asks == 1` was blind to the
+  mutation it named.** The counter sat on the first registrant, and the first
+  registrant is asked once per pass with or without `run`'s per-registrant
+  budget guard; only removing the guard *and* the pass-loop break moved it. What
+  the guard actually protects is everyone *behind* the first, so a registrant
+  now sits there — and counts the asks that arrive with the budget already met.
+  A correct `run` never asks anyone for zero pages, which makes that counter a
+  witness no peer's concurrent `run` can forge: it moving is a defect wherever
+  the call came from. `run`'s `want - freed` became `want.saturating_sub(freed)`
+  in the same change, so the counterfactual the instrument describes is a zero
+  rather than a `u32` underflow.
+
+- **`test_rcu_drain_never_waits_for_a_grace_period` passed on a drain that spent
+  2581 ms inside the masked window.** The doc claimed a dichotomy — either an
+  inline wait reports a quiescent state, or it never terminates — and a wait
+  bounded by its own deadline does neither. The deleted elapsed ceiling caught
+  that shape, but an absolute wall-clock ceiling is the host-dependence this
+  work exists to remove. The replacement is neither: a wait for a grace period
+  to *complete* must reach `rcu_gp_poll`, the only operation that runs the
+  completing compare-exchange, and nothing on the correct drain path calls it —
+  so the expected delta is exactly zero, clock-free, and a wait that never
+  reaches it cannot terminate and takes the run down loudly.
+
+- **The COW exclusivity hoist had no falsifying test at all.** Reverting it left
+  all 193 `slopos_mm::*` tests green, because the pre-fix kernel returns the
+  *same* `Retry` from the single-reference arm — the bounded spin ends in
+  `WouldBlock`, which maps to the same value. The cost is what differs, so the
+  cost is now the observable: a per-CPU counter of spins taken in
+  `vm_space_get_mut`, asserted to be zero for a fault taken with a reader
+  outstanding. It reports `1000000` on the pre-fix tree.
+
+Five comments stating guarantees their code did not have were corrected rather
+than deleted where the code could be made to match, and cut back where it could
+not. One test paid a 50 ms confirmation window up to 512 times to report a
+single already-known frame; it now returns the rest without observing them,
+which takes a failing run from 25.7 s to about 50 ms.
+
+---
+
+## 7. The lockdep ratchet was counting a race
+
+`check_lockdep_headroom.sh` holds each phase's lock-class count to an **exact**
+cap, on a premise the file states plainly: a class registers on the first
+acquire of a declaration site, so by the end of a phase the count is a property
+of the kernel, identical on every run. Twelve boots of one pinned image
+disagreed — 71, 72 or 73 at boot, and whatever boot got, both test phases got
+too. The three-value spread an earlier round dismissed as "across different
+builds, not different runs" was across runs all along, and it failed the gate on
+roughly three runs in four while the tests themselves were green.
+
+Dumping the class table named the culprit at once:
+`PriorityRunQueue.queue_lock` occupied **one, two or three slots** in the same
+table. Every other class occupied exactly one.
+
+`register_class` reserves its slot with `CLASS_COUNT.fetch_add` *before* it
+knows whether it will win the link race, re-scans the bucket, and on losing
+bumps `CLASS_SLOTS_LEAKED` and abandons the slot — which is correct, and is
+what stops one declaration site being split across two live classes. What was
+wrong is what got reported: `class_count()` is the allocation watermark, and
+`kdiag_dump_lock_graph` printed it as `classes=`. On a 4-vCPU boot the per-CPU
+run queues come up together, so nought to two CPUs lose that race, and the
+"exact, deterministic" number moved with them.
+
+So the reported count is now `registered_class_count()` — the watermark less
+the leaked slots, which is exactly the number of distinct declaration sites —
+and the line carries `leaked=` so the pool fact the raw count used to imply is
+not lost. The pool-fill check keeps the watermark, because a leaked slot really
+does consume one. Twelve boots after the change: `classes=71` on every one,
+while `leaked=` moved between 1 and 2 across them — the racy quantity still
+racing, no longer inside the number a ratchet reads.
+
+**The recorded caps were right the whole time.** 71 / 186 / 196 is what this
+tree measures once the count stops including the race, so nothing in
+`scripts/gates/lockdep/` moves. A ratchet failure really was a measurement to
+re-take rather than a number to raise; what needed re-taking was the
+measurement's definition.

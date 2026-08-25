@@ -199,6 +199,13 @@ pub fn frame_accounting(phys_addr: PhysAddr) -> FrameAccounting {
     BUDDY_ALLOCATOR.frame_accounting(phys_addr)
 }
 
+/// Test hook: pages every rotation so far has spliced back into the free
+/// lists. Wraps; a caller takes differences.
+#[cfg(feature = "test-hooks")]
+pub fn rotate_spliced_pages() -> u32 {
+    BUDDY_ALLOCATOR.rotate_spliced_pages()
+}
+
 pub fn page_frame_is_tracked(phys_addr: PhysAddr) -> c_int {
     BUDDY_ALLOCATOR.frame_is_tracked(phys_addr) as c_int
 }
@@ -251,16 +258,71 @@ static QUARANTINE_RECLAIM_ASKS: core::sync::atomic::AtomicU32 =
 /// a caller takes differences.
 ///
 /// A budget governs how many times a registrant is approached, and nothing
-/// else reports that: `run` hands over what is left of the budget, so an ask
-/// made past it is an ask for zero pages and moves no counter a caller sees.
+/// else reports that: an ask made past it frees nothing, so no page count
+/// distinguishes it. This sees only the quarantine's own asks; the registrants
+/// behind it are [`reclaim_probe_zero_asks`]'s subject.
 #[cfg(feature = "test-hooks")]
 pub fn quarantine_reclaim_asks() -> u32 {
     QUARANTINE_RECLAIM_ASKS.load(core::sync::atomic::Ordering::Relaxed)
 }
+
+/// A registrant that holds nothing, registered behind the quarantine.
+///
+/// `run` hands each registrant what is *left* of its budget and stops at the
+/// first pass that meets it, so on a correct kernel nobody is ever asked for
+/// zero pages. This counts the asks that break that, which makes it a witness
+/// no peer's concurrent `run` can forge: the counter moving is a defect
+/// wherever the call came from, so a test may read it without owning the
+/// reclaim tier for the duration.
+///
+/// Registered rather than merely defined because the property is about a
+/// registrant *after* the one that meets the budget, and the quarantine is
+/// always first.
+#[cfg(feature = "test-hooks")]
+struct ReclaimProbe;
+
+#[cfg(feature = "test-hooks")]
+static RECLAIM_PROBE_ZERO_ASKS: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+#[cfg(feature = "test-hooks")]
+impl slopos_ostd::mm::reclaim::Reclaimable for ReclaimProbe {
+    fn name(&self) -> &'static str {
+        RECLAIM_PROBE_NAME
+    }
+
+    fn reclaimable_pages(&self) -> u32 {
+        0
+    }
+
+    fn reclaim(&self, want: u32) -> u32 {
+        if want == 0 {
+            RECLAIM_PROBE_ZERO_ASKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        0
+    }
+}
+
+/// The probe's registry name, so a test can prove it is walked rather than
+/// trusting an assertion that a dead registrant would also satisfy.
+#[cfg(feature = "test-hooks")]
+pub const RECLAIM_PROBE_NAME: &str = "reclaim-probe";
+
+/// Test hook: asks for zero pages the reclaim tier has put to the probe.
+/// Zero on a correct kernel, always and for every caller.
+#[cfg(feature = "test-hooks")]
+pub fn reclaim_probe_zero_asks() -> u32 {
+    RECLAIM_PROBE_ZERO_ASKS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(feature = "test-hooks")]
+static RECLAIM_PROBE: ReclaimProbe = ReclaimProbe;
 
 static QUARANTINE_RECLAIM: QuarantineReclaim = QuarantineReclaim;
 
 /// Register the quarantine with the reclaim tier. Boot only.
 pub fn register_reclaim(token: &slopos_ostd::sync::BspToken<'_>) {
     slopos_ostd::mm::reclaim::register(token, &QUARANTINE_RECLAIM);
+    #[cfg(feature = "test-hooks")]
+    slopos_ostd::mm::reclaim::register(token, &RECLAIM_PROBE);
 }

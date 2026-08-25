@@ -90,17 +90,57 @@ pub(crate) fn vm_space_is_exclusive(vm_space: &KArc<VmSpace>) -> bool {
     KArc::strong_count(vm_space) == 1 && KArc::weak_count(vm_space) == 0
 }
 
+/// Spins taken in [`vm_space_get_mut`], per CPU.
+///
+/// The fault paths' exclusivity probe exists to keep this at zero: a probe
+/// pushed back inside one dispatch arm still returns `Retry` from the other,
+/// because the spin ends in `WouldBlock` and that maps to the same value. The
+/// count is what tells the two apart. Per-CPU so a peer's syscall spinning on
+/// its own address space does not read back as this one having spun.
+#[cfg(feature = "test-hooks")]
+static VM_SPACE_MUT_SPINS_TAKEN: [core::sync::atomic::AtomicU64; slopos_arch::pcr::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; slopos_arch::pcr::MAX_CPUS];
+
+/// Test hook: spins `cpu` has taken waiting for exclusive access to an address
+/// space. Wraps; a caller takes differences, and must pin itself to `cpu` for
+/// the window it measures.
+#[cfg(feature = "test-hooks")]
+pub(crate) fn vm_space_mut_spins_taken(cpu: usize) -> u64 {
+    VM_SPACE_MUT_SPINS_TAKEN
+        .get(cpu)
+        .map_or(0, |c| c.load(core::sync::atomic::Ordering::Relaxed))
+}
+
 #[inline]
 fn vm_space_get_mut(vm_space: &mut KArc<VmSpace>) -> Result<&mut VmSpace, MapError> {
     let mut spins = 0usize;
     while !vm_space_is_exclusive(vm_space) {
         if spins == VM_SPACE_MUT_SPINS {
+            #[cfg(feature = "test-hooks")]
+            record_spins(spins);
             return Err(MapError::WouldBlock);
         }
         spins += 1;
         core::hint::spin_loop();
     }
+    #[cfg(feature = "test-hooks")]
+    record_spins(spins);
     KArc::get_mut(vm_space).ok_or(MapError::WouldBlock)
+}
+
+/// Attributed to the CPU that ran the spin, because that is the CPU reading
+/// `get_current_cpu` here. A reader looking for zero on its own slot therefore
+/// cannot be moved off it by a peer, whatever the peer is doing.
+#[cfg(feature = "test-hooks")]
+#[inline]
+fn record_spins(spins: usize) {
+    if spins == 0 {
+        return;
+    }
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    if let Some(counter) = VM_SPACE_MUT_SPINS_TAKEN.get(cpu) {
+        counter.fetch_add(spins as u64, core::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Map a 4 KiB user page into `vm_space` at `va`, pointing at the

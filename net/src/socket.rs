@@ -1684,6 +1684,9 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         let _ = tcp::abort(tcp_idx);
         return send_rc;
     }
+    // After the send and outside the table lock: the RTO is measured from the
+    // transmission, and the wheel must not be entered under that lock.
+    tcp::arm_syn_retransmit(tcp_idx);
 
     if nonblocking {
         return errno_i32(ERRNO_EINPROGRESS);
@@ -1788,6 +1791,7 @@ pub fn socket_connect_nonblock(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                 }
                 return rc;
             }
+            tcp::arm_syn_retransmit(tcp_idx);
             errno_i32(ERRNO_EAGAIN)
         }
         Action::Poll(tcp_idx) => match tcp::get_state(tcp_idx) {

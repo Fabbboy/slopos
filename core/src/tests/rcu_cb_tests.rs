@@ -15,13 +15,22 @@ use slopos_testing::fail;
 
 /// Quiescent-state reports to allow before calling the drain unreachable.
 ///
-/// The budget is guest progress, not wall clock: this CPU's timer tick both
-/// reports a quiescent state and raises the RCU softirq, so a descheduled vCPU
-/// delivers no tick and spends none of the budget.
+/// The budget is guest progress, not wall clock: this CPU's timer tick raises
+/// the RCU softirq and reports a quiescent state unless a preemption guard is
+/// active, so a descheduled vCPU delivers no tick and spends none of the
+/// budget. A report declined across the whole poll spends none either, which is
+/// what leaves [`TICK_WATCHDOG_MS`] as the only bound in that case.
 const RECLAIM_DEADLINE_REPORTS: u64 = 64;
 
-/// Backstop on the budget above. Reaching it means this CPU stopped reporting
-/// altogether, which is a dead timer tick rather than a slow host.
+/// Backstop on the budget above, and the one wall-clock quantity here.
+///
+/// Reaching it means this CPU reported fewer than [`RECLAIM_DEADLINE_REPORTS`]
+/// times in five real seconds. At the 10 ms tick that is roughly an eighth of
+/// the reports a live tick delivers, so it is a collapsed report rate rather
+/// than a slow one — a dead tick, or a report declined every time. A host slow
+/// enough to starve the guest of eight-ninths of its ticks would reach it too;
+/// that is the residue of having a wall clock in the loop at all, and it is why
+/// the report count is the budget and this is only the backstop.
 const TICK_WATCHDOG_MS: u32 = 5_000;
 
 /// Polled rather than slept: the kernel test phase runs on the BSP before it
@@ -48,7 +57,8 @@ pub fn drain_until(done: impl Fn() -> bool) -> bool {
         slopos_ostd::sync::rcu_process_callbacks();
         // No `rcu_note_qs` of its own: the budget below counts this CPU's
         // reports, and a loop that reports spends its own budget whether or not
-        // the guest advanced. The tick reports for it.
+        // the guest advanced. The tick reports for it when it lands outside a
+        // read-side section.
         slopos_ostd::sync::rcu_gp_poll();
         if done() {
             return true;
@@ -160,13 +170,16 @@ pub fn test_synchronize_rcu_completes_a_grace_period() -> TestResult {
 /// itself: this CPU's entries into `synchronize_rcu`, which only the drain can
 /// have made here, must not move.
 ///
-/// That count only sees a wait routed through `synchronize_rcu`, and an
-/// open-coded one is caught by the second check rather than by a clock: inside
-/// the masked window no grace period can complete until this CPU reports a
-/// quiescent state, so an inline wait is never merely slow. Either it reports —
-/// and nothing on the drain's own path does — or it never terminates and takes
-/// the run down loudly instead of passing. An elapsed ceiling has no case left
-/// to catch, which is why there is none.
+/// That count only sees a wait routed through `synchronize_rcu`. An open-coded
+/// one is caught by the two checks after it rather than by a clock, which on a
+/// host slow enough would have to be loose enough to miss the wait anyway.
+///
+/// A wait for a grace period to *complete* has to reach `rcu_gp_poll` — the
+/// only operation that runs the completing compare-exchange — and a wait that
+/// never reaches it cannot terminate, so it takes the run down loudly instead
+/// of passing. Nothing on the correct drain path calls it, so the expected
+/// delta is exactly zero rather than a budget. `rcu_note_qs` is the other way
+/// to drive a period from in here, hence the third check.
 pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
     const PASSES: u32 = 32;
 
@@ -184,11 +197,12 @@ pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
     // Sampled inside one masked window with the reads it indexes: `rcu_note_qs`
     // increments the slot of whichever CPU is live, so a `cpu` taken before the
     // window names a slot the reports need not have touched.
-    let (sync_before, sync_after, qs_before, qs_after) =
+    let (sync_before, sync_after, qs_before, qs_after, polls_before, polls_after) =
         slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
             let cpu = slopos_arch::pcr::get_current_cpu();
             let sync_before = slopos_ostd::sync::rcu_sync_entry_count(cpu);
             let qs_before = slopos_ostd::sync::rcu_qs_counter(cpu);
+            let polls_before = slopos_ostd::sync::rcu_gp_poll_count(cpu);
             for _ in 0..PASSES {
                 slopos_ostd::sync::rcu_raise_softirq();
                 slopos_ostd::sync::rcu_process_callbacks();
@@ -198,8 +212,20 @@ pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
                 slopos_ostd::sync::rcu_sync_entry_count(cpu),
                 qs_before,
                 slopos_ostd::sync::rcu_qs_counter(cpu),
+                polls_before,
+                slopos_ostd::sync::rcu_gp_poll_count(cpu),
             )
         });
+
+    if polls_after != polls_before {
+        return fail!(
+            "{} drain passes polled the grace period {} time(s) with interrupts masked — \
+             nothing on the drain's path polls, so the invoke step is driving a period it \
+             means to wait for",
+            PASSES,
+            polls_after.wrapping_sub(polls_before)
+        );
+    }
 
     if sync_after != sync_before {
         return fail!(

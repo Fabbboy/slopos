@@ -133,13 +133,74 @@ pub fn test_quarantine_spans_two_epochs_after_a_deferred_unmap() -> TestResult {
 
 /// Rotation runs from a timer interrupt: a splicing rotation would hold the
 /// allocator's cli-lock for O(blocks x free-list length) inside that handler.
+///
+/// Rotating an empty quarantine cannot splice whatever the code does, so the
+/// test parks a frame first and then drives it the whole way through --
+/// incoming to draining to releasable -- which is the only path on which a
+/// splicing rotation has anything to splice.
+///
+/// The observable is the counter rather than this call's return value: the
+/// rotations that move the parked frame along run inside
+/// `force_close_epoch_for_test`, not here. It accumulates over every CPU's
+/// rotations, and the claim holds for all of them, so a peer's tick rotating
+/// mid-test strengthens the assertion instead of racing it.
 pub fn test_quarantine_rotate_does_not_splice() -> TestResult {
+    let _ = quiesce::note_deferred_unmap();
+
+    let parked = page_alloc::alloc_kernel_page_with(
+        slopos_ostd::mm::frame::FrameAllocOptions::single().with_no_pcp(),
+    );
+    if parked.is_null() {
+        klog_info!("QUIESCE_TEST: no frame to park");
+        return TestResult::Fail;
+    }
+    assert_eq_test!(
+        page_alloc::free_page_frame(parked),
+        0,
+        "freeing inside the quarantine window must succeed"
+    );
+    assert_eq_test!(
+        page_alloc::frame_accounting(parked),
+        page_alloc::FrameAccounting::Quarantined,
+        "the freed frame did not park -- nothing below would be exercised"
+    );
+
+    let before = page_alloc::rotate_spliced_pages();
+
+    // Two closures: incoming -> draining -> releasable. Only the second leaves
+    // the frame somewhere a splice could reach it.
+    for _ in 0..2 {
+        let mut closed = false;
+        for _ in 0..CLOSURE_BUDGET {
+            if quiesce::force_close_epoch_for_test().is_some() {
+                closed = true;
+                break;
+            }
+        }
+        if !closed {
+            klog_info!("QUIESCE_TEST: no epoch closed under a full set of acks");
+            return TestResult::Fail;
+        }
+    }
+
+    let spliced = page_alloc::rotate_spliced_pages().wrapping_sub(before);
+    assert_test!(
+        spliced == 0,
+        "a rotation spliced {} pages back into the free lists -- that work \
+         belongs to quarantine_release_some, not to a timer handler",
+        spliced
+    );
+
     let released = page_alloc::quarantine_rotate();
     assert_eq_test!(
         released,
         0,
         "rotate must only move list heads, never release frames"
     );
+
+    // The parked frame is the test's own; leaving it on the backlog would make
+    // the next test's quarantine reading depend on this one having run.
+    let _ = page_alloc::quarantine_release_some(64);
     TestResult::Pass
 }
 

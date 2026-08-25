@@ -18,8 +18,8 @@ use slopos_testing::{assert_test, fail, pass};
 
 use crate::mmu::quiesce;
 use crate::page_alloc::{
-    FrameAccounting, alloc_kernel_page_with, frame_accounting, free_page_frame,
-    quarantine_reclaim_asks,
+    FrameAccounting, RECLAIM_PROBE_NAME, alloc_kernel_page_with, frame_accounting, free_page_frame,
+    quarantine_reclaim_asks, reclaim_probe_zero_asks,
 };
 
 /// Allocate a frame and free it into the quarantine's incoming list. Release
@@ -38,11 +38,20 @@ fn park_a_frame() -> Option<PhysAddr> {
 /// Reclaimers are registered, named, and answer without freeing anything.
 pub fn test_reclaim_registrants_report_without_freeing() -> TestResult {
     let mut names = 0usize;
+    let mut saw_probe = false;
     reclaim::for_each_reclaimer(|name, _| {
         assert!(!name.is_empty());
+        saw_probe |= name == RECLAIM_PROBE_NAME;
         names += 1;
     });
     assert_test!(names > 0, "no reclaimer is registered");
+    // Every zero-ask assertion below reads a counter only this registrant can
+    // move, so a probe the walk does not reach would make all of them vacuous.
+    assert_test!(
+        saw_probe,
+        "the reclaim probe is not in the registry walk -- nothing downstream \
+         of the quarantine is observed"
+    );
 
     let Some(witness) = park_a_frame() else {
         return fail!("witness frame allocation");
@@ -69,19 +78,20 @@ pub fn test_reclaim_registrants_report_without_freeing() -> TestResult {
     pass!()
 }
 
-/// `run(0)` reaches no registrant, and `run(1)` asks the first one once.
+/// `run(0)` reaches no registrant, `run(1)` asks the first one once, and
+/// nobody behind it is asked for what is left of a budget already met.
 ///
-/// Not a page bound, and not the total either. `run` hands a registrant what
-/// is *left* of the budget, so an ask made after the budget is met is an ask
-/// for zero pages; and the only pool holding anything during a test — the
-/// quarantine — is the first one asked. A `run` that dropped its budget checks
-/// altogether therefore returns exactly what a correct one returns, which is
-/// why the count of asks is the signal here and no arithmetic on `freed` is.
+/// Not a page bound, and not the total either. The only pool holding anything
+/// during a test — the quarantine — is the first one asked, so a `run` that
+/// dropped its budget checks altogether returns exactly what a correct one
+/// returns. No arithmetic on `freed` can see the difference; two ask counters
+/// can, one per side of the guard.
 ///
-/// Frames are parked first so the one ask is a satisfied one rather than a
-/// walk over an empty backlog. They are not asserted on: from the closure that
-/// makes them releasable they are anyone's, and every idle CPU's bottom half
-/// splices 64 pages off that backlog (`sched::runtime`).
+/// Frames are parked first to give the ask something to do. Whether it still
+/// finds them is not asserted and does not need to be: from the closure that
+/// makes them releasable they are anyone's — every idle CPU's bottom half
+/// splices 64 pages off that backlog (`sched::runtime`) — and both counts read
+/// the same either way.
 pub fn test_reclaim_run_respects_its_bound() -> TestResult {
     let before = quarantine_reclaim_asks();
     assert_test!(reclaim::run(0) == 0, "run(0) freed pages");
@@ -110,6 +120,19 @@ pub fn test_reclaim_run_respects_its_bound() -> TestResult {
          one ask meets a one-page budget, so the rest came after it was met",
         asks,
         freed
+    );
+
+    // The count above cannot see the registrants *behind* the quarantine: a
+    // `run` that dropped its per-registrant guard still asks the quarantine
+    // exactly once, then walks on to everyone else in the same pass. What that
+    // walk hands them is what is left of a budget already met -- zero -- which
+    // a correct `run` never asks anyone for.
+    let zero_asks = reclaim_probe_zero_asks();
+    assert_test!(
+        zero_asks == 0,
+        "the reclaim tier has asked a registrant for zero pages {} times -- \
+         run walked past a budget it had already met",
+        zero_asks
     );
     pass!()
 }

@@ -68,6 +68,14 @@ const QUARANTINE_RELEASE_PER_FREE: u32 = 8;
 /// the allocator's lock 100 times a second to ask a yes/no question.
 pub(super) static QUARANTINE_FRAMES: AtomicU32 = AtomicU32::new(0);
 
+/// Free-list growth accumulated over *every* rotation, for
+/// [`BuddyAllocator::rotate_spliced_pages`]. A test cannot read the rotation
+/// that matters from a return value: the rotations that move a parked frame
+/// along run inside [`crate::mmu::quiesce`]'s epoch closure, not in the
+/// test's own call.
+#[cfg(feature = "test-hooks")]
+static ROTATE_SPLICED_PAGES: AtomicU32 = AtomicU32::new(0);
+
 /// Where the buddy accounts one frame, for [`BuddyAllocator::frame_accounting`].
 #[cfg(feature = "test-hooks")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -378,7 +386,10 @@ impl BuddyInner {
         self.quarantine_incoming = INVALID_PAGE_FRAME;
         self.quarantine_incoming_tail = INVALID_PAGE_FRAME;
 
-        self.free_frames.saturating_sub(free_before)
+        let grew = self.free_frames.saturating_sub(free_before);
+        #[cfg(feature = "test-hooks")]
+        ROTATE_SPLICED_PAGES.fetch_add(grew, Ordering::Relaxed);
+        grew
     }
 
     /// Splice blocks from the releasable backlog into the free lists until
@@ -807,6 +818,13 @@ impl BuddyAllocator {
 
     pub fn pcp_stats(&self, cpu: usize) -> Option<(u32, u32, u32)> {
         pcp::snapshot(cpu)
+    }
+
+    /// Test hook: pages every rotation so far has spliced back into the free
+    /// lists. Wraps; a caller takes differences.
+    #[cfg(feature = "test-hooks")]
+    pub fn rotate_spliced_pages(&self) -> u32 {
+        ROTATE_SPLICED_PAGES.load(Ordering::Relaxed)
     }
 
     /// Test hook: how the buddy currently accounts one frame.

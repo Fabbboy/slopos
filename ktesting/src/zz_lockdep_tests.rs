@@ -172,8 +172,13 @@ fn lockdep_pool_headroom() -> TestResult {
     if validator_deliberately_off() {
         return TestResult::Skipped;
     }
+    // `class_count` is slots consumed and `registered_class_count` is
+    // declaration sites; the fill checks below want the former and the floor
+    // wants the latter.
+    let slots = lock_graph::class_count();
+    let leaked = lock_graph::class_slots_leaked() as usize;
     let (c, e, ch) = (
-        lock_graph::class_count(),
+        lock_graph::registered_class_count(),
         lock_graph::edge_count(),
         lock_graph::chain_count(),
     );
@@ -183,12 +188,13 @@ fn lockdep_pool_headroom() -> TestResult {
         lock_graph::MAX_CHAINS,
     );
     slopos_ostd::klog_info!(
-        "LOCKDEP HEADROOM: classes={}/{} ({}%) edges={}/{} ({}%) chains={}/{} ({}%) \
+        "LOCKDEP HEADROOM: classes={} slots={}/{} ({}%) edges={}/{} ({}%) chains={}/{} ({}%) \
          held_max={}/{} held_drops={} pop_miss={}/{} chain_hit={} chain_miss={} \
          slots_leaked={}",
         c,
+        slots,
         cc,
-        c * 100 / cc,
+        slots * 100 / cc,
         e,
         ec,
         e * 100 / ec,
@@ -210,11 +216,23 @@ fn lockdep_pool_headroom() -> TestResult {
         "only {} classes registered — the validator is not measuring anything",
         c
     );
+    // The two counters are maintained by one function on two paths; a caller
+    // reading either one has to be able to reconstruct the other, and a
+    // reported class count that has quietly gone back to counting slots shows
+    // up here rather than as an unexplained ratchet bump three commits later.
     assert_test!(
-        c * 100 / cc <= MAX_POOL_FILL_PCT,
-        "class pool {}% full ({}/{})",
-        c * 100 / cc,
+        c + leaked == slots,
+        "{} registered classes + {} leaked slots != {} consumed — the two \
+         counters no longer describe the same table",
         c,
+        leaked,
+        slots
+    );
+    assert_test!(
+        slots * 100 / cc <= MAX_POOL_FILL_PCT,
+        "class pool {}% full ({}/{})",
+        slots * 100 / cc,
+        slots,
         cc
     );
     assert_test!(

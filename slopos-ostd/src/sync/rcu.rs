@@ -189,12 +189,35 @@ fn gp_start_if_idle() {
     });
 }
 
+/// Calls into [`rcu_gp_poll`], per CPU.
+///
+/// This is the only operation that can *complete* a grace period — nothing
+/// else runs the compare-exchange below — so a wait for completion has to
+/// reach it, and one that never does cannot terminate. That makes the count a
+/// clock-free detector for an inline wait open-coded on the callback drain,
+/// which reaches neither [`synchronize_rcu`] nor [`rcu_note_qs`] and so moves
+/// no other counter. Per-CPU for [`rcu_sync_entry_count`]'s reason.
+static RCU_GP_POLLS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// How many times `cpu` has called [`rcu_gp_poll`]. Ungated for
+/// [`rcu_qs_counter`]'s reason.
+pub fn rcu_gp_poll_count(cpu: usize) -> u64 {
+    if cpu >= MAX_CPUS {
+        return 0;
+    }
+    RCU_GP_POLLS[cpu].load(Ordering::Acquire)
+}
+
 /// Advance the grace-period state machine if every online CPU has reported.
 ///
 /// Loads plus at most one compare-exchange: no lock, no allocation, no wait, so
 /// it is legal from a hard IRQ handler. Driven from every CPU's timer tick, so
 /// a period completes on whichever CPU notices first.
 pub fn rcu_gp_poll() {
+    let counting_cpu = get_current_cpu();
+    if counting_cpu < MAX_CPUS {
+        RCU_GP_POLLS[counting_cpu].fetch_add(1, Ordering::Release);
+    }
     let seq = GP_SEQ.load(Ordering::Acquire);
     if seq & GP_IN_FLIGHT == 0 {
         return;
