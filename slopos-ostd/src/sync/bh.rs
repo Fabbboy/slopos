@@ -14,11 +14,15 @@
 //! scheduler's preempt-count assertion.
 
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(any(test, feature = "test-helpers"))]
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::cpu::preempt::PreemptGuard;
 use crate::cpu::x86_64::{interrupts, pcr};
-use crate::sync::{BspToken, CacheAligned};
+use crate::sync::BspToken;
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::sync::CacheAligned;
 
 /// Witness that the holder stands in bottom-half context on this CPU.
 ///
@@ -45,12 +49,14 @@ static RELAXED_DRAIN: AtomicUsize = AtomicUsize::new(0);
 /// indefinitely; what is left over stays pending for the next point.
 const MAX_BH_PASSES: u32 = 8;
 
+#[cfg(any(test, feature = "test-helpers"))]
 struct BhCounters {
     declined_context: AtomicU64,
     declined_reentrant: AtomicU64,
     drains: AtomicU64,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl BhCounters {
     const fn new() -> Self {
         Self {
@@ -62,9 +68,11 @@ impl BhCounters {
 }
 
 /// Not [`crate::sync::CpuLocal`]: its pin guard's drop is the very hook this module hangs off.
+#[cfg(any(test, feature = "test-helpers"))]
 static BH_COUNTERS: [CacheAligned<BhCounters>; pcr::MAX_CPUS] =
     [const { CacheAligned(BhCounters::new()) }; pcr::MAX_CPUS];
 
+#[cfg(any(test, feature = "test-helpers"))]
 #[inline]
 fn counters() -> Option<&'static BhCounters> {
     BH_COUNTERS.get(pcr::get_current_cpu()).map(|slot| &slot.0)
@@ -136,6 +144,7 @@ fn run_pending_slow() {
         || pcr::panic_in_flight_depth() != 0
         || crate::sync::held_lock_count() != 0
     {
+        #[cfg(any(test, feature = "test-helpers"))]
         if let Some(counters) = counters() {
             counters.declined_context.fetch_add(1, Ordering::Relaxed);
         }
@@ -145,6 +154,7 @@ fn run_pending_slow() {
     // Before any guard exists: a decline that had already created one would fire
     // the release hook again from that guard's own drop.
     if pcr::bh_active_swap(true) {
+        #[cfg(any(test, feature = "test-helpers"))]
         if let Some(counters) = counters() {
             counters.declined_reentrant.fetch_add(1, Ordering::Relaxed);
         }
@@ -175,24 +185,28 @@ fn run_pending_slow() {
         pcr::bh_pending_set();
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     if let Some(counters) = counters() {
         counters.drains.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// Calling-CPU declines whose cause was the context rather than re-entrancy.
+#[cfg(any(test, feature = "test-helpers"))]
 #[inline]
 pub fn declined_context() -> u64 {
     counters().map_or(0, |c| c.declined_context.load(Ordering::Relaxed))
 }
 
 /// Calling-CPU declines because it was already inside a drain. Expected to be large.
+#[cfg(any(test, feature = "test-helpers"))]
 #[inline]
 pub fn declined_reentrant() -> u64 {
     counters().map_or(0, |c| c.declined_reentrant.load(Ordering::Relaxed))
 }
 
 /// Drains that ran to completion on the calling CPU.
+#[cfg(any(test, feature = "test-helpers"))]
 #[inline]
 pub fn drains() -> u64 {
     counters().map_or(0, |c| c.drains.load(Ordering::Relaxed))

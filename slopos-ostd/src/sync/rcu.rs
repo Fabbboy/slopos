@@ -13,7 +13,7 @@
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use crate::cpu::preempt::PreemptGuard;
 use crate::cpu::x86_64::pcr::{
@@ -191,8 +191,10 @@ fn gp_start_if_idle() {
 
 /// Calls into [`rcu_gp_poll`], per CPU: the only site that can complete a grace
 /// period, so a wait that never reaches it cannot terminate.
+#[cfg(any(test, feature = "test-helpers"))]
 static RCU_GP_POLLS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn rcu_gp_poll_count(cpu: usize) -> u64 {
     if cpu >= MAX_CPUS {
         return 0;
@@ -206,9 +208,12 @@ pub fn rcu_gp_poll_count(cpu: usize) -> u64 {
 /// it is legal from a hard IRQ handler. Driven from every CPU's timer tick, so
 /// a period completes on whichever CPU notices first.
 pub fn rcu_gp_poll() {
-    let counting_cpu = get_current_cpu();
-    if counting_cpu < MAX_CPUS {
-        RCU_GP_POLLS[counting_cpu].fetch_add(1, Ordering::Release);
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        let counting_cpu = get_current_cpu();
+        if counting_cpu < MAX_CPUS {
+            RCU_GP_POLLS[counting_cpu].fetch_add(1, Ordering::Release);
+        }
     }
     let seq = GP_SEQ.load(Ordering::Acquire);
     if seq & GP_IN_FLIGHT == 0 {
@@ -353,8 +358,10 @@ fn monotonic_ns() -> u64 {
 }
 
 /// Entries into [`synchronize_rcu`], per CPU.
+#[cfg(any(test, feature = "test-helpers"))]
 static RCU_SYNC_ENTRIES: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn rcu_sync_entry_count(cpu: usize) -> u64 {
     if cpu >= MAX_CPUS {
         return 0;
@@ -371,9 +378,12 @@ pub fn rcu_sync_entry_count(cpu: usize) -> u64 {
 /// up and letting the caller free hands memory back while a reader may still be
 /// dereferencing it.
 pub fn synchronize_rcu() {
-    let entry_cpu = get_current_cpu();
-    if entry_cpu < MAX_CPUS {
-        RCU_SYNC_ENTRIES[entry_cpu].fetch_add(1, Ordering::Release);
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        let entry_cpu = get_current_cpu();
+        if entry_cpu < MAX_CPUS {
+            RCU_SYNC_ENTRIES[entry_cpu].fetch_add(1, Ordering::Release);
+        }
     }
 
     let target = gp_snap(GP_SEQ.load(Ordering::Acquire));
@@ -591,6 +601,14 @@ pub fn rcu_call_typed<T: Send + 'static>(arg: crate::mm::KBox<T>, drop_fn: fn(cr
 /// `call_rcu`.
 static CB_BACKLOG: AtomicBool = AtomicBool::new(false);
 
+/// Batches split off the ready list but not yet invoked.
+///
+/// `drain_ready` clears [`CB_BACKLOG`] under the batch lock and invokes outside
+/// it, so the flag alone lets [`rcu_barrier`] return while a callback it
+/// promised is still in flight on another CPU. A callback must therefore not
+/// call `rcu_barrier` itself.
+static CB_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+
 /// Check from the timer tick whether deferred callbacks need processing.
 ///
 /// Hardirq-safe.
@@ -716,10 +734,19 @@ fn drain_ready(limit: usize) -> bool {
     let batch = split_off(&mut batches.done, limit);
     let ready = !batches.done.is_null();
     let more = ready || !batches.wait.is_null();
+    // Published while the batch is still owned here, so no observer sees both
+    // an empty queue and an uninvoked batch.
+    let in_flight = !batch.is_null();
+    if in_flight {
+        CB_INFLIGHT.fetch_add(1, Ordering::AcqRel);
+    }
     CB_BACKLOG.store(more, Ordering::Release);
     drop(batches);
 
     invoke_chain(batch);
+    if in_flight {
+        CB_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }
 
     // A batch was tagged but its period may not have started, and nothing else
     // starts one on the callback path.
@@ -763,7 +790,10 @@ pub(crate) fn invoke_callbacks(_bh: &crate::sync::bh::BhContext<'_>) {
 /// Drives the drain itself rather than waiting on a peer, so it makes progress
 /// from a context that will not go idle.
 pub fn rcu_barrier() {
-    while !PENDING_HEAD.load(Ordering::Acquire).is_null() || CB_BACKLOG.load(Ordering::Acquire) {
+    while !PENDING_HEAD.load(Ordering::Acquire).is_null()
+        || CB_BACKLOG.load(Ordering::Acquire)
+        || CB_INFLIGHT.load(Ordering::Acquire) != 0
+    {
         RCU_CB_PENDING.store(true, Ordering::Release);
         rcu_process_callbacks();
         rcu_note_qs();
@@ -1004,7 +1034,8 @@ fn drop_typed<T: Send + 'static>(_b: crate::mm::KBox<T>) {
 ///
 /// Diagnostics, and the only way a test can tell a *declined* report from a
 /// silent one. Ungated rather than `test-helpers`-gated because
-/// `slopos-ostd/test-helpers` is not in the kernel test build's feature chain.
+/// Ungated because the grace-period algorithm reads it, unlike the two
+/// observational counters above.
 pub fn rcu_qs_counter(cpu: usize) -> u64 {
     if cpu >= MAX_CPUS {
         return 0;

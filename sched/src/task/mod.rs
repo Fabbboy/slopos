@@ -1,5 +1,6 @@
 use core::ffi::c_void;
 
+#[cfg(feature = "test-hooks")]
 mod kernel_io_hold;
 mod pending_spawn;
 mod task_cleanup_hooks;
@@ -24,10 +25,23 @@ pub use slopos_abi::task::{
 };
 pub use slopos_arch::arch::idt::IdtEntry;
 
+#[cfg(feature = "test-hooks")]
 pub(crate) use kernel_io_hold::kernel_io_hold_claim;
+#[cfg(feature = "test-hooks")]
 pub use kernel_io_hold::{
     KernelIoHold, hold_kernel_io_all, kernel_io_dispatchable_count, republish_held_kernel_io,
 };
+
+/// No hold can be armed outside the tests build, so every dispatch site
+/// const-folds this away rather than carrying a branch.
+#[cfg(not(feature = "test-hooks"))]
+#[inline(always)]
+pub(crate) fn kernel_io_hold_claim(
+    _task: &crate::task_struct::Task,
+    _from: slopos_ostd::task::SchedPlacement,
+) -> bool {
+    false
+}
 pub use pending_spawn::SpawnGuard;
 pub use task_cleanup_hooks::*;
 pub use task_family::*;
