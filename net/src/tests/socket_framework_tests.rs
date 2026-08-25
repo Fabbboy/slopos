@@ -21,8 +21,8 @@ fn scope() -> Result<NetTestScope, &'static str> {
 }
 
 pub fn test_slab_alloc_free_cycle() -> TestResult {
-    // The counts are machine-wide, not this test's: one socket opened by a live
-    // thread makes every one of them off by one.
+    // The counts are machine-wide, so the table has to start empty and end
+    // empty; the scope's `enter` and `Drop` are what retire it on both edges.
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),
@@ -53,7 +53,7 @@ pub fn test_slab_alloc_free_cycle() -> TestResult {
 
 pub fn test_ephemeral_port_exhaustion() -> TestResult {
     // Draining the whole range only reaches `EPHEMERAL_PORT_COUNT` if the
-    // allocator starts empty, and a live `sendto` auto-bind holds a port.
+    // allocator starts empty, which is what the scope's entry teardown gives.
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),

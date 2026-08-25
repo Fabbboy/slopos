@@ -2,6 +2,7 @@ use super::tests::resolve_pid;
 use core::ptr;
 
 use slopos_abi::addr::PhysAddr;
+use slopos_kernel_services::platform::timer_poll_delay_ms;
 use slopos_ostd::KBox;
 use slopos_ostd::klog_info;
 use slopos_ostd::test_support::page_io;
@@ -32,7 +33,9 @@ impl FreeOutcome {
     fn describe(self) -> &'static str {
         match self {
             FreeOutcome::NotHandedOut => "was not handed out to begin with, so it was never freed",
-            FreeOutcome::StillHandedOut => "did not come back off the allocator's books",
+            FreeOutcome::StillHandedOut => {
+                "was still on the allocator's books a confirmation window after the free"
+            }
             FreeOutcome::Returned => "came back off the allocator's books",
         }
     }
@@ -41,31 +44,44 @@ impl FreeOutcome {
 /// Free `pa` and report what that did to the buddy's books.
 ///
 /// Asks about a frame the test itself holds rather than about the global free
-/// count, which three other CPUs move. The post-free read is the one place a
-/// peer can intrude — it may already have taken the frame back out — so
-/// `Returned` is spelled as the states that mean the buddy accounted for it,
-/// and `HandedOut` is only believed after a second read, since a peer's
-/// reallocation is indistinguishable from a free that did nothing.
+/// count, which three other CPUs move. The read after the free is the one place
+/// a peer can intrude: it can take the frame straight back out, and the books
+/// spell that exactly as a free that did nothing. So `HandedOut` is not
+/// believed on sight — it is re-read after [`FREE_CONFIRM_MS`] of real time,
+/// which outlasts a peer's transient allocation but not a long-lived one. That
+/// residue is why `StillHandedOut` claims only what the second read saw.
 fn free_and_observe(pa: PhysAddr) -> FreeOutcome {
     if frame_accounting(pa) != FrameAccounting::HandedOut {
         return FreeOutcome::NotHandedOut;
     }
     free_page_frame(pa);
-    for _ in 0..FREE_CONFIRM_READS {
-        match frame_accounting(pa) {
-            FrameAccounting::Free
-            | FrameAccounting::Cached
-            | FrameAccounting::Quarantined
-            | FrameAccounting::Withheld => return FreeOutcome::Returned,
-            _ => core::hint::spin_loop(),
-        }
+    if off_the_books(pa) {
+        return FreeOutcome::Returned;
     }
-    FreeOutcome::StillHandedOut
+    timer_poll_delay_ms(FREE_CONFIRM_MS);
+    if off_the_books(pa) {
+        FreeOutcome::Returned
+    } else {
+        FreeOutcome::StillHandedOut
+    }
 }
 
-/// A peer can hand the frame straight back out, so `HandedOut` after a free has
-/// to be seen more than once before it is a leak rather than a reallocation.
-const FREE_CONFIRM_READS: u32 = 64;
+fn off_the_books(pa: PhysAddr) -> bool {
+    matches!(
+        frame_accounting(pa),
+        FrameAccounting::Free
+            | FrameAccounting::Cached
+            | FrameAccounting::Quarantined
+            | FrameAccounting::Withheld
+    )
+}
+
+/// How long a post-free `HandedOut` is given to resolve itself before it counts
+/// as a leak. Several timer ticks, and a heuristic rather than a bound: nothing
+/// caps how long a peer holds a page it legitimately allocated, so this trades
+/// a longer failing run for not reporting that peer as a leak. Paid only on a
+/// reading that needs it, which a working allocator almost never produces.
+const FREE_CONFIRM_MS: u32 = 50;
 
 pub fn test_page_alloc_until_oom() -> TestResult {
     let free_before = get_page_allocator_stats().free;

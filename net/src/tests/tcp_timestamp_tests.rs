@@ -225,3 +225,23 @@ pub fn test_non_ts_fallback_karn_sampling() -> TestResult {
     );
     pass!()
 }
+
+// This file carried seven tests and no registrations, so none of them had ever
+// run: TCP timestamp negotiation, PAWS and RTTM were untested in a tree that
+// implements all three.
+slopos_testing::stest!(
+    name = test_active_open_ts_negotiation,
+    suite = tcp_timestamp
+);
+slopos_testing::stest!(name = test_ts_declined_by_peer, suite = tcp_timestamp);
+slopos_testing::stest!(name = test_data_segments_carry_tsopt, suite = tcp_timestamp);
+slopos_testing::stest!(
+    name = test_paws_rejects_old_duplicate,
+    suite = tcp_timestamp
+);
+slopos_testing::stest!(name = test_paws_allows_rst, suite = tcp_timestamp);
+slopos_testing::stest!(name = test_rttm_samples_every_ack, suite = tcp_timestamp);
+slopos_testing::stest!(
+    name = test_non_ts_fallback_karn_sampling,
+    suite = tcp_timestamp
+);

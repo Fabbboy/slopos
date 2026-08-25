@@ -269,12 +269,7 @@ pub fn test_socket_close_invalid() -> TestResult {
 }
 
 pub fn test_socket_close_frees_slot() -> TestResult {
-    // Slot identity, not just "a slot": a socket opened by a live thread
-    // between the close and the re-create takes the freed index first.
-    let _scope = match scope() {
-        Ok(s) => s,
-        Err(m) => return fail!("{}", m),
-    };
+    reset();
     let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     assert_eq_test!(socket_close(sock as u32), 0);
     let next = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
@@ -321,10 +316,11 @@ pub fn test_socket_state_after_bind() -> TestResult {
 }
 
 pub fn test_socket_reset_all() -> TestResult {
-    // The scope is what makes the *global* counts below assertable: it gates
-    // ingress, so no live thread can install a socket or a PCB between the
-    // reset and the reads. "Reset all" is the contract, and a version that only
-    // checks this test's own two sockets passes while leaving a stranger's.
+    // "Reset all" is the contract, so the global counts are what has to be
+    // asserted — a version checking only this test's own two sockets passes
+    // while leaving a stranger's. The scope is what makes those counts a known
+    // quantity: its `enter` and `Drop` each retire the socket table, the PCBs,
+    // the demux entries and the ephemeral ports.
     let _scope = match scope() {
         Ok(s) => s,
         Err(m) => return fail!("{}", m),

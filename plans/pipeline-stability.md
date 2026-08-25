@@ -426,13 +426,20 @@ everything can no longer report as a run that passed everything.
   lock**, while every path that drains a magazine into the free lists does both
   halves under it — so a peer draining in that window was counted twice and
   `free` could exceed `total`.
-- **`virtio_net_transmit` never counted what it sent.** `NetDevice::tx` and
-  `submit_tx_zerocopy` both bump `TX_PACKETS`/`TX_BYTES`; the service path — DNS
-  queries, `transmit_udp_packet`, everything reaching the ring through
-  `virtio_net_transmit` — submitted the frame and returned without touching
-  either, so every one of those frames was invisible to `ip -s` and to `sysmon`.
-  Found by a rewritten `test_tx_fire_and_forget` asserting on the counter the
-  submit was supposed to move, and failing deterministically in three runs.
+- **Seven TCP timestamp tests had never run.**
+  `net/src/tests/tcp_timestamp_tests.rs` carried seven `pub fn test_*` and zero
+  `stest!` registrations, so timestamp negotiation, PAWS and RTTM were untested
+  in a tree that implements all three. The module compiled — it is declared in
+  `tests/mod.rs` — which is exactly why nothing noticed. Registered here; the
+  test-count ratchet moves by seven.
+- **`virtio_net_transmit` and `transmit_udp_packet` never counted what they
+  sent.** `NetDevice::tx` and `submit_tx_zerocopy` both bump
+  `TX_PACKETS`/`TX_BYTES`; the two paths that reach the ring *without* going
+  through `NetDevice::tx` did not, so every DNS query and every frame the
+  service path sent was invisible to `ip -s` and to `sysmon`. Found by a
+  rewritten `test_tx_fire_and_forget` asserting on the counter the submit was
+  supposed to move, and failing deterministically in three runs; the second path
+  turned up while fixing a test whose assertion was literally `ok || !ok`.
 - **The reclaim tier's budget was specified in pages and enforced in blocks.**
   `Reclaimable::reclaim`'s contract is "at most `want` pages";
   `QuarantineReclaim::reclaim` forwarded `want` straight to

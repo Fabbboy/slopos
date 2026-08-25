@@ -6,7 +6,6 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_kernel_services::clock::monotonic_ns;
 use slopos_kernel_services::platform::timer_poll_delay_ms;
 use slopos_ostd::KArc;
 use slopos_ostd::sync::RcuArcSlot;
@@ -47,7 +46,9 @@ pub fn drain_until(done: impl Fn() -> bool) -> bool {
     loop {
         slopos_ostd::sync::rcu_raise_softirq();
         slopos_ostd::sync::rcu_process_callbacks();
-        slopos_ostd::sync::rcu_note_qs();
+        // No `rcu_note_qs` of its own: the budget below counts this CPU's
+        // reports, and a loop that reports spends its own budget whether or not
+        // the guest advanced. The tick reports for it.
         slopos_ostd::sync::rcu_gp_poll();
         if done() {
             return true;
@@ -159,16 +160,15 @@ pub fn test_synchronize_rcu_completes_a_grace_period() -> TestResult {
 /// itself: this CPU's entries into `synchronize_rcu`, which only the drain can
 /// have made here, must not move.
 ///
-/// The count is the precise check and only sees a wait routed through
-/// `synchronize_rcu`; an inline `while !gp_done(..) { rcu_gp_poll() }` in the
-/// invoke step moves no counter. The elapsed ceiling is what still catches
-/// that, and it is deliberately coarse: 32 tick-driven grace periods are
-/// seconds, an honest 32 passes are microseconds, so `CEILING_MS` sits ~40x
-/// above the honest cost and ~1/10 of the broken one — far outside anything
-/// host steal reaches.
+/// That count only sees a wait routed through `synchronize_rcu`, and an
+/// open-coded one is caught by the second check rather than by a clock: inside
+/// the masked window no grace period can complete until this CPU reports a
+/// quiescent state, so an inline wait is never merely slow. Either it reports —
+/// and nothing on the drain's own path does — or it never terminates and takes
+/// the run down loudly instead of passing. An elapsed ceiling has no case left
+/// to catch, which is why there is none.
 pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
     const PASSES: u32 = 32;
-    const CEILING_MS: u64 = 2_000;
 
     // Queue work so the passes have something to tag and retire rather than
     // early-returning on an empty backlog.
@@ -184,34 +184,38 @@ pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
     // Sampled inside one masked window with the reads it indexes: `rcu_note_qs`
     // increments the slot of whichever CPU is live, so a `cpu` taken before the
     // window names a slot the reports need not have touched.
-    let (before, after, elapsed_ns) =
+    let (sync_before, sync_after, qs_before, qs_after) =
         slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
             let cpu = slopos_arch::pcr::get_current_cpu();
-            let started = monotonic_ns();
-            let before = slopos_ostd::sync::rcu_sync_entry_count(cpu);
+            let sync_before = slopos_ostd::sync::rcu_sync_entry_count(cpu);
+            let qs_before = slopos_ostd::sync::rcu_qs_counter(cpu);
             for _ in 0..PASSES {
                 slopos_ostd::sync::rcu_raise_softirq();
                 slopos_ostd::sync::rcu_process_callbacks();
             }
-            let after = slopos_ostd::sync::rcu_sync_entry_count(cpu);
-            (before, after, monotonic_ns().saturating_sub(started))
+            (
+                sync_before,
+                slopos_ostd::sync::rcu_sync_entry_count(cpu),
+                qs_before,
+                slopos_ostd::sync::rcu_qs_counter(cpu),
+            )
         });
 
-    if after != before {
+    if sync_after != sync_before {
         return fail!(
             "{} drain passes entered the grace-period wait {} time(s) — the invoke step is \
              waiting again",
             PASSES,
-            after.wrapping_sub(before)
+            sync_after.wrapping_sub(sync_before)
         );
     }
-    let elapsed_ms = elapsed_ns / 1_000_000;
-    if elapsed_ms > CEILING_MS {
+    if qs_after != qs_before {
         return fail!(
-            "{} drain passes took {}ms — the invoke step is waiting inline, without \
-             going through synchronize_rcu",
+            "{} drain passes reported {} quiescent state(s) with interrupts masked — nothing \
+             on the drain's path reports, so the invoke step is waiting for a grace period \
+             it open-coded",
             PASSES,
-            elapsed_ms
+            qs_after.wrapping_sub(qs_before)
         );
     }
     TestResult::Pass

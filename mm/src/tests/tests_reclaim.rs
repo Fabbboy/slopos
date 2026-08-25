@@ -1,12 +1,14 @@
 //! Reclaim: bounding holding time, not just acquisition.
 //!
-//! Pins the two properties that make the tier trustworthy: it actually frees
-//! pages, and it refuses rather than blocks when it cannot.
+//! Pins the three properties that make the tier trustworthy: it actually frees
+//! pages, it refuses rather than blocks when it cannot, and it stops asking at
+//! its budget.
 //!
-//! Both are asserted against a frame this file allocated and parked itself.
-//! The pools the reclaimers report on are shared, so three other CPUs fill and
-//! drain them while a test reads; a frame nobody else holds is the one thing
-//! here whose accounting only this file moves.
+//! Nothing here may assert on the size of a pool. A frame this file parked is
+//! its own until two epoch closures make it releasable; from that instant it
+//! is anyone's, because every idle CPU's bottom half splices 64 pages off the
+//! releasable backlog (`sched::runtime`). What stays this file's own is the
+//! accounting of a specific frame, and the reclaim tier's own call counts.
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::frame::FrameAllocOptions;
@@ -17,7 +19,7 @@ use slopos_testing::{assert_test, fail, pass};
 use crate::mmu::quiesce;
 use crate::page_alloc::{
     FrameAccounting, alloc_kernel_page_with, frame_accounting, free_page_frame,
-    max_reclaim_unit_pages,
+    quarantine_reclaim_asks,
 };
 
 /// Allocate a frame and free it into the quarantine's incoming list. Release
@@ -67,24 +69,47 @@ pub fn test_reclaim_registrants_report_without_freeing() -> TestResult {
     pass!()
 }
 
-/// `run(0)` is a no-op, and `run` stops asking once the budget is met.
+/// `run(0)` reaches no registrant, and `run(1)` asks the first one once.
 ///
-/// Not `freed <= want`: the quarantine releases whole buddy blocks, so the last
-/// one legitimately carries the total past the budget. What `run` must not do
-/// is keep asking after that — the overshoot is bounded by one block for the
-/// whole call, not one per pass or one per registrant.
+/// Not a page bound, and not the total either. `run` hands a registrant what
+/// is *left* of the budget, so an ask made after the budget is met is an ask
+/// for zero pages; and the only pool holding anything during a test — the
+/// quarantine — is the first one asked. A `run` that dropped its budget checks
+/// altogether therefore returns exactly what a correct one returns, which is
+/// why the count of asks is the signal here and no arithmetic on `freed` is.
+///
+/// Frames are parked first so the one ask is a satisfied one rather than a
+/// walk over an empty backlog. They are not asserted on: from the closure that
+/// makes them releasable they are anyone's, and every idle CPU's bottom half
+/// splices 64 pages off that backlog (`sched::runtime`).
 pub fn test_reclaim_run_respects_its_bound() -> TestResult {
+    let before = quarantine_reclaim_asks();
     assert_test!(reclaim::run(0) == 0, "run(0) freed pages");
+    let asks = quarantine_reclaim_asks().wrapping_sub(before);
+    assert_test!(asks == 0, "run(0) put {} asks to the quarantine", asks);
 
-    let want = 4u32;
-    let freed = reclaim::run(want);
-    let ceiling = want.saturating_add(max_reclaim_unit_pages().saturating_sub(1));
+    for _ in 0..8 {
+        if park_a_frame().is_none() {
+            return fail!("witness frame allocation");
+        }
+    }
+    // Two closures carry the batch from `incoming` through `draining` into the
+    // releasable backlog, the only list reclaim splices from.
+    for _ in 0..2 {
+        if quiesce::force_close_epoch_for_test().is_none() {
+            return fail!("no epoch closed under a full set of acks");
+        }
+    }
+
+    let before = quarantine_reclaim_asks();
+    let freed = reclaim::run(1);
+    let asks = quarantine_reclaim_asks().wrapping_sub(before);
     assert_test!(
-        freed <= ceiling,
-        "asked for {} pages and got {} back, over the one-unit overshoot at {}",
-        want,
-        freed,
-        ceiling
+        asks == 1,
+        "run(1) put {} asks to the quarantine and came back with {} pages -- \
+         one ask meets a one-page budget, so the rest came after it was met",
+        asks,
+        freed
     );
     pass!()
 }

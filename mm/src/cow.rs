@@ -34,6 +34,13 @@ pub fn handle_cow_fault(vm_space: &mut KArc<VmSpace>, fault_addr: u64) -> Result
         return Err(MmError::InvalidAddress);
     }
 
+    // Ahead of the dispatch rather than inside one arm: both arms end in a
+    // cursor whose only recourse under contention is a bounded spin taken with
+    // the per-process lock held, and so with interrupts masked.
+    if !vm_space_is_exclusive(vm_space) {
+        return Err(MmError::Retry);
+    }
+
     let ref_count = reference_count_at(Paddr::new(old_phys.as_u64() & !(PAGE_SIZE_4KB - 1)));
 
     if ref_count <= 1 {
@@ -60,10 +67,6 @@ fn resolve_multi_ref(
     aligned_vaddr: VirtAddr,
     old_phys: PhysAddr,
 ) -> Result<(), MmError> {
-    if !vm_space_is_exclusive(vm_space) {
-        return Err(MmError::Retry);
-    }
-
     let new_phys = alloc_kernel_page();
     if new_phys.is_null() {
         return Err(MmError::NoMemory);

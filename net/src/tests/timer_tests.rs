@@ -25,6 +25,14 @@ fn fresh_wheel() -> (KBox<NetTimerWheel>, NetTestScope) {
     (wheel, scope)
 }
 
+/// For the three tests that never read the clock — they schedule and cancel by
+/// token and never fire anything. The scope exists to pin `now_ms`; a test that
+/// does not depend on the clock does not need it, and a scope registers a
+/// device, adds a route and retires the socket table twice for nothing.
+fn fresh_wheel_unpinned() -> KBox<NetTimerWheel> {
+    KBox::try_init(NetTimerWheel::init()).expect("alloc")
+}
+
 fn count_kind(fired: &[FiredTimer], kind: TimerKind) -> usize {
     fired.iter().filter(|t| t.kind == kind).count()
 }
@@ -144,7 +152,7 @@ pub fn test_timer_cancel_already_fired() -> TestResult {
 }
 
 pub fn test_timer_cancel_invalid_token() -> TestResult {
-    let (wheel, _scope) = fresh_wheel();
+    let wheel = fresh_wheel_unpinned();
     assert_test!(
         !wheel.cancel(TimerToken::INVALID),
         "cancel(INVALID) returns false"
@@ -172,7 +180,7 @@ pub fn test_timer_cancel_one_of_many() -> TestResult {
 }
 
 pub fn test_timer_double_cancel() -> TestResult {
-    let (wheel, _scope) = fresh_wheel();
+    let wheel = fresh_wheel_unpinned();
 
     let token = wheel.schedule(5, TimerKind::ArpExpire, 42);
     assert_test!(wheel.cancel(token), "first cancel succeeds");
@@ -305,7 +313,7 @@ pub fn test_timer_multiple_same_deadline() -> TestResult {
 }
 
 pub fn test_timer_pending_count_with_cancels() -> TestResult {
-    let (wheel, _scope) = fresh_wheel();
+    let wheel = fresh_wheel_unpinned();
 
     let t1 = wheel.schedule(5, TimerKind::ArpExpire, 1);
     let _t2 = wheel.schedule(5, TimerKind::ArpRetransmit, 2);
