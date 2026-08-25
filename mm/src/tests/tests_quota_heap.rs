@@ -6,6 +6,7 @@
 
 use slopos_abi::quota::ResourceKind;
 use slopos_ostd::KVec;
+use slopos_ostd::cpu::preempt::PreemptGuard;
 use slopos_ostd::process::quota::{root, stats};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, pass};
@@ -41,19 +42,22 @@ pub fn test_quota_heap_backing_reconciles_with_the_buddy() -> TestResult {
     pass!()
 }
 
-/// The three samples are taken adjacent to the calls they bracket, with
-/// interrupts masked: the charge is a kernel-wide row, so a sample held across
-/// the rest of a test body describes whatever the other CPUs did in between.
+/// The three samples bracket their calls directly. `HEAP_PAGES` is kernel-wide,
+/// so no guard here makes them adjacent — the preempt hold only keeps this
+/// CPU's own reschedule out of the bracket, and the assertions are direction
+/// checks that survive a peer either way. Not `IrqDisabled`: the large tier
+/// walks an unbounded free list and then allocates from the buddy.
 pub fn test_quota_heap_large_alloc_is_charged() -> TestResult {
     const BYTES: usize = 4 * (MAX_SLAB_CLASS_BYTES + 1);
 
-    let (ptr, before, with, after) = slopos_arch::cpu::IrqDisabled::with(|_irq| {
+    let (ptr, before, with, after) = {
+        let _preempt = PreemptGuard::new();
         let before = charged_heap_pages();
         let ptr = kmalloc(BYTES);
         let with = charged_heap_pages();
         kfree(ptr);
         (ptr, before, with, charged_heap_pages())
-    });
+    };
 
     assert_test!(!ptr.is_null(), "large allocation failed");
     assert_test!(

@@ -181,16 +181,43 @@ fn held_ids_snapshot() -> KernelIoTaskIds {
 
 /// Ids are published before the depth bump so [`kernel_io_hold_covers`] never
 /// answers `true` for a task the release walk will not visit.
+///
+/// A union with what is already held, never a replacement. The depth counter
+/// nests; the id set has to nest with it, or an inner arm taken after a stop
+/// deregistered — or before one bound its id — drops that id, the outermost
+/// disarm never visits it, and the task is stranded in `Held` on no queue, past
+/// where the rescue sweep looks.
 pub fn arm_kernel_io_hold() {
-    let stops = registered_stops();
-    store_held_ids(
-        stops
-            .iter()
-            .flatten()
-            .map(|stop| stop.task_id())
-            .filter(|id| *id != INVALID_TASK_ID),
-    );
+    let mut merged = held_ids_snapshot();
+    for stop in registered_stops().iter().flatten() {
+        merged.push_unique(stop.task_id());
+    }
+    store_held_ids(merged.iter());
     HOLD_DEPTH.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Union the registry into an armed hold's cover, without touching the depth.
+///
+/// A stop that registers — or binds its id, which `KernelIoStop::task_id`
+/// leaves `INVALID_TASK_ID` until the thread first runs — after the arm is
+/// otherwise outside the cover for the hold's whole life: every claim declines
+/// it, so it stays freely queueable while the hold claims to have swept
+/// everything. Refreshing inside the settle loop closes that window rather than
+/// leaving it to be discovered as a flake.
+///
+/// A no-op when no hold is armed, so a caller need not check first.
+pub fn refresh_kernel_io_hold() {
+    if !kernel_io_hold_armed() {
+        return;
+    }
+    let mut merged = held_ids_snapshot();
+    let before = merged.len;
+    for stop in registered_stops().iter().flatten() {
+        merged.push_unique(stop.task_id());
+    }
+    if merged.len != before {
+        store_held_ids(merged.iter());
+    }
 }
 
 /// Release one level. `Some` only for the level that takes the depth to zero,
@@ -255,14 +282,24 @@ pub fn clear_kernel_io_hold_after_panic() -> Option<KernelIoTaskIds> {
     Some(held)
 }
 
-/// Arm a hold covering exactly `ids`, handing back the set it displaced so a
-/// test nested inside a real hold can put that set back.
+/// Arm a hold additionally covering `ids`, handing back the set it found so a
+/// test nested inside a real hold can restore exactly that.
+///
+/// Additive rather than displacing so the panic path stays correct: unwinding
+/// runs `KernelIoHold::drop` (which takes the depth 2 -> 1 and republishes
+/// nothing) *before* `clear_kernel_io_hold_after_panic` snapshots `HELD_IDS`.
+/// A displacing helper would leave that snapshot holding only the test's
+/// synthetic ids, and every real kernel-I/O thread stranded in `Held`.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn arm_kernel_io_hold_over_for_test(ids: &[u32]) -> KernelIoTaskIds {
-    let displaced = held_ids_snapshot();
-    store_held_ids(ids.iter().copied());
+    let found = held_ids_snapshot();
+    let mut merged = held_ids_snapshot();
+    for id in ids {
+        merged.push_unique(*id);
+    }
+    store_held_ids(merged.iter());
     HOLD_DEPTH.fetch_add(1, Ordering::AcqRel);
-    displaced
+    found
 }
 
 /// Saturating, like [`disarm_kernel_io_hold`]: a test that unwinds past its own
@@ -725,6 +762,18 @@ impl KernelIoTaskIds {
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
         self.ids[..self.len].iter().copied()
+    }
+
+    /// Ignores [`INVALID_TASK_ID`] and duplicates, and saturates rather than
+    /// panicking: the set is a *cover*, and a nested arm that overflowed it
+    /// would drop an id the release walk must still visit.
+    #[inline]
+    fn push_unique(&mut self, task_id: u32) {
+        if task_id == INVALID_TASK_ID || self.contains(task_id) || self.len == self.ids.len() {
+            return;
+        }
+        self.ids[self.len] = task_id;
+        self.len += 1;
     }
 }
 

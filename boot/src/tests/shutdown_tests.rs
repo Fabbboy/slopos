@@ -241,10 +241,12 @@ pub fn test_shutdown_partial_init() -> TestResult {
     TestResult::Pass
 }
 
+/// Repeated teardown-and-reinit stays safe, and a task can still be created
+/// after each round.
 pub fn test_rapid_shutdown_cycles() -> TestResult {
     const CYCLES: usize = 20;
 
-    for _i in 0..CYCLES {
+    for cycle in 0..CYCLES {
         let _fixture = ShutdownFixture::new();
 
         let task_id = task_create(
@@ -254,7 +256,24 @@ pub fn test_rapid_shutdown_cycles() -> TestResult {
             TaskPriority::Normal.as_u8(),
             TASK_FLAG_KERNEL_MODE,
         );
-        assert_test!(task_id != INVALID_TASK_ID, "cycle task creation failed");
+        assert_test!(
+            task_id != INVALID_TASK_ID,
+            "cycle {} task creation failed",
+            cycle
+        );
+
+        task_shutdown_population();
+        scheduler_shutdown();
+        assert_test!(
+            reset_registry() == 0,
+            "cycle {} registry reset failed",
+            cycle
+        );
+        assert_test!(
+            init_scheduler() == 0,
+            "cycle {} scheduler reinit failed",
+            cycle
+        );
     }
 
     TestResult::Pass

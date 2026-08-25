@@ -4,14 +4,11 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::socket::*;
+use crate::tests::env_wait::errno_i64;
 use crate::types::{Ipv4Addr, Port, SockAddr};
 
 fn reset() {
     socket_reset_all();
-}
-
-fn errno_i64(errno: u64) -> i64 {
-    errno as i64
 }
 
 pub fn test_udp_t2_dispatch_delivery_and_unbound_drop() -> TestResult {

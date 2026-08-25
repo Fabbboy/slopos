@@ -11,6 +11,11 @@
 #   <phase> <TAB> <pool> <TAB> <cap>   exceeding it FAILS the run
 #   band <phase> <pool> <lo> <hi>      leaving it prints DRIFT and passes
 #
+# A band is advisory in *both* directions. What stops a pool that quietly
+# stopped being counted from reading as healthy is the `min-edges` /
+# `min-chains` floor below, not the band's low end — see "What the bands give
+# up".
+#
 # Either kind matching no LOCKDEP[...] line is a dead entry and fails the gate,
 # because a phase that stopped reporting looks exactly like a phase that passed.
 # An entry records what a pool *is*, not that the value is acceptable.
@@ -54,17 +59,29 @@
 # What the bands give up
 # ----------------------
 #
-# The bands lose the ability to notice that a new, *consistent, non-cyclic*
-# nesting appeared between two already-registered classes, when it adds fewer
-# edges or chains than the band is wide (18 to 54 here). That is acceptable for
-# two reasons. First, the defect — an *inverted* acquire order, A→B where B→A
-# exists — is caught by the cycle detector and reported in `violations=`, which
-# this gate still fails on and which no count threshold was ever what caught.
-# Second, the exact caps already missed anything smaller than their spread: they
-# were set at an observed maximum plus one spread, so a change of fewer than 7
-# to 9 chains passed silently under the old design too. The blind spot is
-# widened, not created, and what is lost is a review prompt that now still
-# reaches the operator as a DRIFT line instead of failing an otherwise green run.
+# Stated exactly, because understating it is how a gate ends up trusted for
+# something it does not do: a banded pool has NO upper failure of its own. The
+# only ceiling left above it is `max-fill-pct 70` — 1433 of 2048 chains, 716 of
+# 1024 edges, roughly 3.5x the observed values, and a number that rises
+# automatically if MAX_CHAINS is ever raised. So *any* growth in observed
+# orderings below that ceiling now passes green, reaching the operator only as
+# a DRIFT line on a passing run's stderr.
+#
+# Concretely, the bands lose the ability to *fail* on a new, consistent,
+# non-cyclic nesting between two already-registered classes. That is a real
+# loss, and it has been paid before: `1858edd` moved the kernel phase 351 -> 359
+# with no class movement at all, and the chain count was the only signal that
+# the reclaim tests had taken the quiesce and quarantine locks around the buddy
+# lock — an ordering the kernel phase previously reached only from process exit.
+# A band prints DRIFT there instead of failing.
+#
+# It is accepted because the *defect* is not what was lost. An inverted acquire
+# order — A→B where B→A exists — is caught by the cycle detector and reported in
+# `violations=`, which this gate still fails on, and which no count threshold was
+# ever what caught. A new consistent nesting is a design change, and a design
+# change that fails an otherwise green run four times in fifteen teaches
+# everyone that red means re-run, which costs more than the prompt is worth. The
+# prompt still reaches the operator, as a DRIFT line.
 
 
 # Classes must be well clear of the pool before the validator would disable
@@ -76,8 +93,15 @@ max-fill-pct 70
 # Without a floor, "0 classes" satisfies every ceiling and a validator that
 # stopped registering reports as maximally healthy — the hole `min-records`
 # plugs in the stack-size gate. Mirrors MIN_CLASSES in zz_lockdep_tests.rs.
-# The banded pools get the same floor from their band's low end.
 min-classes 32
+
+# The same hole for the two banded pools, and deliberately NOT the band's low
+# end: a run that happened to observe fewer orderings is exactly as innocent as
+# one that observed more, which is the whole reason those pools carry bands.
+# These sit far under every observation (the smallest is boot's 43 edges / 110
+# chains) so they fail a validator that stopped recording and nothing else.
+min-edges 16
+min-chains 32
 
 require-phase boot
 require-phase post-kernel-tests

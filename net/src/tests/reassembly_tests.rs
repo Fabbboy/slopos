@@ -1,11 +1,14 @@
 use core::sync::atomic::{AtomicU16, Ordering};
 
 use slopos_testing::TestResult;
-use slopos_testing::{assert_eq_test, assert_test, pass};
+use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
+use super::net_scope::NetTestScope;
+use crate::packetbuf::PacketBuf;
+use crate::pool::PACKET_POOL;
 use crate::reassembly::REASSEMBLY_TABLE;
-use crate::timer::NET_TIMER_WHEEL;
-use crate::types::Ipv4Addr;
+use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
+use crate::types::{DevIndex, Ipv4Addr};
 
 const MAX_GROUPS_UNDER_TEST: usize = 32;
 static NEXT_TEST_IDENTIFICATION: AtomicU16 = AtomicU16::new(1);
@@ -23,12 +26,29 @@ fn bytes_are(slice: &[u8], expected: u8) -> bool {
     slice.iter().all(|b| *b == expected)
 }
 
+/// Empties the reassembly table however the test leaves, and before the scope
+/// does. A group that survives holds a timeout token minted in the test wheel,
+/// which the scope's `Drop` clears and deselects — so the next reset would
+/// cancel that index against the live wheel instead.
+struct ResetOnExit;
+
+impl Drop for ResetOnExit {
+    fn drop(&mut self) {
+        reset_reassembly_table();
+    }
+}
+
 pub fn test_reassembly_two_fragments() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    let _reset = ResetOnExit;
     reset_reassembly_table();
 
     let mut table = REASSEMBLY_TABLE.lock();
-    let src = Ipv4Addr([10, 0, 0, 1]);
-    let dst = Ipv4Addr([10, 0, 0, 2]);
+    let src = Ipv4Addr(LOCAL_IP);
+    let dst = Ipv4Addr(REMOTE_IP);
     let identification = next_identification();
     let protocol = 17;
     let frag1 = [0x11; 100];
@@ -62,6 +82,11 @@ pub fn test_reassembly_two_fragments() -> TestResult {
 }
 
 pub fn test_reassembly_timeout_drops_incomplete() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    let _reset = ResetOnExit;
     reset_reassembly_table();
 
     let mut table = REASSEMBLY_TABLE.lock();
@@ -99,6 +124,11 @@ pub fn test_reassembly_timeout_drops_incomplete() -> TestResult {
 }
 
 pub fn test_reassembly_out_of_order() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    let _reset = ResetOnExit;
     reset_reassembly_table();
 
     let mut table = REASSEMBLY_TABLE.lock();
@@ -137,6 +167,11 @@ pub fn test_reassembly_out_of_order() -> TestResult {
 }
 
 pub fn test_reassembly_duplicate_fragment() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    let _reset = ResetOnExit;
     reset_reassembly_table();
 
     let mut table = REASSEMBLY_TABLE.lock();
@@ -181,6 +216,11 @@ pub fn test_reassembly_duplicate_fragment() -> TestResult {
 }
 
 pub fn test_reassembly_max_groups_eviction() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    let _reset = ResetOnExit;
     reset_reassembly_table();
 
     let mut table = REASSEMBLY_TABLE.lock();
@@ -265,22 +305,149 @@ pub fn test_reassembly_max_groups_eviction() -> TestResult {
     pass!()
 }
 
-pub fn test_non_fragmented_bypasses_reassembly() -> TestResult {
+const BYPASS_DST: Ipv4Addr = Ipv4Addr([10, 0, 5, 250]);
+const BYPASS_PROBE_SRC: Ipv4Addr = Ipv4Addr([10, 0, 5, 200]);
+/// Unassigned (RFC 3692), so `dispatch_l4` has no handler and the reassembly
+/// table is the only state an accepted packet can reach.
+const BYPASS_PROTOCOL: u8 = 253;
+const BYPASS_FRAGMENT_LEN: usize = 100;
+
+#[derive(Clone, Copy)]
+struct GroupKey {
+    src: Ipv4Addr,
+    identification: u16,
+}
+
+/// A well-formed IPv4 packet, optionally carrying the More Fragments flag.
+fn ipv4_packet(key: GroupKey, more_fragments: bool) -> Option<PacketBuf> {
+    const HEADER_LEN: usize = 20;
+    const TOTAL_LEN: usize = HEADER_LEN + BYPASS_FRAGMENT_LEN;
+    let mut frame = [0u8; TOTAL_LEN];
+    frame[0] = 0x45;
+    frame[2..4].copy_from_slice(&(TOTAL_LEN as u16).to_be_bytes());
+    frame[4..6].copy_from_slice(&key.identification.to_be_bytes());
+    if more_fragments {
+        frame[6] = 0x20;
+    }
+    frame[8] = 64;
+    frame[9] = BYPASS_PROTOCOL;
+    frame[12..16].copy_from_slice(&key.src.0);
+    frame[16..20].copy_from_slice(&BYPASS_DST.0);
+    let csum = crate::checksum::internet_checksum(&frame[..HEADER_LEN]);
+    frame[10..12].copy_from_slice(&csum.to_be_bytes());
+    frame[HEADER_LEN..].fill(0x5A);
+    PacketBuf::from_raw_copy(&frame)
+}
+
+fn drive_ingress(dev: DevIndex, key: GroupKey, more_fragments: bool) -> bool {
+    match ipv4_packet(key, more_fragments) {
+        Some(pkt) => {
+            crate::ipv4::handle_rx(dev, pkt, false);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Take every group slot, returning the key of the group eviction reaches
+/// first — group ids are a monotonic counter, so that is the one inserted here
+/// first.
+fn fill_groups() -> Option<GroupKey> {
     reset_reassembly_table();
+    let mut table = REASSEMBLY_TABLE.lock();
+    let mut oldest = None;
+    for i in 0..MAX_GROUPS_UNDER_TEST {
+        let key = GroupKey {
+            src: Ipv4Addr([10, 0, 5, (i + 1) as u8]),
+            identification: next_identification(),
+        };
+        if table
+            .insert(
+                key.src,
+                BYPASS_DST,
+                key.identification,
+                BYPASS_PROTOCOL,
+                0,
+                true,
+                &[0x11; BYPASS_FRAGMENT_LEN],
+            )
+            .is_some()
+        {
+            return None;
+        }
+        if oldest.is_none() {
+            oldest = Some(key);
+        }
+    }
+    oldest
+}
 
-    let pending_before = NET_TIMER_WHEEL.pending_count();
+fn complete_group(key: GroupKey) -> bool {
+    let mut table = REASSEMBLY_TABLE.lock();
+    table
+        .insert(
+            key.src,
+            BYPASS_DST,
+            key.identification,
+            BYPASS_PROTOCOL,
+            BYPASS_FRAGMENT_LEN as u16,
+            false,
+            &[0x22; 50],
+        )
+        .is_some()
+}
 
-    let _src = Ipv4Addr([10, 0, 5, 1]);
-    let _dst = Ipv4Addr([10, 0, 5, 2]);
-    let _non_fragmented_payload = [0x5A; 64];
+/// A packet with neither More Fragments nor a fragment offset must never reach
+/// the reassembly table.
+///
+/// The table is filled first, so a group the ingress path creates has to evict
+/// one — whether the evicted group still completes is the observation.
+pub fn test_non_fragmented_bypasses_reassembly() -> TestResult {
+    PACKET_POOL.init();
+    let scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    // After the scope, so it drops first and its reset runs inside.
+    let _reset = ResetOnExit;
 
-    let pending_after = NET_TIMER_WHEEL.pending_count();
-    assert_eq_test!(
-        pending_after,
-        pending_before,
-        "non-fragmented path should not touch reassembly table/timers"
+    let Some(oldest) = fill_groups() else {
+        return fail!("could not fill the reassembly table");
+    };
+    let probe = GroupKey {
+        src: BYPASS_PROBE_SRC,
+        identification: next_identification(),
+    };
+    if !drive_ingress(scope.dev(), probe, false) {
+        return fail!("could not build the probe packet");
+    }
+    let bypassed = complete_group(oldest);
+
+    // The same packet with More Fragments set does take a slot, so the check
+    // above cannot pass merely because the packet was rejected earlier.
+    let Some(oldest) = fill_groups() else {
+        return fail!("could not refill the reassembly table");
+    };
+    let probe = GroupKey {
+        src: BYPASS_PROBE_SRC,
+        identification: next_identification(),
+    };
+    if !drive_ingress(scope.dev(), probe, true) {
+        return fail!("could not build the fragment packet");
+    }
+    let fragment_took_a_group = !complete_group(oldest);
+
+    drop(_reset);
+    drop(scope);
+
+    assert_test!(
+        bypassed,
+        "a non-fragmented packet claims no reassembly group"
     );
-
+    assert_test!(
+        fragment_took_a_group,
+        "a fragment claims one, so the check above is not vacuous"
+    );
     pass!()
 }
 

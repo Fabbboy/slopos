@@ -1,12 +1,19 @@
 //! Tests for the ARP neighbor cache: lookup, insert/update, the
 //! `Incomplete`→`Reachable` flush, the `Failed` transition, and snapshots.
+//!
+//! The cache under test is local, but `insert_or_update`, `resolve` and
+//! `on_retransmit` schedule through the shared wheel with entry ids that
+//! restart at 1, so a test that arms one holds a `NetTestScope`: left in the
+//! live wheel those tokens fire against `NEIGHBOR_CACHE`'s entry of that id.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
 use crate::neighbor::{NeighborAction, NeighborCache, ResolveOutcome};
 use crate::packetbuf::PacketBuf;
+use crate::tests::net_scope::NetTestScope;
 use crate::tests::packetbuf_tests::{TEST_PACKET_POOL, ensure_test_pool};
+use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
 use crate::types::{DevIndex, Ipv4Addr, MacAddr, NetError};
 
 fn fresh_cache() -> NeighborCache {
@@ -22,7 +29,7 @@ pub fn test_neighbor_lookup_empty_cache() -> TestResult {
     let cache = fresh_cache();
 
     let dev = DevIndex(0);
-    let ip = Ipv4Addr([10, 0, 0, 1]);
+    let ip = Ipv4Addr(LOCAL_IP);
 
     let result = cache.lookup(dev, ip);
     assert_test!(result.is_none(), "lookup on empty cache should return None");
@@ -31,10 +38,14 @@ pub fn test_neighbor_lookup_empty_cache() -> TestResult {
 }
 
 pub fn test_neighbor_insert_then_lookup() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return slopos_testing::fail!("net scope: {:?}", e),
+    };
     let cache = fresh_cache();
 
     let dev = DevIndex(0);
-    let ip = Ipv4Addr([10, 0, 0, 1]);
+    let ip = Ipv4Addr(LOCAL_IP);
     let mac = MacAddr([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01]);
     let tick = 1000;
 
@@ -52,7 +63,7 @@ pub fn test_neighbor_insert_then_lookup() -> TestResult {
         "lookup should return the inserted MAC"
     );
 
-    let other_ip = Ipv4Addr([10, 0, 0, 2]);
+    let other_ip = Ipv4Addr(REMOTE_IP);
     assert_test!(
         cache.lookup(dev, other_ip).is_none(),
         "lookup for different IP should return None"
@@ -68,10 +79,14 @@ pub fn test_neighbor_insert_then_lookup() -> TestResult {
 }
 
 pub fn test_neighbor_update_overwrites_mac() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return slopos_testing::fail!("net scope: {:?}", e),
+    };
     let cache = fresh_cache();
 
     let dev = DevIndex(0);
-    let ip = Ipv4Addr([10, 0, 0, 1]);
+    let ip = Ipv4Addr(LOCAL_IP);
     let mac1 = MacAddr([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
     let mac2 = MacAddr([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
@@ -90,11 +105,15 @@ pub fn test_neighbor_update_overwrites_mac() -> TestResult {
 }
 
 pub fn test_neighbor_incomplete_to_reachable_flush() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return slopos_testing::fail!("net scope: {:?}", e),
+    };
     ensure_test_pool();
     let cache = fresh_cache();
 
     let dev = DevIndex(0);
-    let ip = Ipv4Addr([10, 0, 0, 1]);
+    let ip = Ipv4Addr(LOCAL_IP);
     let mac = MacAddr([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01]);
 
     let Some(pkt1) = dummy_packet() else {
@@ -143,11 +162,15 @@ pub fn test_neighbor_incomplete_to_reachable_flush() -> TestResult {
 }
 
 pub fn test_neighbor_failed_drops_packets() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return slopos_testing::fail!("net scope: {:?}", e),
+    };
     ensure_test_pool();
     let cache = fresh_cache();
 
     let dev = DevIndex(0);
-    let ip = Ipv4Addr([10, 0, 0, 1]);
+    let ip = Ipv4Addr(LOCAL_IP);
 
     let Some(pkt) = dummy_packet() else {
         return slopos_testing::fail!("test pool should have capacity");
@@ -196,11 +219,15 @@ pub fn test_neighbor_failed_drops_packets() -> TestResult {
 }
 
 pub fn test_neighbor_resolve_reachable_returns_mac() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return slopos_testing::fail!("net scope: {:?}", e),
+    };
     ensure_test_pool();
     let cache = fresh_cache();
 
     let dev = DevIndex(0);
-    let ip = Ipv4Addr([10, 0, 0, 1]);
+    let ip = Ipv4Addr(LOCAL_IP);
     let mac = MacAddr([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01]);
 
     cache.insert_or_update(dev, ip, mac, 100);
@@ -228,10 +255,14 @@ pub fn test_neighbor_resolve_reachable_returns_mac() -> TestResult {
 }
 
 pub fn test_neighbor_expire_reachable_to_stale() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return slopos_testing::fail!("net scope: {:?}", e),
+    };
     let cache = fresh_cache();
 
     let dev = DevIndex(0);
-    let ip = Ipv4Addr([10, 0, 0, 1]);
+    let ip = Ipv4Addr(LOCAL_IP);
     let mac = MacAddr([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01]);
 
     cache.insert_or_update(dev, ip, mac, 100);
@@ -254,6 +285,10 @@ pub fn test_neighbor_expire_reachable_to_stale() -> TestResult {
 /// `NET_Q_NEIGH` reads `snapshot_owned`, so `ip neigh` shows exactly what it
 /// returns — every state, not just the resolved ones.
 pub fn test_neighbor_snapshot_owned_reports_every_state() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return slopos_testing::fail!("net scope: {:?}", e),
+    };
     ensure_test_pool();
     let cache = fresh_cache();
     let dev = DevIndex(7);

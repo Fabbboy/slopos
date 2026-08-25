@@ -406,10 +406,39 @@ pub fn test_dns_t9_query_entropy() -> TestResult {
 
 /// A response from a host that is not the configured server, or to a port the
 /// query did not leave from, must not reach the resolver.
+///
+/// Nothing here assumes the resolver is idle: the provenance filter names at
+/// most one `(server, port)` pair at a time, and that holds whether or not a
+/// query is in flight.
 pub fn test_dns_t10_response_provenance() -> TestResult {
+    const SERVER_A: [u8; 4] = [192, 0, 2, 53];
+    const SERVER_B: [u8; 4] = [198, 51, 100, 53];
+    const EPHEMERAL: u16 = 49_152;
+
+    // Source ports are drawn from the ephemeral range, so a datagram addressed
+    // below it cannot be the reply to any query this resolver ever sent.
     assert_test!(
-        !dns::response_is_expected([10, 0, 2, 3], 49_152),
-        "with no query in flight nothing is expected"
+        !dns::response_is_expected(SERVER_A, dns::DNS_PORT),
+        "a datagram addressed to port 53 left no query behind"
+    );
+    assert_test!(
+        !dns::response_is_expected(SERVER_A, EPHEMERAL - 1),
+        "nor one addressed below the ephemeral range"
+    );
+
+    // The ID check alone would accept a datagram from any host (RFC 5452 §9);
+    // pinning the source address is what these two cannot both satisfy.
+    let from_a = dns::response_is_expected(SERVER_A, EPHEMERAL);
+    let from_b = dns::response_is_expected(SERVER_B, EPHEMERAL);
+    assert_test!(
+        !(from_a && from_b),
+        "one port accepts replies from at most one server"
+    );
+
+    let other_port = dns::response_is_expected(SERVER_A, EPHEMERAL + 1);
+    assert_test!(
+        !(from_a && other_port),
+        "one server is answered on at most one source port"
     );
     pass!()
 }

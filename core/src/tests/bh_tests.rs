@@ -114,9 +114,12 @@ pub fn test_bh_runs_at_the_outermost_unlock() -> TestResult {
 
     let drains = bh::drains();
     if drains < before + UNLOCK_ROUNDS {
+        // `bh::drains()` is per-CPU and the two reads are not pinned to one, so
+        // the difference can be negative here — on the path whose job is to
+        // report the failure, where an overflow panic would take the run down.
         return fail!(
             "only {} of {} outermost unlocks reached the drain",
-            drains - before,
+            drains.wrapping_sub(before),
             UNLOCK_ROUNDS
         );
     }
@@ -136,6 +139,14 @@ pub fn test_bh_runs_at_the_outermost_unlock() -> TestResult {
 /// [`test_bh_runs_at_the_outermost_unlock`] shows does drain leaves the claim as
 /// the only difference between the two.
 pub fn test_bh_is_not_re_entered() -> TestResult {
+    // `bh_active` is the live per-CPU claim, and the swap is gs-relative. The
+    // window below has interrupts and preemption on, so a migration would
+    // restore the claim on one CPU and leave the other marked as draining for
+    // the rest of the boot — its RCU callback invocation and graveyard drain
+    // stopped, silently. The kernel phase does not migrate today; this makes
+    // that a test failure rather than an assumption, and the restore still runs
+    // first so the reported case is never the stranded one.
+    let claimed_on = slopos_arch::pcr::get_current_cpu();
     let claimed_before = slopos_arch::pcr::bh_active_swap(true);
 
     let guard = PROBE_LOCK.lock();
@@ -146,8 +157,16 @@ pub fn test_bh_is_not_re_entered() -> TestResult {
     let drains = bh::drains();
     let reentrant = bh::declined_reentrant();
 
+    let restored_on = slopos_arch::pcr::get_current_cpu();
     slopos_arch::pcr::bh_active_swap(claimed_before);
 
+    if restored_on != claimed_on {
+        return fail!(
+            "the test migrated from CPU {} to {} holding the bottom-half claim",
+            claimed_on,
+            restored_on
+        );
+    }
     if claimed_before {
         return fail!("a drain was already claimed on this CPU outside one");
     }

@@ -13,4 +13,5 @@ pub mod tests_pcid;
 pub mod tests_quota_heap;
 pub mod tests_quota_pages;
 pub mod tests_reclaim;
+pub mod tests_vm_space_contention;
 pub mod tlb_tests;

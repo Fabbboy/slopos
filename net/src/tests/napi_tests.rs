@@ -1,59 +1,45 @@
 use slopos_abi::net::{AF_INET, SOCK_STREAM};
-use slopos_abi::syscall::{ERRNO_EAGAIN, POLLOUT};
+use slopos_abi::syscall::{ERRNO_EAGAIN, ERRNO_EINPROGRESS, POLLOUT};
 use slopos_ostd::KBox;
+use slopos_ostd::klog_info;
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::WaitQueue;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
-use slopos_testing::{assert_test, pass};
+use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::napi::NapiContext;
 use crate::socket;
-use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpHeader};
+use crate::tcp;
+use crate::tests::env_wait::errno_i64;
+use crate::tests::net_scope::NetTestScope;
 use crate::tests::socket_tests;
+use crate::tests::tcp_common::PEER_ISS;
 
-fn errno_i64(errno: u64) -> i64 {
-    errno as i64 as i32 as i64
-}
-
-fn reset() {
-    socket::socket_reset_all();
-}
-
-fn connect_and_establish() -> Option<(u32, tcp::ConnId)> {
+/// Connect to the scope's sink and complete the handshake by injection: the
+/// sink answers nothing, so the SYN+ACK has to be synthetic, and the peer is
+/// TEST-NET-1 so no real reply can reach the resulting 4-tuple either.
+fn connect_and_establish(scope: &NetTestScope) -> Result<(u32, tcp::ConnId), &'static str> {
     let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0, socket::SocketOwner::UNOWNED);
     if sock < 0 {
-        return None;
+        return Err("socket_create failed");
     }
-    socket::socket_set_nonblocking(sock as u32, true);
-    let rc = socket::socket_connect(sock as u32, [10, 0, 0, 2], 80);
-    if rc < 0 && rc != -115 {
-        return None;
+    let sock = sock as u32;
+    socket::socket_set_nonblocking(sock, true);
+
+    let rc = socket::socket_connect(sock, scope.peer_ip(), scope.peer_port());
+    if rc < 0 && rc != errno_i64(ERRNO_EINPROGRESS) as i32 {
+        return Err("socket_connect failed");
     }
-    let tcp_id = socket::socket_lookup_tcp_idx(sock as u32)?;
-    let (tuple, iss) = tcp::with_pcb(tcp_id, |pcb| {
-        let iss = match &pcb.state {
-            tcp::PcbState::SynSent(s) => s.iss.raw(),
-            tcp::PcbState::Data(d) => d.iss.raw(),
-            _ => return None,
-        };
-        Some((pcb.tuple, iss))
-    })
-    .flatten()?;
-    let syn_ack = TcpHeader {
-        src_port: tuple.remote_port,
-        dst_port: tuple.local_port,
-        seq_num: 9000,
-        ack_num: iss.wrapping_add(1),
-        data_offset: 5,
-        flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
-        window_size: 32768,
-        checksum: 0,
-        urgent_ptr: 0,
+
+    let Some(tcp_id) = socket::socket_lookup_tcp_idx(sock) else {
+        return Err("socket_lookup_tcp_idx failed");
     };
-    let result = tcp::input(tuple.remote_ip, tuple.local_ip, &syn_ack, &[], &[], 0);
-    socket::socket_notify_tcp_activity(&result);
-    Some((sock as u32, tcp_id))
+    if scope.inject_syn_ack(tcp_id, PEER_ISS).is_none() {
+        return Err("no PCB in a handshake state for the synthetic SYN+ACK");
+    }
+
+    Ok((sock, tcp_id))
 }
 
 pub fn test_napi_budget_limiting() -> TestResult {
@@ -93,16 +79,55 @@ pub fn test_napi_waker_rearm_short_circuits() -> TestResult {
     pass!()
 }
 
+/// The submit enqueues and returns; it never waits for the device to complete
+/// the descriptor. Asserted by depth rather than by a wall clock, which
+/// measures the host: a submit that waited for its own completion could not
+/// leave more than one frame outstanding, so `BURST` back-to-back submits
+/// advancing `tx_packets` by `BURST` is the property, and it is the same
+/// verdict on a machine of any speed.
 pub fn test_tx_fire_and_forget() -> TestResult {
-    let start = slopos_kernel_services::clock::uptime_ms();
-    let _ = crate::net_driver_service::net_driver()
-        .map(|d| (d.virtio_net_transmit)(&[0u8; 64]))
-        .unwrap_or(false);
-    let end = slopos_kernel_services::clock::uptime_ms();
+    const BURST: u64 = 8;
+
+    let Some(driver) = crate::net_driver_service::net_driver() else {
+        klog_info!("NAPI_TEST: SKIP - no net driver registered");
+        return TestResult::Skipped;
+    };
+    if !(driver.virtio_net_is_ready)() {
+        klog_info!("NAPI_TEST: SKIP - the net device is not ready");
+        return TestResult::Skipped;
+    }
+    let Some(handle) = (driver.get_device_handle)() else {
+        return fail!("a ready driver with no device handle");
+    };
+
+    // An empty frame is answered before the ring is touched, so it must not
+    // move the counter and is the control for the burst below.
+    let before_empty = handle.stats().tx_packets;
     assert_test!(
-        end.saturating_sub(start) < 1000,
-        "tx submit returns without long blocking"
+        (driver.virtio_net_transmit)(&[]),
+        "an empty submit was refused"
     );
+    assert_eq_test!(
+        handle.stats().tx_packets,
+        before_empty,
+        "an empty submit reached the ring"
+    );
+
+    let before = handle.stats().tx_packets;
+    for _ in 0..BURST {
+        if !(driver.virtio_net_transmit)(&[0u8; 64]) {
+            return fail!("the device refused a frame while ready");
+        }
+    }
+    let advanced = handle.stats().tx_packets.wrapping_sub(before);
+    assert_test!(
+        advanced >= BURST,
+        "{} submits advanced tx_packets by {} — the submit path is waiting on \
+         its own completion",
+        BURST,
+        advanced
+    );
+
     pass!()
 }
 
@@ -121,9 +146,13 @@ pub fn test_waitqueue_basic() -> TestResult {
 }
 
 pub fn test_blocking_recv() -> TestResult {
-    reset();
-    let Some((sock, _tcp_id)) = connect_and_establish() else {
-        return TestResult::Fail;
+    let scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    let (sock, _tcp_id) = match connect_and_establish(&scope) {
+        Ok(v) => v,
+        Err(e) => return fail!("{}", e),
     };
     let _ = socket::socket_set_nonblocking(sock, false);
     let _ = socket::socket_set_timeouts(sock, 1, 0);
@@ -137,7 +166,10 @@ pub fn test_blocking_recv() -> TestResult {
 }
 
 pub fn test_blocking_accept() -> TestResult {
-    reset();
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
     let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0, socket::SocketOwner::UNOWNED) as u32;
     let _ = socket::socket_bind(sock, [0, 0, 0, 0], 8080);
     let _ = socket::socket_listen(sock, 4);
@@ -152,9 +184,13 @@ pub fn test_blocking_accept() -> TestResult {
 }
 
 pub fn test_socket_poll_flags() -> TestResult {
-    reset();
-    let Some((sock, _)) = connect_and_establish() else {
-        return TestResult::Fail;
+    let scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    let (sock, _) = match connect_and_establish(&scope) {
+        Ok(v) => v,
+        Err(e) => return fail!("{}", e),
     };
     let writable = socket::socket_poll_writable(sock);
     assert_test!(
@@ -165,9 +201,13 @@ pub fn test_socket_poll_flags() -> TestResult {
 }
 
 pub fn test_nonblocking_preserved() -> TestResult {
-    reset();
-    let Some((sock, _)) = connect_and_establish() else {
-        return TestResult::Fail;
+    let scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    let (sock, _) = match connect_and_establish(&scope) {
+        Ok(v) => v,
+        Err(e) => return fail!("{}", e),
     };
     let _ = socket::socket_set_nonblocking(sock, true);
     let mut buf = [0u8; 32];
@@ -180,9 +220,13 @@ pub fn test_nonblocking_preserved() -> TestResult {
 }
 
 pub fn test_recv_timeout() -> TestResult {
-    reset();
-    let Some((sock, _)) = connect_and_establish() else {
-        return TestResult::Fail;
+    let scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    let (sock, _) = match connect_and_establish(&scope) {
+        Ok(v) => v,
+        Err(e) => return fail!("{}", e),
     };
     let _ = socket::socket_set_nonblocking(sock, false);
     let _ = socket::socket_set_timeouts(sock, 2, 0);
@@ -193,9 +237,13 @@ pub fn test_recv_timeout() -> TestResult {
 }
 
 pub fn test_send_backpressure() -> TestResult {
-    reset();
-    let Some((sock, _)) = connect_and_establish() else {
-        return TestResult::Fail;
+    let scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
+    let (sock, _) = match connect_and_establish(&scope) {
+        Ok(v) => v,
+        Err(e) => return fail!("{}", e),
     };
     let _ = socket::socket_set_nonblocking(sock, true);
     let mut payload: KBox<[u8; 20000]> = KBox::zeroed().expect("alloc");

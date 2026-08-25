@@ -1,30 +1,33 @@
 use slopos_abi::net::{AF_INET, SOCK_STREAM};
-use slopos_abi::syscall::{SO_KEEPALIVE, SOL_SOCKET};
+use slopos_abi::syscall::{ERRNO_EINPROGRESS, SO_KEEPALIVE, SOL_SOCKET};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
+use crate::clock::MockClock;
 use crate::socket;
-use crate::tcp::{self, ConnId, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpHeader, TcpOutSegment, TcpState};
-use crate::tests::tcp_common::reset_all as reset;
-use crate::timer::{NET_TIMER_WHEEL, TimerKind};
+use crate::tcp::{self, ConnId, TCP_FLAG_ACK, TcpHeader, TcpOutSegment, TcpState};
+use crate::tests::env_wait::errno_i32;
+use crate::tests::net_scope::NetTestScope;
+use crate::tests::tcp_common::PEER_ISS;
+use crate::timer::TimerKind;
 use crate::with_data_state;
 
 // Mirrors the private production constants in tcp/mod.rs. The `+ 1` lands just
-// past a period so the timer wheel fires that deadline in one `process_due()`.
+// past a period so the timer wheel fires that deadline in one dispatch.
 const KEEPALIVE_IDLE_MS: u64 = 7_200 * 1_000;
 const KEEPALIVE_INTERVAL_MS: u64 = 75 * 1_000;
 const IDLE_ADVANCE_MS: u64 = KEEPALIVE_IDLE_MS + 1;
 const INTERVAL_ADVANCE_MS: u64 = KEEPALIVE_INTERVAL_MS + 1;
 
-/// Start each keepalive test on the mock clock so every keepalive deadline is
-/// expressed in mock time and a later `MockClock::advance` can cross it.
-#[must_use = "bind the returned MockClockGuard for the test body, else the clock is restored immediately"]
-fn keepalive_setup() -> crate::clock::MockClockGuard {
-    reset();
-    crate::clock::MockClockGuard::install_at(1)
-}
+/// Each test enters its scope on the mock clock pinned here, so every keepalive
+/// deadline is expressed in mock time and a later `MockClock::advance` can
+/// cross it.
+const MOCK_START_MS: u64 = 1;
 
-fn connect_and_establish(keepalive_enabled: bool) -> Result<(u32, ConnId), &'static str> {
+fn connect_and_establish(
+    scope: &NetTestScope,
+    keepalive_enabled: bool,
+) -> Result<(u32, ConnId), &'static str> {
     let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0, socket::SocketOwner::UNOWNED);
     if sock < 0 {
         return Err("socket_create failed");
@@ -39,64 +42,45 @@ fn connect_and_establish(keepalive_enabled: bool) -> Result<(u32, ConnId), &'sta
     }
 
     socket::socket_set_nonblocking(sock, true);
-    let rc = socket::socket_connect(sock, [10, 0, 0, 2], 80);
-    if rc < 0 && rc != -115 {
+    let rc = socket::socket_connect(sock, scope.peer_ip(), scope.peer_port());
+    if rc < 0 && rc != errno_i32(ERRNO_EINPROGRESS) {
         return Err("socket_connect failed");
     }
 
     let Some(tcp_id) = socket::socket_lookup_tcp_idx(sock) else {
         return Err("socket_lookup_tcp_idx failed");
     };
-    let (tuple, iss) = tcp::with_pcb(tcp_id, |pcb| {
-        let iss = match &pcb.state {
-            tcp::PcbState::SynSent(s) => s.iss.raw(),
-            tcp::PcbState::Data(d) => d.iss.raw(),
-            _ => return Err("unexpected PCB state"),
-        };
-        Ok((pcb.tuple, iss))
-    })
-    .ok_or("PCB not found")??;
-
-    let syn_ack = TcpHeader {
-        src_port: tuple.remote_port,
-        dst_port: tuple.local_port,
-        seq_num: 9000,
-        ack_num: iss.wrapping_add(1),
-        data_offset: 5,
-        flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
-        window_size: 32768,
-        checksum: 0,
-        urgent_ptr: 0,
-    };
-    let result = tcp::input(tuple.remote_ip, tuple.local_ip, &syn_ack, &[], &[], 0);
-    socket::socket_notify_tcp_activity(&result);
+    if scope.inject_syn_ack(tcp_id, PEER_ISS).is_none() {
+        return Err("no PCB in a handshake state for the synthetic SYN+ACK");
+    }
 
     Ok((sock, tcp_id))
 }
 
-/// Advance the unified clock by `advance_ms`, fire every now-due timer, and
-/// return this connection's keepalive outcome if one fired: `Some(Some(seg))`
-/// for a probe, `Some(None)` if the connection was released, `None` if no
-/// keepalive for this connection was due.
+/// Advance the mock clock by `advance_ms` and dispatch the keepalives that
+/// become due, returning this connection's outcome if one of them was its:
+/// `Some(Some(seg))` for a probe, `Some(None)` if the connection was released,
+/// `None` if no keepalive of its own was due.
+///
+/// Every popped keepalive is dispatched before returning, because
+/// `dispatch_due` removes what it hands back and an early return would discard
+/// the rest.
 fn dispatch_next_keepalive_for_conn(
+    scope: &NetTestScope,
     tcp_id: ConnId,
     advance_ms: u64,
 ) -> Option<Option<TcpOutSegment>> {
     let key = tcp_id.raw();
-    crate::clock::MockClock::advance(advance_ms);
-    let fired = NET_TIMER_WHEEL.process_due();
-    for timer in fired {
-        if timer.kind != TimerKind::TcpKeepalive {
-            continue;
-        }
+    MockClock::advance(advance_ms);
 
+    let mut ours = None;
+    for timer in scope.dispatch_due(TimerKind::TcpKeepalive) {
         let probe = tcp::on_keepalive(timer.key);
         if timer.key == key {
-            return Some(probe);
+            ours = Some(probe);
         }
     }
-
-    None
+    ours
 }
 
 fn inject_inbound_data(tcp_id: ConnId, payload: &[u8]) {
@@ -117,14 +101,24 @@ fn inject_inbound_data(tcp_id: ConnId, payload: &[u8]) {
         urgent_ptr: 0,
     };
 
-    let result = tcp::input(tuple.remote_ip, tuple.local_ip, &hdr, &[], payload, 0);
+    let result = tcp::input(
+        tuple.remote_ip,
+        tuple.local_ip,
+        &hdr,
+        &[],
+        payload,
+        crate::clock::now_ms(),
+    );
     socket::socket_notify_tcp_activity(&result);
 }
 
 pub fn test_keepalive_fires_after_idle() -> TestResult {
-    let _clock = keepalive_setup();
+    let scope = match NetTestScope::enter_at_mock_ms(MOCK_START_MS) {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
 
-    let (_sock, tcp_id) = match connect_and_establish(true) {
+    let (_sock, tcp_id) = match connect_and_establish(&scope, true) {
         Ok(v) => v,
         Err(e) => return fail!("{}", e),
     };
@@ -139,7 +133,7 @@ pub fn test_keepalive_fires_after_idle() -> TestResult {
         assert_eq_test!(d.keepalive_probes_sent, 0, "no probes before idle expiry");
     });
 
-    let fired = dispatch_next_keepalive_for_conn(tcp_id, IDLE_ADVANCE_MS);
+    let fired = dispatch_next_keepalive_for_conn(&scope, tcp_id, IDLE_ADVANCE_MS);
     assert_test!(fired.is_some(), "keepalive timer should fire after idle");
     assert_test!(
         fired.unwrap().is_some(),
@@ -162,14 +156,17 @@ pub fn test_keepalive_fires_after_idle() -> TestResult {
 }
 
 pub fn test_keepalive_reset_on_data() -> TestResult {
-    let _clock = keepalive_setup();
+    let scope = match NetTestScope::enter_at_mock_ms(MOCK_START_MS) {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
 
-    let (_sock, tcp_id) = match connect_and_establish(true) {
+    let (_sock, tcp_id) = match connect_and_establish(&scope, true) {
         Ok(v) => v,
         Err(e) => return fail!("{}", e),
     };
 
-    let first_fire = dispatch_next_keepalive_for_conn(tcp_id, IDLE_ADVANCE_MS);
+    let first_fire = dispatch_next_keepalive_for_conn(&scope, tcp_id, IDLE_ADVANCE_MS);
     assert_test!(first_fire.is_some(), "first idle keepalive should fire");
     assert_test!(first_fire.unwrap().is_some(), "first keepalive emits probe");
     with_data_state!(tcp_id, |d| {
@@ -193,13 +190,13 @@ pub fn test_keepalive_reset_on_data() -> TestResult {
         );
     });
 
-    let old_deadline_fire = dispatch_next_keepalive_for_conn(tcp_id, INTERVAL_ADVANCE_MS);
+    let old_deadline_fire = dispatch_next_keepalive_for_conn(&scope, tcp_id, INTERVAL_ADVANCE_MS);
     assert_test!(
         old_deadline_fire.is_none(),
         "old keepalive deadline should not fire after reset"
     );
 
-    let new_deadline_fire = dispatch_next_keepalive_for_conn(tcp_id, IDLE_ADVANCE_MS);
+    let new_deadline_fire = dispatch_next_keepalive_for_conn(&scope, tcp_id, IDLE_ADVANCE_MS);
     assert_test!(
         new_deadline_fire.is_some(),
         "keepalive should fire again after new idle period"
@@ -220,9 +217,12 @@ pub fn test_keepalive_reset_on_data() -> TestResult {
 }
 
 pub fn test_keepalive_max_probes_rst() -> TestResult {
-    let _clock = keepalive_setup();
+    let scope = match NetTestScope::enter_at_mock_ms(MOCK_START_MS) {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
 
-    let (_sock, tcp_id) = match connect_and_establish(true) {
+    let (_sock, tcp_id) = match connect_and_establish(&scope, true) {
         Ok(v) => v,
         Err(e) => return fail!("{}", e),
     };
@@ -237,7 +237,7 @@ pub fn test_keepalive_max_probes_rst() -> TestResult {
             INTERVAL_ADVANCE_MS
         };
 
-        let fired = match dispatch_next_keepalive_for_conn(tcp_id, max_wait) {
+        let fired = match dispatch_next_keepalive_for_conn(&scope, tcp_id, max_wait) {
             Some(v) => v,
             None => return fail!("expected keepalive timer fire before close"),
         };
@@ -271,9 +271,12 @@ pub fn test_keepalive_max_probes_rst() -> TestResult {
 }
 
 pub fn test_keepalive_disabled_no_timer() -> TestResult {
-    let _clock = keepalive_setup();
+    let scope = match NetTestScope::enter_at_mock_ms(MOCK_START_MS) {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
 
-    let (_sock, tcp_id) = match connect_and_establish(false) {
+    let (_sock, tcp_id) = match connect_and_establish(&scope, false) {
         Ok(v) => v,
         Err(e) => return fail!("{}", e),
     };
@@ -295,9 +298,12 @@ pub fn test_keepalive_disabled_no_timer() -> TestResult {
 }
 
 pub fn test_keepalive_cancelled_on_close() -> TestResult {
-    let _clock = keepalive_setup();
+    let scope = match NetTestScope::enter_at_mock_ms(MOCK_START_MS) {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
 
-    let (sock, tcp_id) = match connect_and_establish(true) {
+    let (sock, tcp_id) = match connect_and_establish(&scope, true) {
         Ok(v) => v,
         Err(e) => return fail!("{}", e),
     };
@@ -311,7 +317,7 @@ pub fn test_keepalive_cancelled_on_close() -> TestResult {
 
     assert_eq_test!(socket::socket_close(sock), 0, "socket_close succeeds");
 
-    let fired_after_close = dispatch_next_keepalive_for_conn(tcp_id, IDLE_ADVANCE_MS);
+    let fired_after_close = dispatch_next_keepalive_for_conn(&scope, tcp_id, IDLE_ADVANCE_MS);
     assert_test!(
         fired_after_close.is_none(),
         "no keepalive dispatch occurs after close cancels timer"

@@ -44,13 +44,18 @@ slopos_ostd::cpu_local! {
 
 /// `true` iff this is the moment to log. Pure: the caller supplies the clock,
 /// so the escalation policy is testable without a contended host.
+///
+/// Keyed on the task, not on the address it faulted at: a multi-threaded
+/// process retrying at two addresses on one CPU would otherwise reset the
+/// episode on every alternation and never reach the budget, which is the shape
+/// most likely to produce a retry that does not terminate.
 pub(crate) fn note_retry(
     ep: &mut RetryEpisode,
     task_id: u32,
     fault_addr: u64,
     now_ms: u64,
 ) -> bool {
-    if ep.task_id != task_id || ep.fault_addr != fault_addr {
+    if ep.task_id != task_id {
         *ep = RetryEpisode {
             task_id,
             fault_addr,
@@ -62,6 +67,7 @@ pub(crate) fn note_retry(
     if ep.warned || now_ms.wrapping_sub(ep.since_ms) < RETRY_WARN_MS {
         return false;
     }
+    ep.fault_addr = fault_addr;
     ep.warned = true;
     true
 }
@@ -71,10 +77,16 @@ pub(crate) fn note_retry(
 /// count or deadline threshold is user-reachable — a multi-threaded process
 /// hammering `copy_from_user` can keep a reader outstanding indefinitely.
 fn retry(task_id: u32, fault_addr: u64) -> FaultOutcome {
-    let now = slopos_kernel_services::clock::uptime_ms();
     let warn = {
         let mut episode = RETRY_EPISODE.get_mut();
-        note_retry(&mut episode, task_id, fault_addr, now)
+        // The HPET read is an uncached MMIO access taken here with `IF` clear,
+        // so it is skipped once this task's episode has already been reported.
+        if episode.task_id == task_id && episode.warned {
+            false
+        } else {
+            let now = slopos_kernel_services::clock::uptime_ms();
+            note_retry(&mut episode, task_id, fault_addr, now)
+        }
     };
     if warn {
         klog_warn!(
@@ -118,9 +130,8 @@ pub fn try_resolve_user_fault(
 
     match cow {
         Ok(Some(Ok(()))) => return FaultOutcome::Resolved,
-        // Returns rather than falling through to the demand path: the page is
-        // present, so a demand attempt would be a second decision on state this
-        // arm deliberately did not inspect.
+        // Returns rather than falling through: a `Retry` inspected no page
+        // state, so the demand path would be deciding on a different question.
         Ok(Some(Err(MmError::Retry))) => return retry(task_id, fault_addr),
         Ok(Some(Err(MmError::NoMemory))) => {
             klog_info!(

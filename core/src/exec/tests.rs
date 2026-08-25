@@ -7,6 +7,7 @@ use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm;
 use slopos_ostd::klog_info;
+use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::TestResult;
 
 use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH, INIT_PATH};
@@ -33,16 +34,6 @@ fn read_user_cstr(process_id: u32, addr: u64, max_len: usize) -> Option<slopos_o
         buf.push(byte).ok()?;
     }
     Some(buf)
-}
-
-fn find_argc_slot(process_id: u32, sp: u64, expected_argc: u64) -> Option<u64> {
-    for i in 0..16u64 {
-        let slot = sp + i * 8;
-        if read_user_u64(process_id, slot) == Some(expected_argc) {
-            return Some(slot);
-        }
-    }
-    None
 }
 
 fn create_minimal_elf_header() -> [u8; MINIMAL_ELF_SIZE] {
@@ -328,14 +319,10 @@ pub fn test_translate_address_user_passthrough() -> TestResult {
     TestResult::Pass
 }
 
-/// No address space is handed out for a process that does not exist. The
-/// reachable form is a designator that *outlived* its process — a pid naming
-/// nothing never resolves into one.
+/// The absent designator is reaped, not invented — a pid out of the air is only
+/// absent by luck. The scope's AP pause stops it being reissued mid-check.
 pub fn test_process_vm_root_absent_for_a_reaped_process() -> TestResult {
-    if slopos_ostd::process::ProcessId::resolve(9999).is_some() {
-        klog_info!("EXEC_TEST: BUG - a pid naming no process resolved");
-        return TestResult::Fail;
-    }
+    let _scope = KernelTestScope::enter();
 
     let pid = process_vm::create_process_vm();
     if pid == INVALID_PROCESS_ID {
@@ -343,6 +330,11 @@ pub fn test_process_vm_root_absent_for_a_reaped_process() -> TestResult {
     }
     let stale = resolve_pid(pid);
     process_vm::destroy_process_vm(stale);
+
+    if slopos_ostd::process::ProcessId::resolve(pid).is_some() {
+        klog_info!("EXEC_TEST: BUG - a reaped process's pid still resolved");
+        return TestResult::Fail;
+    }
 
     if process_vm::process_vm_get_ostd_pml4_paddr(stale) != 0 {
         klog_info!("EXEC_TEST: BUG - Got an address space for a reaped process");
@@ -415,8 +407,10 @@ pub fn test_init_path_within_exec_limit() -> TestResult {
     TestResult::Pass
 }
 
+/// The vector layout `setup_user_stack` writes, read back through the
+/// process's own address space.
 pub fn test_setup_user_stack_contract_layout() -> TestResult {
-    process_vm::init_process_vm();
+    let _scope = KernelTestScope::enter();
     let pid = process_vm::create_process_vm();
     if pid == INVALID_PROCESS_ID {
         return TestResult::Fail;
@@ -449,22 +443,22 @@ pub fn test_setup_user_stack_contract_layout() -> TestResult {
         }
     };
 
-    let base = match find_argc_slot(pid, sp, 1) {
-        Some(v) => v,
-        None => {
-            klog_info!(
-                "EXEC_TEST: argc marker not found near stack pointer (sp={})",
-                sp
-            );
-            process_vm::destroy_process_vm(resolve_pid(pid));
-            return TestResult::Fail;
-        }
-    };
+    let argc = read_user_u64(pid, sp).unwrap_or(u64::MAX);
+    if argc != args.len() as u64 {
+        klog_info!(
+            "EXEC_TEST: argc at sp={:#x} is {}, expected {}",
+            sp,
+            argc,
+            args.len()
+        );
+        process_vm::destroy_process_vm(resolve_pid(pid));
+        return TestResult::Fail;
+    }
 
-    let argv0 = read_user_u64(pid, base + 8).unwrap_or(0);
-    let argv_null = read_user_u64(pid, base + 16).unwrap_or(u64::MAX);
-    let env0 = read_user_u64(pid, base + 24).unwrap_or(0);
-    let env_null = read_user_u64(pid, base + 32).unwrap_or(u64::MAX);
+    let argv0 = read_user_u64(pid, sp + 8).unwrap_or(0);
+    let argv_null = read_user_u64(pid, sp + 16).unwrap_or(u64::MAX);
+    let env0 = read_user_u64(pid, sp + 24).unwrap_or(0);
+    let env_null = read_user_u64(pid, sp + 32).unwrap_or(u64::MAX);
 
     if argv0 == 0 || env0 == 0 || argv_null != 0 || env_null != 0 {
         klog_info!(
@@ -483,7 +477,7 @@ pub fn test_setup_user_stack_contract_layout() -> TestResult {
 }
 
 pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
-    process_vm::init_process_vm();
+    let _scope = KernelTestScope::enter();
     let pid = process_vm::create_process_vm();
     if pid == INVALID_PROCESS_ID {
         return TestResult::Fail;
@@ -515,19 +509,19 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
         }
     };
 
-    let base = match find_argc_slot(pid, sp, args.len() as u64) {
-        Some(v) => v,
-        None => {
-            klog_info!(
-                "EXEC_TEST: auxv test could not locate argc marker near sp={}",
-                sp
-            );
-            process_vm::destroy_process_vm(resolve_pid(pid));
-            return TestResult::Fail;
-        }
-    };
+    let argc = read_user_u64(pid, sp).unwrap_or(u64::MAX);
+    if argc != args.len() as u64 {
+        klog_info!(
+            "EXEC_TEST: argc at sp={:#x} is {}, expected {}",
+            sp,
+            argc,
+            args.len()
+        );
+        process_vm::destroy_process_vm(resolve_pid(pid));
+        return TestResult::Fail;
+    }
 
-    let aux_start = base + 8 * (1 + args.len() as u64 + 1 + envs.len() as u64 + 1);
+    let aux_start = sp + 8 * (1 + args.len() as u64 + 1 + envs.len() as u64 + 1);
     let mut cursor = aux_start;
     let mut saw_phdr = false;
     let mut saw_phent = false;
@@ -575,7 +569,7 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
 /// The stack's argv *string content*, not just its pointers: the layout can
 /// look correct while the strings are missing, truncated or at a wrong address.
 pub fn test_setup_user_stack_argv_string_content() -> TestResult {
-    process_vm::init_process_vm();
+    let _scope = KernelTestScope::enter();
     let pid = process_vm::create_process_vm();
     if pid == INVALID_PROCESS_ID {
         return TestResult::Fail;
@@ -607,17 +601,20 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         }
     };
 
-    let base = match find_argc_slot(pid, sp, args.len() as u64) {
-        Some(v) => v,
-        None => {
-            klog_info!("EXEC_TEST: argc={} not found near sp={}", args.len(), sp);
-            process_vm::destroy_process_vm(resolve_pid(pid));
-            return TestResult::Fail;
-        }
-    };
+    let argc = read_user_u64(pid, sp).unwrap_or(u64::MAX);
+    if argc != args.len() as u64 {
+        klog_info!(
+            "EXEC_TEST: argc at sp={:#x} is {}, expected {}",
+            sp,
+            argc,
+            args.len()
+        );
+        process_vm::destroy_process_vm(resolve_pid(pid));
+        return TestResult::Fail;
+    }
 
     for (i, expected) in args.iter().enumerate() {
-        let ptr = match read_user_u64(pid, base + 8 * (1 + i as u64)) {
+        let ptr = match read_user_u64(pid, sp + 8 * (1 + i as u64)) {
             Some(p) if p != 0 => p,
             _ => {
                 klog_info!("EXEC_TEST: argv[{}] pointer is null or unreadable", i);
@@ -649,7 +646,7 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         }
     }
 
-    let argv_null = read_user_u64(pid, base + 8 * (1 + args.len() as u64)).unwrap_or(u64::MAX);
+    let argv_null = read_user_u64(pid, sp + 8 * (1 + args.len() as u64)).unwrap_or(u64::MAX);
     if argv_null != 0 {
         klog_info!(
             "EXEC_TEST: argv null terminator missing, got {:#x}",
@@ -659,7 +656,7 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         return TestResult::Fail;
     }
 
-    let envp0_slot = base + 8 * (1 + args.len() as u64 + 1);
+    let envp0_slot = sp + 8 * (1 + args.len() as u64 + 1);
     let envp0_ptr = match read_user_u64(pid, envp0_slot) {
         Some(p) if p != 0 => p,
         _ => {

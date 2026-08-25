@@ -901,9 +901,18 @@ fn run_napi_burst() -> u32 {
 
 /// Drain the loopback device (DevIndex 0), which stores TX'd packets
 /// internally, back through ingress so they appear as received local traffic.
+///
+/// Gated like `ingress::net_rx`, which this path deliberately bypasses: a frame
+/// queued before a hermetic scope opened would otherwise be delivered into the
+/// global TCP table while the scope is up, minting timeout tokens in the test
+/// wheel and transmitting resets.
 fn poll_loopback() {
     use slopos_net::netdev::DEVICE_REGISTRY;
     use slopos_net::types::DevIndex;
+
+    if slopos_net::ingress::dataplane_quiesced() {
+        return;
+    }
 
     let lo_packets = DEVICE_REGISTRY.poll_rx_by_index(DevIndex(0), 32, &PACKET_POOL);
 

@@ -10,9 +10,9 @@ use crate::process_vm::{create_process_vm, destroy_process_vm, process_vm_handle
 use crate::tlb::TlbProcessKey;
 use crate::tlb::{
     CpuMask, FlushType, TLB_SHOOTDOWN_VECTOR, TlbFlushBatch, enter_lazy_tlb, exit_lazy_tlb,
-    flush_all, flush_asid, flush_page, flush_range, get_active_cpu_count, handle_shootdown_ipi,
-    has_invpcid, has_pcid, is_smp_active, notify_mm_switch, process_tlb_cpumask_count,
-    should_flush_tlb,
+    flush_all, flush_asid, flush_page, flush_range, forget_cpu_process_key, get_active_cpu_count,
+    handle_shootdown_ipi, has_invpcid, has_pcid, is_smp_active, notify_mm_switch,
+    process_tlb_cpumask_count, should_flush_tlb,
 };
 use slopos_abi::task::INVALID_PROCESS_ID;
 
@@ -22,12 +22,17 @@ use slopos_abi::task::INVALID_PROCESS_ID;
 const OFFLINE_CPU_A: usize = MAX_CPUS - 1;
 const OFFLINE_CPU_B: usize = MAX_CPUS - 2;
 
-/// Switch the two fake CPUs out of whatever address space a test parked them
+/// Drop the two fake CPUs' record of whatever address space a test parked them
 /// in. Process slots recycle, so a loaded-process key left behind here is
 /// carried into the next test's process and clears a mask bit it never set.
+///
+/// `forget_cpu_process_key` rather than `notify_mm_switch(None, ..)`: a caller
+/// may already have destroyed the process, and the switch-out would then clear
+/// the slot's mask bit on behalf of the slot's next occupant. A bit left set
+/// here is never inherited, because a slot's mask is cleared when it is bound.
 fn release_offline_cpus() {
-    notify_mm_switch(None, INVALID_PROCESS_ID, OFFLINE_CPU_A);
-    notify_mm_switch(None, INVALID_PROCESS_ID, OFFLINE_CPU_B);
+    forget_cpu_process_key(OFFLINE_CPU_A);
+    forget_cpu_process_key(OFFLINE_CPU_B);
 }
 
 pub fn test_flush_page_null_address() -> TestResult {

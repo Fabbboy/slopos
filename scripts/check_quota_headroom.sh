@@ -48,6 +48,7 @@ done
 # field would yield a whole log line where an integer was expected.
 QUOTA_RE='^QUOTA\[([a-z-]+)\]: mode=([a-z]+) slot=([0-9]+) kind=([a-z]+) used=([0-9]+) peak=([0-9]+) limit=(-?[0-9]+) denials=([0-9]+)'
 COST_RE='^QUOTACOST: depth=([0-9]+) cycles_per_charge=([0-9]+)'
+REF_RE='^QUOTACOST: reference cycles_per_op=([0-9]+)'
 
 # phase/kind -> "maxpeak totaldenials mode". Rows are per-process; the cap is
 # on the worst single row of a kind, because that is what a per-principal
@@ -58,6 +59,9 @@ declare -A MODE=()
 declare -A SEEN_PHASE=()
 # depth -> worst observed cycles per charge+refund round trip.
 declare -A COST=()
+# Cost of one bare CAS round trip in the same run: the scale the two above are
+# read against.
+REF_COST=0
 
 parse_log() {
     local log="$1" raw key phase kind peak denials
@@ -108,6 +112,19 @@ parse_log() {
             COST["$depth"]=$cycles
         fi
     done < <(grep -oE 'QUOTACOST: depth=[0-9]+ cycles_per_charge=[0-9]+' "$log" || true)
+
+    local ref_line
+    while IFS= read -r ref_line; do
+        ref_line="${ref_line%$'\r'}"
+        if [[ ! "$ref_line" =~ $REF_RE ]]; then
+            echo "FAIL: could not parse a QUOTACOST reference line — the report format moved." >&2
+            echo "      line: $ref_line" >&2
+            return 1
+        fi
+        if [ "${BASH_REMATCH[1]}" -gt "$REF_COST" ]; then
+            REF_COST="${BASH_REMATCH[1]}"
+        fi
+    done < <(grep -oE 'QUOTACOST: reference cycles_per_op=[0-9]+' "$log" || true)
 }
 
 emit_gate_data() {
@@ -142,12 +159,32 @@ emit_gate_data() {
         printf '%s\t%s\t%s\n' "${key%%/*}" "${key##*/}" "${PEAK[$key]}"
     done
     echo
-    echo "# Cycles per charge+refund round trip, by account-chain depth. The"
-    echo "# spread across runs is wide under TCG, so these carry it as margin"
-    echo "# rather than sitting one observation above the measurement."
+    echo "# The charge path's cost, as ratios rather than cycle counts. A cycle"
+    echo "# count here measures the accelerator: the same tree reports ~1500"
+    echo "# cycles per charge under KVM and ~20000 under TCG, and both are"
+    echo "# correct. Every number below is x100, so 420 means 4.20."
+    echo "#"
+    echo "# The reference floors are emitted at half the observed value, because"
+    echo "# a bare CAS is relatively dearer under TCG than natively and this"
+    echo "# ratio does move with the accelerator. They prove the measurement"
+    echo "# happened; the depth ratio below is the check."
+    local ref="$REF_COST"
+    [ "$ref" -gt 0 ] || ref=1
     for depth in $(printf '%s\n' "${!COST[@]}" | sort -n); do
-        printf 'max-cycles-per-charge %s %s\n' "$depth" "${COST[$depth]}"
+        printf 'min-charge-over-reference %s %s\n' "$depth" \
+            "$(( COST[$depth] * 100 / ref / 2 ))"
     done
+    local shallow="${COST[1]:-0}" deepest=0 deep_depth=0
+    for depth in $(printf '%s\n' "${!COST[@]}" | sort -n); do
+        if [ "$depth" -gt "$deep_depth" ]; then
+            deep_depth="$depth"
+            deepest="${COST[$depth]}"
+        fi
+    done
+    if [ "$shallow" -gt 0 ] && [ "$deep_depth" -gt 1 ]; then
+        printf 'max-depth-cost-ratio %s %s\n' "$deep_depth" \
+            "$(( deepest * 100 / shallow ))"
+    fi
 }
 
 run_gate() {
@@ -163,7 +200,8 @@ run_gate() {
     local MIN_KINDS=0 MAX_DENIALS=0
     local -a REQUIRED=()
     declare -A CAPS=()
-    declare -A COST_CAP=()
+    declare -A COST_FLOOR=()
+    local DEPTH_RATIO_DEPTH=0 DEPTH_RATIO_CAP=0
     declare -A MIN_KINDS_FOR=()
     local lineno=0 line key
     while IFS= read -r line || [ -n "$line" ]; do
@@ -180,8 +218,11 @@ run_gate() {
             min-kinds-for)
                 MIN_KINDS_FOR["$(awk '{print $2}' <<<"$line")"]=$(awk '{print $3}' <<<"$line") ;;
             max-denials)  MAX_DENIALS=$(awk '{print $2}' <<<"$line") ;;
-            max-cycles-per-charge)
-                COST_CAP["$(awk '{print $2}' <<<"$line")"]=$(awk '{print $3}' <<<"$line") ;;
+            min-charge-over-reference)
+                COST_FLOOR["$(awk '{print $2}' <<<"$line")"]=$(awk '{print $3}' <<<"$line") ;;
+            max-depth-cost-ratio)
+                DEPTH_RATIO_DEPTH=$(awk '{print $2}' <<<"$line")
+                DEPTH_RATIO_CAP=$(awk '{print $3}' <<<"$line") ;;
             require-phase) REQUIRED+=("$(awk '{print $2}' <<<"$line")") ;;
             *)
                 echo "check_quota_headroom: $gate:$lineno: unknown directive '$key'" >&2
@@ -190,7 +231,7 @@ run_gate() {
         esac
     done < "$gate"
 
-    local fail=0 phase kinds gkey
+    local fail=0 phase kinds gkey ratio
 
     for phase in "${REQUIRED[@]}"; do
         if [ -z "${SEEN_PHASE[$phase]+x}" ]; then
@@ -238,19 +279,48 @@ run_gate() {
         fi
     done
 
-    for depth in "${!COST_CAP[@]}"; do
+    # A floor, not a cap. The reference cannot carry a ceiling: a bare CAS is
+    # relatively far more expensive under TCG than natively, so the same tree
+    # reports ~18x here and would report far more under KVM. What it can do is
+    # prove the measurement happened and that the charge path is still doing
+    # atomic work — a collapsed number is the "stopped measuring reads as
+    # healthy" hole, and it is well below any accelerator's honest value.
+    if [ "${#COST_FLOOR[@]}" -gt 0 ] && [ "$REF_COST" -le 0 ]; then
+        echo "FAIL: the boot printed no QUOTACOST reference line, so no cost ratio can be formed." >&2
+        echo "      A cost nobody measures is how an 8 % throughput regression passes." >&2
+        fail=1
+    fi
+    for depth in "${!COST_FLOOR[@]}"; do
         if [ -z "${COST[$depth]+x}" ]; then
             echo "FAIL: gate expects a QUOTACOST line for depth $depth and the boot printed none." >&2
             echo "      A cost nobody measures is how an 8 % throughput regression passes." >&2
             fail=1
             continue
         fi
-        if [ "${COST[$depth]}" -gt "${COST_CAP[$depth]}" ]; then
-            echo "FAIL: a charge at depth $depth cost ${COST[$depth]} cycles, over the recorded cap ${COST_CAP[$depth]}." >&2
-            echo "      Re-measure over several runs with --emit-allowlist; the charge path is on every syscall that allocates." >&2
+        [ "$REF_COST" -gt 0 ] || continue
+        ratio=$(( COST[$depth] * 100 / REF_COST ))
+        if [ "$ratio" -lt "${COST_FLOOR[$depth]}" ]; then
+            echo "FAIL: a charge at depth $depth cost ${COST[$depth]} cycles against a ${REF_COST}-cycle" >&2
+            echo "      reference — ${ratio}x100, under the floor ${COST_FLOOR[$depth]}. The charge path" >&2
+            echo "      cannot be cheaper than the atomics it performs; the measurement collapsed." >&2
             fail=1
         fi
     done
+    if [ "$DEPTH_RATIO_DEPTH" -gt 0 ]; then
+        if [ -z "${COST[1]+x}" ] || [ -z "${COST[$DEPTH_RATIO_DEPTH]+x}" ] \
+            || [ "${COST[1]}" -le 0 ]; then
+            echo "FAIL: gate expects QUOTACOST at depth 1 and $DEPTH_RATIO_DEPTH and the boot printed only:" >&2
+            echo "      ${!COST[*]}" >&2
+            fail=1
+        else
+            ratio=$(( COST[$DEPTH_RATIO_DEPTH] * 100 / COST[1] ))
+            if [ "$ratio" -gt "$DEPTH_RATIO_CAP" ]; then
+                echo "FAIL: depth $DEPTH_RATIO_DEPTH costs ${ratio}x100 of depth 1, over the recorded cap $DEPTH_RATIO_CAP." >&2
+                echo "      The walk stopped amortising: each level is meant to add a bounded constant." >&2
+                fail=1
+            fi
+        fi
+    fi
 
     # A cap matching nothing is a dead entry: it stops describing the kernel and
     # would silently keep passing after the kind it names stopped being charged.
@@ -267,9 +337,14 @@ run_gate() {
             echo "OK: $gkey peak=${PEAK[$gkey]} denials=${DENIALS[$gkey]:-0} (mode=${MODE[$phase]})"
         done
     done
-    for depth in $(printf '%s\n' "${!COST_CAP[@]}" | sort -n); do
-        echo "OK: charge cost at depth $depth = ${COST[$depth]} cycles (cap ${COST_CAP[$depth]})"
+    for depth in $(printf '%s\n' "${!COST_FLOOR[@]}" | sort -n); do
+        echo "OK: charge cost at depth $depth = $(( COST[$depth] * 100 / REF_COST ))x100 of" \
+            "the ${REF_COST}-cycle reference (floor ${COST_FLOOR[$depth]})"
     done
+    if [ "$DEPTH_RATIO_DEPTH" -gt 0 ]; then
+        echo "OK: depth $DEPTH_RATIO_DEPTH costs $(( COST[$DEPTH_RATIO_DEPTH] * 100 / COST[1] ))x100" \
+            "of depth 1 (cap $DEPTH_RATIO_CAP)"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -383,28 +458,83 @@ post-userland-tests	objectrow	257
     printf 'min-kinds 2\nmax-denialz 0\nrequire-phase post-userland-tests\npost-userland-tests\tfdslot\t257\n' > "$tmp/gates/$VARIANT.txt"
     _expect 2 "unknown directive" "$clean" "unknown directive rejected"
 
-    # 12. A charge cost over its cap. The floor that makes an 8 % throughput
-    #     regression a failure rather than a silent pass.
+    # 12. A charge that collapsed against the same run's own reference. The
+    #     floor that stops a measurement which stopped measuring from reading as
+    #     a healthy one.
     {
         cat "$clean"
-        printf 'QUOTACOST: depth=1 cycles_per_charge=9999\r\n'
-    } > "$tmp/slow.log"
-    printf '%smax-cycles-per-charge 1 3000\n' "$good_gate" > "$tmp/gates/$VARIANT.txt"
-    _expect 1 "over the recorded cap 3000" "$tmp/slow.log" "slow charge rejected"
+        printf 'QUOTACOST: depth=1 cycles_per_charge=150\r\n'
+        printf 'QUOTACOST: reference cycles_per_op=100\r\n'
+    } > "$tmp/collapsed.log"
+    printf '%smin-charge-over-reference 1 300\n' "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 1 "under the floor 300" "$tmp/collapsed.log" "collapsed charge cost rejected"
 
     # 13. A gate that asks about a depth the boot never measured. A cost
-    #     nobody measures is exactly how the regression above gets through.
-    printf '%smax-cycles-per-charge 4 3000\n' "$good_gate" > "$tmp/gates/$VARIANT.txt"
-    _expect 1 "printed none" "$clean" "missing charge cost rejected"
+    #     nobody measures is exactly how a regression gets through.
+    printf '%smin-charge-over-reference 4 300\n' "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 1 "printed none" "$tmp/collapsed.log" "missing charge cost rejected"
 
-    # 14. A charge cost within its cap passes, so 12 is not a gate that
-    #     rejects unconditionally.
+    # 14. An honest charge passes, so 12 is not a gate that rejects
+    #     unconditionally.
     {
         cat "$clean"
-        printf 'QUOTACOST: depth=1 cycles_per_charge=1200\r\n'
+        printf 'QUOTACOST: depth=1 cycles_per_charge=1500\r\n'
+        printf 'QUOTACOST: reference cycles_per_op=100\r\n'
     } > "$tmp/fast.log"
-    printf '%smax-cycles-per-charge 1 3000\n' "$good_gate" > "$tmp/gates/$VARIANT.txt"
-    _expect 0 "charge cost at depth 1" "$tmp/fast.log" "in-budget charge accepted"
+    printf '%smin-charge-over-reference 1 300\n' "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 0 "charge cost at depth 1" "$tmp/fast.log" "honest charge accepted"
+
+    # 14a. The same shape on a machine ten times slower. This is the whole point
+    #      of the ratio: an accelerator change must not move the verdict.
+    #      Without this case, 12 and 14 are satisfied by an absolute budget in
+    #      disguise.
+    {
+        cat "$clean"
+        printf 'QUOTACOST: depth=1 cycles_per_charge=15000\r\n'
+        printf 'QUOTACOST: reference cycles_per_op=1000\r\n'
+    } > "$tmp/slow-host.log"
+    _expect 0 "charge cost at depth 1" "$tmp/slow-host.log" "a slower host does not move the verdict"
+
+    # 14b. No reference at all. Every ratio would divide by 1 and pass, which is
+    #      the "stopped measuring reads as healthy" hole.
+    {
+        cat "$clean"
+        printf 'QUOTACOST: depth=1 cycles_per_charge=1500\r\n'
+    } > "$tmp/noref.log"
+    _expect 1 "no QUOTACOST reference line" "$tmp/noref.log" "missing reference rejected"
+
+    # 14c. The walk stopped amortising: each level is meant to add a bounded
+    #      constant, so a depth-7 charge costing seven times a depth-1 one is
+    #      the regression this catches and an absolute budget never could.
+    {
+        cat "$clean"
+        printf 'QUOTACOST: depth=1 cycles_per_charge=1000\r\n'
+        printf 'QUOTACOST: depth=7 cycles_per_charge=7000\r\n'
+        printf 'QUOTACOST: reference cycles_per_op=100\r\n'
+    } > "$tmp/nonamortised.log"
+    printf '%smin-charge-over-reference 1 300\nmin-charge-over-reference 7 300\nmax-depth-cost-ratio 7 500\n' \
+        "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 1 "over the recorded cap 500" "$tmp/nonamortised.log" "non-amortising walk rejected"
+
+    # 14d. ...and an amortising one passes, so 14c is not unconditional.
+    {
+        cat "$clean"
+        printf 'QUOTACOST: depth=1 cycles_per_charge=1000\r\n'
+        printf 'QUOTACOST: depth=7 cycles_per_charge=4000\r\n'
+        printf 'QUOTACOST: reference cycles_per_op=100\r\n'
+    } > "$tmp/amortised.log"
+    _expect 0 "costs 400x100 of depth 1" "$tmp/amortised.log" "amortising walk accepted"
+
+    # 14e. The same non-amortising shape ten times slower still fails, so 14c is
+    #      not an absolute budget either.
+    {
+        cat "$clean"
+        printf 'QUOTACOST: depth=1 cycles_per_charge=10000\r\n'
+        printf 'QUOTACOST: depth=7 cycles_per_charge=70000\r\n'
+        printf 'QUOTACOST: reference cycles_per_op=1000\r\n'
+    } > "$tmp/nonamortised-slow.log"
+    _expect 1 "over the recorded cap 500" "$tmp/nonamortised-slow.log" \
+        "a slower host does not excuse a non-amortising walk"
 
     # 15. No gate data at all for the variant.
     rm -f "$tmp/gates/$VARIANT.txt"

@@ -3321,8 +3321,18 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_process_timers() {
+    // Gated like `net_timer_process`, and for a reason the clock change below
+    // creates: this walks every PCB in the global table and can transmit. Once
+    // it reads the same mock clock a test advances, a test that jumps mock time
+    // by two hours makes every armed delayed ACK in the table look due to the
+    // net-timer kthread on another CPU, which then sends the test's segment.
+    if crate::ingress::dataplane_quiesced() {
+        return;
+    }
     // Retransmit timers fire exclusively via NET_TIMER_WHEEL → tcp::on_retransmit.
-    let now_ms = slopos_kernel_services::clock::uptime_ms();
+    // `crate::clock`, not raw uptime: the deadline this is compared against was
+    // set from the same domain, and a mock advance must move both together.
+    let now_ms = crate::clock::now_ms();
     if let Some((_idx, seg)) = tcp::delayed_ack_check(now_ms) {
         let _ = socket_send_tcp_segment(&seg, &[]);
     }

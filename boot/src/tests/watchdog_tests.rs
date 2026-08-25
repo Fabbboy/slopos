@@ -95,8 +95,17 @@ pub fn test_miss_threshold_rejects_zero() -> TestResult {
         watchdog::miss_threshold() == original,
         "a rejected value still changed the threshold"
     );
-    assert_test!(watchdog::set_miss_threshold(7), "a sane value was rejected");
-    assert_test!(watchdog::miss_threshold() == 7, "threshold did not take");
+    // Raised wherever it can be: lowering the machine-wide fuse, even for the
+    // two reads below, makes a host-descheduled CPU look wedged to its watcher.
+    let raised = original.checked_add(1).unwrap_or(u32::MAX - 1);
+    assert_test!(
+        watchdog::set_miss_threshold(raised),
+        "a sane value was rejected"
+    );
+    assert_test!(
+        watchdog::miss_threshold() == raised,
+        "threshold did not take"
+    );
 
     watchdog::set_miss_threshold(original);
     TestResult::Pass
@@ -211,20 +220,25 @@ pub fn test_force_unlock_releases_exactly_one() -> TestResult {
 /// This CPU stops taking timer interrupts long enough that its watcher must
 /// report it, and must survive being reported.
 pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
+    const FUSE: u32 = 3;
+
     if slopos_arch::pcr::get_online_cpu_count() < 2 {
         return TestResult::Skipped;
     }
 
     let cpu = pcr::get_current_cpu();
-    let original = watchdog::miss_threshold();
+
+    // Scoped to this CPU: on the machine-wide fuse the injection would report
+    // whichever CPU the host happened to deschedule instead.
+    let Some(_fuse) = watchdog::MissThresholdOverride::for_cpu(cpu, FUSE) else {
+        return TestResult::Fail;
+    };
 
     // Three samples, so the stall need only outlast ~30 ms of the watcher's
     // ticks; the delay lets it take one sample under the new threshold.
-    watchdog::set_miss_threshold(3);
     hpet::delay_ms(50);
 
     let Some(watcher) = watchdog::watcher_of(cpu) else {
-        watchdog::set_miss_threshold(original);
         // No AP has started its timer yet, so nothing is sampling us.
         return TestResult::Skipped;
     };
@@ -234,12 +248,12 @@ pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
     hpet::delay_ms(150);
     slopos_arch::cpu::restore_flags(flags);
 
-    watchdog::set_miss_threshold(original);
-
     // What the watcher observed, not how many ticks it took: a descheduled
     // watcher bursts its ticks afterwards, satisfying any count over the window.
-    let observed =
-        matches!(watchdog::max_stall(watcher), Some((t, samples)) if t == cpu && samples >= 3);
+    let observed = matches!(
+        watchdog::max_stall(watcher),
+        Some((t, samples)) if t == cpu && samples >= FUSE
+    );
     if !observed {
         return TestResult::Skipped;
     }
@@ -255,34 +269,37 @@ pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
     TestResult::Pass
 }
 
-/// Escalation is off by default where a stalled heartbeat is not evidence, and
-/// the cmdline knob still forces it back on.
+/// Over the policy function, not the live global: arming `watchdog.panic=on`
+/// would make any stall the rest of the machine takes in that window fatal.
 pub fn test_fatal_escalation_defaults_off_under_a_hypervisor() -> TestResult {
-    if !slopos_ostd::arch::x86_64::cpuid::hypervisor_present() {
-        return TestResult::Skipped;
-    }
-
-    let permitted_default = watchdog::fatal_escalation_permitted();
-    watchdog::set_panic_enabled(true);
-    let permitted_forced_on = watchdog::fatal_escalation_permitted();
-    watchdog::set_panic_enabled(false);
-    let permitted_forced_off = watchdog::fatal_escalation_permitted();
-
-    // The boot cmdline sets no override, so leaving it forced would change how
-    // every later stall is handled.
-    watchdog::clear_panic_override();
+    use slopos_ostd::watchdog::{PanicOverride, fatal_escalation_policy};
 
     assert_test!(
-        !permitted_default,
+        !fatal_escalation_policy(PanicOverride::Unset, true),
         "a stalled heartbeat under a hypervisor is not evidence, so it must not be fatal"
     );
     assert_test!(
-        permitted_forced_on,
+        fatal_escalation_policy(PanicOverride::Unset, false),
+        "on bare metal an unset override must leave escalation available"
+    );
+    assert_test!(
+        fatal_escalation_policy(PanicOverride::ForcedOn, true),
         "watchdog.panic=on did not force escalation"
     );
     assert_test!(
-        !permitted_forced_off,
+        !fatal_escalation_policy(PanicOverride::ForcedOff, false),
         "watchdog.panic=off did not suppress escalation"
+    );
+
+    // The live decision must be that policy applied to the live inputs, or the
+    // table above describes something the detector does not consult.
+    assert_test!(
+        watchdog::fatal_escalation_permitted()
+            == fatal_escalation_policy(
+                watchdog::panic_override(),
+                slopos_ostd::arch::x86_64::cpuid::hypervisor_present()
+            ),
+        "the live escalation decision is not the policy over its own inputs"
     );
     TestResult::Pass
 }

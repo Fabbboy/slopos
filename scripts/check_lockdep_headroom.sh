@@ -143,6 +143,8 @@ emit_gate_data() {
     echo "# of identical code."
     echo
     echo "min-classes 32"
+    echo "min-edges 16"
+    echo "min-chains 32"
     echo "max-fill-pct 70"
     echo
     for phase in $(printf '%s\n' "${!OBSERVED[@]}" | sort); do
@@ -202,10 +204,13 @@ report_drift() {
         delta=$((val - hi))
         dir="above"
     fi
-    echo "DRIFT: LOCKDEP[$phase] $pool = $val, $delta $dir the recorded band $lo-$hi."
-    echo "       Not a failure — this pool counts which orderings the run happened to"
-    echo "       observe. If it persists, re-measure over several runs with"
-    echo "       --emit-allowlist and say in the commit message what moved."
+    # stderr, like every other diagnostic here: a DRIFT on stdout of a green
+    # CI job is a line nobody reads, and the summary below would then have the
+    # last word on the very pool that moved.
+    echo "DRIFT: LOCKDEP[$phase] $pool = $val, $delta $dir the recorded band $lo-$hi." >&2
+    echo "       Not a failure — this pool counts which orderings the run happened to" >&2
+    echo "       observe. If it persists, re-measure over several runs with" >&2
+    echo "       --emit-allowlist and say in the commit message what moved." >&2
 }
 
 run_gate() {
@@ -218,7 +223,7 @@ run_gate() {
         return 2
     fi
 
-    local MIN_CLASSES=0 MAX_FILL=100
+    local MIN_CLASSES=0 MIN_EDGES=0 MIN_CHAINS=0 MAX_FILL=100
     local -a REQUIRED=()
     declare -A CAPS=()
     declare -A BAND_LO=() BAND_HI=()
@@ -234,6 +239,8 @@ run_gate() {
         key="${line%% *}"
         case "$key" in
             min-classes) MIN_CLASSES=$(awk '{print $2}' <<<"$line") ;;
+            min-edges) MIN_EDGES=$(awk '{print $2}' <<<"$line") ;;
+            min-chains) MIN_CHAINS=$(awk '{print $2}' <<<"$line") ;;
             max-fill-pct) MAX_FILL=$(awk '{print $2}' <<<"$line") ;;
             require-phase) REQUIRED+=("$(awk '{print $2}' <<<"$line")") ;;
             band)
@@ -258,6 +265,7 @@ run_gate() {
     done < "$gate"
 
     local fail=0 phase state c e h viol pool_c pool_e pool_h pool val pool_size pct gkey bkey
+    declare -A DRIFTED=()
 
     # A pool graded both ways is a pool whose policy nobody decided: the cap
     # would fail runs the band deliberately tolerates.
@@ -287,6 +295,20 @@ run_gate() {
             echo "FAIL: LOCKDEP[$phase] registered only $c classes (min $MIN_CLASSES) — nothing measured." >&2
             fail=1
         fi
+        # The same hole, for the two pools that carry a band instead of a cap.
+        # A floor is not a tight threshold: it sits far below every observation,
+        # so it fails a validator that stopped recording and nothing else. The
+        # band's low end is deliberately NOT this floor — leaving a band in
+        # either direction is a prompt, and a run that happened to observe
+        # fewer orderings is exactly as innocent as one that observed more.
+        if [ "$e" -lt "$MIN_EDGES" ]; then
+            echo "FAIL: LOCKDEP[$phase] recorded only $e edges (min $MIN_EDGES) — nothing measured." >&2
+            fail=1
+        fi
+        if [ "$h" -lt "$MIN_CHAINS" ]; then
+            echo "FAIL: LOCKDEP[$phase] recorded only $h chains (min $MIN_CHAINS) — nothing measured." >&2
+            fail=1
+        fi
         for pool in classes edges chains; do
             case "$pool" in
                 classes) val=$c; pool_size=$pool_c ;;
@@ -310,15 +332,9 @@ run_gate() {
             if [ -n "${BAND_LO[$gkey]+x}" ]; then
                 blo=${BAND_LO[$gkey]}
                 bhi=${BAND_HI[$gkey]}
-                if [ "$blo" -gt 0 ] && [ "$val" -eq 0 ]; then
-                    # A pool that stopped being counted reads as maximally
-                    # healthy against every ceiling above — the hole min-classes
-                    # plugs for classes, plugged here for the pools that no
-                    # longer carry a cap.
-                    echo "FAIL: LOCKDEP[$phase] $pool is 0 against a band starting at $blo — nothing measured." >&2
-                    fail=1
-                elif [ "$val" -lt "$blo" ] || [ "$val" -gt "$bhi" ]; then
+                if [ "$val" -lt "$blo" ] || [ "$val" -gt "$bhi" ]; then
                     report_drift "$phase" "$pool" "$val" "$blo" "$bhi"
+                    DRIFTED["$phase"]=1
                 fi
                 unset "BAND_LO[$gkey]" "BAND_HI[$gkey]"
             fi
@@ -342,7 +358,9 @@ run_gate() {
 
     for phase in "${REQUIRED[@]}"; do
         read -r state c e h _ pool_c pool_e pool_h <<<"${OBSERVED[$phase]}"
-        echo "OK: LOCKDEP[$phase] $state classes=$c/$pool_c edges=$e/$pool_e chains=$h/$pool_h"
+        local verdict=OK
+        [ -z "${DRIFTED[$phase]+x}" ] || verdict=DRIFT
+        echo "$verdict: LOCKDEP[$phase] $state classes=$c/$pool_c edges=$e/$pool_e chains=$h/$pool_h"
     done
 }
 
@@ -357,7 +375,7 @@ run_gate() {
 # fail, and everything a band does not grade must still fail.
 
 self_test() {
-    local tmp out rc failures=0
+    local tmp out rc failures=0 accepts=0 rejects=0 emitters=0
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' RETURN
     mkdir -p "$tmp/gates"
@@ -386,8 +404,17 @@ self_test() {
     }
 
     # want_rc want_msg log label [must_not_contain]
+    #
+    # Counted here rather than tallied by hand at the end: a case added without
+    # the tally moving is a case nobody notices is missing, and the tally is the
+    # only thing a reader has to check the self-test against.
     _expect() {
         local want_rc="$1" want_msg="$2" log="$3" label="$4" absent="${5:-}"
+        if [ "$want_rc" -eq 0 ]; then
+            accepts=$((accepts + 1))
+        else
+            rejects=$((rejects + 1))
+        fi
         set +e
         out=$( "$0" --variant "$VARIANT" --gate-data-dir "$tmp/gates" --log "$log" 2>&1 )
         rc=$?
@@ -453,9 +480,28 @@ self_test() {
     _assert_has "$out" "280 above the recorded band 100-120" "band drift names the delta"
 
     # A pool that stopped being counted reads as healthy against every ceiling.
-    printf 'min-classes 32\nmax-fill-pct 70\nrequire-phase boot\nband boot edges 40 60\n' > "$tmp/gates/$VARIANT.txt"
+    # The floor is what plugs that, and it is a floor rather than the band's own
+    # low end on purpose — the three cases below are the whole policy:
+    # under the floor fails, between the floor and the band drifts, in band is
+    # silent.
+    printf 'min-classes 32\nmin-edges 16\nmin-chains 32\nmax-fill-pct 70\nrequire-phase boot\nband boot edges 40 60\n' > "$tmp/gates/$VARIANT.txt"
     _line boot ACTIVE 65 12 0 112 0 > "$tmp/zero.log"
-    _expect 1 "nothing measured" "$tmp/zero.log" "zero pool against a non-zero band rejected"
+    _expect 1 "recorded only 0 edges" "$tmp/zero.log" "zero pool against a floor rejected"
+
+    _line boot ACTIVE 65 12 48 4 0 > "$tmp/lowchains.log"
+    _expect 1 "recorded only 4 chains" "$tmp/lowchains.log" "chains under the floor rejected"
+
+    # Between the floor and the band: a run that happened to observe fewer
+    # orderings is exactly as innocent as one that observed more, so this is a
+    # prompt and not a red run. Without this case the floor above could be a
+    # gate that rejects every below-band value.
+    _line boot ACTIVE 65 12 20 112 0 > "$tmp/lowedges.log"
+    _expect 0 "DRIFT: LOCKDEP[boot] edges = 20" "$tmp/lowedges.log" "below-band-above-floor drifts" "FAIL:"
+    _assert_has "$out" "20 below the recorded band 40-60" "low drift names the direction"
+
+    # ...and a drifted phase must not have "OK" as the last word on it.
+    _assert_hasnt "$out" "OK: LOCKDEP[boot]" "drifted phase is not summarised OK"
+    _assert_has "$out" "DRIFT: LOCKDEP[boot] ACTIVE" "drifted phase is summarised DRIFT"
 
     printf 'min-classes 32\nmax-fill-pct 70\nrequire-phase boot\nband boot chains 100 120\n' > "$tmp/gates/$VARIANT.txt"
 
@@ -493,6 +539,7 @@ self_test() {
         _assert_has "$out" "$(printf 'boot\tchains\t110')" "emit keeps boot exact"
         _assert_has "$out" "$(printf 'boot\tedges\t43')" "emit keeps boot exact"
         _assert_hasnt "$out" "band boot" "emit keeps boot exact"
+        emitters=$((emitters + 1))
     fi
 
     # A check grades one run, so several logs on the check path is an operator
@@ -508,13 +555,15 @@ self_test() {
         failures=$((failures + 1))
     else
         _assert_has "$out" "only with --emit-allowlist" "several logs on the check path rejected"
+        rejects=$((rejects + 1))
     fi
 
     if [ "$failures" -ne 0 ]; then
         echo "check_lockdep_headroom: SELF-TEST FAILED ($failures case(s)) — the gate cannot be trusted to reject." >&2
         return 1
     fi
-    echo "check_lockdep_headroom: self-test OK — 16 cases, 2 accept + 13 reject + 1 emitter."
+    echo "check_lockdep_headroom: self-test OK — $((accepts + rejects + emitters)) cases," \
+        "$accepts accept + $rejects reject + $emitters emitter."
 }
 
 if [ "$SELF_TEST" -eq 1 ]; then

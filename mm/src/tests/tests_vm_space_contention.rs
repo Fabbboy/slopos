@@ -106,8 +106,10 @@ pub fn test_cow_fault_retries_while_a_reader_holds_the_space() -> TestResult {
     };
     // Equivalent to a second process mapping the same paddr, which is what
     // sends `handle_cow_fault` down the copying arm.
-    let shared = Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64()))
-        .expect("from_in_use for the COW multi-ref case");
+    let shared = match Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64())) {
+        Ok(frame) => frame,
+        Err(e) => return fail!("take a second reference to the COW frame: {:?}", e),
+    };
 
     let Some(reader) = process_vm_get_vm_space(vm.process) else {
         drop(shared);
@@ -130,8 +132,10 @@ pub fn test_cow_retry_leaves_the_page_mapped_and_cow() -> TestResult {
     let Some(phys) = cow_page(&vm) else {
         return fail!("map and mark a COW page");
     };
-    let shared = Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64()))
-        .expect("from_in_use for the COW multi-ref case");
+    let shared = match Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64())) {
+        Ok(frame) => frame,
+        Err(e) => return fail!("take a second reference to the COW frame: {:?}", e),
+    };
 
     let Some(reader) = process_vm_get_vm_space(vm.process) else {
         drop(shared);
@@ -245,9 +249,43 @@ pub fn test_retry_episode_warns_once_after_the_budget() -> TestResult {
         !note_retry(&mut ep, 7, 0x1000, RETRY_WARN_MS + 1),
         "warned twice in one episode"
     );
+    pass!()
+}
+
+/// A restart is only observable by warning again, so each arm below steps past
+/// the budget from the moment the episode would have restarted: the call that
+/// changes address or task returns `false` either way.
+pub fn test_retry_episode_keys_on_the_task_not_the_address() -> TestResult {
+    let mut ep = RetryEpisode::IDLE;
+    assert_test!(
+        !note_retry(&mut ep, 7, 0x1000, 0),
+        "the first retry of an episode warned"
+    );
+    assert_test!(
+        note_retry(&mut ep, 7, 0x1000, RETRY_WARN_MS),
+        "did not warn once the budget elapsed"
+    );
+
     assert_test!(
         !note_retry(&mut ep, 7, 0x2000, 200),
-        "a new fault address did not restart the episode"
+        "a new fault address warned on its first retry"
+    );
+    assert_test!(
+        !note_retry(&mut ep, 7, 0x2000, 200 + RETRY_WARN_MS),
+        "a new fault address restarted the episode: one task warned twice"
+    );
+
+    assert_test!(
+        !note_retry(&mut ep, 8, 0x2000, 300),
+        "a new task warned on its first retry"
+    );
+    assert_test!(
+        !note_retry(&mut ep, 8, 0x2000, 300 + RETRY_WARN_MS - 1),
+        "the new task's budget was measured from the previous episode"
+    );
+    assert_test!(
+        note_retry(&mut ep, 8, 0x2000, 300 + RETRY_WARN_MS),
+        "a new task did not restart the episode: it never warned"
     );
     pass!()
 }
@@ -286,5 +324,9 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_retry_episode_warns_once_after_the_budget,
+    suite = vm_contention
+);
+slopos_testing::stest!(
+    name = test_retry_episode_keys_on_the_task_not_the_address,
     suite = vm_contention
 );

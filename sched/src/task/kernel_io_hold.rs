@@ -9,8 +9,8 @@ use core::marker::PhantomData;
 
 use slopos_ostd::klog_debug;
 use slopos_ostd::sync::kernel_io_task::{
-    KernelIoTaskIds, arm_kernel_io_hold, disarm_kernel_io_hold, kernel_io_held_ids,
-    kernel_io_hold_armed, kernel_io_hold_covers, kernel_io_task_ids,
+    KernelIoTaskIds, arm_kernel_io_hold, disarm_kernel_io_hold, kernel_io_hold_armed,
+    kernel_io_hold_covers, kernel_io_task_ids, refresh_kernel_io_hold,
 };
 use slopos_ostd::task::SchedPlacement;
 
@@ -30,33 +30,29 @@ pub(crate) fn kernel_io_hold_claim(task: &Task, from: SchedPlacement) -> bool {
 /// Registered kernel-I/O tasks a scheduler container still owns. Zero is the
 /// hold's whole contract, measured rather than assumed.
 pub fn kernel_io_dispatchable_count() -> usize {
-    // Snapshotted off-lock: the stop registry and the task registry share a
-    // lock level, so the lookups below must not run under the former. Under a
-    // hold the set is the one the hold covers, not the whole registry: a thread
-    // that bound its id after the arm is unclaimable, so counting it would
-    // report a state no mechanism can reach.
+    // The whole registry, never the hold's arm-time snapshot. Answering off the
+    // snapshot would make a thread that registered after the arm invisible to
+    // the predicate while it stayed fully queueable — the predicate would report
+    // quiesced and the caller would race exactly the thread it asked about.
+    // Snapshotted off-lock: the stop registry and the task registry share a lock
+    // level, so the lookups below must not run under the former.
     let armed = kernel_io_hold_armed();
-    let ids = if armed {
-        kernel_io_held_ids()
-    } else {
-        kernel_io_task_ids()
-    };
-    // `Waking` is a reservation, not a container: the task is on no queue and
-    // cannot be dispatched from it. Under a hold the publisher holding that
-    // reservation is claimed at the gate before it can link anything, so a
-    // `Waking` covered task is quiesced; without a hold it really is on its way
-    // to a queue and counts.
     let mut count = 0usize;
-    for id in ids.iter() {
+    for id in kernel_io_task_ids().iter() {
         let Some(task) = task_find_by_id(id) else {
             continue;
         };
+        // `Waking` is a reservation, not a container: the task is on no queue
+        // and cannot be dispatched from it. A *covered* publisher holding that
+        // reservation is claimed at the enqueue gate before it can link
+        // anything, so it is quiesced; an uncovered one really is on its way to
+        // a queue and counts until the next refresh brings it into the cover.
         let owned = match task.sched_placement() {
             SchedPlacement::ReadyQueue
             | SchedPlacement::RemoteWake
             | SchedPlacement::OnCpu
             | SchedPlacement::Migrating => true,
-            SchedPlacement::Waking => !armed,
+            SchedPlacement::Waking => !armed || !kernel_io_hold_covers(id),
             _ => false,
         };
         if owned {
@@ -102,6 +98,9 @@ pub fn hold_kernel_io_all(_freeze: &KernelIoFreeze, paused: &ApPauseToken) -> Ke
     let mut swept = 0usize;
     let mut settled = false;
     for _ in 0..HOLD_SETTLE_SPINS {
+        // Before the sweep, so a stop that bound its id since the arm is covered
+        // by the time this round's claims run.
+        refresh_kernel_io_hold();
         swept += crate::per_cpu::hold_kernel_io_off_all_runqueues(paused);
         if kernel_io_dispatchable_count() == 0 {
             settled = true;

@@ -1,6 +1,8 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
+use crate::tests::net_scope::NetTestScope;
+use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
 use crate::types::{Ipv4Addr, NetError, Port};
 use crate::udp::UDP_DEMUX;
 
@@ -12,16 +14,16 @@ pub fn test_udp_demux_register_lookup() -> TestResult {
     reset();
 
     let mut demux = UDP_DEMUX.lock();
-    let rc = demux.register(Ipv4Addr([10, 0, 0, 1]), Port(5000), 3, false);
+    let rc = demux.register(Ipv4Addr(LOCAL_IP), Port(5000), 3, false);
     assert_test!(rc.is_ok(), "register succeeds");
 
     assert_eq_test!(
-        demux.lookup(Ipv4Addr([10, 0, 0, 1]), Port(5000)),
+        demux.lookup(Ipv4Addr(LOCAL_IP), Port(5000)),
         Some(3),
         "lookup returns socket index"
     );
     assert_eq_test!(
-        demux.lookup(Ipv4Addr([10, 0, 0, 1]), Port(5001)),
+        demux.lookup(Ipv4Addr(LOCAL_IP), Port(5001)),
         None,
         "lookup misses wrong port"
     );
@@ -54,17 +56,17 @@ pub fn test_udp_demux_exact_over_wildcard() -> TestResult {
     reset();
 
     let mut demux = UDP_DEMUX.lock();
-    let rc_a = demux.register(Ipv4Addr([10, 0, 0, 1]), Port(7000), 11, false);
+    let rc_a = demux.register(Ipv4Addr(LOCAL_IP), Port(7000), 11, false);
     let rc_b = demux.register(Ipv4Addr::UNSPECIFIED, Port(7000), 12, false);
     assert_test!(rc_a.is_ok() && rc_b.is_ok(), "both registrations succeed");
 
     assert_eq_test!(
-        demux.lookup(Ipv4Addr([10, 0, 0, 1]), Port(7000)),
+        demux.lookup(Ipv4Addr(LOCAL_IP), Port(7000)),
         Some(11),
         "exact ip wins over wildcard"
     );
     assert_eq_test!(
-        demux.lookup(Ipv4Addr([10, 0, 0, 2]), Port(7000)),
+        demux.lookup(Ipv4Addr(REMOTE_IP), Port(7000)),
         Some(12),
         "wildcard handles non-exact destination"
     );
@@ -76,17 +78,17 @@ pub fn test_udp_demux_reuse_addr() -> TestResult {
     reset();
 
     let mut demux = UDP_DEMUX.lock();
-    let first = demux.register(Ipv4Addr([10, 0, 0, 1]), Port(8000), 20, false);
+    let first = demux.register(Ipv4Addr(LOCAL_IP), Port(8000), 20, false);
     assert_test!(first.is_ok(), "initial register succeeds");
 
-    let second = demux.register(Ipv4Addr([10, 0, 0, 1]), Port(8000), 21, false);
+    let second = demux.register(Ipv4Addr(LOCAL_IP), Port(8000), 21, false);
     assert_eq_test!(
         second,
         Err(NetError::AddressInUse),
         "second register without reuse fails"
     );
 
-    let third = demux.register(Ipv4Addr([10, 0, 0, 1]), Port(8000), 21, true);
+    let third = demux.register(Ipv4Addr(LOCAL_IP), Port(8000), 21, true);
     assert_test!(third.is_ok(), "second register with reuse succeeds");
 
     pass!()
@@ -96,12 +98,12 @@ pub fn test_udp_demux_unregister() -> TestResult {
     reset();
 
     let mut demux = UDP_DEMUX.lock();
-    let rc = demux.register(Ipv4Addr([10, 0, 0, 1]), Port(9000), 30, false);
+    let rc = demux.register(Ipv4Addr(LOCAL_IP), Port(9000), 30, false);
     assert_test!(rc.is_ok(), "register succeeds");
 
-    demux.unregister(Ipv4Addr([10, 0, 0, 1]), Port(9000), 30);
+    demux.unregister(Ipv4Addr(LOCAL_IP), Port(9000), 30);
     assert_eq_test!(
-        demux.lookup(Ipv4Addr([10, 0, 0, 1]), Port(9000)),
+        demux.lookup(Ipv4Addr(LOCAL_IP), Port(9000)),
         None,
         "lookup is empty after unregister"
     );
@@ -113,19 +115,19 @@ pub fn test_udp_demux_clear() -> TestResult {
     reset();
 
     let mut demux = UDP_DEMUX.lock();
-    let _ = demux.register(Ipv4Addr([10, 0, 0, 1]), Port(9100), 31, false);
-    let _ = demux.register(Ipv4Addr([10, 0, 0, 2]), Port(9101), 32, false);
+    let _ = demux.register(Ipv4Addr(LOCAL_IP), Port(9100), 31, false);
+    let _ = demux.register(Ipv4Addr(REMOTE_IP), Port(9101), 32, false);
     let _ = demux.register(Ipv4Addr::UNSPECIFIED, Port(9102), 33, false);
 
     demux.clear();
 
     assert_eq_test!(
-        demux.lookup(Ipv4Addr([10, 0, 0, 1]), Port(9100)),
+        demux.lookup(Ipv4Addr(LOCAL_IP), Port(9100)),
         None,
         "first entry removed"
     );
     assert_eq_test!(
-        demux.lookup(Ipv4Addr([10, 0, 0, 2]), Port(9101)),
+        demux.lookup(Ipv4Addr(REMOTE_IP), Port(9101)),
         None,
         "second entry removed"
     );
@@ -139,6 +141,12 @@ pub fn test_udp_demux_clear() -> TestResult {
 }
 
 pub fn test_udp_demux_overflow() -> TestResult {
+    // The bucket fill is a count on a table the live stack also registers
+    // into; the scope is what makes eight the whole population.
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
     reset();
 
     // A shared port hashes every registration into one bucket, which holds 8 entries.

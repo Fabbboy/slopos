@@ -4,14 +4,28 @@
 //! connection silently addresses whichever connection moved in. Each test
 //! drives that reuse deterministically: install, release, install into the same
 //! slot, then act with the first id.
+//!
+//! Every test holds a [`NetTestScope`]: the slots, generations and stale-lookup
+//! counter below are global table state the live ingress and net-timer threads
+//! mutate too. `reset()` stays inside the scope, which clears the table before
+//! it gates ingress, so a frame already in flight can still install after that
+//! clear.
 
 use slopos_testing::TestResult;
-use slopos_testing::{assert_eq_test, assert_test, pass};
+use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::tcp::pcb::{ListenState, PcbState, SynSentState};
 use crate::tcp::seq::SeqNum;
 use crate::tcp::table::{self, ConnId};
 use crate::tcp::tuple::TcpTuple;
+use crate::tests::net_scope::{NetTestScope, ScopeError};
+use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
+
+#[cold]
+#[inline(never)]
+fn scope_error(e: ScopeError) -> TestResult {
+    fail!("net scope: {:?}", e)
+}
 
 fn reset() {
     table::clear_all();
@@ -25,9 +39,9 @@ fn syn_sent_state() -> PcbState {
 /// and takes the same slot, which is the recycling under test.
 fn tuple() -> TcpTuple {
     TcpTuple {
-        local_ip: [10, 0, 0, 1],
+        local_ip: LOCAL_IP,
         local_port: 5100,
-        remote_ip: [10, 0, 0, 2],
+        remote_ip: REMOTE_IP,
         remote_port: 60100,
     }
 }
@@ -51,6 +65,10 @@ fn install_listener() -> ConnId {
 }
 
 pub fn test_generation_advances_on_release() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let first = install();
     table::release(first);
@@ -71,6 +89,10 @@ pub fn test_generation_advances_on_release() -> TestResult {
 }
 
 pub fn test_stale_id_rejected_by_every_accessor() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let stale = install();
     table::release(stale);
@@ -105,6 +127,10 @@ pub fn test_stale_id_rejected_by_every_accessor() -> TestResult {
 /// A socket that has not noticed its connection close still holds the old id,
 /// and `close`/`abort` reach `release` with it.
 pub fn test_stale_release_does_not_evict_live_connection() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let stale = install();
     table::release(stale);
@@ -127,6 +153,10 @@ pub fn test_stale_release_does_not_evict_live_connection() -> TestResult {
 /// Demux mints ids from the same RCU snapshot it matched the tuple in, so a
 /// lookup can never hand back an id for an occupant that snapshot did not see.
 pub fn test_find_returns_current_generation() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let first = install();
     table::release(first);
@@ -141,6 +171,10 @@ pub fn test_find_returns_current_generation() -> TestResult {
 }
 
 pub fn test_stale_lookup_counter_increments() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let stale = install();
     table::release(stale);
@@ -164,6 +198,10 @@ pub fn test_stale_lookup_counter_increments() -> TestResult {
 /// `clear_all` advances rather than resets the generations, so ids the cleared
 /// connections had already issued do not revalidate.
 pub fn test_clear_all_advances_generations() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let stale = install();
     table::clear_all();
@@ -178,6 +216,10 @@ pub fn test_clear_all_advances_generations() -> TestResult {
 }
 
 pub fn test_listener_generation() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return scope_error(e),
+    };
     reset();
     let first = install_listener();
     table::release(first);

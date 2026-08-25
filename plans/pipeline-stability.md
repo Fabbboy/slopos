@@ -1,7 +1,9 @@
 # Making the pipeline stable
 
-Root causes behind the flaky CI runs, and the fixes for them. Written against
-`455102f9`, which is the tip of `develop` and is **red**.
+Root causes behind the flaky CI runs, and the fixes for them. Started against
+`455102f9` — the tip of `develop`, and **red** — and carried through the work
+that landed in `a8d5b17`, `3f2acdd`, `c860a27` and the commit this document
+ships in. §5 records what the fixes measure.
 
 ---
 
@@ -138,6 +140,12 @@ The durable form is a **minimum over repetitions** — one clean pass is enough 
 no number of stolen ones can lower it — or, better, an assertion on the
 structural fact the timing was standing in for.
 
+The shape reaches into the gates too, and further than the suite: an absolute
+*cycle* budget is a wall-clock budget with the units changed. `check_quota_headroom.sh`
+capped the charge path at 3000 and 9000 cycles, numbers taken on a KVM host; the
+identical unmodified tree measures 20631 and 81886 under TCG and fails the gate
+on every machine without `/dev/kvm` (§5).
+
 ### 2.5 Absolute assertions on global counters
 
 A test that reads a machine-wide counter is asserting about every CPU. The
@@ -146,12 +154,6 @@ bottom-half drain counters (`slopos-ostd/src/sync/bh.rs:51,59` — global, not
 per-CPU), the kconsole pending bitmask, the live event bus, the oops ledger, and
 the stack-VA in-use bitmap. Most have a per-CPU or per-principal equivalent
 that is both sound and more sensitive.
-
----
-
-*Sections 3 (the fixes) and 4 (verification) follow as they land.*
-
----
 
 ### 2.6 One documented failure that no longer reproduces
 
@@ -204,6 +206,28 @@ entries with none of the kernel-I/O preservation its ready-queue sibling
 performs, leaving a thread `Ready` with `SchedPlacement::None` — a state no wake
 re-publishes and only the idle rescue sweep recovers.
 
+Three properties of the cover set are load-bearing, and each one is a strand
+the first cut of the hold could produce:
+
+- **Arming unions, never replaces.** The depth counter nests; the id set has to
+  nest with it. An inner arm taken after a stop deregistered — or before one
+  bound its id, which `KernelIoStop::task_id` leaves invalid until the thread
+  first runs — used to drop that id, so the outermost disarm never visited it
+  and the task stayed `Held` on no queue. `placement_is_durable_owner(Held)` is
+  `true`, so `rescue_check_task` skips it and `strand_sweep_task` (which keys on
+  `None`) says nothing: it is gone until reboot.
+- **The test helper is additive too**, for the panic path specifically.
+  Unwinding runs `KernelIoHold::drop` — taking the depth 2 -> 1, republishing
+  nothing — *before* `clear_kernel_io_hold_after_panic` snapshots the set. A
+  displacing helper leaves that snapshot holding only the test's synthetic ids
+  and every real kernel-I/O thread stranded.
+- **The quiesced predicate walks the registry, not the arm-time snapshot**, and
+  the settle loop refreshes the cover each round. Answering off the snapshot
+  makes a thread that registered after the arm invisible to the predicate while
+  it stays fully queueable — the predicate reports quiesced and the caller races
+  exactly the thread it asked about, which is the original bug wearing the
+  fix's clothes.
+
 ### 3.2 A page fault never turns a transient conflict into a fatal one
 
 `MapError::ConcurrentAccess` becomes `MapError::WouldBlock`, `MmError` gains
@@ -214,13 +238,19 @@ and the decision is retaken. Nothing is mapped, nothing stays allocated, no
 generation is bumped, and no fault reason is recorded, so the retry is free of
 side effects.
 
-Two supporting changes. The spin drops from 1,000,000 iterations to 64 — one
-cache-line round trip rather than a scheduling quantum, because past that the
-holder is descheduled and every further iteration burns the CPU it needs in
-order to release, with interrupts and preemption off under the per-process lock.
-And the comment claiming a caller had violated an "external-lock contract" is
-deleted: the clone it blames is the documented design, minted deliberately so
-`user_copy`'s walk runs with the per-process lock released.
+One supporting change: the comment claiming a caller had violated an
+"external-lock contract" is deleted. The clone it blames is the documented
+design, minted deliberately so `user_copy`'s walk runs with the per-process lock
+released.
+
+`VM_SPACE_MUT_SPINS` deliberately stays at 1,000,000. Cutting it to 64 was
+tried and reverted: only two of the ten `vm_space_get_mut` callers can retry —
+the two the `WouldBlock` path reaches. The other eight (fork's COW marking,
+`mmap`, `brk`, `mprotect`, `munmap`) turn a spin exhaustion into a returned
+error, and `fork()`'s has no rollback, so it would leave the parent's pages
+COW-marked with the child never created. A shorter spin is right *for the
+retrying callers* and wrong for the rest; making it right for both is a
+per-caller budget, not a global constant, and is not attempted here.
 
 There is **no escalation after N retries**. Any threshold is a re-measurement of
 the host-scheduling variance being removed, and would reintroduce a rare
@@ -240,7 +270,38 @@ so they neither observe nor starve the global one, and the timer-wheel and mock
 clock are scoped so a test that advances mock time by two hours cannot fire and
 discard the live stack's timers.
 
-### 3.4 Timing assertions become minima, or stop being timing assertions
+`10.0.0.1`/`10.0.0.2` were the last hole, and a wide one: both are reachable
+through the boot default route, so every connect in `socket_tests.rs` and every
+retransmit driven by `tcp_common.rs` really put a frame on the virtio device and
+QEMU's gateway really answered it. A synthetic PCB on a 4-tuple the wire can
+reach is a PCB the wire can tear down between the injection and the assertion —
+which is what `test_tcp_shutdown_wr_recv_still_works` was losing to. Those
+addresses are now TEST-NET-1 throughout, `socket_tests.rs`'s shared
+`connect_and_establish` takes the scope, and so does the one *inbound*-racing
+shape in the file: a listener bound to a wire-reachable port, which a real SYN
+would be accepted on.
+
+Two more mechanisms had to move with them, both found by reproducing the flake
+under host contention rather than by reading:
+
+- **`socket_process_timers` is gated.** It walks every PCB in the global table
+  and can transmit, and it now reads the same clock a test advances, so a test
+  that jumps mock time made every armed delayed ACK in the table look due to the
+  net-timer kthread on another CPU. Without the gate, moving it onto the net
+  clock (§3.7) would have *widened* a race rather than closing one.
+- **`tcp_common::dispatch_fired_timers` drains the selector**, not
+  `NET_TIMER_WHEEL` directly. Under a scope a `tcp::schedule` lands in the test
+  wheel; draining the live one would fire nothing the test armed while leaving
+  what it armed for the live thread to fire instead. That is how
+  `test_tcp_delayed_ack_timeout` and `test_tcp_recv_updates_window` failed under
+  contention having passed in five consecutive uncontended runs.
+
+`poll_loopback` is gated too. It is the one ingress path that calls
+`ipv4::handle_rx` directly rather than through `ingress::net_rx`, so a loopback
+frame queued before a scope opened was delivered into the global TCP table while
+the scope was up.
+
+### 3.4 Timing assertions become minima, ratios, or structural facts
 
 A wall-clock bound measures the host as much as the kernel, and both the TSC and
 the HPET keep counting through a vCPU deschedule. Where the measurement is the
@@ -254,6 +315,17 @@ The harness's own clock was part of this: `estimate_cycles_per_ms` trusted
 CPUID leaf 0x16, which is absent under TCG, and fell back to a hardcoded 3 GHz,
 so every reported `time_ms` was wrong by whatever the real ratio was. Per-test
 elapsed time now comes from the monotonic clock directly.
+
+Where a cost genuinely has to be bounded, the durable form is a **ratio between
+two quantities measured in the same run** — the emulation factor divides out.
+The quota gate's charge cost is now depth 7 against depth 1: measured at
+3.69–3.99 across five runs and three tree states, which is the tightest quantity
+in any gate file here, and tight *because* it is a ratio (§5). Where even that
+is unavailable, the honest move is a coarse ceiling that no host reaches, stated
+as such: `test_rcu_drain_never_waits_for_a_grace_period` keeps its exact
+`synchronize_rcu`-entry count as the real check and carries a 2000 ms ceiling
+only to catch the regression the counter cannot see — an inline wait that never
+calls `synchronize_rcu` at all.
 
 ### 3.5 Absolute assertions on machine-wide counters become local ones
 
@@ -274,16 +346,46 @@ tree exceeding its own cap; those become bands that report drift and fail only
 on the fill ceiling, the class caps, a dead entry, or an actual violation. The
 cycle detector, which is the correctness check, is untouched.
 
+Two things a band must not quietly become. It must not become a hole — a pool
+that stopped being counted reads as maximally healthy against every ceiling
+above it, so `min-edges` and `min-chains` join `min-classes` as explicit floors.
+Those floors are deliberately *not* the band's low end: a run that happened to
+observe fewer orderings is exactly as innocent as one that observed more, which
+is the entire premise of banding, so a below-band value drifts like an
+above-band one and only a value near zero fails. And it must not become a
+silence — `DRIFT` moved to stderr, where every other diagnostic in the script
+already goes, and a phase that drifted is summarised `DRIFT:` rather than `OK:`,
+because the last word on a moved pool was otherwise "OK" on a green CI job's
+collapsed log. The gate file now states the bound it actually enforces
+(`max-fill-pct`, ~3.5x observed) rather than the band width, and the self-test
+counts its own cases instead of carrying a hand-maintained tally that had
+already drifted from 16 to 19.
+
 The Go harness learns the kernel's abort banner: it tightens its silence budget
 rather than exiting, because in the recorded case the abort was one CPU and the
-surviving BSP produced 2931 further results.
+surviving BSP produced 2931 further results. `Skipped` also stops counting into
+`summary.passed` and gets its own `summary.skipped`, so a run that skipped
+everything can no longer report as a run that passed everything.
 
 ### 3.7 Real bugs fixed along the way
 
 - **A demand fault could `SIGSEGV` a correct multithreaded process** (§2.2).
 - **The quota ledger published `used` before `peak`**, so a concurrent
   `ledger_audit` scan could observe `used > peak` — the exact invariant the
-  audit exists to check, violated by the writer's own publish order.
+  audit exists to check, violated by the writer's own publish order. Reordering
+  the two stores is *not* the fix: a charge that raises `peak` and then loses
+  its CAS leaves the mark at a value never held, and one lost CAS whose retry
+  succeeds is enough (`used=100,peak=100`; A raises to 101; B refunds 50; A
+  retries and commits 51; `peak` stays 101). `check_quota_headroom.sh` caps
+  peaks *exactly*, so a `+1` on a contended root row is a red gate. `used` and
+  `peak` are now one `AtomicU64` — `used` in the low half, `peak` in the high —
+  moved by a single CAS, so `used <= peak` holds by construction and only a
+  committed charge can move the mark. `UsedAbovePeak` goes from "eventually
+  true" to unobservable, which is why the two tests that assert `ledger_audit`
+  need no quiescing.
+- **`account_release` handed its outstanding amount up while the row was still
+  live**, so the parent sat below the sum of its children for the length of the
+  hand-up (see §4 for why the sibling ordering issue is *not* fixed).
 - **`test_gdt_set_ist_valid_indices` installed a read-only `.rodata` static as
   the IST top for seven vectors**, two of which — `PageFault` and `KeyboardIrq` —
   are IST-routed. A fault in that window pushes an exception frame onto
@@ -294,6 +396,18 @@ surviving BSP produced 2931 further results.
 - **The net stack had two time bases**: `socket_process_timers` read
   `kernel_services::clock::uptime_ms()` while the deadlines it compared against
   came from `net::clock::now_ms()`.
+- **The reclaim tier's budget was specified in pages and enforced in blocks.**
+  `Reclaimable::reclaim`'s contract is "at most `want` pages";
+  `QuarantineReclaim::reclaim` forwarded `want` straight to
+  `quarantine_release_some`, whose loop counted *blocks* and whose return
+  counted pages. A single order-2 block in the backlog therefore made
+  `reclaim::run(1)` return 4, and the assertion that had guarded the contract
+  (`freed <= want`) was a latent false failure that only stayed quiet because
+  the test before it drained the backlog. `quarantine_release_some` now budgets
+  in pages. Declining a block that would overshoot is deliberately *not* the
+  answer — that reclaimer would report zero forever while `reclaimable_pages`
+  said there was work — so the contract states the residual instead: the total
+  may exceed `want` by less than one unit, once for the whole call.
 
 ---
 
@@ -307,21 +421,25 @@ recorded rather than acted on.
 not: `ledger_audit`'s `AncestorUnderCount` is transiently true on every
 hierarchical charge. The refund direction is already safe. The mechanical fix —
 collect the chain and debit root-downward — was implemented, measured and
-reverted, because it moves two things the fix itself cannot re-measure: a batch
-refused at the leaf would then have been charged to and unwound from every
-ancestor, raising the root's `peak` against the *exact* per-account caps in
-`scripts/gates/quota/tests.txt`; and `refused_by` flips from the nearest
-refusing row to the outermost one, taking the `denials` attribution with it.
-It also would not make the audit's check sound, because the ancestor and its
-children are sampled at different times either way — `AncestorUnderCount` is a
-quiescent-ledger check, and the honest fix for the *test* that asserts it is to
-run it quiesced.
+reverted.
 
-**`account_release` handed its outstanding amount up while the row was still
-live**, so the parent sat below the sum of its children for the length of the
-hand-up. That one *is* fixed here — the row goes dark first — because it is a
-genuine state violation rather than a sampling artifact, and going dark is
-precisely what makes an in-flight refund a whole-chain no-op.
+The decisive reason is the third one, not the first two. **It would not make the
+audit's check sound**: `ledger_audit` samples the ancestor at one instant and
+its children at a later one, so a hierarchical charge completing inside that
+window makes `ancestor(T1) < Σ children(T2)` whichever direction the writer
+walks, and reading children-first has the symmetric problem with refunds.
+`AncestorUnderCount` is a quiescent-ledger check, full stop — unlike
+`UsedAbovePeak`, which the packing above makes instantaneously true and which is
+therefore the one invariant of the four a lock-free reader may hold to.
+
+The two costs are real but secondary: `refused_by` would flip from the nearest
+refusing row to the outermost one, taking `denials` attribution with it; and
+every ancestor would be charged and unwound for a batch the leaf refuses,
+raising the root's `peak` against the *exact* per-account caps in
+`scripts/gates/quota/tests.txt`. Note the packing does not remove that second
+one — the ancestor really would hold the batch for the length of the walk, so
+the peak it records is honest and the caps simply have to be re-measured with
+it.
 
 **A double-free on a non-`WouldBlock` cursor error.** In
 `ostd_map_4kb_user`, if `cursor_mut` or `map` fails after a `UFrame` has been
@@ -329,6 +447,23 @@ wrapped, the frame's drop frees the page and the caller's `free_page_frame`
 frees it again. Pre-existing, not made worse by the retry work — the hoist there
 closes only the arm the retry work makes reachable. The fix is to have `map`
 hand the frame back on error.
+
+**`utest_curl_e2e` and `utest_ip_e2e` need real egress.** Both open TCP to
+`8.8.8.8:53` and `1.1.1.1:53`. In a sandbox whose egress policy allows only
+proxied HTTPS they time out at 30 s per target and the tests fail — while
+`utest_dns_resolve` passes, because QEMU's slirp DNS forwarder is a different
+path. That is the environment answering, not the kernel, and nothing here
+changes it. It is recorded so the next person reading a local run does not chase
+it. Making them `Skipped` on a timeout is deliberately *not* done: a timeout is
+what a real regression looks like too, and a test that skips itself on the
+symptom of the bug it exists to catch is worse than one that fails in a sandbox.
+
+**`BuddyAllocator::stats()` read the per-CPU cache total outside the lock.**
+Every path that moves a frame from a magazine into the free lists does both
+halves under it, so a peer draining in that window was counted twice and `free`
+could exceed `total`. Fixed here — the read moved inside the lock — because it
+is a kernel-side inconsistency, not a test artefact, and a test had just started
+asserting on it.
 
 **An unprotected window in `__spawn_kernel_io`.** The task is published to the
 registry before its id is bound to the stop, so between those two lines a live
@@ -339,9 +474,43 @@ BSP — but nothing enforces that.
 **The guarded skip for an AP pause that proves the target took no CPU.** The
 classification (`NotParking`, which is always a bug, versus `NotRunning`, which
 is not evidence) is worth having and is built. Turning `NotRunning` into a
-`Skipped` rather than a panic is not, yet: `TestOutcome::is_pass()` counts
-`Skipped` as a pass and `summary.skipped` is never incremented at all, so an AP
-genuinely wedged with `IF=0` would silently skip every hermetic test and the
-suite would go green with zero coverage. The counting bug is the prerequisite,
-and the skip should be gated on `hypervisor_present()` so bare metal — where a
-stalled heartbeat *is* evidence — still fails.
+`Skipped` rather than a panic is still not done — but its prerequisite now is:
+`Skipped` no longer counts into `summary.passed`, it counts into its own
+`summary.skipped`, so a run that skipped everything can no longer report as a
+run that passed everything. What remains before the skip is safe is gating it on
+`hypervisor_present()`, so on bare metal — where a stalled heartbeat *is*
+evidence — it still fails.
+
+---
+
+## 5. What the fixes measure
+
+Every number here is from this environment: QEMU **TCG**, `-smp 4`, no
+`/dev/kvm`. TCG is the reproduction (§1), so a green TCG run is a stronger
+statement than a green KVM one — and two of the gates turned out to be
+measuring the accelerator rather than the kernel, which only a run without KVM
+could show.
+
+**Before.** Four TCG runs of the unmodified tree produced eleven failures across
+five distinct tests (§1's table), including the exact failure that had `develop`
+red.
+
+**After.** [filled in below from the ratchet runs]
+
+### Two gates that were measuring the host
+
+Both were found by running them here rather than by reading them.
+
+- **`check_quota_headroom.sh`'s `max-cycles-per-charge`** failed on the
+  *unmodified* tree in all four baseline runs: the caps (3000 and 9000 cycles)
+  were taken on a KVM host, and the same tree reports 20631 and 81886 under TCG.
+  A gate that fails on every machine without `/dev/kvm` is a gate nobody can run
+  green, which is how a documented pre-commit step stops being run. It is now
+  two ratios — the charge against a bare CAS measured in the same run and the
+  same batch shape, and depth 7 against depth 1 — neither of which moves with
+  the accelerator. The self-test now includes the case that proves it: the same
+  verdict from a ten-times-slower host.
+
+- **`check_lockdep_headroom.sh`'s exact edge and chain caps** were the four
+  ratchet failures in §0's table, on runs whose tests were green. Those are
+  bands now (§3.6).

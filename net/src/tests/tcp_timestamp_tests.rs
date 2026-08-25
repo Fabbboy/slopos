@@ -1,10 +1,25 @@
 //! TCP Timestamps (RFC 7323) tests.
 
 use slopos_testing::TestResult;
-use slopos_testing::{assert_eq_test, assert_test, pass};
+use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
+use super::net_scope::NetTestScope;
 use super::tcp_common::*;
 use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_PSH, TCP_FLAG_RST};
+
+/// `now_ms` is the one clock the whole net stack reads, so a test may only pin
+/// it from inside a [`NetTestScope`]: the fixture holds the live data plane
+/// still, and every timer scheduled against the pinned value lands in its own
+/// wheel instead of the live one. Entered after `reset_all`, which clears the
+/// mock clock.
+macro_rules! pinned_scope {
+    ($ms:expr) => {
+        match NetTestScope::enter_at_mock_ms($ms) {
+            Ok(scope) => scope,
+            Err(e) => return fail!("net scope: {:?}", e),
+        }
+    };
+}
 
 fn ts_state(id: tcp::ConnId) -> (bool, u32) {
     tcp::with_pcb(id, |pcb| {
@@ -48,8 +63,7 @@ fn is_reset(id: tcp::ConnId) -> bool {
 
 pub fn test_active_open_ts_negotiation() -> TestResult {
     reset_all();
-    #[cfg(feature = "test-hooks")]
-    let _clock = tcp::clock::MockClockGuard::install_at(100);
+    let _scope = pinned_scope!(100);
 
     let conn = establish_connection_with_ts();
     let (enabled, recent) = ts_state(conn.id);
@@ -60,8 +74,7 @@ pub fn test_active_open_ts_negotiation() -> TestResult {
 
 pub fn test_ts_declined_by_peer() -> TestResult {
     reset_all();
-    #[cfg(feature = "test-hooks")]
-    let _clock = tcp::clock::MockClockGuard::install_at(100);
+    let _scope = pinned_scope!(100);
 
     let conn = establish_connection();
     let (enabled, _) = ts_state(conn.id);
@@ -79,8 +92,7 @@ pub fn test_ts_declined_by_peer() -> TestResult {
 
 pub fn test_data_segments_carry_tsopt() -> TestResult {
     reset_all();
-    #[cfg(feature = "test-hooks")]
-    let _clock = tcp::clock::MockClockGuard::install_at(500);
+    let _scope = pinned_scope!(500);
 
     let conn = establish_connection_with_ts();
 
@@ -95,8 +107,7 @@ pub fn test_data_segments_carry_tsopt() -> TestResult {
 
 pub fn test_paws_rejects_old_duplicate() -> TestResult {
     reset_all();
-    #[cfg(feature = "test-hooks")]
-    let _clock = tcp::clock::MockClockGuard::install_at(100);
+    let _scope = pinned_scope!(100);
 
     let conn = establish_connection_with_ts();
     let peer_seq = conn.peer_iss + 1;
@@ -136,8 +147,7 @@ pub fn test_paws_rejects_old_duplicate() -> TestResult {
 
 pub fn test_paws_allows_rst() -> TestResult {
     reset_all();
-    #[cfg(feature = "test-hooks")]
-    let _clock = tcp::clock::MockClockGuard::install_at(100);
+    let _scope = pinned_scope!(100);
 
     let conn = establish_connection_with_ts();
     let peer_seq = conn.peer_iss + 1;
@@ -174,8 +184,7 @@ pub fn test_paws_allows_rst() -> TestResult {
 
 pub fn test_rttm_samples_every_ack() -> TestResult {
     reset_all();
-    #[cfg(feature = "test-hooks")]
-    let _clock = tcp::clock::MockClockGuard::install_at(1000);
+    let _scope = pinned_scope!(1000);
 
     let conn = establish_connection_with_ts();
 
@@ -183,7 +192,6 @@ pub fn test_rttm_samples_every_ack() -> TestResult {
     let (seg, _) = poll_once(conn.id).expect("should have data");
     let our_tsval = seg.timestamp.unwrap().0;
 
-    #[cfg(feature = "test-hooks")]
     tcp::clock::MockClock::advance(50);
 
     let tsopt = build_tsopt(3000, our_tsval);
@@ -205,8 +213,7 @@ pub fn test_rttm_samples_every_ack() -> TestResult {
 
 pub fn test_non_ts_fallback_karn_sampling() -> TestResult {
     reset_all();
-    #[cfg(feature = "test-hooks")]
-    let _clock = tcp::clock::MockClockGuard::install_at(1000);
+    let _scope = pinned_scope!(1000);
 
     let conn = establish_connection();
     let (enabled, _) = ts_state(conn.id);
@@ -215,7 +222,6 @@ pub fn test_non_ts_fallback_karn_sampling() -> TestResult {
     tcp::send(conn.id, b"hello").ok();
     let _ = poll_once(conn.id).expect("should have data");
 
-    #[cfg(feature = "test-hooks")]
     tcp::clock::MockClock::advance(30);
 
     inject_ack(&conn, conn.peer_iss + 1, conn.our_iss + 1 + 5);

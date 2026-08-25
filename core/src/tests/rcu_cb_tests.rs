@@ -6,6 +6,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_kernel_services::clock::monotonic_ns;
 use slopos_kernel_services::platform::timer_poll_delay_ms;
 use slopos_ostd::KArc;
 use slopos_ostd::sync::RcuArcSlot;
@@ -28,15 +29,36 @@ const TICK_WATCHDOG_MS: u32 = 5_000;
 /// enters the scheduler, so this task cannot block.
 const POLL_INTERVAL_MS: u32 = 10;
 
-/// Drive every callback queued before this call to invocation, then report
-/// `done`.
+/// Drive queued callbacks to invocation until `done`, and report whether it
+/// came true.
 ///
-/// `rcu_barrier` waits for invocation rather than merely for a grace period and
-/// cannot return early, so a `false` here is the callback failing to do its
-/// work — not a deadline the host outran.
+/// Drives the drain itself rather than calling `rcu_barrier`, which has no
+/// escape: a grace period that cannot advance — a peer wedged in a reader, a
+/// holdout that never reports — spins there forever, the KTAP stream goes
+/// silent and the harness kills the whole run. One test failing is strictly
+/// better than every later test being lost.
+///
+/// The budget is guest progress for the reason above the constant, with the
+/// wall clock only as a backstop for a tick that stopped entirely.
 pub fn drain_until(done: impl Fn() -> bool) -> bool {
-    slopos_ostd::sync::rcu_barrier();
-    done()
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    let reports_before = slopos_ostd::sync::rcu_qs_counter(cpu);
+    let mut waited = 0;
+    loop {
+        slopos_ostd::sync::rcu_raise_softirq();
+        slopos_ostd::sync::rcu_process_callbacks();
+        slopos_ostd::sync::rcu_note_qs();
+        slopos_ostd::sync::rcu_gp_poll();
+        if done() {
+            return true;
+        }
+        let reports = slopos_ostd::sync::rcu_qs_counter(cpu).wrapping_sub(reports_before);
+        if reports >= RECLAIM_DEADLINE_REPORTS || waited >= TICK_WATCHDOG_MS {
+            return false;
+        }
+        timer_poll_delay_ms(POLL_INTERVAL_MS);
+        waited += POLL_INTERVAL_MS;
+    }
 }
 
 static DROPPED: AtomicU32 = AtomicU32::new(0);
@@ -136,8 +158,17 @@ pub fn test_synchronize_rcu_completes_a_grace_period() -> TestResult {
 /// still pass every correctness test, so the passes are counted at the wait
 /// itself: this CPU's entries into `synchronize_rcu`, which only the drain can
 /// have made here, must not move.
+///
+/// The count is the precise check and only sees a wait routed through
+/// `synchronize_rcu`; an inline `while !gp_done(..) { rcu_gp_poll() }` in the
+/// invoke step moves no counter. The elapsed ceiling is what still catches
+/// that, and it is deliberately coarse: 32 tick-driven grace periods are
+/// seconds, an honest 32 passes are microseconds, so `CEILING_MS` sits ~40x
+/// above the honest cost and ~1/10 of the broken one — far outside anything
+/// host steal reaches.
 pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
     const PASSES: u32 = 32;
+    const CEILING_MS: u64 = 2_000;
 
     // Queue work so the passes have something to tag and retire rather than
     // early-returning on an empty backlog.
@@ -150,13 +181,21 @@ pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
         slot.store(None);
     }
 
-    let cpu = slopos_arch::pcr::get_current_cpu();
-    let before = slopos_ostd::sync::rcu_sync_entry_count(cpu);
-    for _ in 0..PASSES {
-        slopos_ostd::sync::rcu_raise_softirq();
-        slopos_ostd::sync::rcu_process_callbacks();
-    }
-    let after = slopos_ostd::sync::rcu_sync_entry_count(cpu);
+    // Sampled inside one masked window with the reads it indexes: `rcu_note_qs`
+    // increments the slot of whichever CPU is live, so a `cpu` taken before the
+    // window names a slot the reports need not have touched.
+    let (before, after, elapsed_ns) =
+        slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+            let cpu = slopos_arch::pcr::get_current_cpu();
+            let started = monotonic_ns();
+            let before = slopos_ostd::sync::rcu_sync_entry_count(cpu);
+            for _ in 0..PASSES {
+                slopos_ostd::sync::rcu_raise_softirq();
+                slopos_ostd::sync::rcu_process_callbacks();
+            }
+            let after = slopos_ostd::sync::rcu_sync_entry_count(cpu);
+            (before, after, monotonic_ns().saturating_sub(started))
+        });
 
     if after != before {
         return fail!(
@@ -164,6 +203,15 @@ pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
              waiting again",
             PASSES,
             after.wrapping_sub(before)
+        );
+    }
+    let elapsed_ms = elapsed_ns / 1_000_000;
+    if elapsed_ms > CEILING_MS {
+        return fail!(
+            "{} drain passes took {}ms — the invoke step is waiting inline, without \
+             going through synchronize_rcu",
+            PASSES,
+            elapsed_ms
         );
     }
     TestResult::Pass

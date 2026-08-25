@@ -10,6 +10,9 @@ use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 use crate::tcp::listener::{
     SYN_QUEUE_MAX, SYN_RETRIES_MAX, SynQueue, TcpListenState, reset_syn_entry_keys,
 };
+use crate::tcp::{self, ConnId, TCP_FLAG_ACK, TCP_FLAG_FIN, TcpHeader, TcpState};
+use crate::tests::net_scope::NetTestScope;
+use crate::tests::tcp_common;
 use crate::types::{Ipv4Addr, Port, SockAddr};
 
 fn make_syn_queue() -> SynQueue {
@@ -22,7 +25,7 @@ fn make_listen(backlog: usize) -> TcpListenState {
 
 fn local_addr() -> SockAddr {
     SockAddr {
-        ip: Ipv4Addr([10, 0, 0, 1]),
+        ip: Ipv4Addr(tcp_common::LOCAL_IP),
         port: Port(8080),
     }
 }
@@ -113,6 +116,10 @@ pub fn test_accept_queue_overflow() -> TestResult {
 }
 
 pub fn test_syn_ack_retransmit_exhaustion() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
     reset_syn_entry_keys();
     let mut syn = make_syn_queue();
 
@@ -182,7 +189,7 @@ pub fn test_push_accepted_basic() -> TestResult {
 
     let accepted = crate::tcp::listener::AcceptedConn {
         tuple: crate::tcp::TcpTuple {
-            local_ip: [10, 0, 0, 1],
+            local_ip: tcp_common::LOCAL_IP,
             local_port: 8080,
             remote_ip: [192, 168, 1, 10],
             remote_port: 50000,
@@ -230,7 +237,7 @@ pub fn test_push_accepted_respects_backlog() -> TestResult {
     for i in 0..backlog as u16 {
         let accepted = crate::tcp::listener::AcceptedConn {
             tuple: crate::tcp::TcpTuple {
-                local_ip: [10, 0, 0, 1],
+                local_ip: tcp_common::LOCAL_IP,
                 local_port: 8080,
                 remote_ip: [192, 168, 1, i as u8],
                 remote_port: 40000 + i,
@@ -252,7 +259,7 @@ pub fn test_push_accepted_respects_backlog() -> TestResult {
 
     let overflow = crate::tcp::listener::AcceptedConn {
         tuple: crate::tcp::TcpTuple {
-            local_ip: [10, 0, 0, 1],
+            local_ip: tcp_common::LOCAL_IP,
             local_port: 8080,
             remote_ip: [192, 168, 1, 99],
             remote_port: 59999,
@@ -326,7 +333,7 @@ pub fn test_accept_fifo_order() -> TestResult {
     for i in 0..3u16 {
         let accepted = crate::tcp::listener::AcceptedConn {
             tuple: crate::tcp::TcpTuple {
-                local_ip: [10, 0, 0, 1],
+                local_ip: tcp_common::LOCAL_IP,
                 local_port: 8080,
                 remote_ip: [192, 168, 1, 1],
                 remote_port: 40000 + i,
@@ -366,7 +373,7 @@ pub fn test_listen_state_clear() -> TestResult {
 
     let accepted = crate::tcp::listener::AcceptedConn {
         tuple: crate::tcp::TcpTuple {
-            local_ip: [10, 0, 0, 1],
+            local_ip: tcp_common::LOCAL_IP,
             local_port: 8080,
             remote_ip: [192, 168, 1, 50],
             remote_port: 55000,
@@ -387,9 +394,6 @@ pub fn test_listen_state_clear() -> TestResult {
 
     pass!()
 }
-
-use crate::tcp::{self, ConnId, TCP_FLAG_ACK, TCP_FLAG_FIN, TcpHeader, TcpState};
-use crate::tests::tcp_common;
 
 fn establish_connection() -> (ConnId, u16, u32) {
     let c = tcp_common::establish_connection();
@@ -437,6 +441,10 @@ fn deliver_peer_data(id: ConnId, data: &[u8]) {
 }
 
 pub fn test_fin_handling_eof() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
     tcp::reset_all();
 
     let (id, _lp, _iss) = establish_connection();
@@ -467,6 +475,10 @@ pub fn test_fin_handling_eof() -> TestResult {
 }
 
 pub fn test_shutdown_write_sends_fin() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
     tcp::reset_all();
 
     let (id, _lp, _iss) = establish_connection();
@@ -501,6 +513,10 @@ pub fn test_shutdown_write_sends_fin() -> TestResult {
 }
 
 pub fn test_shutdown_read_discards_buffer() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
     tcp::reset_all();
 
     let (id, _lp, _iss) = establish_connection();
@@ -531,6 +547,10 @@ pub fn test_shutdown_read_discards_buffer() -> TestResult {
 }
 
 pub fn test_tcp_data_roundtrip() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
     tcp::reset_all();
 
     let (id, _lp, _iss) = establish_connection();
@@ -572,6 +592,10 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
 }
 
 pub fn test_tcp_send_buffer_space() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
     tcp::reset_all();
 
     let (id, _lp, _iss) = establish_connection();
@@ -599,6 +623,10 @@ pub fn test_tcp_send_buffer_space() -> TestResult {
 }
 
 pub fn test_fin_full_teardown() -> TestResult {
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
     tcp::reset_all();
 
     let (id, _lp, _iss) = establish_connection();
@@ -729,10 +757,14 @@ slopos_testing::stest!(name = test_fin_full_teardown, suite = tcp_socket);
 pub fn test_listener_release_reclaims_its_children() -> TestResult {
     use crate::tcp::SocketId;
 
+    let _scope = match NetTestScope::enter() {
+        Ok(s) => s,
+        Err(e) => return fail!("net scope: {:?}", e),
+    };
     tcp_common::reset_all();
 
-    let server_ip = [10, 0, 0, 1];
-    let client_ip = [10, 0, 0, 2];
+    let server_ip = tcp_common::LOCAL_IP;
+    let client_ip = tcp_common::REMOTE_IP;
     let owner = SocketId(7);
 
     let listen_id = match tcp::listen(server_ip, 8080) {

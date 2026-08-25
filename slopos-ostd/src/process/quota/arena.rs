@@ -46,9 +46,14 @@ const NO_PARENT: u32 = u32::MAX;
 /// live at that instant, not the high-water mark a ceiling has to be derived
 /// from. `denials` exists so that a refusal nobody can see is not silent.
 struct AccountRow {
-    used: [AtomicU32; KIND_COUNT],
+    /// `used` in the low half, `peak` in the high half. One word rather than
+    /// two atomics: whichever of a pair is published first is a window in which
+    /// a lock-free reader observes `used > peak`, which is precisely the
+    /// invariant [`ledger_audit`] exists to check. Packed, a charge installs
+    /// both in one compare-exchange, so no reader can see the pair apart and a
+    /// charge whose CAS fails moves neither.
+    usage: [AtomicU64; KIND_COUNT],
     limit: [AtomicU32; KIND_COUNT],
-    peak: [AtomicU32; KIND_COUNT],
     denials: [AtomicU32; KIND_COUNT],
     /// Arena index of the account this one debits through. Written once at
     /// creation and never given a setter, which makes charge migration
@@ -64,9 +69,8 @@ struct AccountRow {
 impl AccountRow {
     const fn new() -> Self {
         Self {
-            used: [const { AtomicU32::new(0) }; KIND_COUNT],
+            usage: [const { AtomicU64::new(0) }; KIND_COUNT],
             limit: [const { AtomicU32::new(NO_LIMIT) }; KIND_COUNT],
-            peak: [const { AtomicU32::new(0) }; KIND_COUNT],
             denials: [const { AtomicU32::new(0) }; KIND_COUNT],
             parent: AtomicU32::new(NO_PARENT),
             depth_remaining: AtomicU8::new(ROOT_DEPTH_REMAINING),
@@ -79,12 +83,26 @@ impl AccountRow {
     /// its predecessor's numbers.
     fn reset_counters(&self) {
         for kind in 0..KIND_COUNT {
-            self.used[kind].store(0, Ordering::Relaxed);
+            self.usage[kind].store(0, Ordering::Relaxed);
             self.limit[kind].store(NO_LIMIT, Ordering::Relaxed);
-            self.peak[kind].store(0, Ordering::Relaxed);
             self.denials[kind].store(0, Ordering::Relaxed);
         }
     }
+}
+
+#[inline]
+const fn pack_usage(used: u32, peak: u32) -> u64 {
+    ((peak as u64) << 32) | used as u64
+}
+
+#[inline]
+const fn usage_used(packed: u64) -> u32 {
+    packed as u32
+}
+
+#[inline]
+const fn usage_peak(packed: u64) -> u32 {
+    (packed >> 32) as u32
 }
 
 static ACCOUNTS: [AccountRow; MAX_ACCOUNTS] = [const { AccountRow::new() }; MAX_ACCOUNTS];
@@ -253,7 +271,7 @@ pub fn account_release(id: AccountId) {
     if parent_slot != NO_PARENT {
         let parent = account_id_at(parent_slot);
         for kind in ResourceKind::ALL {
-            let outstanding = row.used[kind.index()].load(Ordering::Acquire);
+            let outstanding = usage_used(row.usage[kind.index()].load(Ordering::Acquire));
             if outstanding != 0 {
                 refund_raw(parent, kind, outstanding);
             }
@@ -407,9 +425,10 @@ fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> 
         QuotaMode::Off => NO_LIMIT,
         _ => row.limit[idx].load(Ordering::Acquire),
     };
-    let mut used = row.used[idx].load(Ordering::Relaxed);
+    let mut packed = row.usage[idx].load(Ordering::Relaxed);
     let mut over_limit;
     loop {
+        let used = usage_used(packed);
         let Some(next) = used.checked_add(n) else {
             row.denials[idx].fetch_add(1, Ordering::Relaxed);
             return Err(());
@@ -419,15 +438,17 @@ fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> 
             row.denials[idx].fetch_add(1, Ordering::Relaxed);
             return Err(());
         }
-        // Raised before the value it covers is published, and carried by the
-        // release below: a reader that sees the new `used` has synchronised
-        // with this store, so `used > peak` is unobservable rather than merely
-        // transient. A CAS that then fails leaves the peak raised for a charge
-        // that did not land — over-reporting a high-water mark is
-        // conservative, under-reporting it is a lie.
-        row.peak[idx].fetch_max(next, Ordering::Relaxed);
-        match row.used[idx].compare_exchange_weak(used, next, Ordering::Release, Ordering::Relaxed)
-        {
+        // The mark moves in the same word as the value it covers, so a reader
+        // cannot see one without the other and a charge that loses the CAS
+        // moves neither. `Release` so an auditor's `Acquire` load synchronises
+        // with everything this charge did.
+        let peak = usage_peak(packed).max(next);
+        match row.usage[idx].compare_exchange_weak(
+            packed,
+            pack_usage(next, peak),
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
             Ok(_) => {
                 // Counted even though the charge was granted: `quota=warn`
                 // exists to measure what enforcement *would* have refused.
@@ -436,7 +457,7 @@ fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> 
                 }
                 return Ok(());
             }
-            Err(observed) => used = observed,
+            Err(observed) => packed = observed,
         }
     }
 }
@@ -450,14 +471,19 @@ fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> 
 /// preceded it up the chain.
 fn release_row(row: &AccountRow, kind: ResourceKind, n: u32) {
     let idx = kind.index();
-    let mut used = row.used[idx].load(Ordering::Relaxed);
+    let mut packed = row.usage[idx].load(Ordering::Relaxed);
     loop {
+        let used = usage_used(packed);
         let next = used.saturating_sub(n);
         debug_assert!(used >= n, "account row underflow on {}", kind.name());
-        match row.used[idx].compare_exchange_weak(used, next, Ordering::Release, Ordering::Relaxed)
-        {
+        match row.usage[idx].compare_exchange_weak(
+            packed,
+            pack_usage(next, usage_peak(packed)),
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
             Ok(_) => return,
-            Err(observed) => used = observed,
+            Err(observed) => packed = observed,
         }
     }
 }
@@ -488,11 +514,11 @@ pub struct KindStats {
 pub fn stats(id: AccountId, kind: ResourceKind) -> Option<KindStats> {
     let row = row_for(id)?;
     let idx = kind.index();
+    let usage = row.usage[idx].load(Ordering::Acquire);
     Some(KindStats {
-        // `used` before `peak`, for the reason `ledger_audit` gives.
-        used: row.used[idx].load(Ordering::Acquire),
+        used: usage_used(usage),
         limit: row.limit[idx].load(Ordering::Acquire),
-        peak: row.peak[idx].load(Ordering::Acquire),
+        peak: usage_peak(usage),
         denials: row.denials[idx].load(Ordering::Acquire),
     })
 }
@@ -606,11 +632,12 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
 
         for kind in ResourceKind::ALL {
             let idx = kind.index();
-            // `used` before `peak`: `charge_row` raises the peak and then
-            // publishes `used` with a release store, so acquiring `used` first
-            // is what makes `used > peak` unobservable rather than transient.
-            let used = row.used[idx].load(Ordering::Acquire);
-            let peak = row.peak[idx].load(Ordering::Acquire);
+            // One load for both halves, so `used <= peak` is not a race the
+            // audit can catch a row mid-way through — it holds by construction
+            // and this check only fires on memory corruption.
+            let usage = row.usage[idx].load(Ordering::Acquire);
+            let used = usage_used(usage);
+            let peak = usage_peak(usage);
             let limit = row.limit[idx].load(Ordering::Acquire);
 
             if used > peak {
@@ -641,7 +668,8 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
                     continue;
                 }
                 if child.parent.load(Ordering::Acquire) == slot as u32 {
-                    children = children.saturating_add(child.used[idx].load(Ordering::Acquire));
+                    children = children
+                        .saturating_add(usage_used(child.usage[idx].load(Ordering::Acquire)));
                 }
             }
             if used < children {
@@ -690,15 +718,15 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
             // Descendants debit through this row too, so `used` is the maps'
             // own total only after their contribution is taken out.
             let idx = ResourceKind::Pages.index();
-            let used = row.used[idx].load(Ordering::Acquire);
+            let used = usage_used(row.usage[idx].load(Ordering::Acquire));
             let mut descendants = 0u32;
             for (child_slot, child) in ACCOUNTS.iter().enumerate() {
                 if child_slot == slot || !child.live.load(Ordering::Acquire) {
                     continue;
                 }
                 if child.parent.load(Ordering::Acquire) == slot as u32 {
-                    descendants =
-                        descendants.saturating_add(child.used[idx].load(Ordering::Acquire));
+                    descendants = descendants
+                        .saturating_add(usage_used(child.usage[idx].load(Ordering::Acquire)));
                 }
             }
             let own = used.saturating_sub(descendants);
@@ -734,8 +762,9 @@ pub(super) fn refund_raw_one_level_for_test(account: AccountId, kind: ResourceKi
     // `debug_assert` would fire on the very corruption being planted.
     if let Some(row) = row_for(account) {
         let idx = kind.index();
-        let used = row.used[idx].load(Ordering::Acquire);
-        row.used[idx].store(used.saturating_sub(n), Ordering::Release);
+        let packed = row.usage[idx].load(Ordering::Acquire);
+        let used = usage_used(packed).saturating_sub(n);
+        row.usage[idx].store(pack_usage(used, usage_peak(packed)), Ordering::Release);
     }
 }
 
@@ -745,8 +774,9 @@ pub(super) fn refund_raw_one_level_for_test(account: AccountId, kind: ResourceKi
 pub(super) fn charge_raw_one_level_for_test(account: AccountId, kind: ResourceKind, n: u32) {
     if let Some(row) = row_for(account) {
         let idx = kind.index();
-        let used = row.used[idx].load(Ordering::Acquire);
-        row.used[idx].store(used.saturating_add(n), Ordering::Release);
+        let packed = row.usage[idx].load(Ordering::Acquire);
+        let used = usage_used(packed).saturating_add(n);
+        row.usage[idx].store(pack_usage(used, usage_peak(packed)), Ordering::Release);
     }
 }
 
@@ -809,10 +839,15 @@ mod tests {
         let ancestor = root();
 
         let stop = Arc::new(AtomicBool::new(false));
+        // The reader has to be sampling before the charges start, or the whole
+        // run can land between its spawn and its first load and the test proves
+        // nothing while still passing.
+        let started = Arc::new(AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
+        let reader_started = Arc::clone(&started);
         let reader = thread::spawn(move || {
             let mut samples = 0u64;
-            while !reader_stop.load(StdOrdering::Acquire) {
+            loop {
                 for id in [ancestor, leaf] {
                     let s = stats(id, ResourceKind::FdSlot).expect("row");
                     assert!(
@@ -824,10 +859,16 @@ mod tests {
                     );
                 }
                 samples += 1;
+                reader_started.store(true, StdOrdering::Release);
+                if reader_stop.load(StdOrdering::Acquire) {
+                    return samples;
+                }
             }
-            samples
         });
 
+        while !started.load(StdOrdering::Acquire) {
+            core::hint::spin_loop();
+        }
         for round in 0..128u32 {
             let held = try_charge::<FdSlot>(leaf, 1 + round % 7).expect("charge");
             let also = try_charge::<FdSlot>(leaf, 2).expect("charge");

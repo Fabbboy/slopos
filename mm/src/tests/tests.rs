@@ -317,35 +317,28 @@ pub fn test_heap_stats() -> TestResult {
 
     let ptr = kmalloc(256);
     assert_not_null!(ptr, "alloc for stats test");
+    let allocated = get_heap_stats_owned();
 
-    let after = get_heap_stats_owned();
     kfree(ptr);
+    let freed = get_heap_stats_owned();
 
-    // `allocated_size` is the heap's live bytes, which a peer's `kfree` lowers
-    // under this test's feet; the allocation counts only ever climb, so this
-    // test's own `kmalloc` is enough to move one.
-    if after.allocation_count <= before.allocation_count {
+    // The byte totals move under a peer's `kfree`, and `free_size` is derived
+    // from the other two rather than accumulated, so nothing there can fail.
+    // Both counts only ever climb: this test's own pair of calls must move one
+    // of each.
+    if allocated.allocation_count <= before.allocation_count {
         return fail!(
             "allocation count did not advance ({} -> {})",
             before.allocation_count,
-            after.allocation_count
+            allocated.allocation_count
         );
     }
 
-    if after.allocated_size + after.free_size != after.total_size {
+    if freed.free_count <= allocated.free_count {
         return fail!(
-            "{} allocated + {} free do not sum to the {} total",
-            after.allocated_size,
-            after.free_size,
-            after.total_size
-        );
-    }
-
-    if after.free_count > after.allocation_count {
-        return fail!(
-            "the heap has freed {} blocks against {} ever allocated",
-            after.free_count,
-            after.allocation_count
+            "free count did not advance ({} -> {})",
+            allocated.free_count,
+            freed.free_count
         );
     }
 
@@ -361,26 +354,30 @@ pub fn test_global_alloc_vec() -> TestResult {
     pass!()
 }
 
-/// Two frees followed by two allocations of the same class must hand back the
-/// two addresses just freed.
-///
-/// Asserted on this test's own pointers rather than on the heap's total size:
-/// that total moves with every other CPU's slab refill. The free and the
-/// realloc run with interrupts masked, so between them nothing on this CPU
-/// touches the per-CPU magazine the two objects were pushed onto.
-pub fn test_heap_free_list_search() -> TestResult {
+enum HeapReuse {
+    Reused,
+    Missed {
+        freed: (usize, usize),
+        handed_back: (usize, usize),
+    },
+    AllocFailed,
+}
+
+fn heap_reuse_round() -> HeapReuse {
     let p1 = kmalloc(256);
-    assert_not_null!(p1, "alloc p1");
+    if p1.is_null() {
+        return HeapReuse::AllocFailed;
+    }
     let p2 = kmalloc(256);
     if p2.is_null() {
         kfree(p1);
-        return fail!("alloc p2");
+        return HeapReuse::AllocFailed;
     }
     let p3 = kmalloc(256);
     if p3.is_null() {
         kfree(p1);
         kfree(p2);
-        return fail!("alloc p3");
+        return HeapReuse::AllocFailed;
     }
 
     let (p4, p5) = cpu::IrqDisabled::with(|_irq| {
@@ -389,33 +386,66 @@ pub fn test_heap_free_list_search() -> TestResult {
         (kmalloc(256), kmalloc(256))
     });
 
-    if p4.is_null() || p5.is_null() {
-        kfree(p3);
-        if !p4.is_null() {
-            kfree(p4);
-        }
-        if !p5.is_null() {
-            kfree(p5);
-        }
-        return fail!("realloc from the freed pair");
-    }
-
     let from_the_freed_pair = |p: *mut c_void| p == p1 || p == p2;
-    let reused = p4 != p5 && from_the_freed_pair(p4) && from_the_freed_pair(p5);
+    let reused = !p4.is_null()
+        && !p5.is_null()
+        && p4 != p5
+        && from_the_freed_pair(p4)
+        && from_the_freed_pair(p5);
 
     kfree(p3);
-    kfree(p4);
-    kfree(p5);
+    if !p4.is_null() {
+        kfree(p4);
+    }
+    if !p5.is_null() {
+        kfree(p5);
+    }
 
-    assert_test!(
-        reused,
-        "freed {:#x} and {:#x} but the next two allocations were {:#x} and {:#x}",
-        p1 as usize,
-        p2 as usize,
-        p4 as usize,
-        p5 as usize
-    );
-    pass!()
+    if p4.is_null() || p5.is_null() {
+        return HeapReuse::AllocFailed;
+    }
+    if reused {
+        HeapReuse::Reused
+    } else {
+        HeapReuse::Missed {
+            freed: (p1 as usize, p2 as usize),
+            handed_back: (p4 as usize, p5 as usize),
+        }
+    }
+}
+
+/// Two frees followed by two allocations of the same class must hand back the
+/// two addresses just freed.
+///
+/// Asserted on this test's own pointers rather than on the heap's total size:
+/// that total moves with every other CPU's slab refill.
+///
+/// A single round is allowed to miss. The magazine fast path is skipped
+/// whenever a peer holds the class lock — masking this CPU's interrupts says
+/// nothing about that — and a free diverted past it lands on a shared slab
+/// free list a peer can allocate from. A class that does not reuse at all
+/// misses every round.
+pub fn test_heap_free_list_search() -> TestResult {
+    const ROUNDS: u32 = 8;
+
+    let mut last = ((0usize, 0usize), (0usize, 0usize));
+    for _ in 0..ROUNDS {
+        match heap_reuse_round() {
+            HeapReuse::Reused => return pass!(),
+            HeapReuse::Missed { freed, handed_back } => last = (freed, handed_back),
+            HeapReuse::AllocFailed => return fail!("256-byte allocation for a reuse round"),
+        }
+    }
+
+    let ((f1, f2), (h1, h2)) = last;
+    fail!(
+        "{} rounds freed {:#x} and {:#x} and were handed back {:#x} and {:#x}",
+        ROUNDS,
+        f1,
+        f2,
+        h1,
+        h2
+    )
 }
 
 /// After a soft reboot, x86 paging-structure caches may retain stale entries;
