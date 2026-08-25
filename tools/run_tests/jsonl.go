@@ -77,15 +77,17 @@ func (s *JsonlSink) WriteRunEnd(summary *RunSummary, exitCode int) error {
 		qemuStatus = *summary.QemuStatus
 	}
 	obj := map[string]any{
-		"t":            "run_end",
-		"wall_ms":      summary.WallMs(),
-		"exit":         exitCode,
-		"qemu_status":  qemuStatus,
-		"user_aborted": summary.UserAborted,
-		"timed_out":    summary.TimedOut,
-		"silence_hit":  summary.SilenceHit,
-		"truncated":    summary.Truncated,
-		"phases":       phases,
+		"t":                   "run_end",
+		"wall_ms":             summary.WallMs(),
+		"exit":                exitCode,
+		"qemu_status":         qemuStatus,
+		"user_aborted":        summary.UserAborted,
+		"timed_out":           summary.TimedOut,
+		"silence_hit":         summary.SilenceHit,
+		"truncated":           summary.Truncated,
+		"kernel_abort":        summary.KernelAbort,
+		"kernel_abort_reason": summary.KernelAbortReason,
+		"phases":              phases,
 	}
 	b, err := json.Marshal(obj)
 	if err != nil {
@@ -176,6 +178,11 @@ func encodeEvent(ev Event) map[string]any {
 			"t":         "bail",
 			"phase_idx": e.PhaseIdx,
 			"reason":    e.Reason,
+		}
+	case *EvKernelAbort:
+		return map[string]any{
+			"t":      "kernel_abort",
+			"reason": e.Reason,
 		}
 	}
 	return nil

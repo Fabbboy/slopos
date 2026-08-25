@@ -47,7 +47,7 @@ func ClassifyRun(s *RunSummary, d DriverResult, hasSelection bool) RunVerdict {
 			break
 		}
 	}
-	failedOverall := len(failures) > 0 || bailed || d.TimedOut || s.Truncated
+	failedOverall := len(failures) > 0 || bailed || d.TimedOut || s.Truncated || s.KernelAbort
 
 	// Ctrl-C first: a run the user killed before the first phase is not
 	// evidence of a broken harness.
@@ -62,6 +62,16 @@ func ClassifyRun(s *RunSummary, d DriverResult, hasSelection bool) RunVerdict {
 				"run_tests: warning: unexpected qemu_run.sh exit status %d "+
 					"(kernel did not reach isa-debug-exit cleanly)", *d.QemuStatus)
 			v.Code = 2
+		}
+		if s.KernelAbort {
+			reason := s.KernelAbortReason
+			if reason == "" {
+				reason = "(no reason line reached the wire)"
+			}
+			v.Diagnostic = fmt.Sprintf(
+				"run_tests: the kernel aborted on some CPU during this run: %s\n"+
+					"  Results after that point come from the surviving CPUs and may cascade.",
+				reason)
 		}
 		return v
 	}

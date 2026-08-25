@@ -41,15 +41,21 @@ pub fn test_quota_heap_backing_reconciles_with_the_buddy() -> TestResult {
     pass!()
 }
 
+/// The three samples are taken adjacent to the calls they bracket, with
+/// interrupts masked: the charge is a kernel-wide row, so a sample held across
+/// the rest of a test body describes whatever the other CPUs did in between.
 pub fn test_quota_heap_large_alloc_is_charged() -> TestResult {
     const BYTES: usize = 4 * (MAX_SLAB_CLASS_BYTES + 1);
 
-    let before = charged_heap_pages();
-    let ptr = kmalloc(BYTES);
-    assert_test!(!ptr.is_null(), "large allocation failed");
-    let with = charged_heap_pages();
-    kfree(ptr);
+    let (ptr, before, with, after) = slopos_arch::cpu::IrqDisabled::with(|_irq| {
+        let before = charged_heap_pages();
+        let ptr = kmalloc(BYTES);
+        let with = charged_heap_pages();
+        kfree(ptr);
+        (ptr, before, with, charged_heap_pages())
+    });
 
+    assert_test!(!ptr.is_null(), "large allocation failed");
     assert_test!(
         with >= before,
         "a large allocation lowered the heap's charge ({} -> {})",
@@ -59,8 +65,10 @@ pub fn test_quota_heap_large_alloc_is_charged() -> TestResult {
     // The tier reuses freed regions rather than returning them to the buddy,
     // so the charge legitimately stays held after `kfree`.
     assert_test!(
-        charged_heap_pages() <= with,
-        "freeing a large allocation raised the heap's charge"
+        after <= with,
+        "freeing a large allocation raised the heap's charge ({} -> {})",
+        with,
+        after
     );
     pass!()
 }

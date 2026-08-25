@@ -3,14 +3,14 @@
 
 use slopos_abi::addr::VirtAddr;
 use slopos_ostd::mm::KArc;
-use slopos_ostd::mm::vm_space::VmSpace;
+use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 
 use crate::error::MmError;
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm;
 use crate::tlb;
-use crate::user_mappings::{ostd_map_4kb_user, ostd_virt_to_phys_4kb};
+use crate::user_mappings::{ostd_map_4kb_user, ostd_virt_to_phys_4kb, vm_space_is_exclusive};
 use crate::vma_region::VmaRegion;
 
 /// A demand-paging fault: the page is absent and `region` is lazily-backed
@@ -76,6 +76,12 @@ pub fn handle_demand_fault(
         return Ok(());
     }
 
+    // Ahead of the allocation rather than after it: a retry storm that reached
+    // `ostd_map_4kb_user` would churn the buddy and run reclaim once per round.
+    if !vm_space_is_exclusive(vm_space) {
+        return Err(MmError::Retry);
+    }
+
     let mut phys = alloc_kernel_page();
     if phys.is_null() {
         // One bounded reclaim-and-retry: a demand fault has no syscall return
@@ -92,8 +98,11 @@ pub fn handle_demand_fault(
 
     let pte_flags = region.to_page_flags().bits();
     if let Err(err) = ostd_map_4kb_user(vm_space, VirtAddr::new(aligned_addr), phys, pte_flags) {
-        slopos_ostd::klog_info!("demand::handle_demand_fault: OSTD map failed: {:?}", err);
         free_page_frame(phys);
+        if err == MapError::WouldBlock {
+            return Err(MmError::Retry);
+        }
+        slopos_ostd::klog_info!("demand::handle_demand_fault: OSTD map failed: {:?}", err);
         return Err(MmError::MappingFailed);
     }
 

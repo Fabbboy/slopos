@@ -12,13 +12,28 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::memory_init::get_memory_statistics;
 use crate::memory_layout_defs::{MAX_PROCESS_ID, MAX_PROCESSES};
 use crate::page_alloc::{
-    alloc_kernel_page_with, alloc_kernel_pages_with, free_page_frame, get_page_allocator_stats,
+    FrameAccounting, alloc_kernel_page_with, alloc_kernel_pages_with, frame_accounting,
+    free_page_frame, get_page_allocator_stats,
 };
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{create_process_vm, destroy_process_vm, init_process_vm, process_vm_alloc};
 use crate::slab::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_ostd::mm::frame::FrameAllocOptions;
+
+/// Free `pa` and report whether the buddy took it back off the handed-out
+/// books.
+///
+/// A leak check against the global free count is a race with three other CPUs:
+/// this asks about a frame the test itself holds, whose accounting nothing
+/// else moves while it is held.
+fn frame_returns_to_the_allocator(pa: PhysAddr) -> bool {
+    if frame_accounting(pa) != FrameAccounting::HandedOut {
+        return false;
+    }
+    free_page_frame(pa);
+    frame_accounting(pa) != FrameAccounting::HandedOut
+}
 
 pub fn test_page_alloc_until_oom() -> TestResult {
     let free_before = get_page_allocator_stats().free;
@@ -50,13 +65,13 @@ pub fn test_page_alloc_until_oom() -> TestResult {
     assert_test!(count > 0, "failed to allocate any pages");
 
     for i in 0..count {
-        free_page_frame(allocated[i]);
+        if !frame_returns_to_the_allocator(allocated[i]) {
+            return fail!(
+                "the frame at {:#x} did not come back off the allocator's books",
+                allocated[i].as_u64()
+            );
+        }
     }
-
-    settle_frees();
-    let free_after = get_page_allocator_stats().free;
-
-    assert_test!(free_after >= free_before - 10, "memory leak after OOM test");
 
     pass!()
 }
@@ -350,58 +365,32 @@ pub fn test_kzalloc_zeroed_under_pressure() -> TestResult {
     pass!()
 }
 
-/// Return every frame the frees above staged, so a free-count comparison sees
-/// them.
-///
-/// A free does not go straight back to the buddy. Once any user address space
-/// exists, `quiesce` requires a quarantine pass before a frame may be reused,
-/// and order-0 frames otherwise land in the per-CPU magazine; the buddy's own
-/// free count includes neither. Without this the tests below read back exactly
-/// what they allocated and call it a leak.
-fn settle_frees() {
-    crate::mmu::quiesce::force_close_epoch_for_test();
-    for _ in 0..4 {
-        crate::page_alloc::quarantine_rotate();
-        while crate::page_alloc::quarantine_has_releasable()
-            && crate::page_alloc::quarantine_release_some(u32::MAX) > 0
-        {}
-    }
-    crate::page_alloc::pcp_drain_all();
-}
-
 pub fn test_alloc_free_cycles_no_leak() -> TestResult {
-    let free_start = get_page_allocator_stats().free;
-
     const CYCLES: usize = 100;
     const PAGES_PER_CYCLE: usize = 4;
 
-    for _cycle in 0..CYCLES {
+    for cycle in 0..CYCLES {
         let mut pages: [PhysAddr; PAGES_PER_CYCLE] = [PhysAddr::NULL; PAGES_PER_CYCLE];
         let mut allocated = 0usize;
 
         for i in 0..PAGES_PER_CYCLE {
             pages[i] = alloc_kernel_page_with(FrameAllocOptions::single().with_no_pcp());
             if pages[i].is_null() {
-                for j in 0..i {
-                    free_page_frame(pages[j]);
-                }
                 break;
             }
             allocated += 1;
         }
 
         for i in 0..allocated {
-            free_page_frame(pages[i]);
+            if !frame_returns_to_the_allocator(pages[i]) {
+                return fail!(
+                    "cycle {} leaked the frame at {:#x}",
+                    cycle,
+                    pages[i].as_u64()
+                );
+            }
         }
     }
-
-    settle_frees();
-    let free_end = get_page_allocator_stats().free;
-
-    assert_test!(
-        !(free_start > free_end && (free_start - free_end) > 16),
-        "memory leak detected"
-    );
 
     pass!()
 }

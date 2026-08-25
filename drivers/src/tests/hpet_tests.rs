@@ -1,9 +1,11 @@
-use slopos_arch::tsc::rdtsc;
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
-use slopos_testing::measure_elapsed_ms;
 
 use crate::hpet;
+
+/// Being descheduled stretches any single measurement without the delay having
+/// been wrong, so the shortest of several rounds is the durable statistic.
+const TIMING_ROUNDS: usize = 5;
 
 pub fn test_hpet_nanoseconds_zero() -> TestResult {
     let ns = hpet::nanoseconds(0);
@@ -136,34 +138,46 @@ pub fn test_hpet_counter_monotonic() -> TestResult {
     TestResult::Pass
 }
 
+/// Measured on the HPET, the clock `delay_ms` itself waits on: the TSC keeps
+/// counting through a vCPU deschedule, so it answers for the host.
 pub fn test_hpet_delay_accuracy() -> TestResult {
     if !hpet::is_available() {
         klog_info!("HPET_TEST: SKIP - HPET not initialized");
         return TestResult::Skipped;
     }
 
-    let delay = 10u32;
-    let start = rdtsc();
-    hpet::delay_ms(delay);
-    let end = rdtsc();
+    const DELAY_MS: u32 = 10;
+    let Some(required) = hpet::ms_to_ticks(DELAY_MS) else {
+        klog_info!("HPET_TEST: BUG - ms_to_ticks() returned None while the HPET is available");
+        return TestResult::Fail;
+    };
 
-    let elapsed = measure_elapsed_ms(start, end);
+    let mut shortest = u64::MAX;
+    for _ in 0..TIMING_ROUNDS {
+        let start = hpet::read_counter();
+        hpet::delay_ms(DELAY_MS);
+        let elapsed = hpet::read_counter().wrapping_sub(start);
+        if elapsed < required {
+            klog_info!(
+                "HPET_TEST: BUG - delay_ms({}) returned after {} ticks, short of the {} it owes",
+                DELAY_MS,
+                elapsed,
+                required
+            );
+            return TestResult::Fail;
+        }
+        shortest = shortest.min(elapsed);
+    }
 
-    // Allow wide tolerance for QEMU jitter: 5-50 ms for a 10 ms delay.
-    if elapsed < 5 {
+    if shortest > required * 2 {
         klog_info!(
-            "HPET_TEST: BUG - delay_ms({}) returned too early ({}ms < 5ms)",
-            delay,
-            elapsed
+            "HPET_TEST: BUG - shortest of {} delay_ms({}) calls took {} ticks, over twice the {} requested",
+            TIMING_ROUNDS,
+            DELAY_MS,
+            shortest,
+            required
         );
         return TestResult::Fail;
-    }
-    if elapsed > 50 {
-        klog_info!(
-            "HPET_TEST: WARNING - delay_ms({}) took {}ms (>50ms, QEMU scheduling?)",
-            delay,
-            elapsed
-        );
     }
     TestResult::Pass
 }
@@ -174,15 +188,25 @@ pub fn test_hpet_delay_zero() -> TestResult {
         return TestResult::Skipped;
     }
 
-    let start = rdtsc();
-    hpet::delay_ms(0);
-    let end = rdtsc();
+    let Some(one_ms) = hpet::ms_to_ticks(1) else {
+        klog_info!("HPET_TEST: BUG - ms_to_ticks() returned None while the HPET is available");
+        return TestResult::Fail;
+    };
 
-    let elapsed = measure_elapsed_ms(start, end);
-    if elapsed > 2 {
+    let mut shortest = u64::MAX;
+    for _ in 0..TIMING_ROUNDS {
+        let start = hpet::read_counter();
+        hpet::delay_ms(0);
+        shortest = shortest.min(hpet::read_counter().wrapping_sub(start));
+    }
+
+    // 1 ms is the shortest wait `delay_ms` can express, so anything it spends
+    // on a zero request is a wait it invented.
+    if shortest >= one_ms {
         klog_info!(
-            "HPET_TEST: BUG - delay_ms(0) took {}ms (should be instant)",
-            elapsed
+            "HPET_TEST: BUG - delay_ms(0) waited {} ticks, a whole millisecond being {}",
+            shortest,
+            one_ms
         );
         return TestResult::Fail;
     }

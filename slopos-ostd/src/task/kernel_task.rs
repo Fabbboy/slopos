@@ -265,6 +265,14 @@ pub enum SchedPlacement {
     /// idle installer (→ `OnCpu`, since an idle task is dispatched rather than
     /// published), and teardown (→ `None`). Holds no reference.
     Nascent = 6,
+    /// Held off every scheduler container by a kernel-I/O hold, which owns it
+    /// until it releases.
+    ///
+    /// Distinct from `None`, which invites any publisher to take the task, and
+    /// from `Migrating`, whose holder is mid-hand-off and will re-link within
+    /// the call. No reference is parked: as for any unqueued task, the
+    /// existence reference is what keeps it alive.
+    Held = 7,
 }
 
 impl SchedPlacement {
@@ -282,6 +290,7 @@ impl SchedPlacement {
             4 => Self::Migrating,
             5 => Self::Waking,
             6 => Self::Nascent,
+            7 => Self::Held,
             _ => Self::None,
         }
     }

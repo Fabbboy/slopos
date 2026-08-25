@@ -239,14 +239,16 @@ pub fn account_release(id: AccountId) {
         return;
     };
 
-    // Give the ancestors back whatever this row still holds, BEFORE going dark:
-    // once it is dark a late refund fails the generation compare, so the
-    // ancestors would keep those debits with nothing left to release them, and
-    // the root accumulates one per charge that outlived its process.
-    //
-    // `used` is the sum of the charges outstanding against this row, which are
-    // precisely the charges whose refunds are about to become no-ops, so the
-    // cancellation is exact rather than approximate.
+    // Dark first: while this row is still live the audit counts it among its
+    // parent's children, so crediting the parent ahead of it would leave the
+    // parent below the sum of its children for the length of the hand-up.
+    row.live.store(false, Ordering::Release);
+
+    // `used` is the sum of the charges outstanding against this row, and going
+    // dark is precisely what turns their refunds into generation-mismatch
+    // no-ops, so handing that sum up cancels them exactly. Skipping it would
+    // leave every ancestor holding one debit per charge that outlived its
+    // process.
     let parent_slot = row.parent.load(Ordering::Acquire);
     if parent_slot != NO_PARENT {
         let parent = account_id_at(parent_slot);
@@ -258,7 +260,6 @@ pub fn account_release(id: AccountId) {
         }
     }
 
-    row.live.store(false, Ordering::Release);
     row.generation.store(0, Ordering::Release);
     row.reset_counters();
 }
@@ -317,7 +318,8 @@ pub fn try_charge<A: Refundable>(
 ) -> Result<Reservation<A>, TryChargeError> {
     let kind = A::KIND;
     let mode = quota_mode();
-    let mut charged: [u32; MAX_ACCOUNT_DEPTH as usize] = [NO_PARENT; MAX_ACCOUNT_DEPTH as usize];
+    let mut charged: [AccountId; MAX_ACCOUNT_DEPTH as usize] =
+        [AccountId::NONE; MAX_ACCOUNT_DEPTH as usize];
     let mut depth = 0usize;
 
     let mut current = account;
@@ -333,7 +335,7 @@ pub fn try_charge<A: Refundable>(
                 errno: kind.errno(),
             });
         }
-        charged[depth] = current.slot();
+        charged[depth] = current;
         depth += 1;
 
         let parent_slot = row.parent.load(Ordering::Acquire);
@@ -417,9 +419,16 @@ fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> 
             row.denials[idx].fetch_add(1, Ordering::Relaxed);
             return Err(());
         }
-        match row.used[idx].compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Relaxed) {
+        // Raised before the value it covers is published, and carried by the
+        // release below: a reader that sees the new `used` has synchronised
+        // with this store, so `used > peak` is unobservable rather than merely
+        // transient. A CAS that then fails leaves the peak raised for a charge
+        // that did not land — over-reporting a high-water mark is
+        // conservative, under-reporting it is a lie.
+        row.peak[idx].fetch_max(next, Ordering::Relaxed);
+        match row.used[idx].compare_exchange_weak(used, next, Ordering::Release, Ordering::Relaxed)
+        {
             Ok(_) => {
-                row.peak[idx].fetch_max(next, Ordering::Relaxed);
                 // Counted even though the charge was granted: `quota=warn`
                 // exists to measure what enforcement *would* have refused.
                 if over_limit {
@@ -435,25 +444,32 @@ fn charge_row(row: &AccountRow, kind: ResourceKind, n: u32, mode: QuotaMode) -> 
 /// Credit one row. Saturating rather than wrapping: an under-run is a
 /// bookkeeping bug, and a count wrapped to `u32::MAX` would refuse every
 /// subsequent charge forever.
+///
+/// The store is a release so that an auditor which reads a row and then its
+/// children cannot see an ancestor's credit without the descendant credit that
+/// preceded it up the chain.
 fn release_row(row: &AccountRow, kind: ResourceKind, n: u32) {
     let idx = kind.index();
     let mut used = row.used[idx].load(Ordering::Relaxed);
     loop {
         let next = used.saturating_sub(n);
         debug_assert!(used >= n, "account row underflow on {}", kind.name());
-        match row.used[idx].compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Relaxed) {
+        match row.used[idx].compare_exchange_weak(used, next, Ordering::Release, Ordering::Relaxed)
+        {
             Ok(_) => return,
             Err(observed) => used = observed,
         }
     }
 }
 
-/// Give back the levels a refused walk had already debited.
-fn unwind(slots: &[u32], kind: ResourceKind, n: u32) {
-    for &slot in slots {
-        if let Some(row) = ACCOUNTS.get(slot as usize)
-            && row.live.load(Ordering::Acquire)
-        {
+/// Give back the levels a refused walk had already debited, leaf-first — the
+/// direction an ordinary refund takes.
+///
+/// Generation-compared rather than slot-and-live: a slot rebound between the
+/// debit and the unwind would otherwise be credited for a stranger's charge.
+fn unwind(levels: &[AccountId], kind: ResourceKind, n: u32) {
+    for &id in levels {
+        if let Some(row) = row_for(id) {
             release_row(row, kind, n);
         }
     }
@@ -473,6 +489,7 @@ pub fn stats(id: AccountId, kind: ResourceKind) -> Option<KindStats> {
     let row = row_for(id)?;
     let idx = kind.index();
     Some(KindStats {
+        // `used` before `peak`, for the reason `ledger_audit` gives.
         used: row.used[idx].load(Ordering::Acquire),
         limit: row.limit[idx].load(Ordering::Acquire),
         peak: row.peak[idx].load(Ordering::Acquire),
@@ -589,6 +606,9 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
 
         for kind in ResourceKind::ALL {
             let idx = kind.index();
+            // `used` before `peak`: `charge_row` raises the peak and then
+            // publishes `used` with a release store, so acquiring `used` first
+            // is what makes `used > peak` unobservable rather than transient.
             let used = row.used[idx].load(Ordering::Acquire);
             let peak = row.peak[idx].load(Ordering::Acquire);
             let limit = row.limit[idx].load(Ordering::Acquire);
@@ -741,4 +761,106 @@ pub fn reset_for_test() {
         row.reset_counters();
     }
     set_quota_mode(QuotaMode::Enforce);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    extern crate std;
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
+    use std::thread;
+
+    use slopos_abi::quota::FdSlot;
+
+    use crate::process::account::alloc_generation_for_test;
+    use crate::test_support::global_lock::{GlobalTestStateGuard, lock_global_test_state};
+
+    fn fixture() -> impl Drop {
+        struct Guard(GlobalTestStateGuard);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                reset_for_test();
+            }
+        }
+        let guard = lock_global_test_state();
+        reset_for_test();
+        Guard(guard)
+    }
+
+    fn account(slot: u32, parent: AccountId) -> AccountId {
+        let id = AccountId::from_parts(slot, alloc_generation_for_test());
+        account_create(id, parent).expect("create");
+        id
+    }
+
+    /// `UsedAbovePeak` is the one ledger invariant a lock-free reader can hold
+    /// to at every instant — `peak` is monotone and lives on the row `used`
+    /// does — so a reader racing a charger must never catch the two out of
+    /// order. The hierarchy checks compare rows sampled at different times and
+    /// are sound only against a quiesced ledger, which is why this pins the
+    /// peak alone.
+    #[test]
+    fn no_reader_ever_observes_used_above_peak() {
+        let _f = fixture();
+        let leaf = account(1, root());
+        let ancestor = root();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = Arc::clone(&stop);
+        let reader = thread::spawn(move || {
+            let mut samples = 0u64;
+            while !reader_stop.load(StdOrdering::Acquire) {
+                for id in [ancestor, leaf] {
+                    let s = stats(id, ResourceKind::FdSlot).expect("row");
+                    assert!(
+                        s.used <= s.peak,
+                        "observed used={} above peak={} on {:?}",
+                        s.used,
+                        s.peak,
+                        id
+                    );
+                }
+                samples += 1;
+            }
+            samples
+        });
+
+        for round in 0..128u32 {
+            let held = try_charge::<FdSlot>(leaf, 1 + round % 7).expect("charge");
+            let also = try_charge::<FdSlot>(leaf, 2).expect("charge");
+            drop(held);
+            drop(also);
+        }
+        stop.store(true, StdOrdering::Release);
+
+        let samples = reader.join().expect("reader");
+        assert!(samples > 0, "the reader never sampled the ledger");
+    }
+
+    /// The walk debits the leaf before the ancestor that refuses, so the leaf
+    /// really did hold the batch for the length of the walk. `peak` records
+    /// what was held rather than what was kept — an over-reported high-water
+    /// mark is conservative, an under-reported one would make the audit's
+    /// `UsedAbovePeak` unfalsifiable.
+    #[test]
+    fn a_batch_refused_above_the_leaf_leaves_the_leaf_peak_raised() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let leaf = account(2, parent);
+        set_limit(parent, ResourceKind::FdSlot, 2);
+
+        try_charge::<FdSlot>(leaf, 5).expect_err("the parent ceiling refuses");
+
+        let held = stats(leaf, ResourceKind::FdSlot).expect("row");
+        assert_eq!(held.used, 0, "a refused batch must leave no debit");
+        assert_eq!(held.peak, 5, "but the leaf did hold it");
+        let refused = stats(parent, ResourceKind::FdSlot).expect("row");
+        assert_eq!(
+            refused.peak, 0,
+            "the refusing row never held the amount, so its peak must not move"
+        );
+    }
 }

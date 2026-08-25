@@ -354,11 +354,18 @@ slopos_testing::stest!(
 /// which is what lets it outlive its `PinnedUserBuffer` while a NIC TX DMA is
 /// still in flight. A shared charge would be refunded at ring teardown while
 /// the driver still held the pages — a memory-lock bypass at the DMA boundary.
+///
+/// Charged to a scratch account rather than the root: the root is the ancestor
+/// of every live principal, so its pinned row moves whenever any other CPU
+/// pins or releases a page.
 #[cfg(feature = "test-hooks")]
 pub fn test_quota_keepalive_charge_outlives_its_pin() -> TestResult {
     use crate::pinned_user_buffer::PinnedUserBuffer;
 
-    let account = slopos_ostd::process::quota::root();
+    let Some(scratch) = Scratch::new() else {
+        return fail!("could not create an address space");
+    };
+    let account = scratch.account();
     let pinned = || stats(account, ResourceKind::PinnedBytes).map_or(0, |s| s.used);
 
     let before = pinned();
@@ -404,7 +411,10 @@ pub fn test_quota_keepalive_charge_outlives_its_pin() -> TestResult {
 pub fn test_quota_keepalive_redup_charges_each_dma() -> TestResult {
     use crate::pinned_user_buffer::PinnedUserBuffer;
 
-    let account = slopos_ostd::process::quota::root();
+    let Some(scratch) = Scratch::new() else {
+        return fail!("could not create an address space");
+    };
+    let account = scratch.account();
     let pinned = || stats(account, ResourceKind::PinnedBytes).map_or(0, |s| s.used);
 
     let Some(pin) = PinnedUserBuffer::alloc_for_test(8192) else {

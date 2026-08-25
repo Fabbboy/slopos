@@ -444,6 +444,7 @@ fn placement_is_durable_owner(placement: SchedPlacement) -> bool {
             | SchedPlacement::RemoteWake
             | SchedPlacement::OnCpu
             | SchedPlacement::Migrating
+            | SchedPlacement::Held
     )
 }
 
@@ -477,7 +478,8 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
         SchedPlacement::ReadyQueue
         | SchedPlacement::RemoteWake
         | SchedPlacement::OnCpu
-        | SchedPlacement::Migrating => return 0,
+        | SchedPlacement::Migrating
+        | SchedPlacement::Held => return 0,
         SchedPlacement::Nascent => return -1,
         SchedPlacement::None | SchedPlacement::Waking => {}
     }
@@ -512,7 +514,8 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
             SchedPlacement::ReadyQueue
             | SchedPlacement::RemoteWake
             | SchedPlacement::OnCpu
-            | SchedPlacement::Migrating => return 0,
+            | SchedPlacement::Migrating
+            | SchedPlacement::Held => return 0,
             SchedPlacement::Nascent => return -1,
             SchedPlacement::None | SchedPlacement::Waking => {}
         }
@@ -539,7 +542,8 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
             SchedPlacement::ReadyQueue
             | SchedPlacement::RemoteWake
             | SchedPlacement::OnCpu
-            | SchedPlacement::Migrating => return 0,
+            | SchedPlacement::Migrating
+            | SchedPlacement::Held => return 0,
             SchedPlacement::Nascent => return -1,
             SchedPlacement::None | SchedPlacement::Waking => {}
         }
@@ -582,6 +586,7 @@ fn publish_reserved_waking_ready(task: &TaskRef, task_id: u32, context: &str) ->
                 | SchedPlacement::RemoteWake
                 | SchedPlacement::OnCpu
                 | SchedPlacement::Migrating
+                | SchedPlacement::Held
         )
     {
         return 0;
@@ -602,7 +607,10 @@ fn publish_ready_from_current_owner(task: &TaskRef, task_id: u32, context: &str)
     let body: &Task = task;
     for _ in 0..4 {
         match body.sched_placement() {
-            SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake | SchedPlacement::Migrating => {
+            SchedPlacement::ReadyQueue
+            | SchedPlacement::RemoteWake
+            | SchedPlacement::Migrating
+            | SchedPlacement::Held => {
                 return 0;
             }
             SchedPlacement::Waking => return publish_reserved_waking_ready(task, task_id, context),
@@ -635,6 +643,13 @@ fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: 
         return -1;
     }
 
+    // Conclusive, not a failure: the hold owns the task and publishes it on
+    // release, which is exactly what `wake_blocked_task`'s totality contract
+    // asks a publisher to guarantee.
+    if crate::task::kernel_io_hold_claim(body, from) {
+        return 0;
+    }
+
     if body.time_slice_remaining() == 0 {
         reset_task_quantum(task);
     }
@@ -658,8 +673,9 @@ fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: 
             // whatever handle it carried.
             SchedPlacement::Migrating => sched.enqueue_migrated_borrowed(task),
             SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake => 0,
-            // A nascent task holds no reservation to transfer into a queue.
-            SchedPlacement::Nascent => -1,
+            // A nascent task holds no reservation to transfer into a queue, and
+            // no reservation is ever taken *from* a held one.
+            SchedPlacement::Nascent | SchedPlacement::Held => -1,
         });
 
         if result != Some(0) {
@@ -679,7 +695,7 @@ fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: 
             }
             SchedPlacement::Waking => sched.push_remote_wake_waking(task),
             SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake | SchedPlacement::OnCpu => 0,
-            SchedPlacement::Migrating | SchedPlacement::Nascent => -1,
+            SchedPlacement::Migrating | SchedPlacement::Nascent | SchedPlacement::Held => -1,
         });
         if !matches!(push_result, Some(0) | Some(1)) {
             return publish_ready_fallback(task);
@@ -850,11 +866,14 @@ pub fn task_apply_affinity(task: &TaskRef, new_affinity: u32) {
                 send_reschedule_ipi(last_cpu);
             }
         }
+        // The release re-runs `select_target_cpu`, so a held task needs no
+        // repatriation here.
         SchedPlacement::None
         | SchedPlacement::Waking
         | SchedPlacement::RemoteWake
         | SchedPlacement::Migrating
-        | SchedPlacement::Nascent => {}
+        | SchedPlacement::Nascent
+        | SchedPlacement::Held => {}
     }
 }
 
@@ -1079,6 +1098,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
                     SchedPlacement::ReadyQueue
                         | SchedPlacement::RemoteWake
                         | SchedPlacement::Migrating
+                        | SchedPlacement::Held
                 );
         }
     }
@@ -1557,9 +1577,12 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
                 core::hint::spin_loop();
                 continue;
             }
-            SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake | SchedPlacement::Migrating => {
+            SchedPlacement::ReadyQueue
+            | SchedPlacement::RemoteWake
+            | SchedPlacement::Migrating
+            | SchedPlacement::Held => {
                 // Scheduler ownership already exists: the state CAS alone makes
-                // the existing queue/inbox/migration owner runnable again.
+                // the existing queue/inbox/migration/hold owner runnable again.
                 if task_transition_from(body, TaskStatus::Blocked, TaskStatus::Ready) {
                     return 0;
                 }

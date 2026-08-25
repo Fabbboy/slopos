@@ -1,56 +1,76 @@
 //! Tests for PacketBuf and PacketPool.
 
+use slopos_ostd::lock_class;
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
 use crate::packetbuf::{HEADROOM, PacketBuf};
-use crate::pool::{PACKET_POOL, POOL_SIZE};
+use crate::pool::{PACKET_POOL, PacketPool};
 use crate::types::{Ipv4Addr, NetError};
+
+/// Ten is the most any one test holds at once
+/// (`loopback_tests::test_loopback_queue_capacity`); the rest is margin.
+const TEST_POOL_SLOTS: usize = 16;
+
+/// The live stack allocates from `PACKET_POOL` asynchronously, so an exact
+/// free-count assertion needs a pool nothing else can reach. Shared with
+/// `neighbor_tests` and `loopback_tests`: every `PacketPool` is another lockdep
+/// class.
+pub static TEST_PACKET_POOL: PacketPool =
+    PacketPool::new(lock_class!("TEST_PACKET_POOL", LOCK_LEVEL_RESOURCE));
+
+pub fn ensure_test_pool() {
+    TEST_PACKET_POOL.init_with_slots(TEST_POOL_SLOTS);
+}
 
 fn ensure_pool_init() {
     PACKET_POOL.init();
 }
 
 pub fn test_pool_alloc_and_release() -> TestResult {
-    ensure_pool_init();
+    ensure_test_pool();
 
-    let initial = PACKET_POOL.available();
+    let initial = TEST_PACKET_POOL.available();
     assert_test!(initial > 0, "pool should have free slots after init");
 
-    let slot = match PACKET_POOL.alloc() {
+    let slot = match TEST_PACKET_POOL.alloc() {
         Some(s) => s,
         None => return slopos_testing::fail!("alloc should succeed"),
     };
     assert_eq_test!(
-        PACKET_POOL.available(),
+        TEST_PACKET_POOL.available(),
         initial - 1,
         "available decreases by 1 after alloc"
     );
 
-    PACKET_POOL.release(slot);
+    TEST_PACKET_POOL.release(slot);
     assert_eq_test!(
-        PACKET_POOL.available(),
+        TEST_PACKET_POOL.available(),
         initial,
         "available restored after release"
     );
 
-    let slot2 = match PACKET_POOL.alloc() {
+    let slot2 = match TEST_PACKET_POOL.alloc() {
         Some(s) => s,
         None => return slopos_testing::fail!("alloc should succeed after release"),
     };
-    PACKET_POOL.release(slot2);
+    TEST_PACKET_POOL.release(slot2);
 
     pass!()
 }
 
 pub fn test_pool_exhaust_and_recover() -> TestResult {
-    ensure_pool_init();
+    ensure_test_pool();
 
-    let mut slots = [0u16; POOL_SIZE];
+    let initial = TEST_PACKET_POOL.available();
+    assert_test!(initial > 0, "pool should have free slots after init");
+
+    let mut slots = [0u16; TEST_POOL_SLOTS];
     let mut allocated = 0usize;
 
     for slot in &mut slots {
-        match PACKET_POOL.alloc() {
+        match TEST_PACKET_POOL.alloc() {
             Some(s) => {
                 *slot = s;
                 allocated += 1;
@@ -59,20 +79,20 @@ pub fn test_pool_exhaust_and_recover() -> TestResult {
         }
     }
 
-    assert_test!(allocated > 0, "should allocate at least one slot");
-    assert_eq_test!(PACKET_POOL.available(), 0, "pool should be exhausted");
+    assert_eq_test!(allocated, initial, "the drain took every free slot");
+    assert_eq_test!(TEST_PACKET_POOL.available(), 0, "pool should be exhausted");
 
     assert_test!(
-        PACKET_POOL.alloc().is_none(),
+        TEST_PACKET_POOL.alloc().is_none(),
         "alloc on exhausted pool returns None"
     );
 
     for i in 0..allocated {
-        PACKET_POOL.release(slots[i]);
+        TEST_PACKET_POOL.release(slots[i]);
     }
     assert_eq_test!(
-        PACKET_POOL.available(),
-        allocated,
+        TEST_PACKET_POOL.available(),
+        initial,
         "pool recovers after releasing all slots"
     );
 
@@ -235,24 +255,24 @@ pub fn test_from_raw_copy_empty() -> TestResult {
 }
 
 pub fn test_drop_returns_to_pool() -> TestResult {
-    ensure_pool_init();
+    ensure_test_pool();
 
-    let before = PACKET_POOL.available();
+    let before = TEST_PACKET_POOL.available();
 
     {
-        let _pkt = match PacketBuf::alloc() {
+        let _pkt = match PacketBuf::alloc_in(&TEST_PACKET_POOL) {
             Some(p) => p,
             None => return slopos_testing::fail!("alloc failed"),
         };
         assert_eq_test!(
-            PACKET_POOL.available(),
+            TEST_PACKET_POOL.available(),
             before - 1,
             "available decreased while PacketBuf alive"
         );
     }
 
     assert_eq_test!(
-        PACKET_POOL.available(),
+        TEST_PACKET_POOL.available(),
         before,
         "available restored after PacketBuf dropped"
     );
@@ -261,19 +281,28 @@ pub fn test_drop_returns_to_pool() -> TestResult {
 }
 
 pub fn test_drop_multiple() -> TestResult {
-    ensure_pool_init();
+    ensure_test_pool();
 
-    let before = PACKET_POOL.available();
+    let before = TEST_PACKET_POOL.available();
+    assert_test!(before >= 3, "pool has room for the 3 buffers this takes");
 
     {
-        let _p1 = PacketBuf::alloc();
-        let _p2 = PacketBuf::alloc();
-        let _p3 = PacketBuf::alloc();
-        assert_test!(PACKET_POOL.available() <= before - 3, "3 buffers allocated");
+        let (Some(_p1), Some(_p2), Some(_p3)) = (
+            PacketBuf::alloc_in(&TEST_PACKET_POOL),
+            PacketBuf::alloc_in(&TEST_PACKET_POOL),
+            PacketBuf::alloc_in(&TEST_PACKET_POOL),
+        ) else {
+            return slopos_testing::fail!("alloc failed");
+        };
+        assert_eq_test!(
+            TEST_PACKET_POOL.available(),
+            before - 3,
+            "3 buffers allocated"
+        );
     }
 
     assert_eq_test!(
-        PACKET_POOL.available(),
+        TEST_PACKET_POOL.available(),
         before,
         "all 3 slots returned after drop"
     );

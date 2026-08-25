@@ -42,7 +42,9 @@ const NUM_PRIORITY_LEVELS: usize = 5;
 /// it without OSTD reaching into `core/`.
 pub use slopos_ostd::task::link_roles::ReadyQueueRole;
 
-use slopos_ostd::sync::kernel_io_task::{KernelIoTaskIds, MAX_KERNEL_IO_STOPS};
+use slopos_ostd::sync::kernel_io_task::{
+    KernelIoTaskIds, MAX_KERNEL_IO_STOPS, kernel_io_hold_armed, kernel_io_hold_covers,
+};
 
 /// Per-priority FIFO of ready tasks.
 struct ReadyQueue {
@@ -64,6 +66,10 @@ impl ReadyQueue {
         let mut kept = 0usize;
         while let Some(node) = self.list.pop() {
             let task = TaskRef::from_placement(node);
+            if crate::task::kernel_io_hold_claim(&task, SchedPlacement::ReadyQueue) {
+                task_put(task);
+                continue;
+            }
             if kept < preserved.len() && kernel_io.contains(task.task_id) {
                 // Re-linking here would push onto the list this loop drains.
                 preserved[kept] = Some(node);
@@ -142,6 +148,50 @@ impl ReadyQueue {
             task.sched_placement_compare_exchange(SchedPlacement::ReadyQueue, SchedPlacement::None);
         task_put(TaskRef::from_placement(node));
         0
+    }
+
+    /// Unlink every task the hold covers, releasing the membership reference
+    /// this queue held. Two passes because the list has no remove-while-
+    /// iterating: at most `MAX_KERNEL_IO_STOPS` nodes can match.
+    fn hold_kernel_io(&self) -> usize {
+        let mut found: [Option<NonNull<Task>>; MAX_KERNEL_IO_STOPS] = [None; MAX_KERNEL_IO_STOPS];
+        let mut seen = 0usize;
+        for node in self.list.iter() {
+            if seen == found.len() {
+                break;
+            }
+            if with_parked_node(node, |task| kernel_io_hold_covers(task.task_id)) {
+                found[seen] = Some(node);
+                seen += 1;
+            }
+        }
+
+        let mut held = 0usize;
+        for node in found[..seen].iter().flatten() {
+            // Claimed before the unlink and rolled back if the unlink fails:
+            // the same order `steal_from_tail` takes, for the same reason.
+            let claimed = with_parked_node(*node, |task| {
+                task.sched_placement_compare_exchange(
+                    SchedPlacement::ReadyQueue,
+                    SchedPlacement::Held,
+                )
+            });
+            if !claimed {
+                continue;
+            }
+            if self.list.remove(*node).is_err() {
+                with_parked_node(*node, |task| {
+                    let _ = task.sched_placement_compare_exchange(
+                        SchedPlacement::Held,
+                        SchedPlacement::ReadyQueue,
+                    );
+                });
+                continue;
+            }
+            task_put(TaskRef::from_placement(*node));
+            held += 1;
+        }
+        held
     }
 
     /// Detach the tail task for migration, handing the thief the owning
@@ -258,7 +308,7 @@ impl PriorityRunQueue {
         self.schedule_calls.store(0, Ordering::Relaxed);
         self.aging.reset();
         self.initialized.store(true, Ordering::Release);
-        self.clear_remote_inbox_with_ref_release();
+        self.clear_remote_inbox_with_ref_release(&kernel_io);
         self.inbox_count.store(0, Ordering::Relaxed);
     }
 
@@ -335,6 +385,11 @@ impl PriorityRunQueue {
         if current == SchedPlacement::Nascent {
             return -1;
         }
+        // `1`, as for every other owner: the hold owns this task and will
+        // publish it itself, so a publisher must not hunt for another CPU.
+        if current == SchedPlacement::Held {
+            return 1;
+        }
         if current == SchedPlacement::ReadyQueue || current == SchedPlacement::RemoteWake {
             return 1;
         }
@@ -349,6 +404,14 @@ impl PriorityRunQueue {
         }
         if current != from {
             return -1;
+        }
+        // Claim, not refuse: `from` here is a placement the caller *owns* --
+        // `OnCpu` from a dispatcher unwinding into the pause, `Migrating` from
+        // a thief, `Waking` from a wake that reserved before the hold armed.
+        // A refusal keyed on `Held` never sees those, because the task was
+        // already off every list when the sweep ran.
+        if crate::task::kernel_io_hold_claim(body, from) {
+            return 1;
         }
         if !body.sched_placement_compare_exchange(from, SchedPlacement::ReadyQueue) {
             let after = body.sched_placement();
@@ -474,8 +537,19 @@ impl PriorityRunQueue {
     /// Clear the remote inbox and its count. Test fixtures only.
     #[cfg(feature = "test-hooks")]
     pub fn force_clear_inbox_count(&self) {
-        self.clear_remote_inbox_with_ref_release();
+        // Off-lock, and before the drain: the stop registry ranks with the task
+        // registry, not with a run queue.
+        let kernel_io = slopos_ostd::sync::kernel_io_task::kernel_io_task_ids();
+        self.clear_remote_inbox_with_ref_release(&kernel_io);
         self.inbox_count.store(0, Ordering::Relaxed);
+    }
+
+    fn hold_kernel_io(&self) -> usize {
+        let _guard = self.queue_lock.lock();
+        self.ready_queues
+            .iter()
+            .map(|queue| queue.hold_kernel_io())
+            .sum()
     }
 
     pub fn steal_task(&self) -> Option<TaskRef> {
@@ -553,12 +627,16 @@ impl PriorityRunQueue {
             || current == SchedPlacement::RemoteWake
             || current == SchedPlacement::OnCpu
             || current == SchedPlacement::Migrating
+            || current == SchedPlacement::Held
             || (current == SchedPlacement::Waking && from != SchedPlacement::Waking)
         {
             return 1;
         }
         if current != from {
             return -1;
+        }
+        if crate::task::kernel_io_hold_claim(body, from) {
+            return 1;
         }
         if !body.sched_placement_compare_exchange(from, SchedPlacement::RemoteWake) {
             let after = body.sched_placement();
@@ -631,6 +709,13 @@ impl PriorityRunQueue {
             let next = body.inbox_link().load();
             body.inbox_link().store(ptr::null_mut());
 
+            if crate::task::kernel_io_hold_claim(body, SchedPlacement::RemoteWake) {
+                body.inbox_link().mark_unlinked();
+                task_put(task);
+                cursor = next;
+                continue;
+            }
+
             if body.status() == (TaskStatus::Ready)
                 && body.sched_placement_compare_exchange(
                     SchedPlacement::RemoteWake,
@@ -671,8 +756,11 @@ impl PriorityRunQueue {
         self.saturating_sub_inbox_count(count);
     }
 
-    /// Discard the whole inbox, releasing each parked reference.
-    fn clear_remote_inbox_with_ref_release(&self) {
+    /// Discard the whole inbox, releasing each parked reference. A registered
+    /// kernel-I/O thread is moved to this CPU's ready queue instead of dropped:
+    /// `Ready` with no scheduler owner is a state no wake undoes, and nothing
+    /// respawns one of these threads.
+    fn clear_remote_inbox_with_ref_release(&self, kernel_io: &KernelIoTaskIds) {
         let mut cursor = self
             .remote_inbox_head
             .swap(ptr::null_mut(), Ordering::AcqRel);
@@ -683,11 +771,32 @@ impl PriorityRunQueue {
             let next = body.inbox_link().load();
             body.inbox_link().store(ptr::null_mut());
             body.inbox_link().mark_unlinked();
+            cursor = next;
+            drained = drained.saturating_add(1);
+
+            if crate::task::kernel_io_hold_claim(body, SchedPlacement::RemoteWake) {
+                task_put(task);
+                continue;
+            }
+            if kernel_io.contains(body.task_id)
+                && body.status() == (TaskStatus::Ready)
+                && body.sched_placement_compare_exchange(
+                    SchedPlacement::RemoteWake,
+                    SchedPlacement::ReadyQueue,
+                )
+            {
+                if self.enqueue_local_preclaimed(&task) < 0 {
+                    let _ = body.sched_placement_compare_exchange(
+                        SchedPlacement::ReadyQueue,
+                        SchedPlacement::None,
+                    );
+                }
+                task_put(task);
+                continue;
+            }
             let _ = body
                 .sched_placement_compare_exchange(SchedPlacement::RemoteWake, SchedPlacement::None);
             task_put(task);
-            cursor = next;
-            drained = drained.saturating_add(1);
         }
         self.saturating_sub_inbox_count(drained);
     }
@@ -1289,7 +1398,7 @@ pub fn clear_cpu_queues(cpu_id: usize) {
         queue.clear_with_ref_release(&kernel_io);
     }
     drop(_guard);
-    sched.clear_remote_inbox_with_ref_release();
+    sched.clear_remote_inbox_with_ref_release(&kernel_io);
 }
 
 pub fn clear_all_cpu_queues() {
@@ -1297,4 +1406,32 @@ pub fn clear_all_cpu_queues() {
     for cpu_id in 0..cpu_count {
         clear_cpu_queues(cpu_id);
     }
+}
+
+/// Take every task an armed kernel-I/O hold covers off every CPU's ready queue
+/// and remote inbox.
+///
+/// The token is the precondition, not a courtesy: `ReadyQueue::dequeue`
+/// ignores its own placement CAS, so an AP still dispatching could run a task
+/// this sweep had already claimed.
+pub fn hold_kernel_io_off_all_runqueues(_paused: &ApPauseToken) -> usize {
+    if !kernel_io_hold_armed() {
+        return 0;
+    }
+    let mut held = 0usize;
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    for cpu_id in 0..cpu_count {
+        let Some(sched) = cpu_scheduler(cpu_id) else {
+            continue;
+        };
+        // Unconditional, and a drain rather than a discard: the drain hands a
+        // covered task to the hold, and lands every other pending wake in a
+        // ready queue where `task_shutdown_population` retires it. Discarding
+        // the inbox instead — which is what `force_clear_inbox_count` does a
+        // few lines later in `enter()` — leaves a woken task `Ready` with no
+        // placement, which no wake re-publishes.
+        sched.drain_remote_inbox();
+        held += sched.hold_kernel_io();
+    }
+    held
 }

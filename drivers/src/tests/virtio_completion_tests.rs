@@ -12,8 +12,8 @@ use slopos_ostd::mm::heap::KVec;
 use slopos_ostd::sync::Mutex;
 
 use crate::hpet;
-use crate::virtio::IrqEdgeEvent;
 use crate::virtio::queue::Virtqueue;
+use crate::virtio::{EdgeWait, IrqEdgeEvent};
 use crate::virtio_blk;
 use crate::virtio_blk::BlkClaimError;
 
@@ -87,44 +87,44 @@ pub fn test_edge_event_multiple_signals() -> TestResult {
 pub fn test_edge_event_wait_presignaled() -> TestResult {
     let ev = IrqEdgeEvent::new();
     ev.signal();
-    let start = hpet::read_counter();
-    let result = ev.wait_timeout_ms(5000);
-    let elapsed_ticks = hpet::read_counter().wrapping_sub(start);
-    assert_test!(result, "wait should return true when pre-signaled");
-    let period = hpet::period_fs() as u64;
-    if period > 0 {
-        let elapsed_ns = (elapsed_ticks as u128 * period as u128 / 1_000_000) as u64;
-        assert_test!(
-            elapsed_ns < 1_000_000,
-            "pre-signaled wait took {} ns — should be < 1 ms",
-            elapsed_ns
-        );
-    }
+    assert_eq_test!(
+        ev.wait_timeout(5000),
+        EdgeWait::Latched,
+        "a pre-signaled wait must consume the latched edge without parking"
+    );
     pass!()
 }
 
+/// A timeout owes the caller the interval it asked for, measured on the clock
+/// the wait itself uses.
 pub fn test_edge_event_wait_timeout() -> TestResult {
-    if !hpet::is_available() {
-        let ev = IrqEdgeEvent::new();
-        let result = ev.wait_timeout_ms(1);
-        assert_test!(!result, "unsignaled wait should timeout");
-        return pass!();
-    }
-
+    const TIMEOUT_MS: u32 = 1;
     let ev = IrqEdgeEvent::new();
-    let start = hpet::read_counter();
-    let result = ev.wait_timeout_ms(1);
-    let elapsed_ticks = hpet::read_counter().wrapping_sub(start);
-    assert_test!(!result, "unsignaled wait(1ms) should timeout");
-    let period = hpet::period_fs() as u64;
-    if period > 0 {
-        let elapsed_ns = (elapsed_ticks as u128 * period as u128 / 1_000_000) as u64;
-        assert_test!(
-            elapsed_ns >= 500_000,
-            "timeout wait took only {} ns — expected >= 0.5 ms",
-            elapsed_ns
+
+    let Some(owed_ticks) = hpet::ms_to_ticks(TIMEOUT_MS) else {
+        assert_eq_test!(
+            ev.wait_timeout(TIMEOUT_MS),
+            EdgeWait::TimedOut,
+            "unsignaled wait should time out"
         );
-    }
+        return pass!();
+    };
+
+    let start = hpet::read_counter();
+    let outcome = ev.wait_timeout(TIMEOUT_MS);
+    let elapsed_ticks = hpet::read_counter().wrapping_sub(start);
+
+    assert_eq_test!(
+        outcome,
+        EdgeWait::TimedOut,
+        "unsignaled wait should time out"
+    );
+    assert_test!(
+        elapsed_ticks >= owed_ticks,
+        "timeout returned after {} HPET ticks, owing {}",
+        elapsed_ticks,
+        owed_ticks
+    );
     pass!()
 }
 

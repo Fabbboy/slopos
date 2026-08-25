@@ -20,17 +20,13 @@ const MAP_FLAGS: u64 = MAP_ANONYMOUS | MAP_PRIVATE;
 const PROT_RW: u64 = PROT_READ | PROT_WRITE;
 const MARKER: &[u8] = b"pre-exec-image";
 
-/// Return every frame the address spaces below borrowed, so the allocator is
-/// left as it was found. Teardown defers frame reuse until the quiesce epoch
-/// closes, and a later test that compares free-page counts against a baseline
-/// would otherwise read that deferral as a leak.
+/// Return every frame the address spaces below borrowed, so the suite does not
+/// carry a growing quarantine from here to whatever runs next.
 fn settle_teardown() {
-    // Address-space teardown returns frames by three staged routes, and a
-    // later test that compares global free-page counts against a baseline
-    // sees them only once all three have run: the quiesce epoch has to close
-    // before a frame is reusable, the quarantine holds it for a rotation
-    // after that, and the per-CPU cache holds it after that again.
-    crate::mmu::quiesce::force_close_epoch_for_test();
+    // Teardown stages a frame through three holds before it is reusable: the
+    // quiesce epoch has to close, then the quarantine rotates, then the
+    // per-CPU cache drains.
+    let _ = crate::mmu::quiesce::force_close_epoch_for_test();
     for _ in 0..4 {
         crate::page_alloc::quarantine_rotate();
         while crate::page_alloc::quarantine_has_releasable() {

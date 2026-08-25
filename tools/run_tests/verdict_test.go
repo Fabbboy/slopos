@@ -182,3 +182,60 @@ func TestNilQemuStatusIsSafe(t *testing.T) {
 		t.Fatalf("want exit 0 for a green run with unknown status, got %d", v.Code)
 	}
 }
+
+func TestKernelAbortIsNotGreen(t *testing.T) {
+	s := summaryOf(phase(1, "kernel", 3, 3), phase(2, "userland", 1, 1))
+	s.KernelAbort = true
+	s.KernelAbortReason = "NMI watchdog: CPU made no progress, sustained"
+	v := ClassifyRun(s, DriverResult{QemuStatus: intp(0)}, false)
+	if v.Code == 0 {
+		t.Fatalf("an abort with zero failing tests must not exit 0")
+	}
+	if v.Code != 1 {
+		t.Fatalf("want exit 1, got %d", v.Code)
+	}
+	if !strings.Contains(v.Diagnostic, "aborted on some CPU") {
+		t.Fatalf("diagnostic must name the abort, got %q", v.Diagnostic)
+	}
+	if !strings.Contains(v.Diagnostic, "NMI watchdog") {
+		t.Fatalf("diagnostic must carry the reason, got %q", v.Diagnostic)
+	}
+}
+
+func TestKernelAbortWithNoReasonStillDiagnoses(t *testing.T) {
+	s := summaryOf(phase(1, "kernel", 1, 1))
+	s.KernelAbort = true
+	v := ClassifyRun(s, DriverResult{QemuStatus: intp(0)}, false)
+	if v.Code != 1 || v.Diagnostic == "" {
+		t.Fatalf("want exit 1 with a diagnostic, got %d %q", v.Code, v.Diagnostic)
+	}
+	if !strings.Contains(v.Diagnostic, "no reason line") {
+		t.Fatalf("diagnostic must say the reason never arrived, got %q", v.Diagnostic)
+	}
+}
+
+// Ctrl-C still outranks the abort: a run the user killed is not evidence about
+// the kernel, whatever the kernel printed on its way down.
+func TestUserAbortStillOutranksKernelAbort(t *testing.T) {
+	s := summaryOf(phase(1, "kernel", 1, 1))
+	s.KernelAbort = true
+	v := ClassifyRun(s, DriverResult{UserAborted: true}, false)
+	if v.Code != 130 {
+		t.Fatalf("want exit 130, got %d", v.Code)
+	}
+}
+
+// The recorded case ended with QEMU killed by the wall guard, so the abort has
+// to survive the unexpected-status path with its diagnostic intact.
+func TestKernelAbortDiagnosticSurvivesUnexpectedQemuStatus(t *testing.T) {
+	s := summaryOf(phase(1, "kernel", 1, 1))
+	s.KernelAbort = true
+	s.KernelAbortReason = "panic core abort"
+	v := ClassifyRun(s, DriverResult{QemuStatus: intp(3)}, false)
+	if v.Code != 2 {
+		t.Fatalf("want exit 2 for an unexpected qemu status, got %d", v.Code)
+	}
+	if !strings.Contains(v.Diagnostic, "panic core abort") {
+		t.Fatalf("diagnostic lost the reason, got %q", v.Diagnostic)
+	}
+}

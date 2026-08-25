@@ -4,6 +4,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use slopos_kernel_services::clock;
 use slopos_ostd::klog_info;
 use slopos_ostd::sync::StateFlag;
 #[cfg(feature = "tests")]
@@ -18,8 +19,9 @@ use crate::registry::{registry_sorted, TestDesc, TestKind};
 #[cfg(feature = "tests")]
 use crate::result::TestResult;
 
-/// Default cycles per millisecond estimate (3 GHz).
-const DEFAULT_CYCLES_PER_MS: u64 = 3_000_000;
+/// HPET window the TSC ratio is measured over: long enough that the counter
+/// reads are noise against it, short enough to be paid once at first use.
+const CALIBRATION_NS: u64 = 1_000_000;
 
 /// Aggregated counters returned to the boot caller.
 #[repr(C)]
@@ -42,25 +44,53 @@ impl TestRunSummary {
 
 static CACHED_CYCLES_PER_MS: AtomicU64 = AtomicU64::new(0);
 
+/// `None` until the platform clock is wired, which is the harness's only
+/// evidence that a duration can be measured at all.
+fn monotonic_ns() -> Option<u64> {
+    match clock::monotonic_ns() {
+        0 => None,
+        ns => Some(ns),
+    }
+}
+
+#[cfg(feature = "tests")]
+fn elapsed_ms_since(start: Option<u64>) -> Option<u32> {
+    let start = start?;
+    let ms = monotonic_ns()?.saturating_sub(start) / 1_000_000;
+    Some(ms.min(u32::MAX as u64) as u32)
+}
+
+/// TSC cycles per millisecond, measured against the HPET-backed monotonic
+/// clock; `0` when no time base is available to measure against.
+///
+/// CPUID leaf 0x16 reports the nominal base frequency and is absent entirely
+/// under TCG, so it can neither be trusted nor relied on to be there.
 pub fn estimate_cycles_per_ms() -> u64 {
     let cached = CACHED_CYCLES_PER_MS.load(Ordering::Relaxed);
     if cached != 0 {
         return cached;
     }
 
-    let (max_leaf, _, _, _) = slopos_arch::cpu::cpuid(0);
-    let mut cycles_per_ms = DEFAULT_CYCLES_PER_MS;
-    if max_leaf >= 0x16 {
-        let (freq_mhz, _, _, _) = slopos_arch::cpu::cpuid(0x16);
-        if freq_mhz != 0 {
-            cycles_per_ms = freq_mhz as u64 * 1_000;
-        }
+    let Some(start_ns) = monotonic_ns() else {
+        return 0;
+    };
+    let start_tsc = slopos_arch::tsc::rdtsc();
+    let mut elapsed_ns = 0u64;
+    while elapsed_ns < CALIBRATION_NS {
+        core::hint::spin_loop();
+        let Some(now_ns) = monotonic_ns() else {
+            return 0;
+        };
+        elapsed_ns = now_ns.saturating_sub(start_ns);
     }
+    let cycles = slopos_arch::tsc::rdtsc().wrapping_sub(start_tsc);
 
+    let cycles_per_ms = ((cycles as u128 * 1_000_000) / elapsed_ns as u128) as u64;
     CACHED_CYCLES_PER_MS.store(cycles_per_ms, Ordering::Relaxed);
     cycles_per_ms
 }
 
+/// `0` when no time base was available to calibrate against.
 pub fn cycles_to_ms(cycles: u64) -> u32 {
     let cycles_per_ms = estimate_cycles_per_ms();
     if cycles_per_ms == 0 {
@@ -188,7 +218,7 @@ fn run_phase(
     }
     crate::ktap::emit_header(planned);
 
-    let start_cycles = slopos_arch::tsc::rdtsc();
+    let phase_start_ns = monotonic_ns();
     let mut idx: u32 = 0;
     let mut bailed = false;
 
@@ -241,8 +271,8 @@ fn run_phase(
     }
 
     summary.total = idx;
-    let end_cycles = slopos_arch::tsc::rdtsc();
-    summary.elapsed_ms = measure_elapsed_ms(start_cycles, end_cycles);
+    let elapsed = elapsed_ms_since(phase_start_ns);
+    summary.elapsed_ms = elapsed.unwrap_or(0);
 
     klog_info!(
         "TESTS SUMMARY ({} phase): total={} passed={} failed={} elapsed_ms={}",
@@ -250,9 +280,11 @@ fn run_phase(
         summary.total,
         summary.passed,
         summary.failed,
-        summary.elapsed_ms,
+        Elapsed(elapsed),
     );
 
+    // The footer grammar has no slot for an absent duration, so an unmeasured
+    // phase reports zero here and says "unmeasured" in the line above.
     crate::ktap::emit_footer(
         summary.elapsed_ms,
         summary.passed,
@@ -265,6 +297,19 @@ fn run_phase(
         -1
     } else {
         0
+    }
+}
+
+#[cfg(feature = "tests")]
+struct Elapsed(Option<u32>);
+
+#[cfg(feature = "tests")]
+impl core::fmt::Display for Elapsed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(ms) => write!(f, "{}", ms),
+            None => f.write_str("unmeasured"),
+        }
     }
 }
 
@@ -282,10 +327,9 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
     let log_cpu;
     {
         let _g = crate::capture::begin();
-        let t0 = slopos_arch::tsc::rdtsc();
+        let t0 = monotonic_ns();
         raw_outcome = (desc.run)();
-        let t1 = slopos_arch::tsc::rdtsc();
-        time_ms = measure_elapsed_ms(t0, t1);
+        time_ms = elapsed_ms_since(t0);
         log_cpu = crate::capture::current_cpu();
         truncated = crate::capture::truncated_bytes();
     }
@@ -297,7 +341,10 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
         raw_outcome
     };
 
-    let final_outcome = if outcome == TestResult::Pass && cfg.warn_ms > 0 && time_ms > cfg.warn_ms {
+    let final_outcome = if outcome == TestResult::Pass
+        && cfg.warn_ms > 0
+        && matches!(time_ms, Some(ms) if ms > cfg.warn_ms)
+    {
         TestResult::OverTime
     } else {
         outcome

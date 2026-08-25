@@ -14,7 +14,8 @@ use slopos_testing::{assert_not_null, assert_test, fail, pass};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::page_alloc::{
-    alloc_kernel_page, alloc_kernel_pages, free_page_frame, get_page_allocator_stats,
+    FrameAccounting, alloc_kernel_page, alloc_kernel_pages, frame_accounting, free_page_frame,
+    get_page_allocator_stats,
 };
 use crate::paging::virt_to_phys;
 use crate::paging_defs::PAGE_SIZE_4KB;
@@ -157,23 +158,34 @@ pub fn test_pinned_io_runs_at_offset() -> TestResult {
 }
 
 pub fn test_page_alloc_stats() -> TestResult {
-    let before = get_page_allocator_stats();
-    let (total, alloc_before) = (before.total, before.allocated);
-
-    assert_test!(total != 0, "total frames is 0");
+    let stats = get_page_allocator_stats();
+    assert_test!(stats.total != 0, "total frames is 0");
+    assert_test!(
+        stats.free <= stats.total && stats.allocated <= stats.total,
+        "{} free and {} allocated against a total of {}",
+        stats.free,
+        stats.allocated,
+        stats.total
+    );
 
     let phys = alloc_kernel_pages(4);
     assert_not_null!(phys.as_u64() as *const u8, "alloc 4 pages for stats");
 
-    let after = get_page_allocator_stats();
-    let alloc_after = after.allocated;
-
-    if alloc_after < alloc_before + 4 {
-        free_page_frame(phys);
-        return fail!("allocated count didn't increase by 4");
-    }
-
+    // The block this test holds, not the counters every CPU writes.
+    let accounting = frame_accounting(phys);
+    let block_base = phys.as_u64() % (4 * PAGE_SIZE_4KB);
     free_page_frame(phys);
+
+    assert_test!(
+        accounting == FrameAccounting::HandedOut,
+        "the buddy accounts a block it just handed out as {:?}",
+        accounting
+    );
+    assert_test!(
+        block_base == 0,
+        "a 4-page block starts at {:#x}, off its own order's boundary",
+        phys.as_u64()
+    );
     pass!()
 }
 
@@ -307,18 +319,36 @@ pub fn test_heap_stats() -> TestResult {
     assert_not_null!(ptr, "alloc for stats test");
 
     let after = get_heap_stats_owned();
-
-    if after.allocated_size <= before.allocated_size {
-        kfree(ptr);
-        return fail!("allocated size didn't increase");
-    }
-
-    if after.allocation_count <= before.allocation_count {
-        kfree(ptr);
-        return fail!("allocation count didn't increase");
-    }
-
     kfree(ptr);
+
+    // `allocated_size` is the heap's live bytes, which a peer's `kfree` lowers
+    // under this test's feet; the allocation counts only ever climb, so this
+    // test's own `kmalloc` is enough to move one.
+    if after.allocation_count <= before.allocation_count {
+        return fail!(
+            "allocation count did not advance ({} -> {})",
+            before.allocation_count,
+            after.allocation_count
+        );
+    }
+
+    if after.allocated_size + after.free_size != after.total_size {
+        return fail!(
+            "{} allocated + {} free do not sum to the {} total",
+            after.allocated_size,
+            after.free_size,
+            after.total_size
+        );
+    }
+
+    if after.free_count > after.allocation_count {
+        return fail!(
+            "the heap has freed {} blocks against {} ever allocated",
+            after.free_count,
+            after.allocation_count
+        );
+    }
+
     pass!()
 }
 
@@ -331,9 +361,14 @@ pub fn test_global_alloc_vec() -> TestResult {
     pass!()
 }
 
+/// Two frees followed by two allocations of the same class must hand back the
+/// two addresses just freed.
+///
+/// Asserted on this test's own pointers rather than on the heap's total size:
+/// that total moves with every other CPU's slab refill. The free and the
+/// realloc run with interrupts masked, so between them nothing on this CPU
+/// touches the per-CPU magazine the two objects were pushed onto.
 pub fn test_heap_free_list_search() -> TestResult {
-    let initial_heap_size = get_heap_stats_owned().total_size;
-
     let p1 = kmalloc(256);
     assert_not_null!(p1, "alloc p1");
     let p2 = kmalloc(256);
@@ -348,39 +383,37 @@ pub fn test_heap_free_list_search() -> TestResult {
         return fail!("alloc p3");
     }
 
-    let heap_after_alloc = get_heap_stats_owned().total_size;
+    let (p4, p5) = cpu::IrqDisabled::with(|_irq| {
+        kfree(p1);
+        kfree(p2);
+        (kmalloc(256), kmalloc(256))
+    });
 
-    kfree(p1);
-    kfree(p2);
-
-    let p4 = kmalloc(256);
-    if p4.is_null() {
+    if p4.is_null() || p5.is_null() {
         kfree(p3);
-        return fail!("alloc p4");
-    }
-    let p5 = kmalloc(256);
-    if p5.is_null() {
-        kfree(p3);
-        kfree(p4);
-        return fail!("alloc p5");
+        if !p4.is_null() {
+            kfree(p4);
+        }
+        if !p5.is_null() {
+            kfree(p5);
+        }
+        return fail!("realloc from the freed pair");
     }
 
-    let final_heap_size = get_heap_stats_owned().total_size;
-
-    if final_heap_size > heap_after_alloc {
-        kfree(p3);
-        kfree(p4);
-        kfree(p5);
-        return fail!("heap grew beyond post-alloc size");
-    }
+    let from_the_freed_pair = |p: *mut c_void| p == p1 || p == p2;
+    let reused = p4 != p5 && from_the_freed_pair(p4) && from_the_freed_pair(p5);
 
     kfree(p3);
     kfree(p4);
     kfree(p5);
 
     assert_test!(
-        final_heap_size >= initial_heap_size,
-        "final heap size less than initial"
+        reused,
+        "freed {:#x} and {:#x} but the next two allocations were {:#x} and {:#x}",
+        p1 as usize,
+        p2 as usize,
+        p4 as usize,
+        p5 as usize
     );
     pass!()
 }

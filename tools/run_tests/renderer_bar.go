@@ -55,6 +55,8 @@ func (r *BarRenderer) OnEvent(ev Event, summary *RunSummary) {
 		r.endPhase(e, summary)
 	case *EvBail:
 		r.onBail(e)
+	case *EvKernelAbort:
+		r.onKernelAbort(e)
 	}
 }
 
@@ -105,6 +107,20 @@ func (r *BarRenderer) onTest(rec *TestRecord, _ *RunSummary) {
 	default:
 		r.drawBar()
 	}
+}
+
+func (r *BarRenderer) onKernelAbort(ev *EvKernelAbort) {
+	r.eraseBar()
+	msg := "KERNEL ABORT on some CPU"
+	if ev.Reason != "" {
+		msg += ": " + ev.Reason
+	}
+	r.println(Paint(msg, ansiRedBold, r.Colour))
+	r.println(Paint(
+		fmt.Sprintf("  surviving CPUs continue; run ends %ds after the last output",
+			PostAbortSilenceSec),
+		ansiDim, r.Colour,
+	))
 }
 
 func (r *BarRenderer) onBail(ev *EvBail) {
@@ -453,6 +469,18 @@ func (r *BarRenderer) renderSummary(summary *RunSummary) {
 		r.println("")
 	}
 
+	if summary.KernelAbort {
+		reason := summary.KernelAbortReason
+		if reason == "" {
+			reason = "(no reason line reached the wire)"
+		}
+		r.println(Paint("KERNEL ABORT on some CPU: "+reason, ansiRedBold, r.Colour))
+		r.println(Paint(
+			"  results below came from the surviving CPUs and may cascade",
+			ansiDim, r.Colour,
+		))
+	}
+
 	bailed := false
 	var bailedPhase *PhaseRecord
 	for _, p := range summary.Phases {
@@ -503,7 +531,7 @@ func (r *BarRenderer) renderSummary(summary *RunSummary) {
 				total, nPhases, plural, passed, failed, skipped, overTime),
 			ansiYellow, r.Colour,
 		))
-	case failed == 0 && !summary.Truncated:
+	case failed == 0 && !summary.Truncated && !summary.KernelAbort:
 		r.println(Paint(
 			fmt.Sprintf("%d tests across %d phase%s  →  "+
 				"%d passed, 0 failed, %d skipped, %d over-time",

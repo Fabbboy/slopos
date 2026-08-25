@@ -1,6 +1,6 @@
 use slopos_abi::task::TaskFaultReason;
 use slopos_ostd::handle::HandleError;
-use slopos_ostd::klog_info;
+use slopos_ostd::{klog_info, klog_warn};
 
 use crate::error::MmError;
 use crate::{cow, demand, process_vm};
@@ -10,9 +10,82 @@ use crate::{cow, demand, process_vm};
 pub enum FaultOutcome {
     /// Serviced; the faulting instruction can be retried.
     Resolved,
+    /// Exclusive access to the address space was unavailable. Nothing was
+    /// mapped and nothing was changed; the instruction re-executes and
+    /// re-faults, and the decision is retaken then.
+    Retry,
     /// Not serviceable; the task dies with this reason, which `waitpid` needs
     /// to tell an out-of-memory kill from a wild dereference.
     Fatal(TaskFaultReason),
+}
+
+pub(crate) const RETRY_WARN_MS: u64 = 50;
+
+#[derive(Clone, Copy)]
+pub(crate) struct RetryEpisode {
+    task_id: u32,
+    fault_addr: u64,
+    since_ms: u64,
+    warned: bool,
+}
+
+impl RetryEpisode {
+    pub(crate) const IDLE: Self = Self {
+        task_id: 0,
+        fault_addr: 0,
+        since_ms: 0,
+        warned: false,
+    };
+}
+
+slopos_ostd::cpu_local! {
+    static RETRY_EPISODE: RetryEpisode = RetryEpisode::IDLE;
+}
+
+/// `true` iff this is the moment to log. Pure: the caller supplies the clock,
+/// so the escalation policy is testable without a contended host.
+pub(crate) fn note_retry(
+    ep: &mut RetryEpisode,
+    task_id: u32,
+    fault_addr: u64,
+    now_ms: u64,
+) -> bool {
+    if ep.task_id != task_id || ep.fault_addr != fault_addr {
+        *ep = RetryEpisode {
+            task_id,
+            fault_addr,
+            since_ms: now_ms,
+            warned: false,
+        };
+        return false;
+    }
+    if ep.warned || now_ms.wrapping_sub(ep.since_ms) < RETRY_WARN_MS {
+        return false;
+    }
+    ep.warned = true;
+    true
+}
+
+/// No escalation: a `Retry` that never terminates is a leaked address-space
+/// handle, which is a kernel defect. Killing the task would hide it, and any
+/// count or deadline threshold is user-reachable — a multi-threaded process
+/// hammering `copy_from_user` can keep a reader outstanding indefinitely.
+fn retry(task_id: u32, fault_addr: u64) -> FaultOutcome {
+    let now = slopos_kernel_services::clock::uptime_ms();
+    let warn = {
+        let mut episode = RETRY_EPISODE.get_mut();
+        note_retry(&mut episode, task_id, fault_addr, now)
+    };
+    if warn {
+        klog_warn!(
+            "PF: task {} has been retrying at cr2=0x{:x} for {} ms — an address-space \
+             reader is not draining",
+            task_id,
+            fault_addr,
+            RETRY_WARN_MS
+        );
+    }
+    FaultOutcome::Retry
 }
 
 /// Try to service a user page fault in the address space named by
@@ -32,35 +105,39 @@ pub fn try_resolve_user_fault(
         return FaultOutcome::Fatal(TaskFaultReason::UserPage);
     };
 
-    let is_cow = process_vm::process_vm_with_vm_space_by_handle(handle, |vs| {
-        cow::is_cow_fault(error_code, vs, fault_addr)
+    // One acquisition, not two: deciding under one hold of the per-process lock
+    // and acting under the next lets a sibling thread resolve the page in
+    // between, and the second hold then reports a failure for work that is
+    // already done.
+    let cow = process_vm::process_vm_with_vm_space_by_handle(handle, |vs| {
+        if !cow::is_cow_fault(error_code, vs, fault_addr) {
+            return None;
+        }
+        Some(cow::handle_cow_fault(vs, fault_addr))
     });
 
-    match is_cow {
-        Ok(true) => {
-            let result = process_vm::process_vm_with_vm_space_by_handle(handle, |vs| {
-                cow::handle_cow_fault(vs, fault_addr)
-            });
-            match result {
-                Ok(Ok(())) => return FaultOutcome::Resolved,
-                Ok(Err(MmError::NoMemory)) => {
-                    klog_info!(
-                        "PF: COW copy for task {} at cr2=0x{:x} found no memory",
-                        task_id,
-                        fault_addr
-                    );
-                    return FaultOutcome::Fatal(TaskFaultReason::UserOom);
-                }
-                Ok(Err(_)) | Err(_) => {
-                    klog_info!(
-                        "PF: COW resolution FAILED for task {} at cr2=0x{:x}",
-                        task_id,
-                        fault_addr
-                    );
-                }
-            }
+    match cow {
+        Ok(Some(Ok(()))) => return FaultOutcome::Resolved,
+        // Returns rather than falling through to the demand path: the page is
+        // present, so a demand attempt would be a second decision on state this
+        // arm deliberately did not inspect.
+        Ok(Some(Err(MmError::Retry))) => return retry(task_id, fault_addr),
+        Ok(Some(Err(MmError::NoMemory))) => {
+            klog_info!(
+                "PF: COW copy for task {} at cr2=0x{:x} found no memory",
+                task_id,
+                fault_addr
+            );
+            return FaultOutcome::Fatal(TaskFaultReason::UserOom);
         }
-        Ok(false) => {}
+        Ok(Some(Err(_))) => {
+            klog_info!(
+                "PF: COW resolution FAILED for task {} at cr2=0x{:x}",
+                task_id,
+                fault_addr
+            );
+        }
+        Ok(None) => {}
         Err(err) => {
             report_unresolvable_address_space(err, task_id, fault_addr);
             return FaultOutcome::Fatal(TaskFaultReason::UserPage);
@@ -82,6 +159,7 @@ pub fn try_resolve_user_fault(
 
     match demanded {
         Ok(Some(Ok(()))) => FaultOutcome::Resolved,
+        Ok(Some(Err(MmError::Retry))) => retry(task_id, fault_addr),
         Ok(Some(Err(MmError::NoMemory))) => {
             klog_info!(
                 "PF: demand fault for task {} at cr2=0x{:x} found no memory after reclaim",

@@ -145,6 +145,148 @@ pub fn clear_kernel_io_freeze_after_panic() {
     }
 }
 
+/// The freeze's second phase. A freeze is cooperative — a thread parks only by
+/// running — so a caller whose correctness needs the threads *off the run
+/// queues* arms a hold once the freeze's window has had its chance. While a
+/// hold is armed no covered task may be linked into a run queue at all.
+///
+/// A depth, not a flag, for `FREEZE_DEPTH`'s reason.
+static HOLD_DEPTH: AtomicU32 = AtomicU32::new(0);
+
+/// The covered ids, mirrored out of `STOP_REGISTRY` so the publish path can ask
+/// without taking it: a claim runs under a run-queue lock, and reading the
+/// registry there would invert the order `clear_cpu_queues` takes.
+static HELD_IDS: [AtomicU32; MAX_KERNEL_IO_STOPS] =
+    [const { AtomicU32::new(INVALID_TASK_ID) }; MAX_KERNEL_IO_STOPS];
+
+fn store_held_ids(ids: impl IntoIterator<Item = u32>) {
+    let mut ids = ids.into_iter();
+    for cell in &HELD_IDS {
+        cell.store(ids.next().unwrap_or(INVALID_TASK_ID), Ordering::Release);
+    }
+}
+
+fn held_ids_snapshot() -> KernelIoTaskIds {
+    let mut ids = [INVALID_TASK_ID; MAX_KERNEL_IO_STOPS];
+    let mut len = 0usize;
+    for cell in &HELD_IDS {
+        let id = cell.load(Ordering::Acquire);
+        if id != INVALID_TASK_ID {
+            ids[len] = id;
+            len += 1;
+        }
+    }
+    KernelIoTaskIds { ids, len }
+}
+
+/// Ids are published before the depth bump so [`kernel_io_hold_covers`] never
+/// answers `true` for a task the release walk will not visit.
+pub fn arm_kernel_io_hold() {
+    let stops = registered_stops();
+    store_held_ids(
+        stops
+            .iter()
+            .flatten()
+            .map(|stop| stop.task_id())
+            .filter(|id| *id != INVALID_TASK_ID),
+    );
+    HOLD_DEPTH.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Release one level. `Some` only for the level that takes the depth to zero,
+/// carrying the set that level covered so the caller can publish each held task
+/// again. Saturating for [`release_kernel_io_freeze`]'s reason, and worse here:
+/// a wrapped depth would keep every kernel-I/O thread off every run queue for
+/// the rest of the boot.
+pub fn disarm_kernel_io_hold() -> Option<KernelIoTaskIds> {
+    let held = held_ids_snapshot();
+    let mut depth = HOLD_DEPTH.load(Ordering::Acquire);
+    loop {
+        if depth == 0 {
+            debug_assert!(false, "kernel-io hold released more times than held");
+            return None;
+        }
+        match HOLD_DEPTH.compare_exchange_weak(
+            depth,
+            depth - 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(observed) => depth = observed,
+        }
+    }
+    if depth != 1 {
+        return None;
+    }
+    store_held_ids(core::iter::empty());
+    Some(held)
+}
+
+#[inline]
+pub fn kernel_io_hold_armed() -> bool {
+    HOLD_DEPTH.load(Ordering::Acquire) != 0
+}
+
+#[inline]
+pub fn kernel_io_hold_covers(task_id: u32) -> bool {
+    if task_id == INVALID_TASK_ID || !kernel_io_hold_armed() {
+        return false;
+    }
+    HELD_IDS
+        .iter()
+        .any(|cell| cell.load(Ordering::Acquire) == task_id)
+}
+
+/// The set an armed hold covers.
+#[inline]
+pub fn kernel_io_held_ids() -> KernelIoTaskIds {
+    held_ids_snapshot()
+}
+
+/// Panic path: a test that panics under a hold must not leave the threads off
+/// every run queue for the rest of the boot.
+pub fn clear_kernel_io_hold_after_panic() -> Option<KernelIoTaskIds> {
+    let held = held_ids_snapshot();
+    if HOLD_DEPTH.swap(0, Ordering::AcqRel) == 0 {
+        return None;
+    }
+    store_held_ids(core::iter::empty());
+    Some(held)
+}
+
+/// Arm a hold covering exactly `ids`, handing back the set it displaced so a
+/// test nested inside a real hold can put that set back.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn arm_kernel_io_hold_over_for_test(ids: &[u32]) -> KernelIoTaskIds {
+    let displaced = held_ids_snapshot();
+    store_held_ids(ids.iter().copied());
+    HOLD_DEPTH.fetch_add(1, Ordering::AcqRel);
+    displaced
+}
+
+/// Saturating, like [`disarm_kernel_io_hold`]: a test that unwinds past its own
+/// disarm, or one whose panic cleanup zeroed the depth first, would otherwise
+/// wrap it to `u32::MAX` and refuse every kernel-I/O publication for the rest
+/// of the boot.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn disarm_kernel_io_hold_for_test(displaced: &KernelIoTaskIds) {
+    let mut depth = HOLD_DEPTH.load(Ordering::Acquire);
+    while depth != 0 {
+        match HOLD_DEPTH.compare_exchange_weak(
+            depth,
+            depth - 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(observed) => depth = observed,
+        }
+    }
+    debug_assert!(depth != 0, "kernel-io hold released more times than held");
+    store_held_ids(displaced.iter());
+}
+
 /// Cooperative stop signal for one kernel-I/O thread.
 ///
 /// Kernel tasks take no signals and are not killable: they need a stop they
@@ -578,6 +720,11 @@ impl KernelIoTaskIds {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.ids[..self.len].iter().copied()
     }
 }
 

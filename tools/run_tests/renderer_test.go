@@ -227,3 +227,94 @@ func TestJsonlSinkOneEventPerLine(t *testing.T) {
 		}
 	}
 }
+
+// The banner has to reach the operator while the run is still going, and the
+// final summary must not paint a zero-failure abort green.
+func TestRendererKernelAbortIsReportedAndNotGreen(t *testing.T) {
+	lines := []string{
+		"KTAP\tTAP version 14",
+		"KTAP\t1..2",
+		"KTAP\tok 1 - mod::a # time_ms=1",
+		KernelAbortBanner,
+		"NMI watchdog: CPU made no progress, sustained",
+		"KTAP\tok 2 - mod::b # time_ms=2",
+		"KTAP\t# elapsed_ms=9 pass=2 fail=0 skip=0 over_time=0",
+	}
+	// Colour on, or the ansiGreen assertion below is vacuous: Paint is a
+	// pass-through when colour is off.
+	var buf bytes.Buffer
+	r := NewBarRenderer(&buf, "summary", true, 0, false, 100)
+	rec := NewRecorder()
+	p := NewKtapParser()
+	for _, ln := range lines {
+		for _, ev := range p.Feed(ln) {
+			rec.Record(ev)
+			r.OnEvent(ev, rec.Summary)
+		}
+	}
+	zero := 0
+	rec.Finalize(&zero)
+	r.Finalize(rec.Summary)
+
+	out := buf.String()
+	if !strings.Contains(out, ansiRedBold) {
+		t.Fatalf("colour is off, so the green assertion below proves nothing:\n%q", out)
+	}
+	if strings.Count(out, "KERNEL ABORT on some CPU") != 2 {
+		t.Errorf("want the abort inline and in the summary, got:\n%s", out)
+	}
+	if !strings.Contains(out, "NMI watchdog: CPU made no progress, sustained") {
+		t.Errorf("summary lost the abort reason:\n%s", out)
+	}
+	// The per-phase line stays green on purpose: it echoes the kernel's own
+	// footer for that phase, which really did report pass=2 fail=0. It is the
+	// run summary that must not read as a clean run.
+	if !strings.Contains(out, ansiRedBold+"2 tests across 1 phase") {
+		t.Errorf("the run summary must be red, not green:\n%q", out)
+	}
+	if strings.Contains(out, ansiGreen+"2 tests across") {
+		t.Errorf("a run with an abort must not summarise green:\n%q", out)
+	}
+}
+
+func TestJsonlEncodesKernelAbort(t *testing.T) {
+	obj := encodeEvent(&EvKernelAbort{Reason: "panic core abort"})
+	if obj == nil {
+		t.Fatalf("kernel_abort must reach the JSONL stream")
+	}
+	if obj["t"] != "kernel_abort" || obj["reason"] != "panic core abort" {
+		t.Fatalf("unexpected encoding: %+v", obj)
+	}
+}
+
+func TestJsonlRunEndCarriesKernelAbort(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	sink, err := NewJsonlSink(path)
+	if err != nil {
+		t.Fatalf("NewJsonlSink: %v", err)
+	}
+	s := NewRecorder().Summary
+	s.KernelAbort = true
+	s.KernelAbortReason = "panic core abort"
+	if err := sink.WriteRunEnd(s, 1); err != nil {
+		t.Fatalf("WriteRunEnd: %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(body), &obj); err != nil {
+		t.Fatalf("unmarshal run_end: %v", err)
+	}
+	if obj["kernel_abort"] != true {
+		t.Fatalf("run_end must carry kernel_abort: %+v", obj)
+	}
+	if obj["kernel_abort_reason"] != "panic core abort" {
+		t.Fatalf("run_end must carry the reason: %+v", obj)
+	}
+}

@@ -8,6 +8,7 @@
 //! `process_vm::process_vm_with_vm_space`.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_ostd::klog_warn;
 use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::frame::{AnonymousMeta, Paddr, RingMeta};
 use slopos_ostd::mm::page_property::{CachePolicy, PageProperty};
@@ -15,14 +16,17 @@ use slopos_ostd::mm::page_size::Size4Kb;
 use slopos_ostd::mm::page_table::PteFlags;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
-use slopos_ostd::{klog_info, klog_warn};
 
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
 /// Bit shift for the AVL software-bits field (PTE bits 9..=11); legacy
 /// [`PageFlags::COW`] sits at bit 9, the low bit of `PageProperty::software`.
 const SOFTWARE_BITS_SHIFT: u32 = 9;
-const VM_SPACE_MUT_RETRY_SPINS: usize = 1_000_000;
+/// One cache-line round trip, not a scheduling quantum. Past this the holder
+/// is descheduled, and every further iteration is spent with interrupts and
+/// preemption off under the per-process lock — burning the CPU the holder
+/// needs in order to release.
+const VM_SPACE_MUT_SPINS: usize = 64;
 
 /// Convert a legacy `PageFlags` bitfield (passed as `u64`) into an OSTD
 /// `PageProperty`.
@@ -74,27 +78,24 @@ pub fn property_to_page_flags(prop: PageProperty) -> PageFlags {
     PageFlags::from_bits_truncate(bits)
 }
 
-/// The per-process VM lock prevents *new* `KArc<VmSpace>` clones while this
-/// helper runs, but syscall/user-copy readers may already hold short-lived
-/// ones, so transient readers are waited out rather than panicked on. A ref
-/// still standing after the bounded spin means a caller holds an address-space
-/// handle across a mutation window, violating the external-lock contract this
-/// helper rests on.
+/// Advisory: `KArc::get_mut` is the authoritative check. Callers use it to
+/// bail before doing work a `WouldBlock` would have to undo.
+#[inline]
+pub(crate) fn vm_space_is_exclusive(vm_space: &KArc<VmSpace>) -> bool {
+    KArc::strong_count(vm_space) == 1 && KArc::weak_count(vm_space) == 0
+}
+
 #[inline]
 fn vm_space_get_mut(vm_space: &mut KArc<VmSpace>) -> Result<&mut VmSpace, MapError> {
-    for _ in 0..VM_SPACE_MUT_RETRY_SPINS {
-        if KArc::strong_count(vm_space) == 1 && KArc::weak_count(vm_space) == 0 {
-            return KArc::get_mut(vm_space).ok_or(MapError::ConcurrentAccess);
+    let mut spins = 0usize;
+    while !vm_space_is_exclusive(vm_space) {
+        if spins == VM_SPACE_MUT_SPINS {
+            return Err(MapError::WouldBlock);
         }
+        spins += 1;
         core::hint::spin_loop();
     }
-
-    klog_info!(
-        "user_mappings: VmSpace mutation blocked by refs strong={} weak={}",
-        KArc::strong_count(vm_space),
-        KArc::weak_count(vm_space)
-    );
-    Err(MapError::ConcurrentAccess)
+    KArc::get_mut(vm_space).ok_or(MapError::WouldBlock)
 }
 
 /// Map a 4 KiB user page into `vm_space` at `va`, pointing at the
@@ -111,6 +112,7 @@ pub fn ostd_map_4kb_user(
     pa: PhysAddr,
     flags: u64,
 ) -> Result<(), MapError> {
+    let vs = vm_space_get_mut(vm_space)?;
     let prop = page_flags_to_property(flags);
     let pa_ostd = Paddr::new(pa.as_u64());
     let frame = match UFrame::<AnonymousMeta>::wrap_user_paddr(pa_ostd) {
@@ -133,10 +135,38 @@ pub fn ostd_map_4kb_user(
             return Err(MapError::PathCorrupt);
         }
     };
-    let vs = vm_space_get_mut(vm_space)?;
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
     cursor.map::<Size4Kb, AnonymousMeta>(frame, prop)
+}
+
+/// Unmap the 4 KiB user leaf at `va` and map `pa` in its place on one cursor.
+/// `CursorMut::unmap` does not advance, so both operations land on the same
+/// entry and no window exists in which the address is unmapped and the caller
+/// has already returned.
+/// The displaced frame comes back rather than being dropped here: `unmap` only
+/// flushes this CPU's TLB, so releasing the last reference inline would return
+/// the page to the allocator while a peer CPU still caches the old translation.
+/// The caller must hold it until after a cross-CPU shootdown of `va`.
+#[must_use = "dropping the displaced frame before the TLB shootdown frees a page a peer may still translate"]
+pub fn ostd_replace_4kb_user(
+    vm_space: &mut KArc<VmSpace>,
+    va: VirtAddr,
+    pa: PhysAddr,
+    flags: u64,
+) -> Result<Option<UFrame<AnonymousMeta>>, MapError> {
+    let vs = vm_space_get_mut(vm_space)?;
+    let prop = page_flags_to_property(flags);
+    let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
+    let mut cursor = vs.cursor_mut(range)?;
+    let displaced = cursor.unmap::<Size4Kb, AnonymousMeta>()?;
+    // Wrapped only once every fallible step before the hand-off has passed:
+    // a `UFrame` dropped on an error path returns `pa` to the allocator, and
+    // the caller frees it too.
+    let frame = UFrame::<AnonymousMeta>::wrap_user_paddr(Paddr::new(pa.as_u64()))
+        .map_err(|_| MapError::PathCorrupt)?;
+    cursor.map::<Size4Kb, AnonymousMeta>(frame, prop)?;
+    Ok(displaced)
 }
 
 /// Unmap a 4 KiB user page from `vm_space` at `va`. The `UFrame` is dropped

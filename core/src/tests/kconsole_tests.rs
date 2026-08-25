@@ -3,11 +3,13 @@
 //! These assert on state a probe command recorded rather than on log text,
 //! because swapping the klog backend is process-global.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
 use slopos_ostd::kconsole::{self, KCMD_DESTRUCTIVE, KCMD_INFORMATIONAL, KConfig, KConsole};
 use slopos_ostd::kline;
 use slopos_ostd::sync::bh;
+use slopos_sched::per_cpu::{ApPauseError, pause_all_aps};
 use slopos_testing::TestResult;
 use slopos_testing::fail;
 
@@ -18,6 +20,12 @@ static PROBE_EMIT: AtomicU32 = AtomicU32::new(0);
 /// Lines the probe actually got to emit.
 static PROBE_EMITTED: AtomicU32 = AtomicU32::new(0);
 static PROBE_TRUNCATED: AtomicU32 = AtomicU32::new(0);
+/// Asks the probe for [`MARKER`]; set by the log-ring test alone.
+static PROBE_MARK: AtomicBool = AtomicBool::new(false);
+
+/// A line no other test asks for, so a scan of the ring cannot match an
+/// earlier probe's output.
+const MARKER: &str = "kconsole probe marker";
 
 slopos_ostd::kcommand! {
     name = probe,
@@ -37,6 +45,9 @@ slopos_ostd::kcommand! {
 
 fn run_probe(kc: &mut KConsole<'_>) {
     PROBE_RUNS.fetch_add(1, Ordering::Relaxed);
+    if PROBE_MARK.swap(false, Ordering::Relaxed) {
+        kline!(kc, "{}", MARKER);
+    }
     let want = PROBE_EMIT.swap(0, Ordering::Relaxed);
     let mut emitted = 0u32;
     for i in 0..want {
@@ -56,6 +67,58 @@ fn run_probe_destructive(_kc: &mut KConsole<'_>) {
 fn pump() {
     bh::raise();
     bh::run_pending_if_due();
+}
+
+/// Park every AP for the duration of `f`.
+///
+/// The pending set is one machine-wide bitmap that `drain` swaps to zero, so
+/// "the drain I caused ran the command" is an observation only while no other
+/// CPU can reach a drain, and a parked AP runs no bottom half. Without it a
+/// foreign drain claims the request and this CPU reads the probe's counters
+/// while the CPU that claimed it is still inside the command.
+fn with_aps_parked<R>(f: impl FnOnce() -> R) -> Result<R, ApPauseError> {
+    let _parked = pause_all_aps()?;
+    Ok(f())
+}
+
+/// [`with_aps_parked`] with this CPU's interrupts masked as well, so no timer
+/// tick lands between a request and the drain that must claim it. `f` has to
+/// call `kconsole::drain` rather than [`pump`]: the bottom-half point declines
+/// with interrupts masked.
+fn with_sole_drain<R>(f: impl FnOnce() -> R) -> Result<R, ApPauseError> {
+    with_aps_parked(|| IrqDisabled::with(|_irq| f()))
+}
+
+/// How far back from the ring's end [`klog_holds`] searches. `klog_len`
+/// saturates once the ring is full, after which an offset captured before the
+/// command ran names a later byte than it did and cannot start the search; the
+/// line is read moments after it is emitted, so this leaves room for whatever
+/// another CPU logged in between.
+const SCAN_TAIL: usize = 16 * 1024;
+
+/// Whether the retained log ring holds `needle`; `None` if the read window
+/// could not be allocated.
+///
+/// Reads windows forward to the ring's current length rather than stopping at
+/// the first, and overlaps them by `needle.len() - 1` so a needle straddling a
+/// read boundary is still found.
+fn klog_holds(needle: &[u8]) -> Option<bool> {
+    const WINDOW: usize = 8192;
+
+    let mut buf = slopos_ostd::KBox::<[u8; WINDOW]>::zeroed().ok()?;
+    let end = slopos_ostd::klog::klog_len();
+    let mut offset = end.saturating_sub(SCAN_TAIL);
+    while offset < end {
+        let read = slopos_ostd::klog::klog_read(offset, &mut buf[..]);
+        if read < needle.len() {
+            break;
+        }
+        if buf[..read].windows(needle.len()).any(|w| w == needle) {
+            return Some(true);
+        }
+        offset += read - (needle.len() - 1);
+    }
+    Some(false)
 }
 
 /// Swap in a policy for the duration of a test and put the old one back.
@@ -127,31 +190,53 @@ pub fn test_kcon_flags_are_exclusive() -> TestResult {
 
 pub fn test_kcon_end_to_end_via_bottom_half() -> TestResult {
     with_policy(KConfig::defaults(), || {
-        let before = PROBE_RUNS.load(Ordering::Relaxed);
-        let drains_before = bh::drains();
-        kconsole::request(b'z');
-        pump();
-        if bh::drains() == drains_before {
+        // Interrupts stay on: this is the one test that must reach the real
+        // bottom-half point, which declines with them masked.
+        let observed = with_aps_parked(|| {
+            let before = PROBE_RUNS.load(Ordering::Relaxed);
+            let drains_before = bh::drains();
+            kconsole::request(b'z');
+            pump();
+            (
+                bh::drains() != drains_before,
+                PROBE_RUNS.load(Ordering::Relaxed) == before + 1,
+            )
+        });
+        let (drained, ran_once) = match observed {
+            Ok(pair) => pair,
+            Err(err) => return fail!("the APs would not park: {:?}", err),
+        };
+        if !drained {
             return fail!("the bottom half never drained");
         }
-        if PROBE_RUNS.load(Ordering::Relaxed) != before + 1 {
+        if !ran_once {
             return fail!("the queued command did not run exactly once");
         }
         TestResult::Pass
     })
 }
 
+/// A key queued repeatedly runs once: the pending set is a bitmap, not a ring.
 pub fn test_kcon_request_is_idempotent() -> TestResult {
     with_policy(KConfig::defaults(), || {
         let before = PROBE_RUNS.load(Ordering::Relaxed);
-        kconsole::request(b'z');
-        kconsole::request(b'z');
-        kconsole::request(b'z');
-        pump();
+        let drains = with_sole_drain(|| {
+            kconsole::request(b'z');
+            kconsole::request(b'z');
+            kconsole::request(b'z');
+            (kconsole::drain(), kconsole::drain())
+        });
+        let (claimed, empty) = match drains {
+            Ok(pair) => pair,
+            Err(err) => return fail!("the APs would not park: {:?}", err),
+        };
+        if !claimed {
+            return fail!("the drain after three requests reported no work");
+        }
         if PROBE_RUNS.load(Ordering::Relaxed) != before + 1 {
             return fail!("three requests before one drain ran the command more than once");
         }
-        if kconsole::drain() {
+        if empty {
             return fail!("an empty drain claimed it did work");
         }
         TestResult::Pass
@@ -163,19 +248,32 @@ pub fn test_kcon_budget_truncates() -> TestResult {
         max_lines: 8,
         ..KConfig::defaults()
     };
-    with_policy(cfg, || {
-        PROBE_EMIT.store(64, Ordering::Relaxed);
-        kconsole::request(b'z');
-        pump();
-        let emitted = PROBE_EMITTED.load(Ordering::Relaxed);
-        if emitted != 64 {
-            return fail!("the probe stopped early: {} of 64 attempts", emitted);
-        }
-        if PROBE_TRUNCATED.load(Ordering::Relaxed) == 0 {
-            return fail!("64 lines against a budget of 8 did not register as truncated");
-        }
-        TestResult::Pass
-    })
+    let observed = with_policy(cfg, || {
+        with_sole_drain(|| {
+            PROBE_EMIT.store(64, Ordering::Relaxed);
+            kconsole::request(b'z');
+            let claimed = kconsole::drain();
+            (
+                claimed,
+                PROBE_EMITTED.load(Ordering::Relaxed),
+                PROBE_TRUNCATED.load(Ordering::Relaxed),
+            )
+        })
+    });
+    let (claimed, emitted, truncated) = match observed {
+        Ok(triple) => triple,
+        Err(err) => return fail!("the APs would not park: {:?}", err),
+    };
+    if !claimed {
+        return fail!("the drain never claimed the request, so the counters are stale");
+    }
+    if emitted != 64 {
+        return fail!("the probe stopped early: {} of 64 attempts", emitted);
+    }
+    if truncated == 0 {
+        return fail!("64 lines against a budget of 8 did not register as truncated");
+    }
+    TestResult::Pass
 }
 
 /// The mask is checked at `request`, so a trigger never reaches the registry
@@ -185,16 +283,22 @@ pub fn test_kcon_disabled_drops_requests() -> TestResult {
         mask: 0,
         ..KConfig::defaults()
     };
-    let ran = with_policy(off, || {
-        let before = PROBE_RUNS.load(Ordering::Relaxed);
-        kconsole::request(b'z');
-        pump();
-        PROBE_RUNS.load(Ordering::Relaxed) != before
+    let observed = with_policy(off, || {
+        with_sole_drain(|| {
+            let before = PROBE_RUNS.load(Ordering::Relaxed);
+            kconsole::request(b'z');
+            let queued = kconsole::drain();
+            (queued, PROBE_RUNS.load(Ordering::Relaxed) != before)
+        })
     });
+    let (queued, ran) = match observed {
+        Ok(pair) => pair,
+        Err(err) => return fail!("the APs would not park: {:?}", err),
+    };
     if ran {
         return fail!("a command ran while the console was disabled");
     }
-    if kconsole::drain() {
+    if queued {
         return fail!("a request made while disabled was queued anyway");
     }
     TestResult::Pass
@@ -202,13 +306,20 @@ pub fn test_kcon_disabled_drops_requests() -> TestResult {
 
 pub fn test_kcon_destructive_needs_the_mask_bit() -> TestResult {
     let refused = with_policy(KConfig::defaults(), || {
-        let before = DESTRUCTIVE_RUNS.load(Ordering::Relaxed);
-        kconsole::request(b'y');
-        pump();
-        DESTRUCTIVE_RUNS.load(Ordering::Relaxed) == before
+        with_sole_drain(|| {
+            let before = DESTRUCTIVE_RUNS.load(Ordering::Relaxed);
+            kconsole::request(b'y');
+            let claimed = kconsole::drain();
+            (claimed, DESTRUCTIVE_RUNS.load(Ordering::Relaxed) == before)
+        })
     });
-    if !refused {
-        return fail!("a destructive command ran under the default policy");
+    match refused {
+        // The key must reach a drain and be turned away there; never queued at
+        // all would satisfy the counter without the policy doing anything.
+        Ok((true, true)) => {}
+        Ok((false, _)) => return fail!("the request was never queued, so nothing was refused"),
+        Ok((true, false)) => return fail!("a destructive command ran under the default policy"),
+        Err(err) => return fail!("the APs would not park: {:?}", err),
     }
 
     let permitted = KConfig {
@@ -216,15 +327,18 @@ pub fn test_kcon_destructive_needs_the_mask_bit() -> TestResult {
         ..KConfig::defaults()
     };
     let ran = with_policy(permitted, || {
-        let before = DESTRUCTIVE_RUNS.load(Ordering::Relaxed);
-        kconsole::request(b'y');
-        pump();
-        DESTRUCTIVE_RUNS.load(Ordering::Relaxed) == before + 1
+        with_sole_drain(|| {
+            let before = DESTRUCTIVE_RUNS.load(Ordering::Relaxed);
+            kconsole::request(b'y');
+            kconsole::drain();
+            DESTRUCTIVE_RUNS.load(Ordering::Relaxed) == before + 1
+        })
     });
-    if !ran {
-        return fail!("a destructive command was refused with its mask bit set");
+    match ran {
+        Ok(true) => TestResult::Pass,
+        Ok(false) => fail!("a destructive command was refused with its mask bit set"),
+        Err(err) => fail!("the APs would not park: {:?}", err),
     }
-    TestResult::Pass
 }
 
 pub fn test_kcon_unknown_key_is_consumed() -> TestResult {
@@ -233,8 +347,14 @@ pub fn test_kcon_unknown_key_is_consumed() -> TestResult {
         if kconsole::commands().iter().any(|c| c.key == b'0') {
             return fail!("this test needs a key no command claims");
         }
-        kconsole::request(b'0');
-        if !kconsole::drain() {
+        let drained = match with_sole_drain(|| {
+            kconsole::request(b'0');
+            kconsole::drain()
+        }) {
+            Ok(drained) => drained,
+            Err(err) => return fail!("the APs would not park: {:?}", err),
+        };
+        if !drained {
             return fail!("a queued unknown key was not drained");
         }
         if PROBE_RUNS.load(Ordering::Relaxed) != before {
@@ -258,32 +378,36 @@ pub fn test_kcon_kernel_text_symbolizes() -> TestResult {
 /// Everything else here only proves dispatch worked; `log_forced` bypasses the
 /// level filter.
 pub fn test_kcon_output_reaches_the_log_ring() -> TestResult {
-    const MARKER: &[u8] = b"kconsole probe line 0";
-    const WINDOW: usize = 8192;
-
     with_policy(KConfig::defaults(), || {
-        let Ok(mut buf) = slopos_ostd::KBox::<[u8; WINDOW]>::zeroed() else {
-            return fail!("could not allocate the read window");
-        };
-        let before = slopos_ostd::klog::klog_len();
-
-        PROBE_EMIT.store(1, Ordering::Relaxed);
-        kconsole::request(b'z');
-        pump();
-
-        let read = slopos_ostd::klog::klog_read(before, &mut buf[..]);
-        if read == 0 {
-            return fail!("the ring gained nothing while a command was running");
+        let len_before = slopos_ostd::klog::klog_len();
+        let ran = with_aps_parked(|| {
+            let runs_before = PROBE_RUNS.load(Ordering::Relaxed);
+            PROBE_MARK.store(true, Ordering::Relaxed);
+            kconsole::request(b'z');
+            pump();
+            PROBE_RUNS.load(Ordering::Relaxed) != runs_before
+        });
+        match ran {
+            Ok(true) => {}
+            Ok(false) => {
+                PROBE_MARK.store(false, Ordering::Relaxed);
+                return fail!("the command never ran, so the ring had nothing to gain");
+            }
+            Err(err) => {
+                PROBE_MARK.store(false, Ordering::Relaxed);
+                return fail!("the APs would not park: {:?}", err);
+            }
         }
-        // Concurrent logging from other CPUs lands in the same window, so this
-        // searches rather than compares.
-        if buf[..read].windows(MARKER.len()).any(|w| w == MARKER) {
-            TestResult::Pass
-        } else {
-            fail!(
-                "the command's output never reached the ring ({} bytes scanned)",
-                read
-            )
+        match klog_holds(MARKER.as_bytes()) {
+            Some(true) => TestResult::Pass,
+            // Equal lengths mean the ring is full and has been dropping its
+            // oldest bytes, which is what a lost marker would look like.
+            Some(false) => fail!(
+                "the command's output never reached the ring (ring length {} -> {})",
+                len_before,
+                slopos_ostd::klog::klog_len()
+            ),
+            None => fail!("could not allocate the read window"),
         }
     })
 }
@@ -294,39 +418,37 @@ pub fn test_kcon_output_reaches_the_log_ring() -> TestResult {
 pub fn test_kcon_probe_slot_protocol() -> TestResult {
     use slopos_ostd::watchdog::{self, NmiDisposition};
 
-    let cpus = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
-    let Some(victim) = (0..cpus).find(|c| *c != slopos_ostd::cpu::x86_64::pcr::get_current_cpu())
-    else {
-        // Uniprocessor: the fan-out has nothing to probe.
-        return TestResult::Pass;
-    };
+    // An index no machine this runs on has, so the lockup detector's own
+    // probes — which land on whichever CPU the host descheduled — can never
+    // contend for this slot.
+    const VICTIM: usize = slopos_arch::MAX_CPUS - 1;
 
-    if watchdog::probe_disposition(victim) != NmiDisposition::Unsolicited {
-        return fail!("cpu {} already had a probe armed before the test", victim);
+    if watchdog::probe_disposition(VICTIM) != NmiDisposition::Unsolicited {
+        return fail!("cpu {} already had a probe armed before the test", VICTIM);
     }
 
-    if !watchdog::arm_probe(victim, NmiDisposition::Probe) {
+    if !watchdog::arm_probe(VICTIM, NmiDisposition::Probe) {
         return fail!("arming a free probe slot failed");
     }
     // A second claim must fail, or a per-tick check would storm a CPU still
     // emitting its dump.
-    if watchdog::arm_probe(victim, NmiDisposition::Probe) {
-        watchdog::release_probe(victim);
+    if watchdog::arm_probe(VICTIM, NmiDisposition::Probe) {
+        watchdog::release_probe(VICTIM);
         return fail!("a busy probe slot was claimed twice");
     }
 
-    if watchdog::release_probe_if(victim, NmiDisposition::Fatal) {
+    if watchdog::release_probe_if(VICTIM, NmiDisposition::Fatal) {
         return fail!("the conditional release cleared a slot it did not own");
     }
-    if watchdog::probe_disposition(victim) != NmiDisposition::Probe {
-        watchdog::release_probe(victim);
+    if watchdog::probe_disposition(VICTIM) != NmiDisposition::Probe {
+        watchdog::release_probe(VICTIM);
         return fail!("a failed conditional release still changed the slot");
     }
-    if !watchdog::release_probe_if(victim, NmiDisposition::Probe) {
-        watchdog::release_probe(victim);
+    if !watchdog::release_probe_if(VICTIM, NmiDisposition::Probe) {
+        watchdog::release_probe(VICTIM);
         return fail!("the conditional release did not take back its own slot");
     }
-    if watchdog::probe_disposition(victim) != NmiDisposition::Unsolicited {
+    if watchdog::probe_disposition(VICTIM) != NmiDisposition::Unsolicited {
         return fail!("the slot was not freed");
     }
     TestResult::Pass

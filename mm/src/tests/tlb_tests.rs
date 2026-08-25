@@ -22,6 +22,14 @@ use slopos_abi::task::INVALID_PROCESS_ID;
 const OFFLINE_CPU_A: usize = MAX_CPUS - 1;
 const OFFLINE_CPU_B: usize = MAX_CPUS - 2;
 
+/// Switch the two fake CPUs out of whatever address space a test parked them
+/// in. Process slots recycle, so a loaded-process key left behind here is
+/// carried into the next test's process and clears a mask bit it never set.
+fn release_offline_cpus() {
+    notify_mm_switch(None, INVALID_PROCESS_ID, OFFLINE_CPU_A);
+    notify_mm_switch(None, INVALID_PROCESS_ID, OFFLINE_CPU_B);
+}
+
 pub fn test_flush_page_null_address() -> TestResult {
     flush_page(VirtAddr::NULL);
     TestResult::Pass
@@ -382,32 +390,37 @@ pub fn test_cpumask_clear_all() -> TestResult {
     TestResult::Pass
 }
 
+/// The flag belongs to whichever CPU is running this, and a context switch on
+/// it owns the same word: masking interrupts is what makes the read after each
+/// write report this test's own store.
 pub fn test_lazy_tlb_flag() -> TestResult {
-    let cpu = 0usize;
-    exit_lazy_tlb(cpu);
-    if !should_flush_tlb(cpu) {
-        return TestResult::Fail;
-    }
-    enter_lazy_tlb(cpu);
-    if should_flush_tlb(cpu) {
-        return TestResult::Fail;
-    }
-    exit_lazy_tlb(cpu);
-    if !should_flush_tlb(cpu) {
-        return TestResult::Fail;
-    }
-    TestResult::Pass
+    slopos_arch::cpu::IrqDisabled::with(|_irq| {
+        let cpu = slopos_arch::pcr::get_current_cpu();
+        exit_lazy_tlb(cpu);
+        if !should_flush_tlb(cpu) {
+            return TestResult::Fail;
+        }
+        enter_lazy_tlb(cpu);
+        let lazy_skips = !should_flush_tlb(cpu);
+        exit_lazy_tlb(cpu);
+        if !lazy_skips || !should_flush_tlb(cpu) {
+            return TestResult::Fail;
+        }
+        TestResult::Pass
+    })
 }
 
 pub fn test_should_flush_tlb_lazy_skips() -> TestResult {
-    let cpu = 0usize;
-    enter_lazy_tlb(cpu);
-    let result = should_flush_tlb(cpu);
-    exit_lazy_tlb(cpu);
-    if result {
-        return TestResult::Fail;
-    }
-    TestResult::Pass
+    slopos_arch::cpu::IrqDisabled::with(|_irq| {
+        let cpu = slopos_arch::pcr::get_current_cpu();
+        enter_lazy_tlb(cpu);
+        let result = should_flush_tlb(cpu);
+        exit_lazy_tlb(cpu);
+        if result {
+            return TestResult::Fail;
+        }
+        TestResult::Pass
+    })
 }
 
 pub fn test_rapid_flush_pages() -> TestResult {
@@ -462,6 +475,7 @@ pub fn test_destroy_clears_the_process_shootdown_mask() -> TestResult {
             masked,
             pid
         );
+        release_offline_cpus();
         destroy_process_vm(resolve_pid(pid));
         return TestResult::Fail;
     }
@@ -469,6 +483,7 @@ pub fn test_destroy_clears_the_process_shootdown_mask() -> TestResult {
     destroy_process_vm(resolve_pid(pid));
 
     let after = process_tlb_cpumask_count(key);
+    release_offline_cpus();
     if after != 0 {
         klog_info!(
             "TLB_TEST: destroyed pid {} left {} CPUs in its shootdown mask",
@@ -509,6 +524,8 @@ pub fn test_targeted_flush_covers_every_masked_cpu() -> TestResult {
             pid,
             masked
         );
+        notify_mm_switch(None, INVALID_PROCESS_ID, live_cpu);
+        release_offline_cpus();
         destroy_process_vm(resolve_pid(pid));
         return TestResult::Fail;
     }
@@ -519,6 +536,7 @@ pub fn test_targeted_flush_covers_every_masked_cpu() -> TestResult {
     // Switch this CPU off the address space, as a real context switch would,
     // before the process goes away.
     notify_mm_switch(None, INVALID_PROCESS_ID, live_cpu);
+    release_offline_cpus();
     destroy_process_vm(resolve_pid(pid));
     if after != 3 {
         klog_info!(

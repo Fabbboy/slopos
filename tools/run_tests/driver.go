@@ -27,6 +27,31 @@ type QemuDriver struct {
 	// this many seconds; 0 disables. Catches inter-phase wedges that would
 	// otherwise burn the full WallTimeoutSec.
 	SilenceSec float64
+
+	// silenceLimitNs is the live silence budget the watchdog re-reads every
+	// tick. It starts at SilenceSec and only TightenSilence moves it.
+	silenceLimitNs atomic.Int64
+}
+
+// TightenSilence lowers the live silence budget, never raises it.
+//
+// A no-op when --silence-secs=0: no watchdog goroutine was ever started, so
+// there is no budget to tighten and the run keeps the full wall timeout. That
+// is deliberate — --silence-secs=0 means "do not abort on silence", and a
+// kernel abort does not override the operator on that.
+func (d *QemuDriver) TightenSilence(limit time.Duration) {
+	if d.SilenceSec <= 0 || limit <= 0 {
+		return
+	}
+	for {
+		cur := d.silenceLimitNs.Load()
+		if cur != 0 && cur <= int64(limit) {
+			return
+		}
+		if d.silenceLimitNs.CompareAndSwap(cur, int64(limit)) {
+			return
+		}
+	}
 }
 
 // DriverResult is what `Run` returns to main.
@@ -35,6 +60,40 @@ type DriverResult struct {
 	UserAborted bool // SIGINT received from the user
 	TimedOut    bool // wall-clock guard or silence watchdog fired
 	SilenceHit  bool // silence watchdog (not wall-clock) was the trigger
+}
+
+// silenceTickInterval is how often the watchdog re-reads the live budget.
+//
+// Fixed, not derived from SilenceSec: at the 120 s default a SilenceSec/4 tick
+// is 30 s, and a budget TightenSilence lowered to 20 s would not be read until
+// after it had already elapsed. The limit and the interval are both captured
+// state, so lowering only the limit shortens nothing.
+const silenceTickInterval = time.Second
+
+// watchSilence trips `tripped` the first time the gap since `lastLine` reaches
+// the live budget, then returns. Split out of Run, and taking its tick as a
+// channel rather than owning a Ticker, so a test can step it one tick at a
+// time and observe that the budget is re-read on every one.
+func (d *QemuDriver) watchSilence(
+	ctx context.Context, tick <-chan time.Time,
+	lastLine *atomic.Int64, tripped chan<- struct{},
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick:
+			limit := time.Duration(d.silenceLimitNs.Load())
+			last := time.Unix(0, lastLine.Load())
+			if time.Since(last) >= limit {
+				select {
+				case tripped <- struct{}{}:
+				default:
+				}
+				return
+			}
+		}
+	}
 }
 
 // Run streams QEMU's stdout line-by-line through `onLine`, enforcing the
@@ -92,30 +151,10 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 	defer silenceCancel()
 	silenceTripped := make(chan struct{}, 1)
 	if d.SilenceSec > 0 {
-		go func() {
-			interval := time.Duration(d.SilenceSec*float64(time.Second)) / 4
-			if interval < time.Second {
-				interval = time.Second
-			}
-			t := time.NewTicker(interval)
-			defer t.Stop()
-			limit := time.Duration(d.SilenceSec * float64(time.Second))
-			for {
-				select {
-				case <-silenceCtx.Done():
-					return
-				case <-t.C:
-					last := time.Unix(0, lastLine.Load())
-					if time.Since(last) >= limit {
-						select {
-						case silenceTripped <- struct{}{}:
-						default:
-						}
-						return
-					}
-				}
-			}
-		}()
+		d.silenceLimitNs.Store(int64(d.SilenceSec * float64(time.Second)))
+		ticker := time.NewTicker(silenceTickInterval)
+		defer ticker.Stop()
+		go d.watchSilence(silenceCtx, ticker.C, &lastLine, silenceTripped)
 	}
 
 	// Killing the process group closes QEMU's stdout, which is what lets the

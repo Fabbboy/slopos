@@ -67,6 +67,24 @@ const QUARANTINE_RELEASE_PER_FREE: u32 = 2;
 /// the allocator's lock 100 times a second to ask a yes/no question.
 pub(super) static QUARANTINE_FRAMES: AtomicU32 = AtomicU32::new(0);
 
+/// Where the buddy accounts one frame, for [`BuddyAllocator::frame_accounting`].
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameAccounting {
+    /// Outside the frame table entirely.
+    Untracked,
+    /// Handed to a caller, who owes a free.
+    HandedOut,
+    /// In a per-CPU magazine — the allocator's, not a caller's.
+    Cached,
+    /// Parked awaiting a TLB quiesce.
+    Quarantined,
+    /// On a free list.
+    Free,
+    /// Reserved at boot, or retired from the supply.
+    Withheld,
+}
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Lifecycle {
@@ -337,11 +355,12 @@ impl BuddyInner {
     }
 
     /// Close one epoch: `draining` joins the releasable backlog, `incoming`
-    /// takes its place.
+    /// takes its place. Reports the frames it released.
     ///
     /// Splices nothing — a splice is O(blocks × free-list length), and this
     /// runs from whichever CPU's timer interrupt observes the last ack.
-    fn quarantine_rotate(&mut self, table: &RawTable<PageFrame>) {
+    fn quarantine_rotate(&mut self, table: &RawTable<PageFrame>) -> u32 {
+        let parked_before = self.quarantine_frames;
         let releasable = Self::quarantine_concat(
             table,
             (self.quarantine_draining, self.quarantine_draining_tail),
@@ -354,6 +373,8 @@ impl BuddyInner {
         self.quarantine_draining_tail = self.quarantine_incoming_tail;
         self.quarantine_incoming = INVALID_PAGE_FRAME;
         self.quarantine_incoming_tail = INVALID_PAGE_FRAME;
+
+        parked_before.saturating_sub(self.quarantine_frames)
     }
 
     /// Splice at most `limit` blocks from the releasable backlog into the free
@@ -774,6 +795,28 @@ impl BuddyAllocator {
         pcp::snapshot(cpu)
     }
 
+    /// Test hook: how the buddy currently accounts one frame.
+    ///
+    /// Lets a test assert what its *own* allocation and free did to the frame
+    /// it holds, which no other CPU can move — unlike the free and allocated
+    /// counts, which every CPU writes.
+    #[cfg(feature = "test-hooks")]
+    pub fn frame_accounting(&self, phys_addr: PhysAddr) -> FrameAccounting {
+        self.with_locked(|inner, table| {
+            let frame_num = inner.phys_to_frame(phys_addr);
+            match inner.frame_desc_mut(table, frame_num).map(|f| f.state) {
+                None => FrameAccounting::Untracked,
+                Some(PAGE_FRAME_ALLOCATED | PAGE_FRAME_KERNEL | PAGE_FRAME_DMA) => {
+                    FrameAccounting::HandedOut
+                }
+                Some(PAGE_FRAME_PCP) => FrameAccounting::Cached,
+                Some(PAGE_FRAME_QUIESCE) => FrameAccounting::Quarantined,
+                Some(PAGE_FRAME_FREE) => FrameAccounting::Free,
+                Some(_) => FrameAccounting::Withheld,
+            }
+        })
+    }
+
     pub fn frame_is_tracked(&self, phys_addr: PhysAddr) -> bool {
         let inner = self.inner.lock();
         let frame_num = inner.phys_to_frame(phys_addr);
@@ -1012,9 +1055,10 @@ impl BuddyAllocator {
     }
 
     /// Promote the proven-safe batch into the releasable backlog. O(1); the
-    /// splicing is [`Self::quarantine_release_some`]'s job.
-    pub fn quarantine_rotate(&self) {
-        self.with_locked(|inner, table| inner.quarantine_rotate(table));
+    /// splicing is [`Self::quarantine_release_some`]'s job, so the frames this
+    /// reports releasing are none.
+    pub fn quarantine_rotate(&self) -> u32 {
+        self.with_locked(|inner, table| inner.quarantine_rotate(table))
     }
 
     /// Splice up to `limit` proven-safe blocks back into the free lists.

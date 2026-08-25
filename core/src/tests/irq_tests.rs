@@ -4,17 +4,50 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use slopos_ostd::irq::{IRQ_BASE_VECTOR, IrqAllocator, IrqContext, IrqError, dispatch};
 use slopos_testing::TestResult;
-use slopos_testing::assert_test;
+use slopos_testing::{assert_test, fail};
 
 use crate::irq::{
-    IRQ_LINES, disable_line, enable_line, get_irq_route, get_keyboard_event_counter,
-    get_timer_ticks, increment_keyboard_events, increment_timer_ticks, is_initialized, is_masked,
-    mask_irq_line, set_irq_route, unmask_irq_line,
+    IRQ_LINES, IrqLineState, disable_line, enable_line, get_irq_route, get_keyboard_event_counter,
+    get_timer_ticks, increment_keyboard_events, increment_timer_ticks, irq_line_state,
+    is_initialized, is_masked, mask_irq_line, restore_irq_line_state, set_irq_route,
+    unmask_irq_line,
 };
 
+/// Puts one line's routing and mask back on the way out.
+///
+/// The routing table is the machine's, not the test's: a line left routed
+/// sends every later mask request for it at an IOAPIC entry nothing programmed.
+/// A guard rather than a restore at the end of the body, so a failing early
+/// return cannot skip it.
+struct IrqLineGuard {
+    line: u8,
+    saved: IrqLineState,
+}
+
+impl IrqLineGuard {
+    fn new(line: u8) -> Option<Self> {
+        Some(Self {
+            line,
+            saved: irq_line_state(line)?,
+        })
+    }
+}
+
+impl Drop for IrqLineGuard {
+    fn drop(&mut self) {
+        restore_irq_line_state(self.line, self.saved);
+    }
+}
+
 pub fn test_irq_route_set_get_round_trip() -> TestResult {
-    set_irq_route(5, 42);
-    let r = get_irq_route(5).expect("in-range route");
+    // One the boot path never programs; PS/2 init takes 1, 4 and 12.
+    const LINE: u8 = 5;
+
+    let Some(_restore) = IrqLineGuard::new(LINE) else {
+        return fail!("line {} is out of range", LINE);
+    };
+    set_irq_route(LINE, 42);
+    let r = get_irq_route(LINE).expect("in-range route");
     assert_test!(
         r.via_ioapic,
         "via_ioapic should be true after set_irq_route"
@@ -44,10 +77,15 @@ pub fn test_irq_is_masked_boundary() -> TestResult {
 
 pub fn test_irq_mask_unmask_no_route() -> TestResult {
     // Line 7 is one the boot path never programs; PS/2 init takes 1, 4 and 12.
-    unmask_irq_line(7);
-    assert_test!(!is_masked(7), "Line should be unmasked");
-    mask_irq_line(7);
-    assert_test!(is_masked(7), "Line should be masked");
+    const LINE: u8 = 7;
+
+    let Some(_restore) = IrqLineGuard::new(LINE) else {
+        return fail!("line {} is out of range", LINE);
+    };
+    unmask_irq_line(LINE);
+    assert_test!(!is_masked(LINE), "Line should be unmasked");
+    mask_irq_line(LINE);
+    assert_test!(is_masked(LINE), "Line should be masked");
     TestResult::Pass
 }
 
@@ -137,16 +175,13 @@ pub fn test_ostd_alloc_drop_releases() -> TestResult {
 }
 
 pub fn test_ostd_reserve_specific_double_claim_refused() -> TestResult {
-    // Pick a vector that's almost certainly free (high MSI range).
-    let v = 200u8;
-    let line = match IrqAllocator::reserve_specific(v) {
-        Ok(l) => l,
-        Err(_) => return TestResult::Pass, // already taken — test inert
-    };
-    let r = IrqAllocator::reserve_specific(v);
+    // The allocator's own answer for which vector is taken, rather than a
+    // guess at one no driver holds: a guess that loses makes the test inert.
+    let line = IrqAllocator::alloc().expect("alloc");
+    let r = IrqAllocator::reserve_specific(line.vector());
     assert_test!(
         matches!(r, Err(IrqError::AlreadyRegistered)),
-        "Double reserve_specific must fail with AlreadyRegistered"
+        "reserve_specific handed out a vector the allocator had already given away"
     );
     drop(line);
     TestResult::Pass
@@ -221,8 +256,10 @@ pub fn test_ostd_handle_drop_clears_dispatch() -> TestResult {
 }
 
 pub fn test_ostd_dispatch_to_unregistered_vector_is_noop() -> TestResult {
-    // 123 has no registered callback.
-    dispatch(123, 0);
+    // Held for the call, so the vector cannot be one a driver registered: a
+    // dispatch to that would run its handler with a fabricated error code.
+    let line = IrqAllocator::alloc().expect("alloc");
+    dispatch(line.vector(), 0);
     TestResult::Pass
 }
 

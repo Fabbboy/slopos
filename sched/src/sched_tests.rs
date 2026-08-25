@@ -43,8 +43,8 @@ impl SchedFixture {
         }
     }
 
-    pub fn kernel_io_is_frozen(&self) -> bool {
-        self._scope.kernel_io_is_frozen()
+    pub fn kernel_io_is_quiesced(&self) -> bool {
+        self._scope.kernel_io_is_quiesced()
     }
 }
 
@@ -7325,12 +7325,13 @@ pub fn test_low_priority_is_not_starved_by_busy_normal() -> TestResult {
     schedule_task(&low);
     schedule_task(&normal);
 
-    // An unfrozen kernel-I/O thread is runnable privileged work, and
-    // `tier_owed` disables aging entirely while a privileged tier has any.
-    if !fixture.kernel_io_is_frozen() {
-        klog_info!("SCHED_TEST: a kernel-io thread stayed runnable; aging is suppressed by design");
-        return TestResult::Skipped;
-    }
+    // A queued kernel-I/O thread is runnable privileged work, and `tier_owed`
+    // disables aging entirely while a privileged tier has any. The scope's hold
+    // is what makes this an assertion rather than a reason to skip.
+    slopos_testing::assert_test!(
+        fixture.kernel_io_is_quiesced(),
+        "a kernel-io thread was still queued inside a scope"
+    );
 
     let mut low_ran_at: Option<usize> = None;
     let rounds = (AGING_THRESHOLD as usize) * 4;

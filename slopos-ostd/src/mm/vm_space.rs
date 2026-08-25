@@ -98,9 +98,10 @@ pub enum MapError {
     /// `unmap::<S>` / `protect::<S>` invoked on a leaf whose actual
     /// page size differs from `S`.
     SizeMismatch,
-    /// The consumer attempted a mutating cursor operation while another
-    /// externally-held handle still had the address space borrowed.
-    ConcurrentAccess,
+    /// A mutating cursor was requested while another handle on the same
+    /// address space was still outstanding. Transient by construction: the
+    /// only correct response is to release what is held and retry.
+    WouldBlock,
     /// A kernel-half entry point ([`CursorMut::map_kernel`],
     /// [`CursorMut::map_io`]) was handed `prop.user`, or a cursor
     /// positioned below the canonical higher half. Neither condition is
