@@ -1,7 +1,100 @@
 # SlopOS Known Issues
 
-Last updated: 2026-08-23
+Last updated: 2026-08-26
 
+
+---
+
+## `poll(2)` on a TTY can lose a wake and sleep out the full 100 ms
+
+**Status**: Open
+**Severity**: Low (latency only; no correctness consequence for the kernel)
+**Component**: `drivers/src/tty/poll.rs:149` (in-tree `TODO(tech-debt)`)
+
+`poll_sleep_on` registers on each named slot, then blocks. A wake landing
+between the enqueue and the block CAS is lost, so a poll that should have
+returned immediately waits out its whole 100 ms timeout. Real userland path,
+not a test artefact: reached from the syscall adapters
+(`drivers/src/syscall_services_init.rs:127`, `:171-172`).
+
+The fix is one `wait_event_timeout` whose predicate re-checks readiness after
+the enqueue — closing the window — rather than the current register/block/
+unregister dance over N queues.
+
+Not the cause of any test-time inflation: no `tty_tests` test calls it. The
+only occurrence in that suite is a re-export signature check
+(`test_ldisc_regression.rs:2461`) that never invokes it.
+
+---
+
+## A non-`WouldBlock` cursor error in `ostd_map_4kb_user` double-frees
+
+**Status**: Open
+**Severity**: Medium (frees a page a peer may still translate)
+**Component**: `mm/src/user_mappings.rs:141-164`
+
+Once `UFrame::wrap_user_paddr` has wrapped the frame, a later failure of
+`vs.cursor_mut(range)?` or `cursor.map(...)` drops the `UFrame` — which frees
+the page — while the caller's error path also calls `free_page_frame`
+(`mm/src/demand.rs:100`). The page is freed twice.
+
+The fix is for `map` to hand the frame back on error, so ownership is never
+ambiguous. Pre-existing; the demand-fault retry work narrowed rather than
+widened the reachable arms.
+
+---
+
+## A window in `__spawn_kernel_io` leaves a live thread preserved by nothing
+
+**Status**: Open
+**Severity**: Low (not currently reachable)
+**Component**: `slopos-ostd/src/sync/kernel_io_task.rs:577-581`
+
+`spawn_at_priority` publishes the task to the registry before `stop.bind_task`
+binds its id. Between those two lines the thread is live but its id is not yet
+on the stop, so it is preserved by neither `task_registry_reset` nor
+`reset_preserving` — a test scope entered in that window would tear it down.
+
+Not reachable today because all three kernel-I/O spawns happen on the BSP, but
+nothing in the type system or the gates enforces that.
+
+---
+
+## A simultaneous-open TCP connection never retransmits its SYN-ACK
+
+**Status**: Open
+**Severity**: Low (affects only simultaneous open, which no test reaches)
+**Component**: `net/src/tcp/`
+
+`SynRecvState` carries `retransmits` and `retransmit_token`, written once at
+construction and never read, and the `SynSent` -> `SynRecv` transition arms no
+timer. The ordinary passive open is unaffected: a listener's SYN-ACKs go
+through `SynQueue::on_retransmit` on a `TcpSynAck` timer, which does back off
+and does give up. What is uncovered is the case where both peers send a SYN and
+neither is a listener.
+
+The fix has the same shape as the landed active-open one. It is not done
+because the tree has no test that reaches `SynRecv` from `SynSent` on a live
+stack, so it would ship with an unfalsifiable assertion.
+
+---
+
+## `utest_curl_e2e` and `utest_ip_e2e` need real egress
+
+**Status**: Open (environmental, not a kernel defect)
+**Severity**: Informational
+**Component**: `userland/src/bin/tests/`
+
+Both open TCP to `8.8.8.8:53` and `1.1.1.1:53`. In a sandbox whose egress
+policy allows only proxied HTTPS they time out at 30 s per target and fail,
+while `utest_dns_resolve` passes because QEMU's slirp DNS forwarder is a
+different path. Recorded so a local run's failure is not chased as a
+regression.
+
+Making them `Skipped` on a timeout is deliberately **not** done: a timeout is
+also what a real regression looks like, and a test that skips itself on the
+symptom of the bug it exists to catch is worse than one that fails in a
+sandbox.
 
 ---
 

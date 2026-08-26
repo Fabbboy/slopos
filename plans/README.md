@@ -18,7 +18,6 @@ editing.
 | `driver-framework-base.html` | Driver-framework base: unified Bus model, platform/ACPI registry, deferred-probe/hotplug/unbind |
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
-| `vcpu-steal-robustness.md` | Making the AP-pause, watchdog and harness bounds survive a host-descheduled vCPU |
 
 The authority model has **landed and its plan is retired**. Authority is a flat
 per-capability mask whose classification is total by compile-time construction:
