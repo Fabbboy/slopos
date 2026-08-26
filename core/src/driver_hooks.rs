@@ -125,6 +125,34 @@ fn runtime_current_task_wait_aborted() -> bool {
     })
 }
 
+/// Claim the current task's poll-waiter slot, refusing a second live claim.
+fn runtime_poll_arm_current() -> bool {
+    Current::get().is_some_and(|current| current.task().poll_arm())
+}
+
+fn runtime_poll_armed_current() -> bool {
+    Current::get().is_some_and(|current| current.task().poll_armed())
+}
+
+fn runtime_poll_disarm_current() {
+    if let Some(current) = Current::get() {
+        current.task().poll_disarm();
+    }
+}
+
+fn runtime_poll_clear_pending_current() {
+    if let Some(current) = Current::get() {
+        current.task().poll_clear_pending();
+    }
+}
+
+/// Record a wake against `task_id`'s armed poll token. `false` when the id
+/// names no live task or no token is armed, obliging the waker to fall back to
+/// its ordinary unblock.
+fn runtime_poll_set_pending(task_id: u32) -> bool {
+    task::task_find_by_id(task_id).is_some_and(|task| task.poll_set_pending())
+}
+
 /// Publish the wait queue the current task is parked on, so teardown can unlink
 /// its stack-pinned wait node.
 fn runtime_swap_parked_wait_queue(queue: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
@@ -190,6 +218,12 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     set_current_task_controlling_tty: scheduler::set_current_task_controlling_tty,
     clear_session_controlling_tty: scheduler::clear_session_controlling_tty,
     block_current_task_with_timeout: scheduler::block_current_task_with_timeout,
+    poll_block_current_timeout: scheduler::poll_block_current_timeout,
+    poll_arm_current: runtime_poll_arm_current,
+    poll_armed_current: runtime_poll_armed_current,
+    poll_disarm_current: runtime_poll_disarm_current,
+    poll_clear_pending_current: runtime_poll_clear_pending_current,
+    poll_set_pending: runtime_poll_set_pending,
     sleep_current_task_ms: scheduler::sleep_current_task_ms,
     mark_current_blocked: scheduler::mark_current_blocked,
     yield_blocked_task: scheduler::yield_blocked_task,

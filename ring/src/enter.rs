@@ -456,6 +456,9 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
 /// `min_complete` CQEs are available, a signal arrives, or a deadline elapses
 /// (SLOPRING § 7.1, § 8.3). Returns 0 on progress, `-EINTR` on signal.
 fn harvest(table: FdTable, raw_handle: usize, min_complete: u32) -> i32 {
+    // Armed across every iteration: `register_files` below must find a live
+    // token, and it must outlast `unregister`. See `PollWaiter`'s module docs.
+    let waiter = slopos_ostd::sync::PollWaiter::new();
     loop {
         // The returned aliases keep the backings alive across the unlocked
         // registration below.
@@ -490,7 +493,13 @@ fn harvest(table: FdTable, raw_handle: usize, min_complete: u32) -> i32 {
         }
 
         let sleep_ms = sleep_budget(deadline);
-        block_current_task_with_timeout(sleep_ms);
+        match &waiter {
+            Some(waiter) => {
+                waiter.block(sleep_ms);
+                waiter.clear_pending();
+            }
+            None => block_current_task_with_timeout(sleep_ms),
+        }
 
         unregister(&tokens);
         if current_task_wait_aborted() {

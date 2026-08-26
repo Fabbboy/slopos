@@ -8,6 +8,7 @@ use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::syscall::POLLIN;
+use slopos_ostd::sync::PollWaiterRef;
 use slopos_ostd::sync::event_bus::BUS;
 use slopos_ostd::task::ops::child_exit_event;
 use slopos_sched::task::task_find_by_id;
@@ -37,7 +38,8 @@ impl FileOps for PidfdFileOps {
     }
 
     fn poll_wait(&self, handle: usize) -> bool {
-        BUS.subscribe_current(child_exit_event(handle as u32))
+        PollWaiterRef::current()
+            .is_some_and(|w| BUS.subscribe_current(w, child_exit_event(handle as u32)))
     }
 
     fn poll_unwait(&self, handle: usize) {

@@ -9,13 +9,18 @@
 //! ```text
 //! bits  0..4    TaskStatus    (4 bits, 5 variants)
 //! bits  4..12   BlockReason   (8 bits, 8 variants)
-//! bits 12..16   reserved      (must be zero)
+//! bits 12..14   poll          (2 bits: armed, pending — see below)
+//! bits 14..16   reserved      (must be zero)
 //! bits 16..32   cpu_hint      (16 bits, currently zero — reserved for
 //!                              future CPU-affinity-aware wakeup paths)
 //! bits 32..64   epoch         (32 bits, ABA defence; bumped on every
 //!                              wake/recycle so a stale comparator from
 //!                              before the wake fails its CAS)
 //! ```
+//!
+//! The poll bits are [`PollWaiter`](crate::sync::PollWaiter)'s; they live here
+//! so arming a token and parking are one atomic each, rather than a flag plus a
+//! state write that a wake could land between.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,13 +28,15 @@ use slopos_abi::task::{BlockReason, TaskStatus};
 
 const STATUS_BITS: u32 = 4;
 const REASON_BITS: u32 = 8;
-const RESERVED_BITS: u32 = 4;
+const POLL_BITS: u32 = 2;
+const RESERVED_BITS: u32 = 2;
 const CPU_HINT_BITS: u32 = 16;
 const EPOCH_BITS: u32 = 32;
 
 const STATUS_SHIFT: u32 = 0;
 const REASON_SHIFT: u32 = STATUS_SHIFT + STATUS_BITS;
-const _RESERVED_SHIFT: u32 = REASON_SHIFT + REASON_BITS;
+const POLL_SHIFT: u32 = REASON_SHIFT + REASON_BITS;
+const _RESERVED_SHIFT: u32 = POLL_SHIFT + POLL_BITS;
 const CPU_HINT_SHIFT: u32 = _RESERVED_SHIFT + RESERVED_BITS;
 const EPOCH_SHIFT: u32 = CPU_HINT_SHIFT + CPU_HINT_BITS;
 
@@ -38,7 +45,14 @@ const REASON_MASK: u64 = (1u64 << REASON_BITS) - 1;
 const _CPU_HINT_MASK: u64 = (1u64 << CPU_HINT_BITS) - 1;
 const EPOCH_MASK: u64 = (1u64 << EPOCH_BITS) - 1;
 
-const _: () = assert!(STATUS_BITS + REASON_BITS + RESERVED_BITS + CPU_HINT_BITS + EPOCH_BITS == 64);
+/// Bit 12: a [`PollWaiter`](crate::sync::PollWaiter) is live for this task.
+const POLL_ARMED_BIT: u64 = 1u64 << POLL_SHIFT;
+/// Bit 13: a wake was aimed at this task while it was not `Blocked`.
+const POLL_PENDING_BIT: u64 = 1u64 << (POLL_SHIFT + 1);
+
+const _: () = assert!(
+    STATUS_BITS + REASON_BITS + POLL_BITS + RESERVED_BITS + CPU_HINT_BITS + EPOCH_BITS == 64
+);
 
 /// Snapshot view of a [`TaskState`] word — the unpacked form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,16 +60,29 @@ pub struct TaskStateView {
     pub status: TaskStatus,
     pub reason: BlockReason,
     pub epoch: u32,
+    /// A `PollWaiter` is live for this task. See the [module docs](self).
+    pub poll_armed: bool,
+    /// A wake landed while this task was not `Blocked`. See the
+    /// [module docs](self).
+    pub poll_pending: bool,
 }
 
 impl TaskStateView {
-    /// Repack into the raw 64-bit word. Round-trips with [`unpack`].
+    /// Repack into the raw 64-bit word. Round-trips with [`unpack`]: every bit
+    /// the layout defines is carried by a field, so no CAS built from an
+    /// unpacked view can silently drop one.
     #[inline]
     const fn pack(self) -> u64 {
         let s = (self.status.as_u8() as u64) & STATUS_MASK;
         let r = (self.reason.as_u8() as u64) & REASON_MASK;
         let e = (self.epoch as u64) & EPOCH_MASK;
-        (s << STATUS_SHIFT) | (r << REASON_SHIFT) | (e << EPOCH_SHIFT)
+        let a = if self.poll_armed { POLL_ARMED_BIT } else { 0 };
+        let p = if self.poll_pending {
+            POLL_PENDING_BIT
+        } else {
+            0
+        };
+        (s << STATUS_SHIFT) | (r << REASON_SHIFT) | (e << EPOCH_SHIFT) | a | p
     }
 
     #[inline]
@@ -67,6 +94,8 @@ impl TaskStateView {
             status,
             reason,
             epoch,
+            poll_armed: (word & POLL_ARMED_BIT) != 0,
+            poll_pending: (word & POLL_PENDING_BIT) != 0,
         }
     }
 }
@@ -84,6 +113,8 @@ impl TaskState {
             status: TaskStatus::Invalid,
             reason: BlockReason::None,
             epoch: 0,
+            poll_armed: false,
+            poll_pending: false,
         };
         Self(AtomicU64::new(view.pack()))
     }
@@ -126,6 +157,7 @@ impl TaskState {
                 status: target,
                 reason,
                 epoch: current.epoch.wrapping_add(1),
+                ..current
             };
             match self.0.compare_exchange_weak(
                 current_word,
@@ -154,6 +186,7 @@ impl TaskState {
                 status,
                 reason,
                 epoch: current.epoch.wrapping_add(1),
+                ..current
             };
             match self.0.compare_exchange_weak(
                 current_word,
@@ -192,6 +225,7 @@ impl TaskState {
                 status,
                 reason,
                 epoch: current.epoch.wrapping_add(1),
+                ..current
             };
             match self.0.compare_exchange_weak(
                 current_word,
@@ -214,9 +248,8 @@ impl TaskState {
             let current_word = self.0.load(Ordering::Relaxed);
             let current = TaskStateView::unpack(current_word);
             let next = TaskStateView {
-                status: current.status,
-                reason: current.reason,
                 epoch: current.epoch.wrapping_add(1),
+                ..current
             };
             match self.0.compare_exchange_weak(
                 current_word,
@@ -246,8 +279,8 @@ impl TaskState {
             }
             let next = TaskStateView {
                 status: target,
-                reason: current.reason,
                 epoch: current.epoch.wrapping_add(1),
+                ..current
             };
             match self.0.compare_exchange_weak(
                 current_word,
@@ -256,6 +289,170 @@ impl TaskState {
                 Ordering::Acquire,
             ) {
                 Ok(_) => return Ok(next),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Claim the poll-waiter slot, or refuse because one is already live.
+    /// Clears `pending` in the same CAS, so a token never begins life
+    /// pre-signalled by a wake aimed at the previous holder.
+    #[inline]
+    #[must_use = "a refused claim means a PollWaiter is already live for this task"]
+    pub fn poll_arm(&self) -> bool {
+        loop {
+            let current_word = self.0.load(Ordering::Acquire);
+            let current = TaskStateView::unpack(current_word);
+            if current.poll_armed {
+                return false;
+            }
+            let next = TaskStateView {
+                poll_armed: true,
+                poll_pending: false,
+                ..current
+            };
+            match self.0.compare_exchange_weak(
+                current_word,
+                next.pack(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Release the poll-waiter slot and discard any unconsumed wake.
+    #[inline]
+    pub fn poll_disarm(&self) {
+        loop {
+            let current_word = self.0.load(Ordering::Acquire);
+            let current = TaskStateView::unpack(current_word);
+            let next = TaskStateView {
+                poll_armed: false,
+                poll_pending: false,
+                ..current
+            };
+            match self.0.compare_exchange_weak(
+                current_word,
+                next.pack(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Record a wake for a task that is not parked yet; `false` means no token
+    /// is armed and the caller must fall back to its ordinary wake path.
+    ///
+    /// The epoch is deliberately not bumped: this records a wake rather than
+    /// transitioning, and a bump would fail a concurrent comparator that has no
+    /// reason to retry.
+    #[inline]
+    pub fn poll_set_pending(&self) -> bool {
+        loop {
+            let current_word = self.0.load(Ordering::Acquire);
+            let current = TaskStateView::unpack(current_word);
+            if !current.poll_armed {
+                return false;
+            }
+            if current.poll_pending {
+                return true;
+            }
+            let next = TaskStateView {
+                poll_pending: true,
+                ..current
+            };
+            match self.0.compare_exchange_weak(
+                current_word,
+                next.pack(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Consume a pending wake (`Ok(false)`, status untouched, caller must not
+    /// block) or transition `expected -> Blocked` (`Ok(true)`), in one
+    /// compare-exchange. `Err` carries the state when it was not `expected`.
+    ///
+    /// Fused deliberately: a separate flag test before a separate block CAS
+    /// would let a wake land between them, setting a bit nobody re-reads
+    /// against a task about to become `Blocked`.
+    #[inline]
+    pub fn poll_consume_or_block(
+        &self,
+        expected: TaskStatus,
+        reason: BlockReason,
+    ) -> Result<bool, TaskStateView> {
+        loop {
+            let current_word = self.0.load(Ordering::Acquire);
+            let current = TaskStateView::unpack(current_word);
+            if current.poll_pending {
+                let next = TaskStateView {
+                    poll_pending: false,
+                    ..current
+                };
+                match self.0.compare_exchange_weak(
+                    current_word,
+                    next.pack(),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return Ok(false),
+                    Err(_) => continue,
+                }
+            }
+            if current.status != expected {
+                return Err(current);
+            }
+            let next = TaskStateView {
+                status: TaskStatus::Blocked,
+                reason,
+                epoch: current.epoch.wrapping_add(1),
+                ..current
+            };
+            match self.0.compare_exchange_weak(
+                current_word,
+                next.pack(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(true),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Clear an unconsumed wake, keeping the token armed. See
+    /// [`PollWaiter::clear_pending`](crate::sync::PollWaiter::clear_pending)
+    /// for the ordering this must be called in.
+    #[inline]
+    pub fn poll_clear_pending(&self) {
+        loop {
+            let current_word = self.0.load(Ordering::Acquire);
+            let current = TaskStateView::unpack(current_word);
+            if !current.poll_pending {
+                return;
+            }
+            let next = TaskStateView {
+                poll_pending: false,
+                ..current
+            };
+            match self.0.compare_exchange_weak(
+                current_word,
+                next.pack(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
                 Err(_) => continue,
             }
         }
@@ -270,11 +467,7 @@ impl TaskState {
         loop {
             let current_word = self.0.load(Ordering::Relaxed);
             let current = TaskStateView::unpack(current_word);
-            let next = TaskStateView {
-                status: current.status,
-                reason,
-                epoch: current.epoch,
-            };
+            let next = TaskStateView { reason, ..current };
             match self.0.compare_exchange_weak(
                 current_word,
                 next.pack(),

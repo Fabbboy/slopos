@@ -184,6 +184,31 @@ pub unsafe trait WaitQueueBackend: Send + Sync + 'static {
     /// Whether the task running on this CPU has a signal it can act on.
     /// Consulted only by the interruptible wait tier.
     fn current_task_has_deliverable_signal(&self) -> bool;
+
+    /// Claim the current task's poll-waiter slot, or refuse because one is
+    /// already live. Must return `false` when there is no current task.
+    fn poll_arm_current(&self) -> bool;
+
+    /// Whether the current task holds a live poll-waiter token. Must return
+    /// `false` when there is no current task.
+    fn poll_armed_current(&self) -> bool;
+
+    /// Release the current task's poll-waiter slot, discarding any unconsumed
+    /// wake.
+    fn poll_disarm_current(&self);
+
+    /// Clear an unconsumed wake on the current task, keeping the token armed.
+    fn poll_clear_pending_current(&self);
+
+    /// Record a wake against `task`'s armed poll token, reporting whether one
+    /// was armed to take it. `false` obliges the caller to fall back to its
+    /// ordinary wake path.
+    fn poll_set_pending(&self, task: WaitTaskHandle) -> bool;
+
+    /// Consume a pending poll wake or park the current task for at most
+    /// `timeout_ms`, in a single state compare-exchange. Same out-of-lock
+    /// contract as [`yield_blocked_task`](Self::yield_blocked_task).
+    fn poll_block_current_timeout(&self, timeout_ms: u32);
 }
 
 struct UnregisteredBackend;
@@ -217,6 +242,18 @@ unsafe impl WaitQueueBackend for UnregisteredBackend {
     fn current_task_has_deliverable_signal(&self) -> bool {
         false
     }
+    fn poll_arm_current(&self) -> bool {
+        false
+    }
+    fn poll_armed_current(&self) -> bool {
+        false
+    }
+    fn poll_disarm_current(&self) {}
+    fn poll_clear_pending_current(&self) {}
+    fn poll_set_pending(&self, _task: WaitTaskHandle) -> bool {
+        false
+    }
+    fn poll_block_current_timeout(&self, _timeout_ms: u32) {}
 }
 
 static DEFAULT_BACKEND: UnregisteredBackend = UnregisteredBackend;
@@ -236,6 +273,12 @@ pub struct WaitQueueOps {
     pub swap_parked_queue: fn(*mut c_void) -> *mut c_void,
     pub current_task_is_killed: fn() -> bool,
     pub current_task_has_deliverable_signal: fn() -> bool,
+    pub poll_arm_current: fn() -> bool,
+    pub poll_armed_current: fn() -> bool,
+    pub poll_disarm_current: fn(),
+    pub poll_clear_pending_current: fn(),
+    pub poll_set_pending: fn(WaitTaskHandle) -> bool,
+    pub poll_block_current_timeout: fn(u32),
 }
 
 struct OpsBackend(&'static WaitQueueOps);
@@ -276,6 +319,24 @@ unsafe impl WaitQueueBackend for OpsBackend {
     fn current_task_has_deliverable_signal(&self) -> bool {
         (self.0.current_task_has_deliverable_signal)()
     }
+    fn poll_arm_current(&self) -> bool {
+        (self.0.poll_arm_current)()
+    }
+    fn poll_armed_current(&self) -> bool {
+        (self.0.poll_armed_current)()
+    }
+    fn poll_disarm_current(&self) {
+        (self.0.poll_disarm_current)()
+    }
+    fn poll_clear_pending_current(&self) {
+        (self.0.poll_clear_pending_current)()
+    }
+    fn poll_set_pending(&self, task: WaitTaskHandle) -> bool {
+        (self.0.poll_set_pending)(task)
+    }
+    fn poll_block_current_timeout(&self, timeout_ms: u32) {
+        (self.0.poll_block_current_timeout)(timeout_ms)
+    }
 }
 
 struct BackendSlot(UnsafeCell<MaybeUninit<OpsBackend>>);
@@ -300,7 +361,7 @@ pub fn register_wait_queue_backend<'brand>(_token: &BspToken<'brand>, ops: &'sta
 }
 
 #[inline]
-fn backend() -> &'static dyn WaitQueueBackend {
+pub(crate) fn backend() -> &'static dyn WaitQueueBackend {
     if !BACKEND_INSTALLED.load(Ordering::Acquire) {
         return &DEFAULT_BACKEND;
     }
@@ -316,6 +377,33 @@ fn backend() -> &'static dyn WaitQueueBackend {
 #[inline]
 pub(crate) fn unblock_task_by_id(task: WaitTaskHandle) -> i32 {
     backend().unblock_task(task)
+}
+
+/// Deliver a wake to `task`, recording it against the task's poll token when
+/// the waiter registered through [`WaitQueue::enqueue_current`].
+///
+/// The lost-wake fix. A heap-owned node belongs to a poll/select-style caller
+/// that registers on N queues and only afterwards parks, so a wake can arrive
+/// while it is still `Running` — where `unblock_task` finds nothing to do and
+/// returns, dropping the wake. Setting the durable token first means the
+/// caller's block CAS consumes it instead of sleeping out its budget.
+///
+/// `poll_set_pending` reports `false` when no token is armed, which is both
+/// the stack-pinned `wait_event*` case (its own `has_woken` covers it) and a
+/// poll waiter whose `PollWaiter` has already been dropped. Both want the
+/// ordinary wake, so the fallback is unconditional rather than a branch on
+/// node flavour: a wake must never be delivered by neither path.
+#[inline]
+fn deliver_wake(task: WaitTaskHandle, heap_owned: bool) {
+    let bk = backend();
+    // Token first, then the unblock. A poll waiter already parked is `Blocked`
+    // with its token armed, and the unblock is what moves it; one still
+    // `Running` has the wake carried by the token instead. Setting the token
+    // after the unblock would leave a window where neither carries it.
+    if heap_owned {
+        let _ = bk.poll_set_pending(task);
+    }
+    let _ = bk.unblock_task(task);
 }
 
 /// Publishes "the current task is parked on this queue" while a stack-pinned
@@ -732,7 +820,7 @@ impl WaitQueue {
                         drop(KBox::from_raw(nn.as_ptr()));
                     }
                 }
-                let _ = backend().unblock_task(task);
+                deliver_wake(task, heap_owned);
                 true
             }
         }
@@ -767,7 +855,7 @@ impl WaitQueue {
                             drop(KBox::from_raw(nn.as_ptr()));
                         }
                     }
-                    let _ = backend().unblock_task(task);
+                    deliver_wake(task, heap_owned);
                     woken += 1;
                 }
             }

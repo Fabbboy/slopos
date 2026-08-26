@@ -15,6 +15,7 @@ use slopos_abi::syscall::{POLLIN, POLLNVAL};
 use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
 use slopos_ostd::process::quota::{Charge, FileBacking, try_charge};
+use slopos_ostd::sync::PollWaiterRef;
 use slopos_ostd::sync::event_bus::BUS;
 
 use crate::netmon::NETMON_TABLE;
@@ -94,7 +95,8 @@ impl FileOps for NetmonFileOps {
         };
         // Register first, test second: a post landing in between has already
         // marked this task.
-        let registered = BUS.subscribe_current(KernelEvent::NetMonitor { mon: slot });
+        let registered = PollWaiterRef::current()
+            .is_some_and(|w| BUS.subscribe_current(w, KernelEvent::NetMonitor { mon: slot }));
         let revents = if NETMON_TABLE.is_readable(handle) {
             POLLIN
         } else {
@@ -117,7 +119,8 @@ impl FileOps for NetmonFileOps {
 
     fn poll_wait(&self, handle: usize) -> bool {
         match NETMON_TABLE.slot_of(handle) {
-            Some(slot) => BUS.subscribe_current(KernelEvent::NetMonitor { mon: slot }),
+            Some(slot) => PollWaiterRef::current()
+                .is_some_and(|w| BUS.subscribe_current(w, KernelEvent::NetMonitor { mon: slot })),
             None => false,
         }
     }

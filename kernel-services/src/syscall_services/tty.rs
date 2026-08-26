@@ -35,8 +35,6 @@ slopos_service_core::define_service! {
         open_pty_peer(tty_index: slopos_abi::syscall::TtyIndex) -> Result<(slopos_abi::syscall::TtyIndex, slopos_ostd::KArc<dyn slopos_ostd::process::quota::FileBacking>), slopos_abi::tty_error::TtyError>;
         detach_session_by_id(session_id: u32);
         poll_events(tty_index: slopos_abi::syscall::TtyIndex, requested: u16) -> u16;
-        poll_sleep();
-        poll_sleep_on(slots: *const u8, count: usize);
         poll_enqueue(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
         poll_dequeue(tty_index: slopos_abi::syscall::TtyIndex);
         detach_controlling_terminal(tty_index: slopos_abi::syscall::TtyIndex, caller_sid: u32, caller_is_session_leader: bool) -> Result<bool, slopos_abi::tty_error::TtyError>;

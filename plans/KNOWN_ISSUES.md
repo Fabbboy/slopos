@@ -5,28 +5,6 @@ Last updated: 2026-08-26
 
 ---
 
-## `poll(2)` on a TTY can lose a wake and sleep out the full 100 ms
-
-**Status**: Open
-**Severity**: Low (latency only; no correctness consequence for the kernel)
-**Component**: `drivers/src/tty/poll.rs:149` (in-tree `TODO(tech-debt)`)
-
-`poll_sleep_on` registers on each named slot, then blocks. A wake landing
-between the enqueue and the block CAS is lost, so a poll that should have
-returned immediately waits out its whole 100 ms timeout. Real userland path,
-not a test artefact: reached from the syscall adapters
-(`drivers/src/syscall_services_init.rs:127`, `:171-172`).
-
-The fix is one `wait_event_timeout` whose predicate re-checks readiness after
-the enqueue — closing the window — rather than the current register/block/
-unregister dance over N queues.
-
-Not the cause of any test-time inflation: no `tty_tests` test calls it. The
-only occurrence in that suite is a re-export signature check
-(`test_ldisc_regression.rs:2461`) that never invokes it.
-
----
-
 ## A non-`WouldBlock` cursor error in `ostd_map_4kb_user` double-frees
 
 **Status**: Open

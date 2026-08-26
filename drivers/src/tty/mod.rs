@@ -328,8 +328,7 @@ pub use self::lifecycle::{
 };
 
 pub use self::poll::{
-    get_compositor_focus, poll_dequeue, poll_enqueue, poll_events, poll_sleep, poll_sleep_on,
-    set_compositor_focus,
+    get_compositor_focus, poll_dequeue, poll_enqueue, poll_events, set_compositor_focus,
 };
 
 pub use self::session::detach_session_by_id;

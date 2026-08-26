@@ -23,6 +23,12 @@ slopos_service_core::define_service! {
         set_current_task_controlling_tty(tty: Option<slopos_abi::syscall::TtyIndex>) -> bool;
         clear_session_controlling_tty(session_id: u32, tty: slopos_abi::syscall::TtyIndex) -> usize;
         block_current_task_with_timeout(timeout_ms: u32);
+        poll_block_current_timeout(timeout_ms: u32);
+        poll_arm_current() -> bool;
+        poll_armed_current() -> bool;
+        poll_disarm_current();
+        poll_clear_pending_current();
+        poll_set_pending(task_id: u32) -> bool;
         sleep_current_task_ms(ms: u32) -> c_int;
         mark_current_blocked() -> bool;
         yield_blocked_task();

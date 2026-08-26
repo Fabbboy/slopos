@@ -18,7 +18,7 @@ use slopos_abi::event::{KernelEvent, UnixSocketSlot};
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
 use slopos_ostd::handle::HandleTable;
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, SpinLock};
+use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, PollWaiterRef, SpinLock};
 use slopos_ostd::{KVec, KVecDeque};
 
 use pair::{PairSide, PairTable};
@@ -889,7 +889,8 @@ pub fn unix_poll_fused(handle: SocketHandle, requested: u16) -> (u16, bool) {
         return (0, false);
     };
 
-    let registered = BUS.subscribe_current(unix_ev(wq_idx));
+    let registered =
+        PollWaiterRef::current().is_some_and(|w| BUS.subscribe_current(w, unix_ev(wq_idx)));
 
     let revents = {
         let state = UNIX_STATE.lock();
@@ -907,7 +908,7 @@ pub fn unix_poll_register(handle: SocketHandle) -> bool {
     let Some(wq_idx) = handle.slot_for_wq() else {
         return false;
     };
-    BUS.subscribe_current(unix_ev(wq_idx))
+    PollWaiterRef::current().is_some_and(|w| BUS.subscribe_current(w, unix_ev(wq_idx)))
 }
 
 pub fn unix_poll_waiter_count(handle: SocketHandle) -> usize {

@@ -1086,8 +1086,10 @@ pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
         return TestResult::Fail;
     };
     // `file_poll_register_fd` takes PCR.current_task as the waiter, so the
-    // fd-owning task has to be current, as the real poll path leaves it.
+    // fd-owning task has to be current, as the real poll path leaves it, and a
+    // `PollWaiter` must be armed as the real poll path arms one.
     make_task_current(task_id);
+    let _waiter = assert_some!(slopos_ostd::sync::PollWaiter::new(), "arm poll token");
 
     let slave_fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY | O_NOCTTY as u32);
     assert_test!(slave_fd >= 0, "open(/dev/pts/N) failed");
@@ -4883,6 +4885,7 @@ pub fn test_unix_socket_poll_before_send() -> TestResult {
     };
 
     make_task_current(task_id);
+    let _waiter = assert_some!(slopos_ostd::sync::PollWaiter::new(), "arm poll token");
 
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
     assert_test!(
@@ -5411,6 +5414,7 @@ pub fn test_unix_send_wakes_blocked_poll_waiter() -> TestResult {
     // Dispatch sets the task Running, the precondition for the Running →
     // Blocked CAS.
     make_task_current(task_id);
+    let _waiter = assert_some!(slopos_ostd::sync::PollWaiter::new(), "arm poll token");
 
     // Register before checking readiness; that ordering is the whole point.
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
@@ -5473,8 +5477,10 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
         "client fd does not name a socket"
     );
 
-    // `enqueue_current` operates on PCR.current_task.
+    // `enqueue_current` operates on PCR.current_task, and registration needs a
+    // live poll token.
     make_task_current(task_id);
+    let _waiter = assert_some!(slopos_ostd::sync::PollWaiter::new(), "arm poll token");
 
     // Commit Blocked without first registering — the broken ordering.
     let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
@@ -5528,6 +5534,7 @@ pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
     };
 
     make_task_current(task_id);
+    let _waiter = assert_some!(slopos_ostd::sync::PollWaiter::new(), "arm poll token");
 
     let cli_handle = assert_some!(
         socket_handle_for_fd(pid, cli_fd),
@@ -5602,6 +5609,239 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_poll_fused_register_first_catches_wakeup,
+    suite = poll_wakeup_race
+);
+
+/// The register-then-block window: a wake aimed at a *registered but still
+/// `Running`* waiter must survive to the block.
+///
+/// This is the gap `PollWaiter` exists to close, and the one the pre-fix tree
+/// lost. Registration is correct here — the waiter is on the queue before the
+/// write — but `poll` registers on N fds and only afterwards parks, so the
+/// wake lands while the task is `Running`, where `wake_blocked_task` finds a
+/// non-`Blocked` target and returns having done nothing.
+///
+/// Without the token this test fails at STEP3: the task parks and sleeps out
+/// its budget with data waiting.
+pub fn test_poll_wake_survives_register_to_block_gap() -> TestResult {
+    use slopos_ostd::sync::PollWaiter;
+
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+
+    make_task_current(task_id);
+
+    let waiter = assert_some!(PollWaiter::new(), "STEP1: claim the poll token");
+
+    let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
+    assert_test!(reg.registered, "STEP2: registered before the write");
+    assert_test!(!task_guard.poll_pending(), "no wake has been delivered yet");
+
+    assert_eq_test!(
+        task_guard.status(),
+        TaskStatus::Running,
+        "the waiter has not parked yet"
+    );
+    let payload = b"gap-wake";
+    let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
+    assert_eq_test!(written as usize, payload.len(), "write");
+
+    assert_test!(
+        task_guard.poll_pending(),
+        "STEP3: the wake must be recorded on the token, not dropped"
+    );
+
+    waiter.block(100);
+    assert_eq_test!(
+        task_guard.status(),
+        TaskStatus::Running,
+        "STEP4: block consumed the token instead of sleeping"
+    );
+    assert_test!(
+        !task_guard.poll_pending(),
+        "the token is consumed, not merely observed"
+    );
+
+    let revents = file_poll_fd(pid, cli_fd, POLLIN);
+    assert_test!((revents & POLLIN) != 0, "POLLIN after the re-scan");
+
+    drop(waiter);
+    assert_test!(
+        !task_guard.poll_armed(),
+        "dropping the waiter disarms the token"
+    );
+
+    slopos_fs::fileio::file_poll_unregister_fd(&reg);
+    file_close_fd(pid, srv_fd);
+    file_close_fd(pid, cli_fd);
+    park_bootstrap_on_current_cpu();
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// A second `PollWaiter` cannot exist while the first is live, and the slot is
+/// returned when it drops.
+///
+/// The single-slot invariant is what keeps a nested poll from sharing one
+/// token with its parent — where the inner wait would consume a wake the outer
+/// one is owed.
+pub fn test_poll_waiter_slot_is_exclusive() -> TestResult {
+    use slopos_ostd::sync::PollWaiter;
+
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    make_task_current(task_id);
+
+    assert_test!(!task_guard.poll_armed(), "slot starts free");
+    let first = assert_some!(PollWaiter::new(), "first claim succeeds");
+    assert_test!(task_guard.poll_armed(), "slot is armed");
+    assert_test!(
+        PollWaiter::new().is_none(),
+        "a second claim must be refused, not silently share the slot"
+    );
+
+    drop(first);
+    assert_test!(!task_guard.poll_armed(), "drop returns the slot");
+    let second = assert_some!(PollWaiter::new(), "the slot is reusable after a drop");
+    drop(second);
+
+    park_bootstrap_on_current_cpu();
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// A wake delivered after the waiter is dropped must not leave a token for the
+/// *next* poll to consume.
+///
+/// Asterinas's `Waker::close`. Without it a stale token makes the following
+/// `poll` skip its first block and spin one iteration for a readiness change
+/// that was already reported to someone else.
+pub fn test_poll_waiter_drop_discards_late_wake() -> TestResult {
+    use slopos_ostd::sync::PollWaiter;
+
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+
+    make_task_current(task_id);
+
+    let waiter = assert_some!(PollWaiter::new(), "claim");
+    let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
+    assert_test!(reg.registered, "registered");
+
+    drop(waiter);
+    assert_test!(!task_guard.poll_armed(), "disarmed");
+
+    let payload = b"late";
+    let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
+    assert_eq_test!(written as usize, payload.len(), "write");
+
+    assert_test!(
+        !task_guard.poll_pending(),
+        "a wake with no armed token must leave nothing behind"
+    );
+    let next = assert_some!(PollWaiter::new(), "next poll claims a clean slot");
+    assert_test!(
+        !task_guard.poll_pending(),
+        "the next poll must not inherit a stale token"
+    );
+    drop(next);
+
+    slopos_fs::fileio::file_poll_unregister_fd(&reg);
+    file_close_fd(pid, srv_fd);
+    file_close_fd(pid, cli_fd);
+    park_bootstrap_on_current_cpu();
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// The poll bits must survive every ordinary state transition, since they share
+/// one word with status, reason and epoch.
+///
+/// A `pack`/`unpack` round trip that dropped them would make the token vanish
+/// on the next unrelated CAS — silently reintroducing the lost wake.
+pub fn test_poll_bits_survive_state_transitions() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+
+    assert_test!(task_guard.poll_arm(), "arm");
+    assert_test!(task_guard.poll_set_pending(), "set pending");
+
+    let epoch_before = task_guard.state_epoch();
+    let _ = task_set_state(task_id, TaskStatus::Ready);
+    let _ = task_set_state(task_id, TaskStatus::Running);
+    assert_test!(
+        task_guard.state_epoch() != epoch_before,
+        "the transitions really happened"
+    );
+
+    assert_test!(task_guard.poll_armed(), "armed bit survived");
+    assert_test!(task_guard.poll_pending(), "pending bit survived");
+
+    task_guard.poll_disarm();
+    assert_test!(!task_guard.poll_armed(), "disarm clears armed");
+    assert_test!(!task_guard.poll_pending(), "disarm clears pending");
+    assert_test!(
+        !task_guard.poll_set_pending(),
+        "a wake against a disarmed task reports no token"
+    );
+
+    park_bootstrap_on_current_cpu();
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_poll_wake_survives_register_to_block_gap,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_poll_waiter_slot_is_exclusive,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_poll_waiter_drop_discards_late_wake,
+    suite = poll_wakeup_race
+);
+slopos_testing::stest!(
+    name = test_poll_bits_survive_state_transitions,
     suite = poll_wakeup_race
 );
 

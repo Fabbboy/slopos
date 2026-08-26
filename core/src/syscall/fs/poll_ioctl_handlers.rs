@@ -237,6 +237,29 @@ fn poll_to_select_mask(
     (read_ready, write_ready, except_ready)
 }
 
+/// Park a poll/select iteration that found nothing ready.
+///
+/// Without a token — no current task, or a nested poll that lost the claim —
+/// the untokened block still runs, so the wait degrades in latency rather than
+/// breaking. With nothing registered no queue can wake us, leaving only a short
+/// timed delay.
+///
+/// `#[inline(never)]`: inlined into both loops it pushed `syscall_select`'s
+/// frame past the 2 KiB stack gate.
+#[inline(never)]
+fn poll_park(waiter: Option<&slopos_ostd::sync::PollWaiter>, registered: bool, sleep_ms: u32) {
+    match (waiter, registered) {
+        (Some(waiter), true) => {
+            waiter.block(sleep_ms);
+            waiter.clear_pending();
+        }
+        (None, true) => {
+            slopos_kernel_services::driver_runtime::block_current_task_with_timeout(sleep_ms);
+        }
+        (_, false) => slopos_kernel_services::platform::timer_poll_delay_ms(1),
+    }
+}
+
 define_syscall!(syscall_poll
     (ctx, base_ptr: u64, nfds: u64, timeout_ms_raw: i64)
     cap(NoneFd)
@@ -264,6 +287,11 @@ define_syscall!(syscall_poll
     let cached_revents = &mut scratch.cached_revents;
     let poll_fds: &mut [UserPollFd] = &mut scratch.poll_fds;
     let registered_ofis = &mut scratch.registered_ofis;
+
+    // Whole call, not per iteration: the token must be live before the first
+    // `file_poll_fused` registers and outlast the last unregistration, or a
+    // wake in either gap has nothing durable to land on.
+    let waiter = slopos_ostd::sync::PollWaiter::new();
 
     loop {
         for idx in 0..nfds {
@@ -341,11 +369,7 @@ define_syscall!(syscall_poll
             (remaining.max(0) as u32).min(500)
         };
 
-        if reg_count > 0 {
-            slopos_kernel_services::driver_runtime::block_current_task_with_timeout(sleep_ms);
-        } else {
-            slopos_kernel_services::platform::timer_poll_delay_ms(1);
-        }
+        poll_park(waiter.as_ref(), reg_count > 0, sleep_ms);
 
         cleanup(reg_count, registered_ofis);
 
@@ -430,6 +454,9 @@ define_syscall!(syscall_select
     };
 
     let start_ms = slopos_kernel_services::platform::get_time_ms();
+
+    // See `syscall_poll` for why the token spans the whole call.
+    let waiter = slopos_ostd::sync::PollWaiter::new();
 
     #[inline(never)]
     fn copy_out_select_results(
@@ -539,11 +566,7 @@ define_syscall!(syscall_select
             (remaining.max(0) as u32).min(500)
         };
 
-        if reg_count > 0 {
-            slopos_kernel_services::driver_runtime::block_current_task_with_timeout(sleep_ms);
-        } else {
-            slopos_kernel_services::platform::timer_poll_delay_ms(1);
-        }
+        poll_park(waiter.as_ref(), reg_count > 0, sleep_ms);
 
         cleanup(reg_count, registered_ofis);
 

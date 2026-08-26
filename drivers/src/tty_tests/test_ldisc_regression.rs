@@ -2458,8 +2458,6 @@ pub fn test_mod_reexports_lifecycle_functions() -> TestResult {
 
 pub fn test_mod_reexports_poll_functions() -> TestResult {
     let _: fn(TtyIndex, u16) -> u16 = tty::poll_events;
-    let _: fn(&[u8]) = tty::poll_sleep_on;
-    let _: fn() = tty::poll_sleep;
     let _: fn(u32) -> Result<(), TtyError> = tty::set_compositor_focus;
     let _: fn() -> Result<u32, TtyError> = tty::get_compositor_focus;
     TestResult::Pass

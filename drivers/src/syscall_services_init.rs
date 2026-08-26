@@ -124,14 +124,6 @@ fn tty_write_bytes_adapter(
     slopos_ostd::util::ptr_buf::with_buf(buf, len, |data| tty::write(tty_index, data, nonblock))
 }
 
-fn tty_poll_sleep_on_adapter(slots: *const u8, count: usize) {
-    if slots.is_null() || count == 0 {
-        tty::poll_sleep();
-        return;
-    }
-    slopos_ostd::util::ptr_buf::with_buf(slots, count, tty::poll_sleep_on);
-}
-
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
     read_cooked_with_attach: tty_read_with_attach_adapter,
@@ -168,8 +160,6 @@ static TTY_SERVICES: TtyServices = TtyServices {
     open_pty_peer: tty::pty_open_peer,
     detach_session_by_id: tty::detach_session_by_id,
     poll_events: tty::poll_events,
-    poll_sleep: tty::poll_sleep,
-    poll_sleep_on: tty_poll_sleep_on_adapter,
     poll_enqueue: tty::poll_enqueue,
     poll_dequeue: tty::poll_dequeue,
     detach_controlling_terminal: tty::detach_controlling_terminal,

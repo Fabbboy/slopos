@@ -1348,6 +1348,56 @@ impl<K, U> TaskInner<K, U> {
             .is_ok()
     }
 
+    /// Claim this task's poll-waiter slot. See [`TaskState::poll_arm`].
+    #[inline]
+    #[must_use = "a refused claim means a PollWaiter is already live for this task"]
+    pub fn poll_arm(&self) -> bool {
+        self.state.poll_arm()
+    }
+
+    /// Release the poll-waiter slot. See [`TaskState::poll_disarm`].
+    #[inline]
+    pub fn poll_disarm(&self) {
+        self.state.poll_disarm();
+    }
+
+    /// Record a wake against an armed poll token, reporting whether one was
+    /// armed to take it. See [`TaskState::poll_set_pending`].
+    #[inline]
+    pub fn poll_set_pending(&self) -> bool {
+        self.state.poll_set_pending()
+    }
+
+    /// Consume a pending poll wake, or block. See
+    /// [`TaskState::poll_consume_or_block`].
+    #[inline]
+    pub fn poll_consume_or_block(
+        &self,
+        expected: TaskStatus,
+        reason: BlockReason,
+    ) -> Result<bool, crate::task::state::TaskStateView> {
+        self.state.poll_consume_or_block(expected, reason)
+    }
+
+    /// Clear an unconsumed poll wake. See [`TaskState::poll_clear_pending`].
+    #[inline]
+    pub fn poll_clear_pending(&self) {
+        self.state.poll_clear_pending();
+    }
+
+    /// Whether a poll wake is recorded and unconsumed. Diagnostic / test use.
+    #[inline]
+    pub fn poll_pending(&self) -> bool {
+        self.state.snapshot().poll_pending
+    }
+
+    /// Whether a [`PollWaiter`](crate::sync::PollWaiter) is live for this task.
+    /// Diagnostic / test use.
+    #[inline]
+    pub fn poll_armed(&self) -> bool {
+        self.state.snapshot().poll_armed
+    }
+
     /// Load the block reason. Only meaningful when `status() == Blocked`.
     #[inline]
     pub fn load_block_reason(&self) -> BlockReason {

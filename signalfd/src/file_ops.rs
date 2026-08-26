@@ -12,6 +12,7 @@ use slopos_abi::quota::ObjectRow;
 use slopos_abi::signal::{SignalfdSiginfo, sig_bit};
 use slopos_abi::syscall::{POLLIN, POLLNVAL};
 use slopos_ostd::process::quota::{Charge, FileBacking};
+use slopos_ostd::sync::PollWaiterRef;
 use slopos_ostd::sync::event_bus::BUS;
 use slopos_ostd::task::ops::signal_pending_event;
 use slopos_sched::task::task_find_by_id;
@@ -84,7 +85,9 @@ impl FileOps for SignalfdFileOps {
 
     fn poll_wait(&self, handle: usize) -> bool {
         match registry::get(handle) {
-            Some(state) => BUS.subscribe_current(signal_pending_event(state.owner_task_id)),
+            Some(state) => PollWaiterRef::current().is_some_and(|w| {
+                BUS.subscribe_current(w, signal_pending_event(state.owner_task_id))
+            }),
             None => false,
         }
     }

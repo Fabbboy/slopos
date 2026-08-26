@@ -72,7 +72,10 @@ pub use super::runtime::{
     create_idle_task, create_idle_task_for_cpu, enter_scheduler,
     scheduler_register_idle_wakeup_callback,
 };
-pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_current_task_ms};
+pub use super::sleep::{
+    block_current_task_with_timeout, cancel_sleep, poll_block_current_timeout,
+    sleep_current_task_ms,
+};
 use super::sleep::{sleep_queue_next_deadline_ms, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,

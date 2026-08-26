@@ -723,6 +723,72 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
     cancel_sleep(task_id);
 }
 
+/// Consume a pending poll wake, or block the current task for at most
+/// `timeout_ms`.
+///
+/// The [`PollWaiter`](slopos_ostd::sync::PollWaiter) counterpart of
+/// [`block_current_task_with_timeout`], and the reason poll no longer loses
+/// wakes. The difference is one line: the `Running -> Blocked` transition goes
+/// through `poll_consume_or_block`, which in the *same* compare-exchange either
+/// takes a wake that arrived while this task was still `Running` — leaving the
+/// status alone, so the caller returns and re-scans — or publishes `Blocked`.
+/// A separate flag test before this CAS would reopen the window it closes.
+pub fn poll_block_current_timeout(timeout_ms: u32) {
+    let Some(current) = crate::task_struct::Current::get() else {
+        return;
+    };
+
+    // Consume before every early return, not only on the blocking path. A
+    // caller that cannot park still asked "is there a wake for me?", and
+    // leaving the token set would hand it to the *next* iteration, which would
+    // skip its own block for a readiness change this one already saw.
+    if !is_scheduling_active()
+        || slopos_ostd::task::TaskAddr::current().is_some_and(super::per_cpu::is_idle_task)
+    {
+        current.task().poll_clear_pending();
+        return;
+    }
+
+    let task_id = current.id();
+    let wake_ms = now_ms().wrapping_add(timeout_ms as u64);
+
+    // Same CAS-before-upsert ordering as `block_current_task_with_timeout`, for
+    // the same reason: the timer path gates on `is_blocked`, so an entry
+    // collected while we are still `Running` is a dropped deadline.
+    let cancelled = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> bool {
+        match current
+            .task()
+            .poll_consume_or_block(TaskStatus::Running, BlockReason::Sleep)
+        {
+            Ok(false) => return true,
+            Ok(true) => {}
+            Err(_) => {
+                if current.task().status() == TaskStatus::Ready {
+                    consume_ready_wake_for_current(&current);
+                }
+                return true;
+            }
+        }
+        if !SLEEP_QUEUE.lock().upsert(task_id, wake_ms) {
+            let _ = super::task::task_try_transition_from(
+                task_id,
+                TaskStatus::Blocked,
+                TaskStatus::Running,
+            );
+            return true;
+        }
+        if !commit_blocked_deschedule(&current) {
+            return false;
+        }
+        schedule();
+        false
+    });
+    if cancelled {
+        return;
+    }
+    cancel_sleep(task_id);
+}
+
 #[cfg(feature = "test-hooks")]
 pub(crate) fn test_insert_sleep_entry(task_id: u32, wake_ms: u64) -> bool {
     SLEEP_QUEUE.lock().upsert(task_id, wake_ms)

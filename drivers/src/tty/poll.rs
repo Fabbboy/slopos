@@ -4,7 +4,7 @@ use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 
 use slopos_kernel_services::driver_runtime::scheduler_is_enabled;
 
-use slopos_ostd::sync::BUS;
+use slopos_ostd::sync::{BUS, PollWaiterRef};
 
 use super::table::{TTY_SLOTS, tty_input_event, tty_output_event};
 use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
@@ -12,8 +12,11 @@ use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
 /// Waiters park on both queues so a readiness change in either direction wakes
 /// them.
 fn poll_register_slot(slot: usize) -> bool {
-    let input = BUS.subscribe_current(tty_input_event(slot));
-    let output = BUS.subscribe_current(tty_output_event(slot));
+    let Some(waiter) = PollWaiterRef::current() else {
+        return false;
+    };
+    let input = BUS.subscribe_current(waiter, tty_input_event(slot));
+    let output = BUS.subscribe_current(waiter, tty_output_event(slot));
     input || output
 }
 
@@ -130,57 +133,4 @@ pub fn poll_dequeue(idx: TtyIndex) {
         return;
     }
     poll_unregister_slot(slot);
-}
-
-/// Enqueue the current task on every named slot's input and output queues, then
-/// block once; any one of them waking resumes it. Falls back to a 1 ms timer
-/// delay when `slots` is empty or the scheduler is not yet running.
-pub fn poll_sleep_on(slots: &[u8]) {
-    if scheduler_is_enabled() == 0 {
-        slopos_kernel_services::platform::timer_poll_delay_ms(1);
-        return;
-    }
-
-    if slots.is_empty() {
-        slopos_kernel_services::platform::timer_poll_delay_ms(1);
-        return;
-    }
-
-    // TODO(tech-debt): a wake landing between enqueue and the block CAS is lost, so
-    // this waits out the full 100 ms — fix is one `wait_event_timeout` queue, not N.
-    let mut registered = 0usize;
-    for &slot in slots {
-        let s = slot as usize;
-        if s < MAX_TTYS && poll_register_slot(s) {
-            registered += 1;
-        }
-    }
-
-    if registered == 0 {
-        slopos_kernel_services::platform::timer_poll_delay_ms(1);
-        return;
-    }
-
-    slopos_kernel_services::driver_runtime::block_current_task_with_timeout(100);
-
-    for &slot in slots {
-        let s = slot as usize;
-        if s < MAX_TTYS {
-            poll_unregister_slot(s);
-        }
-    }
-}
-
-/// Slot-less form: sleeps on every active TTY poll waiter.
-pub fn poll_sleep() {
-    let mut slots = [0u8; MAX_TTYS];
-    let mut count = 0;
-    let mut bits = super::table::active_slots_bitmap();
-    while bits != 0 {
-        let i = bits.trailing_zeros() as usize;
-        slots[count] = i as u8;
-        count += 1;
-        bits &= bits - 1;
-    }
-    poll_sleep_on(&slots[..count]);
 }
