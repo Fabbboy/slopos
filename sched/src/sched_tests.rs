@@ -6236,6 +6236,13 @@ pub fn test_ap_pause_nests_on_a_depth_count() -> TestResult {
 /// `pause_all_aps` waits on. An AP may clear it by passing through its dispatch
 /// path underneath the attempt, so the provocation gets a bounded number of
 /// tries rather than silently passing.
+///
+/// The classification is checked against ground truth rather than asserted
+/// outright: the budget is a few timer periods, so whether the held AP bumps
+/// its heartbeat inside the wait is a race the kernel is allowed to lose either
+/// way. What is not a race is the implication — a heartbeat that provably did
+/// not move across a window *containing* the wait cannot have moved inside it,
+/// so `NotRunning` is then mandatory.
 pub fn test_ap_pause_timeout_is_reported_and_rolled_back() -> TestResult {
     if slopos_arch::pcr::get_cpu_count() < 2 {
         klog_info!("SCHED_TEST: uniprocessor boot has no AP to hold a pause off");
@@ -6253,7 +6260,7 @@ pub fn test_ap_pause_timeout_is_reported_and_rolled_back() -> TestResult {
 
     const ATTEMPTS: usize = 3;
     const HELD_CPU: usize = 1;
-    let mut blamed_cpu = None;
+    let mut failure = None;
     for _ in 0..ATTEMPTS {
         if crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.set_executing_task(true))
             .is_none()
@@ -6261,26 +6268,37 @@ pub fn test_ap_pause_timeout_is_reported_and_rolled_back() -> TestResult {
             klog_info!("SCHED_TEST: CPU {} has no per-CPU scheduler", HELD_CPU);
             return TestResult::Fail;
         }
+        let beat_before = slopos_arch::pcr::heartbeat_for_cpu(HELD_CPU);
         let outcome = crate::per_cpu::pause_all_aps();
+        let beat_after = slopos_arch::pcr::heartbeat_for_cpu(HELD_CPU);
         crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.set_executing_task(false));
         match outcome {
-            Err(crate::per_cpu::ApPauseError::Timeout { cpu_id }) => {
-                blamed_cpu = Some(cpu_id);
+            Err(err) => {
+                failure = Some((err, beat_after == beat_before));
                 break;
             }
             Ok(token) => crate::per_cpu::resume_all_aps_if_not_nested(token),
         }
     }
 
-    let Some(cpu_id) = blamed_cpu else {
+    let Some((err, beat_was_still)) = failure else {
         klog_info!("SCHED_TEST: pause_all_aps never observed the held AP");
         return TestResult::Fail;
     };
+    let cpu_id = err.cpu_id();
     if cpu_id != HELD_CPU {
         klog_info!(
             "SCHED_TEST: timeout blamed CPU {} instead of CPU {}",
             cpu_id,
             HELD_CPU
+        );
+        return TestResult::Fail;
+    }
+    if beat_was_still && !matches!(err, crate::per_cpu::ApPauseError::NotRunning { .. }) {
+        klog_info!(
+            "SCHED_TEST: CPU {} took no tick across the whole attempt but was classified {:?}",
+            HELD_CPU,
+            err
         );
         return TestResult::Fail;
     }
@@ -6354,6 +6372,269 @@ pub fn test_ap_pause_ignores_an_offline_ap() -> TestResult {
     TestResult::Pass
 }
 
+/// The wait's bound is wall time when a clock is available, and every
+/// degenerate reading falls back to the iteration budget rather than expiring.
+///
+/// The backwards-clock and zero-clock arms are the load-bearing ones: a
+/// `wrapping_sub` here yields ~2^64 on a clock that went backwards and expires
+/// the wait instantly, blaming an AP for the host's timekeeping.
+pub fn test_pause_deadline_passed_uses_wall_clock_when_available() -> TestResult {
+    use crate::per_cpu::{AP_PAUSE_SPIN_BUDGET_FOR_TEST as SPINS, test_pause_deadline_passed as p};
+
+    const BUDGET: u64 = 12_000_000;
+    const START: u64 = 1_000_000_000;
+
+    // A slice of a `const`, not an array local: the array form materialises
+    // every case on this frame and costs ~3 KiB, past the stack-size gate.
+    //
+    // (start, now, iteration, budget, expected, what it pins)
+    const CASES: &[(u64, u64, u32, u64, bool, &str)] = &[
+        (
+            START,
+            START + BUDGET - 1,
+            0,
+            BUDGET,
+            false,
+            "inside the budget",
+        ),
+        (START, START + BUDGET, 0, BUDGET, true, "at the budget"),
+        (
+            START,
+            START + BUDGET * 2,
+            0,
+            BUDGET,
+            true,
+            "past the budget",
+        ),
+        (
+            START,
+            START + BUDGET - 1,
+            u32::MAX,
+            BUDGET,
+            false,
+            "iterations do not expire a live wall-clock wait",
+        ),
+        (
+            START,
+            START - 1,
+            0,
+            BUDGET,
+            false,
+            "a clock that went backwards is not the AP's fault",
+        ),
+        (
+            START,
+            0,
+            0,
+            BUDGET,
+            false,
+            "a zero end reading falls back, under the spin budget",
+        ),
+        (
+            START,
+            0,
+            SPINS,
+            BUDGET,
+            true,
+            "a zero end reading falls back, at the spin budget",
+        ),
+        (
+            0,
+            START,
+            0,
+            BUDGET,
+            false,
+            "no start clock falls back, under the spin budget",
+        ),
+        (
+            0,
+            START,
+            SPINS,
+            BUDGET,
+            true,
+            "no start clock falls back, at the spin budget",
+        ),
+        (
+            START,
+            START + BUDGET * 100,
+            SPINS - 1,
+            0,
+            false,
+            "budget 0 disables the deadline",
+        ),
+    ];
+
+    for &(start, now, iteration, budget, expected, what) in CASES {
+        let got = p(start, now, iteration, budget);
+        if got != expected {
+            klog_info!(
+                "SCHED_TEST: pause_deadline_passed({}, {}, {}, {}) = {}, want {} — {}",
+                start,
+                now,
+                iteration,
+                budget,
+                got,
+                expected,
+                what
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// A stalled heartbeat reads as `NotRunning` and a moving one as `NotParking`.
+///
+/// Driven over the classifier directly rather than through a provoked pause:
+/// whether a held AP happens to tick inside a few-millisecond window is a race,
+/// so a live pause makes both arms reachable and neither mandatory — a test
+/// that asserts on it passes just as happily on a classifier that has lost an
+/// arm entirely. The heartbeat is what the classifier reads, so a baseline
+/// equal to the live value is a stalled CPU by construction, and one that
+/// differs is a CPU that has run.
+pub fn test_pause_failure_classification_reads_the_heartbeat() -> TestResult {
+    use crate::per_cpu::{ApPauseError, test_classify_pause_failure as classify};
+
+    const CPU: usize = 0;
+    let live = slopos_arch::pcr::heartbeat_for_cpu(CPU);
+
+    let stalled = classify(CPU, Some(live));
+    if !matches!(stalled, ApPauseError::NotRunning { cpu_id } if cpu_id == CPU) {
+        klog_info!(
+            "SCHED_TEST: an unchanged heartbeat classified {:?}, want NotRunning",
+            stalled
+        );
+        return TestResult::Fail;
+    }
+
+    let moved = classify(CPU, Some(live.wrapping_sub(1)));
+    if !matches!(moved, ApPauseError::NotParking { cpu_id } if cpu_id == CPU) {
+        klog_info!(
+            "SCHED_TEST: an advanced heartbeat classified {:?}, want NotParking",
+            moved
+        );
+        return TestResult::Fail;
+    }
+
+    // No baseline means the blamed CPU is not the one sampled: it took up a
+    // task during the wait, so it has demonstrably run.
+    let unsampled = classify(CPU, None);
+    if !matches!(unsampled, ApPauseError::NotParking { cpu_id } if cpu_id == CPU) {
+        klog_info!(
+            "SCHED_TEST: an unsampled CPU classified {:?}, want NotParking",
+            unsampled
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// `sched.ap_pause_ms=` moves the live budget, and 0 disables the deadline.
+///
+/// Restores whatever was configured: leaving a 1 ms budget behind would make
+/// every later scope's pause fail, and leaving 0 behind would silently put the
+/// rest of the run back on the iteration bound this work removed.
+pub fn test_ap_pause_budget_knob_round_trips() -> TestResult {
+    let restore_ns = crate::per_cpu::ap_pause_budget_ns_for_test();
+
+    crate::per_cpu::set_ap_pause_budget_ms(7);
+    let seven = crate::per_cpu::ap_pause_budget_ns_for_test();
+    crate::per_cpu::set_ap_pause_budget_ms(0);
+    let zero = crate::per_cpu::ap_pause_budget_ns_for_test();
+
+    crate::per_cpu::set_ap_pause_budget_ms(restore_ns / 1_000_000);
+    let restored = crate::per_cpu::ap_pause_budget_ns_for_test();
+
+    if seven != 7_000_000 {
+        klog_info!("SCHED_TEST: 7 ms became {} ns", seven);
+        return TestResult::Fail;
+    }
+    if zero != 0 {
+        klog_info!(
+            "SCHED_TEST: 0 ms became {} ns, so the deadline stayed armed",
+            zero
+        );
+        return TestResult::Fail;
+    }
+    if restored != restore_ns {
+        klog_info!(
+            "SCHED_TEST: budget restored to {} ns, not the {} ns this test found",
+            restored,
+            restore_ns
+        );
+        return TestResult::Fail;
+    }
+
+    // The disabled budget must actually reach the fallback, not merely be zero.
+    if crate::per_cpu::test_pause_deadline_passed(1, u64::MAX, 0, 0) {
+        klog_info!("SCHED_TEST: a zero budget still expired a wait on wall time");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Every online AP acknowledges the pause from its own poll point.
+///
+/// The ack is corroboration rather than the gate, so this asserts what it is
+/// for: a value only the AP itself can have written, under the generation this
+/// pause published. A stale ack from an earlier pause cannot satisfy it.
+pub fn test_ap_pause_acks_from_the_poll_point() -> TestResult {
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    if cpu_count < 2 {
+        klog_info!("SCHED_TEST: uniprocessor boot has no AP to acknowledge");
+        return TestResult::Skipped;
+    }
+
+    let token = match crate::per_cpu::pause_all_aps() {
+        Ok(token) => token,
+        Err(err) => {
+            klog_info!("SCHED_TEST: pause_all_aps failed: {:?}", err);
+            return TestResult::Fail;
+        }
+    };
+
+    // A parked AP acks on the reschedule IPI the pause already sends, but it
+    // has to be scheduled to do so; poll rather than sample once.
+    let generation = crate::per_cpu::ap_pause_generation();
+    let deadline = slopos_kernel_services::clock::monotonic_ns() + 200_000_000;
+    let mut unacked;
+    loop {
+        unacked = (1..cpu_count)
+            .filter(|&cpu| {
+                slopos_arch::pcr::is_cpu_online(cpu) && !crate::per_cpu::ap_has_acked_pause(cpu)
+            })
+            .count();
+        if unacked == 0 {
+            break;
+        }
+        let now = slopos_kernel_services::clock::monotonic_ns();
+        if now == 0 || now >= deadline {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    crate::per_cpu::resume_all_aps_if_not_nested(token);
+
+    if generation == 0 {
+        klog_info!("SCHED_TEST: pause generation never advanced past its initial value");
+        return TestResult::Fail;
+    }
+    if unacked != 0 {
+        klog_info!(
+            "SCHED_TEST: {} online AP(s) never acked pause generation {}",
+            unacked,
+            generation
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 /// The one store the dying-CPU cascade hinges on.
 pub fn test_abandon_dispatch_for_dying_cpu_clears_the_flag() -> TestResult {
     if slopos_arch::pcr::get_cpu_count() < 2 {
@@ -6388,6 +6669,22 @@ pub fn test_abandon_dispatch_for_dying_cpu_clears_the_flag() -> TestResult {
 
 slopos_testing::stest!(
     name = test_ap_pause_ignores_an_offline_ap,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_pause_deadline_passed_uses_wall_clock_when_available,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_ap_pause_acks_from_the_poll_point,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_ap_pause_budget_knob_round_trips,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_pause_failure_classification_reads_the_heartbeat,
     suite = sched_core
 );
 slopos_testing::stest!(

@@ -665,6 +665,25 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         boot_info(b"Boot option: root=virtio\0");
     }
 
+    // `sched.ap_pause_ms=0` disables the AP pause's wall-clock deadline and
+    // falls back to its iteration budget, the escape hatch
+    // `mce=monarchtimeout=` and `csd_lock_timeout=` both have.
+    for token in cmdline.split_whitespace() {
+        if let Some(value) = token.strip_prefix("sched.ap_pause_ms=") {
+            match value.parse::<u64>() {
+                Ok(ms) => {
+                    slopos_sched::per_cpu::set_ap_pause_budget_ms(ms);
+                    if ms == 0 {
+                        boot_info(b"Boot option: sched.ap_pause_ms=0 (deadline disabled)\0");
+                    } else {
+                        boot_info(b"Boot option: sched.ap_pause_ms set\0");
+                    }
+                }
+                Err(_) => boot_info(b"Boot option: sched.ap_pause_ms ignored (want an integer)\0"),
+            }
+        }
+    }
+
     // A typed parser rather than more `contains` arms, so a malformed value
     // degrades to the shipped policy instead of to a disabled console.
     let kconsole = slopos_ostd::kconsole::config::parse(cmdline);

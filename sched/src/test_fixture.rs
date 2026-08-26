@@ -111,12 +111,37 @@ impl KernelTestScope {
         // Every snapshot below reads kernel-wide state an AP is free to mutate,
         // so a scope entered over running APs would report results from a run
         // it did not control.
-        let aps_paused = match pause_all_aps() {
-            Ok(token) => token,
-            Err(err) => {
+        // Retried rather than fatal on the first failure: the depth is rolled
+        // back on failure, so each attempt starts clean, and an AP the host has
+        // simply not scheduled yet may park on the next one. A final failure
+        // still panics — the scope's whole contract is that APs cannot race the
+        // body, and running it anyway would report a result from a run it did
+        // not control. Panicking one test is correct; the defect this plan
+        // fixed was one dead CPU panicking thirty-two.
+        const PAUSE_ATTEMPTS: usize = 3;
+        let mut last_err = None;
+        let mut paused = None;
+        for attempt in 0..PAUSE_ATTEMPTS {
+            if attempt != 0 {
+                super::per_cpu::note_ap_pause_retry();
+            }
+            match pause_all_aps() {
+                Ok(token) => {
+                    paused = Some(token);
+                    break;
+                }
+                Err(err) => last_err = Some(err),
+            }
+        }
+        let aps_paused = match paused {
+            Some(token) => token,
+            None => {
                 drop(kernel_io_freeze);
                 slopos_hermetic::return_after_test(boot_ctx);
-                panic!("KernelTestScope: AP pause failed: {:?}", err);
+                panic!(
+                    "KernelTestScope: AP pause failed: {:?} ({} attempts)",
+                    last_err, PAUSE_ATTEMPTS
+                );
             }
         };
 

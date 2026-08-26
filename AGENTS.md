@@ -175,6 +175,7 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `tests.run` | comma-separated globs | only run matching tests |
 | `tests.skip` | comma-separated globs | skip matching tests |
 | `lockdep` | `off` / `warn` / `panic` | lock-order validator policy; default `panic` |
+| `sched.ap_pause_ms` | integer | wall-clock budget for the AP pause; `0` disables the deadline and falls back to the iteration bound. Default measured — see `AP_PAUSE_BUDGET_NS_DEFAULT` |
 | `kconsole` | `off` / `on` / `<hex mask>` | diagnostic-console permission mask; default `on` (informational only) |
 | `kconsole.serial` | `on` / `off` | serial BREAK trigger; default `on` |
 | `kconsole.arm_ms` | integer | how long the keyboard chord stays armed; default 3000 |

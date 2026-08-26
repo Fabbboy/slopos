@@ -243,6 +243,10 @@ pub struct PriorityRunQueue {
     pub schedule_calls: AtomicU32,
     initialized: AtomicBool,
     executing_task: AtomicBool,
+    /// Generation of the AP pause this CPU last acknowledged from its poll
+    /// point. Only this CPU writes it, so no dead CPU's stale value can be
+    /// mistaken for a fresh ack.
+    pause_ack: AtomicU32,
     remote_inbox_head: AtomicPtr<Task>,
     inbox_count: AtomicU32,
 }
@@ -267,6 +271,7 @@ impl PriorityRunQueue {
             schedule_calls: AtomicU32::new(0),
             initialized: AtomicBool::new(false),
             executing_task: AtomicBool::new(false),
+            pause_ack: AtomicU32::new(0),
             remote_inbox_head: AtomicPtr::new(ptr::null_mut()),
             inbox_count: AtomicU32::new(0),
         }
@@ -283,6 +288,14 @@ impl PriorityRunQueue {
 
     pub fn is_executing_task(&self) -> bool {
         self.executing_task.load(Ordering::SeqCst)
+    }
+
+    pub fn ack_pause(&self, generation: u32) {
+        self.pause_ack.store(generation, Ordering::Release);
+    }
+
+    pub fn pause_ack(&self) -> u32 {
+        self.pause_ack.load(Ordering::Acquire)
     }
 
     /// Initialise this CPU's scheduler. Must run on the owning CPU before any
@@ -1203,9 +1216,119 @@ pub fn is_idle_task(task: TaskAddr) -> bool {
 /// to release would lift the second holder's pause out from under it.
 static AP_PAUSE_DEPTH: AtomicU32 = AtomicU32::new(0);
 
-/// Spin budget for the pause wait. Each iteration is one scan of the online APs
-/// plus a `spin_loop` hint, so this bounds work, not wall-clock time.
+/// Bumped once per outermost pause, so an ack carrying it cannot have been
+/// left behind by an earlier one.
+static AP_PAUSE_GENERATION: AtomicU32 = AtomicU32::new(0);
+
+#[inline]
+pub fn ap_pause_generation() -> u32 {
+    AP_PAUSE_GENERATION.load(Ordering::Acquire)
+}
+
+/// Corroboration, not the gate. Requiring an ack unconditionally would make
+/// every pause an IPI round trip on the test suite's hottest fixture path,
+/// where an idle-parked AP would have to be woken only to answer; keeping
+/// `!executing` as the success condition preserves that cost while making the
+/// failure classification provable rather than inferred. Linux's
+/// `multi_cpu_stop` does gate on a counted ack — it has a stopper thread per
+/// CPU to answer with, which this loop does not.
+pub fn ack_ap_pause(cpu_id: usize) {
+    let generation = ap_pause_generation();
+    let _ = with_cpu_scheduler(cpu_id, |sched| sched.ack_pause(generation));
+}
+
+pub fn ap_has_acked_pause(cpu_id: usize) -> bool {
+    with_cpu_scheduler(cpu_id, |sched| sched.pause_ack()) == Some(ap_pause_generation())
+}
+
+/// Fallback spin budget, retained only for the pre-clock window:
+/// `monotonic_ns` reads 0 until the platform table is wired, and
+/// `task_shutdown` can reach the pause before that. Each iteration is one scan
+/// of the online APs plus a `spin_loop` hint, so it bounds work, not time.
 const AP_PAUSE_SPIN_BUDGET: u32 = 100_000;
+
+/// Wall-clock budget for the pause wait.
+///
+/// Measured, not chosen. Five uncontended `run_tests` captures on 2026-08-26,
+/// QEMU/KVM `-cpu host -smp 4`, reported max_park_ns 138950 / 112490 / 191670 /
+/// 252170 / 193970 — a 252 us worst case, which matches the expectation that a
+/// park is one poll-point round trip. 12 ms is ~48x that, leaving room for a
+/// slower host without ceasing to be a bound. Re-measure with the
+/// `APPAUSE[<phase>]` line rather than raising this by hand.
+///
+/// The waiter's own retired instructions have no relation to whether the target
+/// got any CPU at all, which is why this is wall time: a descheduled vCPU burns
+/// an iteration budget having executed nothing.
+const AP_PAUSE_BUDGET_NS_DEFAULT: u64 = 12_000_000;
+
+/// Live budget, overridable by `sched.ap_pause_ms=`. Zero disables the
+/// wall-clock deadline and falls back to the iteration budget, matching how
+/// Linux's `mce=monarchtimeout=0` and `csd_lock_timeout=0` disable theirs.
+static AP_PAUSE_BUDGET_NS: AtomicU64 = AtomicU64::new(AP_PAUSE_BUDGET_NS_DEFAULT);
+
+/// 0 disables the deadline.
+pub fn set_ap_pause_budget_ms(ms: u64) {
+    AP_PAUSE_BUDGET_NS.store(ms.saturating_mul(1_000_000), Ordering::Relaxed);
+}
+
+#[inline]
+fn ap_pause_budget_ns() -> u64 {
+    AP_PAUSE_BUDGET_NS.load(Ordering::Relaxed)
+}
+
+/// Longest observed *successful* park, in nanoseconds, and the attempt/retry
+/// counts beside it. Reported as `APPAUSE[<phase>]` next to the lockdep and
+/// quota lines, so one boot answers for all three.
+static AP_PAUSE_MAX_NS: AtomicU64 = AtomicU64::new(0);
+static AP_PAUSE_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+static AP_PAUSE_RETRIES: AtomicU64 = AtomicU64::new(0);
+
+/// A sample is dropped rather than clamped when the clock is unavailable or
+/// runs backwards: `clock_monotonic_ns` reads 0 until the platform table is
+/// wired, and a `0` end against a live start would record a maximum no wait
+/// ever took.
+fn record_park_duration(start_ns: u64, end_ns: u64) {
+    if start_ns == 0 || end_ns < start_ns {
+        return;
+    }
+    let elapsed = end_ns - start_ns;
+    let mut observed = AP_PAUSE_MAX_NS.load(Ordering::Relaxed);
+    while elapsed > observed {
+        match AP_PAUSE_MAX_NS.compare_exchange_weak(
+            observed,
+            elapsed,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(current) => observed = current,
+        }
+    }
+}
+
+pub fn note_ap_pause_retry() {
+    AP_PAUSE_RETRIES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// `(max_park_ns, attempts, retries)`.
+pub fn ap_pause_stats() -> (u64, u64, u64) {
+    (
+        AP_PAUSE_MAX_NS.load(Ordering::Relaxed),
+        AP_PAUSE_ATTEMPTS.load(Ordering::Relaxed),
+        AP_PAUSE_RETRIES.load(Ordering::Relaxed),
+    )
+}
+
+pub fn ap_pause_report(phase: &str) {
+    let (max_park_ns, attempts, retries) = ap_pause_stats();
+    klog_info!(
+        "APPAUSE[{}]: max_park_ns={} attempts={} retries={}",
+        phase,
+        max_park_ns,
+        attempts,
+        retries
+    );
+}
 
 /// Spin iterations between reschedule-IPI re-sends: an IPI that is lost or
 /// coalesced against a pending one would leave the wait spinning for an AP that
@@ -1226,12 +1349,86 @@ impl Drop for ApPauseToken {
     }
 }
 
-/// Why an AP pause could not be established.
+/// Why an AP pause could not be established. The depth increment is rolled
+/// back before either is returned, so there is nothing to release.
+///
+/// A watcher cannot tell a descheduled CPU from a wedged one — both stop
+/// bumping their heartbeat — so the split is deliberately the honest half of
+/// that question rather than a claim to answer it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApPauseError {
-    /// `cpu_id` was still executing a task after the whole spin budget. The
-    /// depth increment is rolled back first, so there is nothing to release.
-    Timeout { cpu_id: usize },
+    /// Still executing, and its heartbeat advanced during the wait: the AP is
+    /// taking timer interrupts and did not reach its poll point. A real
+    /// scheduler bug, and always worth chasing.
+    NotParking { cpu_id: usize },
+    /// Still executing, and its heartbeat never moved: the AP took no timer
+    /// interrupt in the whole window. Descheduled by the host, or wedged — the
+    /// guest cannot tell which, so this is not on its own evidence of a defect.
+    NotRunning { cpu_id: usize },
+}
+
+impl ApPauseError {
+    /// The AP this pause gave up on.
+    pub fn cpu_id(self) -> usize {
+        match self {
+            Self::NotParking { cpu_id } | Self::NotRunning { cpu_id } => cpu_id,
+        }
+    }
+}
+
+/// Whether the wait has run out of budget.
+///
+/// Pure so it can be driven over a fake clock without a live HPET. Every
+/// degenerate clock reading falls back to the iteration budget rather than
+/// expiring: `monotonic_ns` reads 0 before the platform table is wired, and a
+/// clock that runs backwards must not be charged to the target — the same care
+/// Linux's `csd_lock_wait_toolong` takes before blaming a peer.
+fn pause_deadline_passed(start_ns: u64, now_ns: u64, iteration: u32, budget_ns: u64) -> bool {
+    if budget_ns == 0 || start_ns == 0 || now_ns == 0 {
+        return iteration >= AP_PAUSE_SPIN_BUDGET;
+    }
+    match now_ns.checked_sub(start_ns) {
+        Some(elapsed) => elapsed >= budget_ns,
+        None => false,
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn test_classify_pause_failure(cpu_id: usize, baseline: Option<u64>) -> ApPauseError {
+    classify_pause_failure(cpu_id, baseline)
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn ap_pause_budget_ns_for_test() -> u64 {
+    ap_pause_budget_ns()
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn test_pause_deadline_passed(
+    start_ns: u64,
+    now_ns: u64,
+    iteration: u32,
+    budget_ns: u64,
+) -> bool {
+    pause_deadline_passed(start_ns, now_ns, iteration, budget_ns)
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) const AP_PAUSE_SPIN_BUDGET_FOR_TEST: u32 = AP_PAUSE_SPIN_BUDGET;
+
+/// Which of the two failures this is, from what the target's heartbeat did.
+///
+/// `baseline` is the heartbeat of the CPU first seen executing. When the CPU
+/// finally blamed is a *different* one it took up a task during the window and
+/// has therefore demonstrably run, so it is `NotParking` without needing a
+/// baseline of its own.
+fn classify_pause_failure(cpu_id: usize, baseline: Option<u64>) -> ApPauseError {
+    match baseline {
+        Some(before) if slopos_arch::pcr::heartbeat_for_cpu(cpu_id) == before => {
+            ApPauseError::NotRunning { cpu_id }
+        }
+        _ => ApPauseError::NotParking { cpu_id },
+    }
 }
 
 /// Park every AP's scheduler loop and wait until none is executing a task.
@@ -1247,6 +1444,10 @@ pub fn pause_all_aps() -> Result<ApPauseToken, ApPauseError> {
     if !outermost {
         return Ok(ApPauseToken { _private: () });
     }
+    AP_PAUSE_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    // Before the fence, so an ack an AP publishes after seeing the depth is
+    // against this generation rather than the previous one.
+    AP_PAUSE_GENERATION.fetch_add(1, Ordering::AcqRel);
 
     // The depth increment must be visible to an AP before this CPU reads that
     // AP's executing flag, or a CPU that dispatched just ahead of the increment
@@ -1293,28 +1494,54 @@ fn executing_ap(cpu_count: usize) -> Option<usize> {
 }
 
 fn wait_for_aps_to_park(cpu_count: usize) -> Result<(), ApPauseError> {
-    if executing_ap(cpu_count).is_none() {
+    let Some(blamed) = executing_ap(cpu_count) else {
         return Ok(());
-    }
+    };
+    // One `u64`, never an array: `[u64; MAX_CPUS]` is 2048 bytes, the whole of
+    // `check_stack_sizes.sh`'s cap, before a single other local.
+    let blamed_beat_before = slopos_arch::pcr::heartbeat_for_cpu(blamed);
 
     // An AP holds `executing_task` for as long as its task runs, so waiting
     // unprovoked is a wait on that task yielding; the reschedule IPI turns it
     // into a wait on interrupt latency.
     nudge_aps_to_poll_point(cpu_count);
 
-    for iteration in 0..AP_PAUSE_SPIN_BUDGET {
+    let budget_ns = ap_pause_budget_ns();
+    let start_ns = slopos_kernel_services::clock::monotonic_ns();
+    let mut iteration: u32 = 0;
+
+    loop {
         if executing_ap(cpu_count).is_none() {
+            record_park_duration(start_ns, slopos_kernel_services::clock::monotonic_ns());
             return Ok(());
         }
-        if iteration != 0 && iteration % AP_PAUSE_NUDGE_INTERVAL == 0 {
+        iteration = iteration.wrapping_add(1);
+        // Iteration-keyed, and deliberately not folded into the deadline: this
+        // bounds work between IPIs, so a lost or coalesced one is re-sent
+        // without turning the wait into an IPI storm.
+        if iteration % AP_PAUSE_NUDGE_INTERVAL == 0 {
             nudge_aps_to_poll_point(cpu_count);
+        }
+        if pause_deadline_passed(
+            start_ns,
+            slopos_kernel_services::clock::monotonic_ns(),
+            iteration,
+            budget_ns,
+        ) {
+            break;
         }
         core::hint::spin_loop();
     }
 
     match executing_ap(cpu_count) {
-        Some(cpu_id) => Err(ApPauseError::Timeout { cpu_id }),
-        None => Ok(()),
+        Some(cpu_id) => Err(classify_pause_failure(
+            cpu_id,
+            (cpu_id == blamed).then_some(blamed_beat_before),
+        )),
+        None => {
+            record_park_duration(start_ns, slopos_kernel_services::clock::monotonic_ns());
+            Ok(())
+        }
     }
 }
 

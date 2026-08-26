@@ -1428,10 +1428,12 @@ fn task_shutdown(scope: ShutdownScope) -> c_int {
     // forward.
     let ap_pause = match crate::per_cpu::pause_all_aps() {
         Ok(token) => Some(token),
-        Err(crate::per_cpu::ApPauseError::Timeout { cpu_id }) => {
+        Err(err @ crate::per_cpu::ApPauseError::NotParking { cpu_id })
+        | Err(err @ crate::per_cpu::ApPauseError::NotRunning { cpu_id }) => {
             klog_info!(
-                "SCHED: CPU {} would not park; shutting tasks down with the APs running",
-                cpu_id
+                "SCHED: CPU {} would not park ({:?}); shutting tasks down with the APs running",
+                cpu_id,
+                err
             );
             None
         }

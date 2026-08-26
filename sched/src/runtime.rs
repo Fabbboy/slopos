@@ -429,6 +429,10 @@ fn scheduler_loop(cpu_id: usize) -> ! {
         });
 
         if per_cpu::should_pause_scheduler_loop(cpu_id) {
+            // Before the park, so the ack is evidence this CPU executed code
+            // after the request rather than an inference from a flag it may
+            // never clear again.
+            per_cpu::ack_ap_pause(cpu_id);
             // No reclaim and no bottom half: the pause exists so its holder can
             // act against quiescent APs, and both take allocator and registry
             // locks on this CPU's behalf.
