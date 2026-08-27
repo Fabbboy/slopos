@@ -126,6 +126,14 @@ fn check_alignment<T: Pod>(paddr: Paddr, offset: usize) -> Result<(), UFrameErro
 /// ```
 pub struct UFrame<M: AnyUFrameMeta = AnonymousMeta>(Frame<M>);
 
+/// Paddr and ref-count, never frame contents: a formatter that printed those
+/// would be the no-reference rule broken from inside this module.
+impl<M: AnyUFrameMeta> core::fmt::Debug for UFrame<M> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("UFrame").field(&self.0).finish()
+    }
+}
+
 impl UFrame<AnonymousMeta> {
     /// Wrap a freshly-allocated 4 KiB user paddr that this `UFrame` will own
     /// through META_SLOTS. The first call for a paddr does `from_unused` (slot

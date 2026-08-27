@@ -160,7 +160,12 @@ pub fn ostd_map_4kb_user(
     };
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
-    cursor.map::<Size4Kb, AnonymousMeta>(frame, prop)
+    // TODO(frame-ownership): dropping the returned frame here is the
+    // double-free; the caller still frees `pa`. Removed when this takes an
+    // owned `UFrame` rather than a `PhysAddr`.
+    cursor
+        .map::<Size4Kb, AnonymousMeta>(frame, prop)
+        .map_err(|(_, e)| e)
 }
 
 /// Unmap the 4 KiB user leaf at `va` and map `pa` in its place on one cursor.
@@ -181,7 +186,12 @@ pub fn ostd_replace_4kb_user(
     let displaced = cursor.unmap::<Size4Kb, AnonymousMeta>()?;
     let frame = UFrame::<AnonymousMeta>::wrap_user_paddr(Paddr::new(pa.as_u64()))
         .map_err(|_| MapError::PathCorrupt)?;
-    cursor.map::<Size4Kb, AnonymousMeta>(frame, prop)?;
+    // TODO(frame-ownership): as `ostd_map_4kb_user`, and this arm also drops
+    // `displaced` before its cross-CPU shootdown. Both go with the `replace`
+    // cursor primitive.
+    cursor
+        .map::<Size4Kb, AnonymousMeta>(frame, prop)
+        .map_err(|(_, e)| e)?;
     Ok(displaced)
 }
 
@@ -256,7 +266,11 @@ pub fn ostd_map_ring_4kb_user(
     let mut cursor = vs.cursor_mut(range)?;
     match cursor.map::<Size4Kb, RingMeta>(frame, prop) {
         Ok(()) => Ok(()),
-        Err(e) => {
+        // Dropping the returned frame is correct here and only here: it is an
+        // alias taken by `from_in_use`, so this releases the second ref the
+        // failed map would have leaked into the PTE. The ring object's own ref
+        // keeps the page alive.
+        Err((_, e)) => {
             klog_warn!(
                 "RINGMAP: cursor.map(RingMeta) FAILED pa=0x{:x} va=0x{:x} map_err={:?}",
                 pa.as_u64(),

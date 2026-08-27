@@ -1281,6 +1281,16 @@ impl<S: init_state::InitState> Frame<PacketMeta, S> {
     }
 }
 
+/// The inline `M` is not printed: `AnyFrameMeta` does not require `Debug`.
+impl<M: AnyFrameMeta, S: init_state::InitState> core::fmt::Debug for Frame<M, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Frame")
+            .field("paddr", &format_args!("0x{:x}", self.paddr().as_u64()))
+            .field("refs", &self.reference_count())
+            .finish()
+    }
+}
+
 impl<M: AnyFrameMeta, S: init_state::InitState> Drop for Frame<M, S> {
     fn drop(&mut self) {
         // SAFETY: `ptr` points at a live `MetaSlot` for as long as

@@ -217,8 +217,12 @@ fn overlap_returns_err() {
     }
     {
         let mut cur = space.cursor_mut(vaddr_start..vaddr_end).unwrap();
-        let err = cur.map::<Size4Kb, _>(f1, PageProperty::USER_RW);
-        assert_eq!(err, Err(MapError::Overlap));
+        let f1_paddr = f1.paddr();
+        let (returned, err) = cur
+            .map::<Size4Kb, _>(f1, PageProperty::USER_RW)
+            .expect_err("map over a present leaf must be refused");
+        assert_eq!(err, MapError::Overlap);
+        assert_eq!(returned.paddr(), f1_paddr);
     }
 }
 
@@ -270,10 +274,12 @@ fn cursor_oob_after_step_past_range() {
     cur.next().unwrap(); // range.end is an allowed past-the-end position
     assert_eq!(cur.next(), Err(MapError::OutOfBounds));
     let f2 = fresh_user_frame();
-    assert_eq!(
-        cur.map::<Size4Kb, _>(f2, PageProperty::USER_RW),
-        Err(MapError::OutOfBounds)
-    );
+    let f2_paddr = f2.paddr();
+    let (returned, err) = cur
+        .map::<Size4Kb, _>(f2, PageProperty::USER_RW)
+        .expect_err("map past range.end must be refused");
+    assert_eq!(err, MapError::OutOfBounds);
+    assert_eq!(returned.paddr(), f2_paddr);
 }
 
 #[test]
@@ -386,8 +392,11 @@ fn map_2mb_unaligned_cursor_rejected() {
         UFrame::<AnonymousMeta>::from_unused(huge_paddr, AnonymousMeta::default()).unwrap();
 
     let mut cur = space.cursor_mut(vaddr_start..vaddr_end).unwrap();
-    let err = cur.map::<Size2Mb, _>(huge_uframe, PageProperty::USER_RW);
-    assert_eq!(err, Err(MapError::UnalignedCursor));
+    let (returned, err) = cur
+        .map::<Size2Mb, _>(huge_uframe, PageProperty::USER_RW)
+        .expect_err("a 2 MiB map at a 4 KiB-aligned cursor must be refused");
+    assert_eq!(err, MapError::UnalignedCursor);
+    assert_eq!(returned.paddr(), huge_paddr);
 }
 
 #[test]
@@ -761,10 +770,13 @@ fn map_4kb_inside_2mb_leaf_demotes_and_keeps_translations() {
         let mut cur = space
             .cursor_mut(target..VirtAddr::new(target.as_u64() + 0x1000))
             .unwrap();
-        assert_eq!(
-            cur.map::<Size4Kb, _>(fresh_user_frame(), PageProperty::USER_RW),
-            Err(MapError::Overlap)
-        );
+        let offered = fresh_user_frame();
+        let offered_paddr = offered.paddr();
+        let (returned, err) = cur
+            .map::<Size4Kb, _>(offered, PageProperty::USER_RW)
+            .expect_err("a demoted-but-present leaf must refuse");
+        assert_eq!(err, MapError::Overlap);
+        assert_eq!(returned.paddr(), offered_paddr);
     }
 
     assert_eq!(
@@ -828,10 +840,13 @@ fn map_4kb_inside_1gb_leaf_demotes_and_keeps_translations() {
         let mut cur = space
             .cursor_mut(target..VirtAddr::new(target.as_u64() + 0x1000))
             .unwrap();
-        assert_eq!(
-            cur.map::<Size4Kb, _>(fresh_user_frame(), PageProperty::USER_RW),
-            Err(MapError::Overlap)
-        );
+        let offered = fresh_user_frame();
+        let offered_paddr = offered.paddr();
+        let (returned, err) = cur
+            .map::<Size4Kb, _>(offered, PageProperty::USER_RW)
+            .expect_err("a twice-demoted but present leaf must refuse");
+        assert_eq!(err, MapError::Overlap);
+        assert_eq!(returned.paddr(), offered_paddr);
     }
 
     assert_eq!(
@@ -904,10 +919,11 @@ fn map_kernel_refuses_user_property_and_low_half() {
         let mut cur = space
             .cursor_mut(kernel_va..VirtAddr::new(kernel_va.as_u64() + 0x1000))
             .unwrap();
-        assert_eq!(
-            cur.map_kernel::<Size4Kb, KernelMeta>(frame, PageProperty::USER_RW),
-            Err(MapError::NotKernelMapping)
-        );
+        let (returned, err) = cur
+            .map_kernel::<Size4Kb, KernelMeta>(frame, PageProperty::USER_RW)
+            .expect_err("map_kernel must refuse a user leaf");
+        assert_eq!(err, MapError::NotKernelMapping);
+        assert_eq!(returned.paddr(), paddr);
     }
     assert_eq!(
         space
@@ -927,10 +943,11 @@ fn map_kernel_refuses_user_property_and_low_half() {
     let mut cur = space
         .cursor_mut(low_va..VirtAddr::new(low_va.as_u64() + 0x1000))
         .unwrap();
-    assert_eq!(
-        cur.map_kernel::<Size4Kb, KernelMeta>(frame2, PageProperty::KERNEL_RW),
-        Err(MapError::NotKernelMapping)
-    );
+    let (returned, err) = cur
+        .map_kernel::<Size4Kb, KernelMeta>(frame2, PageProperty::KERNEL_RW)
+        .expect_err("map_kernel must refuse a leaf below the higher half");
+    assert_eq!(err, MapError::NotKernelMapping);
+    assert_eq!(returned.paddr(), paddr2);
 }
 
 /// A `map_io` leaf owns nothing: unmapping it yields no frame, and the

@@ -650,6 +650,21 @@ impl<'a> CursorMut<'a> {
     /// leaked into the leaf PTE and held by the page table. Reverse via
     /// [`Self::unmap::<S>`].
     ///
+    /// On refusal `frame` comes back in the error, so the caller's page is
+    /// never freed by a path that reports failure. VERIFIED:
+    /// `verification/proofs/vm_space_cursor.rs`'s (REF-CONSERVE) proves the
+    /// offered frame is installed xor handed back, and
+    /// `broken_map_failed_drops` is the witness for the `Result<(), MapError>`
+    /// shape this replaced — there `?` dropped the frame and freed a page the
+    /// caller went on to free again.
+    ///
+    /// A refusal out of the walk is not a no-op on the tables: the Create-mode
+    /// descent links missing intermediates and splits any blocking huge page
+    /// before the leaf is reached, and neither is undone. Both are owned by
+    /// their parent entry and reclaimed by `VmSpace::drop`, so this is
+    /// retained memory, not leaked memory — but a caller that retries sees a
+    /// cheaper walk and a permanently split huge page.
+    ///
     /// Errors:
     /// * [`MapError::OutOfBounds`] — cursor past `range.end`.
     /// * [`MapError::UnalignedCursor`] — `cur % S::BYTES != 0`.
@@ -660,28 +675,29 @@ impl<'a> CursorMut<'a> {
         &mut self,
         frame: UFrame<M>,
         prop: PageProperty,
-    ) -> Result<(), MapError> {
+    ) -> Result<(), (UFrame<M>, MapError)> {
         if self.cur.as_u64() >= self.range.end.as_u64() {
-            return Err(MapError::OutOfBounds);
+            return Err((frame, MapError::OutOfBounds));
         }
         if self.cur.as_u64() & (S::BYTES - 1) != 0 {
-            return Err(MapError::UnalignedCursor);
+            return Err((frame, MapError::UnalignedCursor));
         }
         // Without this, a 2 MiB map at the last 4 KiB of `range` would
         // silently extend past `range.end`.
-        let map_end = self
-            .cur
-            .as_u64()
-            .checked_add(S::BYTES)
-            .ok_or(MapError::OutOfBounds)?;
+        let Some(map_end) = self.cur.as_u64().checked_add(S::BYTES) else {
+            return Err((frame, MapError::OutOfBounds));
+        };
         if map_end > self.range.end.as_u64() {
-            return Err(MapError::OutOfBounds);
+            return Err((frame, MapError::OutOfBounds));
         }
         if frame.paddr().as_u64() & (S::BYTES - 1) != 0 {
-            return Err(MapError::UnalignedFrame);
+            return Err((frame, MapError::UnalignedFrame));
         }
 
-        let (leaf_table_phys, leaf_index) = self.walk_to_leaf_for_map::<S>(prop.user)?;
+        let (leaf_table_phys, leaf_index) = match self.walk_to_leaf_for_map::<S>(prop.user) {
+            Ok(leaf) => leaf,
+            Err(e) => return Err((frame, e)),
+        };
         let pte = entry_in_table(leaf_table_phys, leaf_index);
         if pte.is_present() {
             // VERIFIED: `verification/proofs/vm_space_cursor.rs`
@@ -690,7 +706,7 @@ impl<'a> CursorMut<'a> {
             // a present leaf strands a ref. This guard is shared by
             // `map_kernel` and `map_io`; do not remove without
             // re-proving.
-            return Err(MapError::Overlap);
+            return Err((frame, MapError::Overlap));
         }
 
         // Leak the UFrame's ref into the PTE: the count stays at 1,
@@ -730,6 +746,8 @@ impl<'a> CursorMut<'a> {
     /// statement that dropping the `!prop.user` half violates the
     /// invariant.
     ///
+    /// Hands `frame` back on refusal; see [`Self::map`]'s (REF-CONSERVE) note.
+    ///
     /// Errors: as [`Self::map`], plus
     /// [`MapError::NotKernelMapping`] when `prop.user` is set or the
     /// cursor sits below the canonical higher half.
@@ -737,37 +755,38 @@ impl<'a> CursorMut<'a> {
         &mut self,
         frame: Frame<M>,
         prop: PageProperty,
-    ) -> Result<(), MapError> {
+    ) -> Result<(), (Frame<M>, MapError)> {
         if prop.user || self.cur.as_u64() < HIGHER_HALF_START {
             crate::klog_warn!(
                 "vm_space::map_kernel: refused va=0x{:x} user={} -> NotKernelMapping",
                 self.cur.as_u64(),
                 prop.user,
             );
-            return Err(MapError::NotKernelMapping);
+            return Err((frame, MapError::NotKernelMapping));
         }
         if self.cur.as_u64() >= self.range.end.as_u64() {
-            return Err(MapError::OutOfBounds);
+            return Err((frame, MapError::OutOfBounds));
         }
         if self.cur.as_u64() & (S::BYTES - 1) != 0 {
-            return Err(MapError::UnalignedCursor);
+            return Err((frame, MapError::UnalignedCursor));
         }
-        let map_end = self
-            .cur
-            .as_u64()
-            .checked_add(S::BYTES)
-            .ok_or(MapError::OutOfBounds)?;
+        let Some(map_end) = self.cur.as_u64().checked_add(S::BYTES) else {
+            return Err((frame, MapError::OutOfBounds));
+        };
         if map_end > self.range.end.as_u64() {
-            return Err(MapError::OutOfBounds);
+            return Err((frame, MapError::OutOfBounds));
         }
         if frame.paddr().as_u64() & (S::BYTES - 1) != 0 {
-            return Err(MapError::UnalignedFrame);
+            return Err((frame, MapError::UnalignedFrame));
         }
 
-        let (leaf_table_phys, leaf_index) = self.walk_to_leaf_for_map::<S>(false)?;
+        let (leaf_table_phys, leaf_index) = match self.walk_to_leaf_for_map::<S>(false) {
+            Ok(leaf) => leaf,
+            Err(e) => return Err((frame, e)),
+        };
         let pte = entry_in_table(leaf_table_phys, leaf_index);
         if pte.is_present() {
-            return Err(MapError::Overlap);
+            return Err((frame, MapError::Overlap));
         }
 
         let paddr = frame.paddr();
@@ -1072,7 +1091,17 @@ impl CursorMut<'_> {
     ///
     /// Requires the cursor's `range` to extend at least
     /// `frames.len() * S::BYTES` bytes from the starting `cur`.
-    pub fn map_range<S, M, I>(&mut self, frames: I, prop: PageProperty) -> Result<usize, MapError>
+    ///
+    /// The refused frame comes back in the error beside the count, so a caller
+    /// that owns its frames can free exactly the one that did not land. The
+    /// iterator's *untouched* remainder is the caller's: it still holds the
+    /// `I`, and every frame this consumed is either mapped (counted) or
+    /// returned here.
+    pub fn map_range<S, M, I>(
+        &mut self,
+        frames: I,
+        prop: PageProperty,
+    ) -> Result<usize, (Option<UFrame<M>>, usize, MapError)>
     where
         S: PageSize,
         M: AnyUFrameMeta,
@@ -1080,8 +1109,12 @@ impl CursorMut<'_> {
     {
         let mut count = 0usize;
         for frame in frames {
-            self.map::<S, M>(frame, prop)?;
-            self.advance(S::BYTES)?;
+            if let Err((frame, e)) = self.map::<S, M>(frame, prop) {
+                return Err((Some(frame), count, e));
+            }
+            if let Err(e) = self.advance(S::BYTES) {
+                return Err((None, count + 1, e));
+            }
             count += 1;
         }
         Ok(count)
