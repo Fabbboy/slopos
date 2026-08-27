@@ -1348,11 +1348,19 @@ impl<K, U> TaskInner<K, U> {
             .is_ok()
     }
 
-    /// Claim this task's poll-waiter slot. See [`TaskState::poll_arm`].
+    /// Claim this task's poll-waiter slot, yielding the new token's era. See
+    /// [`TaskState::poll_arm`].
     #[inline]
     #[must_use = "a refused claim means a PollWaiter is already live for this task"]
-    pub fn poll_arm(&self) -> bool {
+    pub fn poll_arm(&self) -> Option<u8> {
         self.state.poll_arm()
+    }
+
+    /// The live poll token's era, or `None` when none is armed. See
+    /// [`TaskState::poll_era`].
+    #[inline]
+    pub fn poll_era(&self) -> Option<u8> {
+        self.state.poll_era()
     }
 
     /// Release the poll-waiter slot. See [`TaskState::poll_disarm`].
@@ -1361,11 +1369,11 @@ impl<K, U> TaskInner<K, U> {
         self.state.poll_disarm();
     }
 
-    /// Record a wake against an armed poll token, reporting whether one was
-    /// armed to take it. See [`TaskState::poll_set_pending`].
+    /// Record a wake against the token of generation `era`, reporting whether
+    /// that token was live to take it. See [`TaskState::poll_set_pending`].
     #[inline]
-    pub fn poll_set_pending(&self) -> bool {
-        self.state.poll_set_pending()
+    pub fn poll_set_pending(&self, era: u8) -> bool {
+        self.state.poll_set_pending(era)
     }
 
     /// Consume a pending poll wake, or block. See

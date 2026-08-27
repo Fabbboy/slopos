@@ -240,9 +240,11 @@ fn poll_to_select_mask(
 /// Park a poll/select iteration that found nothing ready.
 ///
 /// Without a token — no current task, or a nested poll that lost the claim —
-/// the untokened block still runs, so the wait degrades in latency rather than
-/// breaking. With nothing registered no queue can wake us, leaving only a short
-/// timed delay.
+/// the untokened block still runs, and the registrations made above are still
+/// on their queues, so the wait degrades to the pre-token behaviour (a wake
+/// landing in the register-block gap is dropped and the iteration sleeps out
+/// its budget) rather than breaking. With nothing registered no queue can wake
+/// us, leaving only a short timed delay.
 ///
 /// `#[inline(never)]`: inlined into both loops it pushed `syscall_select`'s
 /// frame past the 2 KiB stack gate.

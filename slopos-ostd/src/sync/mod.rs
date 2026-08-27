@@ -80,7 +80,7 @@ pub use spin::{
     register_spin_relax_hook, spin_relax,
 };
 pub use spin::{SpinLock, SpinLockGuard};
-pub use wait_node::WaitNode;
+pub use wait_node::{NO_POLL_ERA, WaitNode};
 pub use wait_queue::{
     WaitAbort, WaitQueue, WaitQueueBackend, WaitResult, WaitTaskHandle, register_wait_queue_backend,
 };

@@ -25,7 +25,6 @@ use slopos_abi::event::{
 use slopos_abi::net::{MAX_SOCKET_SLOTS, MAX_SOCKETS};
 
 use crate::KVec;
-use crate::sync::poll_waiter::PollWaiterRef;
 use crate::sync::wait_queue::{WaitQueue, WaitResult};
 
 /// One AF_INET socket's three wait queues, addressed by slab index.
@@ -206,12 +205,16 @@ impl EventBus {
     /// Pairs with [`unsubscribe_current`](EventBus::unsubscribe_current).
     ///
     /// Registering before the readiness check closes the *check-then-register*
-    /// window; the [`PollWaiter`] closes the *register-then-block* one, by
-    /// making a wake that arrives before the caller parks durable rather than
-    /// dropped. The token is taken by reference rather than discovered so that
-    /// registering without one is not expressible.
+    /// window; a [`PollWaiter`](crate::sync::PollWaiter), if the caller holds
+    /// one, closes the *register-then-block* one by making a wake that arrives
+    /// before the caller parks durable rather than dropped.
+    ///
+    /// The token is discovered rather than demanded, and its absence is not an
+    /// error: this is also the registration path for callers that never park on
+    /// a `PollWaiter` at all, and refusing to queue without one would leave
+    /// them on no wait queue and reachable only by timer.
     #[inline]
-    pub fn subscribe_current(&'static self, _waiter: PollWaiterRef<'_>, ev: KernelEvent) -> bool {
+    pub fn subscribe_current(&'static self, ev: KernelEvent) -> bool {
         self.queue_for(ev).enqueue_current()
     }
 

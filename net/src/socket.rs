@@ -621,7 +621,7 @@ use slopos_abi::syscall::{
     ERRNO_ENOTSOCK, ERRNO_EPIPE, ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN,
     POLLOUT,
 };
-use slopos_ostd::sync::{BUS, PollWaiterRef, WaitAbort};
+use slopos_ostd::sync::{BUS, WaitAbort};
 
 use crate as net;
 use crate::tcp::{TCP_HEADER_LEN, TcpError, TcpOutSegment, TcpState};
@@ -2742,7 +2742,7 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
 }
 
 pub fn socket_poll_enqueue_recv(sock_idx: u32) -> bool {
-    PollWaiterRef::current().is_some_and(|w| BUS.subscribe_current(w, sock_recv_ev(sock_idx)))
+    BUS.subscribe_current(sock_recv_ev(sock_idx))
 }
 
 pub fn socket_poll_dequeue_recv(sock_idx: u32) {
@@ -2750,7 +2750,7 @@ pub fn socket_poll_dequeue_recv(sock_idx: u32) {
 }
 
 pub fn socket_poll_enqueue_send(sock_idx: u32) -> bool {
-    PollWaiterRef::current().is_some_and(|w| BUS.subscribe_current(w, sock_send_ev(sock_idx)))
+    BUS.subscribe_current(sock_send_ev(sock_idx))
 }
 
 pub fn socket_poll_dequeue_send(sock_idx: u32) {

@@ -26,6 +26,15 @@ use slopos_abi::task::INVALID_TASK_ID;
 
 use crate::sync::intrusive::{Link, Linked};
 
+/// Sentinel era for a node enqueued while no poll token was armed. No wake can
+/// be recorded against it, so such a node takes the ordinary unblock path.
+///
+/// Also the `None` encoding for the era in [`WaitQueueOps`], whose plain `fn`
+/// signatures cannot carry an `Option<u8>`.
+///
+/// [`WaitQueueOps`]: crate::sync::wait_queue::WaitQueueOps
+pub const NO_POLL_ERA: u32 = u32::MAX;
+
 /// Role tag for the wait-queue intrusive list.
 pub enum WaitQueueRole {}
 
@@ -43,6 +52,16 @@ pub struct WaitNode {
     /// `true` for nodes constructed via `KBox<WaitNode>` and consumed via
     /// `KBox::from_raw`. Set once at construction, so reads may be `Relaxed`.
     heap_owned: AtomicBool,
+    /// Generation of the poll token live when this node was enqueued, or
+    /// [`NO_POLL_ERA`] for a registration made without one.
+    ///
+    /// The wake side delivers *after* releasing the queue lock, so by then the
+    /// waiter may have finished its poll and a fresh one may have armed. The
+    /// era recorded here is what lets the delivery address the token that this
+    /// registration was actually made under, rather than whichever token
+    /// happens to be armed on arrival. Set once before the push, so reads may
+    /// be `Relaxed`.
+    poll_era: AtomicU32,
     /// Set by the wake side under the WQ lock when this node is popped; the
     /// waiter's post-WQ-unlock recheck `Acquire`-loads it to detect a wake that
     /// raced its decision to yield. An auxiliary signal — the WQ-lock pair
@@ -79,6 +98,7 @@ impl WaitNode {
             link: Link::new(),
             task: AtomicU32::new(INVALID_TASK_ID),
             heap_owned: AtomicBool::new(false),
+            poll_era: AtomicU32::new(NO_POLL_ERA),
             has_woken: AtomicBool::new(false),
             queue_ptr: AtomicPtr::new(core::ptr::null_mut()),
             _not_send: PhantomData,
@@ -92,6 +112,7 @@ impl WaitNode {
             link: Link::new(),
             task: AtomicU32::new(INVALID_TASK_ID),
             heap_owned: AtomicBool::new(true),
+            poll_era: AtomicU32::new(NO_POLL_ERA),
             has_woken: AtomicBool::new(false),
             queue_ptr: AtomicPtr::new(core::ptr::null_mut()),
             _not_send: PhantomData,
@@ -113,6 +134,18 @@ impl WaitNode {
     #[inline]
     pub(crate) fn is_heap_owned(&self) -> bool {
         self.heap_owned.load(Ordering::Relaxed)
+    }
+
+    /// Stamp the poll-token era. Called once, before the node is pushed.
+    #[inline]
+    pub(crate) fn set_poll_era(&self, era: u32) {
+        self.poll_era.store(era, Ordering::Release);
+    }
+
+    /// The era this registration was made under, or [`NO_POLL_ERA`].
+    #[inline]
+    pub(crate) fn poll_era(&self) -> u32 {
+        self.poll_era.load(Ordering::Acquire)
     }
 
     #[inline]

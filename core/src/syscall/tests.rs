@@ -5801,8 +5801,8 @@ pub fn test_poll_bits_survive_state_transitions() -> TestResult {
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
 
-    assert_test!(task_guard.poll_arm(), "arm");
-    assert_test!(task_guard.poll_set_pending(), "set pending");
+    let era = assert_some!(task_guard.poll_arm(), "arm");
+    assert_test!(task_guard.poll_set_pending(era), "set pending");
 
     let epoch_before = task_guard.state_epoch();
     let _ = task_set_state(task_id, TaskStatus::Ready);
@@ -5819,7 +5819,7 @@ pub fn test_poll_bits_survive_state_transitions() -> TestResult {
     assert_test!(!task_guard.poll_armed(), "disarm clears armed");
     assert_test!(!task_guard.poll_pending(), "disarm clears pending");
     assert_test!(
-        !task_guard.poll_set_pending(),
+        !task_guard.poll_set_pending(era),
         "a wake against a disarmed task reports no token"
     );
 
@@ -5840,8 +5840,171 @@ slopos_testing::stest!(
     name = test_poll_waiter_drop_discards_late_wake,
     suite = poll_wakeup_race
 );
+
 slopos_testing::stest!(
     name = test_poll_bits_survive_state_transitions,
+    suite = poll_wakeup_race
+);
+
+/// A wake owed to a finished poll must not be consumed by the next poll.
+///
+/// `wake_one` pops the node under the queue lock and delivers *after* releasing
+/// it. In that window the waiter can finish its poll, disarm, and a fresh poll
+/// on the same task can arm. Against a single armed bit the late wake marks the
+/// new poll's token, whose first `block` then returns without parking, having
+/// consumed a wake it was never owed — poll reports nothing ready and spins.
+///
+/// The era is what refuses it. This test drives `poll_set_pending` with the era
+/// captured at registration, which is exactly what `deliver_wake` does; against
+/// a token that carries no generation it succeeds and this fails.
+pub fn test_poll_token_generation_rejects_a_stale_era_wake() -> TestResult {
+    use slopos_ostd::sync::PollWaiter;
+
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    make_task_current(task_id);
+
+    let first = assert_some!(PollWaiter::new(), "poll #1 claims");
+    let stale_era = first.era();
+    drop(first);
+    assert_test!(!task_guard.poll_armed(), "poll #1 disarmed");
+
+    let second = assert_some!(PollWaiter::new(), "poll #2 claims");
+    assert_test!(
+        second.era() != stale_era,
+        "a fresh claim must not reuse the era a wake may still name"
+    );
+
+    assert_test!(
+        !task_guard.poll_set_pending(stale_era),
+        "a wake registered under poll #1 must not mark poll #2's token"
+    );
+    assert_test!(
+        !task_guard.poll_pending(),
+        "and must leave poll #2's token unsignalled"
+    );
+
+    assert_test!(
+        task_guard.poll_set_pending(second.era()),
+        "poll #2's own era is still accepted"
+    );
+    assert_test!(task_guard.poll_pending(), "its own wake is recorded");
+
+    drop(second);
+    park_bootstrap_on_current_cpu();
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// A registration made with no poll token still queues, and is still woken.
+///
+/// The token makes a wake *durable* across the register-block gap; it is not a
+/// precondition for being on a wait queue. Requiring one would silently stop
+/// every non-poll registration path from queueing, leaving those callers
+/// reachable only by timer.
+pub fn test_registration_without_a_token_still_queues() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+    let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
+        Some(pair) => pair,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+
+    make_task_current(task_id);
+    assert_test!(
+        !task_guard.poll_armed(),
+        "this test is about the no-token path"
+    );
+
+    let cli_handle = assert_some!(
+        socket_handle_for_fd(pid, cli_fd),
+        "client fd names a socket"
+    );
+    let before = slopos_net::unix_socket::unix_poll_waiter_count(cli_handle);
+
+    let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
+    assert_test!(
+        reg.registered,
+        "registration must succeed without a poll token"
+    );
+    assert_eq_test!(
+        slopos_net::unix_socket::unix_poll_waiter_count(cli_handle),
+        before + 1,
+        "and must actually be on the queue"
+    );
+
+    slopos_fs::fileio::file_poll_unregister_fd(&reg);
+    file_close_fd(pid, srv_fd);
+    file_close_fd(pid, cli_fd);
+    park_bootstrap_on_current_cpu();
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_poll_token_generation_rejects_a_stale_era_wake,
+    suite = poll_wakeup_race
+);
+
+/// `poll_consume_or_block` must refuse a transition into `Blocked` that the
+/// state machine forbids, exactly as `block_from` does.
+///
+/// It is the only fused block CAS in the tree, so an ungated one would be the
+/// single path able to restore a task stamped terminal by a peer back into a
+/// live status — which is how a task stops reaching deferred cleanup.
+pub fn test_poll_block_refuses_an_illegal_transition() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "create task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+
+    // `Blocked -> Blocked` is not a legal edge; `can_transition_to` rejects it.
+    assert_test!(
+        !TaskStatus::Blocked.can_transition_to(TaskStatus::Blocked),
+        "premise: the state machine forbids this edge"
+    );
+    let _ = task_set_state(task_id, TaskStatus::Ready);
+    let _ = task_set_state(task_id, TaskStatus::Running);
+    assert_test!(task_guard.block(BlockReason::Sleep), "park the task");
+    assert_eq_test!(task_guard.status(), TaskStatus::Blocked, "it is parked");
+
+    let epoch_before = task_guard.state_epoch();
+    let outcome = task_guard.poll_consume_or_block(TaskStatus::Blocked, BlockReason::Sleep);
+    assert_test!(outcome.is_err(), "an illegal transition must be refused");
+    assert_eq_test!(
+        task_guard.state_epoch(),
+        epoch_before,
+        "a refusal must write nothing at all"
+    );
+
+    let _ = task_set_state(task_id, TaskStatus::Ready);
+    let _ = task_set_state(task_id, TaskStatus::Running);
+    park_bootstrap_on_current_cpu();
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_poll_block_refuses_an_illegal_transition,
+    suite = poll_wakeup_race
+);
+
+slopos_testing::stest!(
+    name = test_registration_without_a_token_still_queues,
     suite = poll_wakeup_race
 );
 

@@ -27,7 +27,7 @@ pub static WAIT_QUEUE_OPS: WaitQueueOps = WaitQueueOps {
     current_task_is_killed: driver_runtime::current_task_is_killed,
     current_task_has_deliverable_signal: driver_runtime::has_pending_signal,
     poll_arm_current: driver_runtime::poll_arm_current,
-    poll_armed_current: driver_runtime::poll_armed_current,
+    poll_era_current: driver_runtime::poll_era_current,
     poll_disarm_current: driver_runtime::poll_disarm_current,
     poll_clear_pending_current: driver_runtime::poll_clear_pending_current,
     poll_set_pending: driver_runtime::poll_set_pending,

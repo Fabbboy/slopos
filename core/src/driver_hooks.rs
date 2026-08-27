@@ -8,6 +8,7 @@ use slopos_kernel_services::driver_runtime::{
 
 use crate::irq;
 use slopos_ostd::KArc;
+use slopos_ostd::sync::NO_POLL_ERA;
 use slopos_ostd::task::ProcessGroup;
 use slopos_sched::scheduler;
 use slopos_sched::task::{self, task_has_deliverable_signal, task_signal_post};
@@ -126,12 +127,18 @@ fn runtime_current_task_wait_aborted() -> bool {
 }
 
 /// Claim the current task's poll-waiter slot, refusing a second live claim.
-fn runtime_poll_arm_current() -> bool {
-    Current::get().is_some_and(|current| current.task().poll_arm())
+/// Answers the new token's era, or `NO_POLL_ERA` on refusal.
+fn runtime_poll_arm_current() -> u32 {
+    Current::get()
+        .and_then(|current| current.task().poll_arm())
+        .map_or(NO_POLL_ERA, u32::from)
 }
 
-fn runtime_poll_armed_current() -> bool {
-    Current::get().is_some_and(|current| current.task().poll_armed())
+/// The current task's live token era, or `NO_POLL_ERA` when none is armed.
+fn runtime_poll_era_current() -> u32 {
+    Current::get()
+        .and_then(|current| current.task().poll_era())
+        .map_or(NO_POLL_ERA, u32::from)
 }
 
 fn runtime_poll_disarm_current() {
@@ -146,11 +153,15 @@ fn runtime_poll_clear_pending_current() {
     }
 }
 
-/// Record a wake against `task_id`'s armed poll token. `false` when the id
-/// names no live task or no token is armed, obliging the waker to fall back to
-/// its ordinary unblock.
-fn runtime_poll_set_pending(task_id: u32) -> bool {
-    task::task_find_by_id(task_id).is_some_and(|task| task.poll_set_pending())
+/// Record a wake against `task_id`'s poll token of generation `era`. `false`
+/// when the id names no live task, no token is armed, or the live token is of
+/// a different generation — all of which oblige the waker to fall back to its
+/// ordinary unblock.
+fn runtime_poll_set_pending(task_id: u32, era: u32) -> bool {
+    if era > u8::MAX as u32 {
+        return false;
+    }
+    task::task_find_by_id(task_id).is_some_and(|task| task.poll_set_pending(era as u8))
 }
 
 /// Publish the wait queue the current task is parked on, so teardown can unlink
@@ -220,7 +231,7 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     block_current_task_with_timeout: scheduler::block_current_task_with_timeout,
     poll_block_current_timeout: scheduler::poll_block_current_timeout,
     poll_arm_current: runtime_poll_arm_current,
-    poll_armed_current: runtime_poll_armed_current,
+    poll_era_current: runtime_poll_era_current,
     poll_disarm_current: runtime_poll_disarm_current,
     poll_clear_pending_current: runtime_poll_clear_pending_current,
     poll_set_pending: runtime_poll_set_pending,

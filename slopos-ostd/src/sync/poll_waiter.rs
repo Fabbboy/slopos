@@ -10,18 +10,27 @@
 //! consumes it in the same compare-exchange that would otherwise park — so
 //! there is no window between testing the token and parking.
 //!
-//! Registering demands a [`PollWaiterRef`], so a registration no block will
-//! consume cannot be written. `new` claims a single per-task slot and answers
-//! `None` to a second caller, so a nested poll fails rather than sharing its
-//! parent's token. Dropping disarms, so a late wake cannot leave `pending` set
-//! for an unrelated later poll.
+//! `new` claims a single per-task slot and answers `None` to a second caller,
+//! so a nested poll fails rather than sharing its parent's token. Dropping
+//! disarms, so a late wake cannot leave `pending` set for an unrelated later
+//! poll.
+//!
+//! Each claim carries a **generation**. A wake is delivered after the wait
+//! queue's lock is released, so by then this poll may have finished and the
+//! next one armed; the registration records the era it was made under and the
+//! wake refuses any other, which is what stops a later poll from consuming a
+//! wake it was never owed.
+//!
+//! A token is not a precondition for *registering*. `enqueue_current` queues
+//! whether or not one is armed — the token is what makes a wake durable across
+//! the register-block gap, and a caller without one is simply woken the
+//! ordinary way. Requiring one would silently stop every non-poll registration
+//! path (blocking `read`, `file_poll_register_fd`) from queueing at all.
 //!
 //! The owning/borrowed split exists because the two ends live in different
 //! crates: the syscall owns the lifecycle, but the `poll_fused` impls that
 //! register sit behind `slopos_abi`'s `FileOps`, which cannot name an OSTD
-//! type. `PollWaiterRef::current` therefore discovers the token instead — and
-//! since minting one re-checks the armed bit, discovery is as strong as
-//! passing.
+//! type.
 
 use core::marker::PhantomData;
 
@@ -35,6 +44,7 @@ use super::wait_queue::backend;
 /// one task's slot and consume another's.
 #[must_use = "a PollWaiter does nothing until you register on it and block"]
 pub struct PollWaiter {
+    era: u8,
     _not_send: PhantomData<*const ()>,
 }
 
@@ -46,9 +56,16 @@ impl PollWaiter {
     /// not park as though it had: poll's fallback is a timed re-scan.
     #[inline]
     pub fn new() -> Option<Self> {
-        backend().poll_arm_current().then_some(Self {
+        backend().poll_arm_current().map(|era| Self {
+            era,
             _not_send: PhantomData,
         })
+    }
+
+    /// This token's generation. Diagnostic / test use.
+    #[inline]
+    pub fn era(&self) -> u8 {
+        self.era
     }
 
     /// Discard an unconsumed wake, keeping the token armed.
@@ -79,11 +96,14 @@ impl Drop for PollWaiter {
     }
 }
 
-/// Proof that a [`PollWaiter`] is armed for the current task, as
-/// [`EventBus::subscribe_current`](super::EventBus::subscribe_current) demands.
+/// A borrow of the current task's [`PollWaiter`].
 ///
 /// Borrowed, not owning: dropping one disarms nothing, because the owning
 /// `PollWaiter` up the stack must outlast every registration made under it.
+///
+/// Deliberately *not* a precondition for registering. `enqueue_current` reads
+/// the live era off the task itself, so a registration made without a token
+/// still queues and is woken the ordinary way; see the [module docs](self).
 #[derive(Clone, Copy)]
 pub struct PollWaiterRef<'a> {
     _borrow: PhantomData<&'a PollWaiter>,
@@ -98,20 +118,5 @@ impl<'a> PollWaiterRef<'a> {
             _borrow: PhantomData,
             _not_send: PhantomData,
         }
-    }
-
-    /// Discover the current task's armed token; `None` when none is armed.
-    ///
-    /// For `FileOps::poll_fused`, which cannot receive a borrow through a trait
-    /// its crate cannot name OSTD from. `None` is the honest answer for a
-    /// readiness probe with no poll in progress — the level-triggered
-    /// `poll_events` path is one — and such a caller must not register, having
-    /// nothing that will unregister it.
-    #[inline]
-    pub fn current() -> Option<Self> {
-        backend().poll_armed_current().then_some(Self {
-            _borrow: PhantomData,
-            _not_send: PhantomData,
-        })
     }
 }

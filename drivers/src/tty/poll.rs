@@ -4,7 +4,7 @@ use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 
 use slopos_kernel_services::driver_runtime::scheduler_is_enabled;
 
-use slopos_ostd::sync::{BUS, PollWaiterRef};
+use slopos_ostd::sync::BUS;
 
 use super::table::{TTY_SLOTS, tty_input_event, tty_output_event};
 use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
@@ -12,11 +12,8 @@ use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
 /// Waiters park on both queues so a readiness change in either direction wakes
 /// them.
 fn poll_register_slot(slot: usize) -> bool {
-    let Some(waiter) = PollWaiterRef::current() else {
-        return false;
-    };
-    let input = BUS.subscribe_current(waiter, tty_input_event(slot));
-    let output = BUS.subscribe_current(waiter, tty_output_event(slot));
+    let input = BUS.subscribe_current(tty_input_event(slot));
+    let output = BUS.subscribe_current(tty_output_event(slot));
     input || output
 }
 

@@ -6,7 +6,7 @@ use slopos_abi::syscall::{POLLERR, POLLHUP};
 use slopos_kernel_services::driver_runtime::scheduler_is_enabled;
 use slopos_ostd::KArc;
 use slopos_ostd::process::quota::{AliasOf, FileBacking};
-use slopos_ostd::sync::{BUS, PollWaiterRef};
+use slopos_ostd::sync::BUS;
 
 use crate::pipe;
 use crate::pipe::PipeHandle;
@@ -248,8 +248,7 @@ impl FileOps for PipeReadOps {
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
         let h = PipeHandle::from_usize(handle);
         // Register FIRST, then check readiness.
-        let registered =
-            PollWaiterRef::current().is_some_and(|w| BUS.subscribe_current(w, read_ev(h)));
+        let registered = BUS.subscribe_current(read_ev(h));
         let revents =
             pipe::with_pipe(h, |slot| slot.revents(true, false, events)).unwrap_or(POLLERR);
         slopos_abi::file_ops::FusedPollResult {
@@ -265,8 +264,7 @@ impl FileOps for PipeReadOps {
     }
 
     fn poll_wait(&self, handle: usize) -> bool {
-        PollWaiterRef::current()
-            .is_some_and(|w| BUS.subscribe_current(w, read_ev(PipeHandle::from_usize(handle))))
+        BUS.subscribe_current(read_ev(PipeHandle::from_usize(handle)))
     }
 
     fn poll_unwait(&self, handle: usize) {
@@ -453,8 +451,7 @@ impl FileOps for PipeWriteOps {
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
         let h = PipeHandle::from_usize(handle);
-        let registered =
-            PollWaiterRef::current().is_some_and(|w| BUS.subscribe_current(w, write_ev(h)));
+        let registered = BUS.subscribe_current(write_ev(h));
         let revents = pipe::with_pipe(h, |slot| slot.revents(false, true, events))
             .unwrap_or(POLLERR | POLLHUP);
         slopos_abi::file_ops::FusedPollResult {
@@ -470,8 +467,7 @@ impl FileOps for PipeWriteOps {
     }
 
     fn poll_wait(&self, handle: usize) -> bool {
-        PollWaiterRef::current()
-            .is_some_and(|w| BUS.subscribe_current(w, write_ev(PipeHandle::from_usize(handle))))
+        BUS.subscribe_current(write_ev(PipeHandle::from_usize(handle)))
     }
 
     fn poll_unwait(&self, handle: usize) {

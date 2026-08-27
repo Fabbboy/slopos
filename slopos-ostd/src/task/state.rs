@@ -10,7 +10,7 @@
 //! bits  0..4    TaskStatus    (4 bits, 5 variants)
 //! bits  4..12   BlockReason   (8 bits, 8 variants)
 //! bits 12..14   poll          (2 bits: armed, pending — see below)
-//! bits 14..16   reserved      (must be zero)
+//! bits 14..16   poll_era      (2 bits, wrapping token generation)
 //! bits 16..32   cpu_hint      (16 bits, currently zero — reserved for
 //!                              future CPU-affinity-aware wakeup paths)
 //! bits 32..64   epoch         (32 bits, ABA defence; bumped on every
@@ -21,6 +21,15 @@
 //! The poll bits are [`PollWaiter`](crate::sync::PollWaiter)'s; they live here
 //! so arming a token and parking are one atomic each, rather than a flag plus a
 //! state write that a wake could land between.
+//!
+//! `poll_era` is what makes the token an identity rather than a boolean.
+//! `WaitQueue::wake_one` pops a node under the queue lock and delivers the wake
+//! *after* releasing it; in that window the waiter can finish its poll, disarm,
+//! and a fresh poll on the same task can arm. Against a single armed bit that
+//! late wake marks the new poll's token and its first block returns without
+//! parking, having consumed a wake it was never owed. A wake therefore carries
+//! the era its registration was made under, and
+//! [`poll_set_pending`](TaskState::poll_set_pending) refuses a mismatch.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,15 +38,15 @@ use slopos_abi::task::{BlockReason, TaskStatus};
 const STATUS_BITS: u32 = 4;
 const REASON_BITS: u32 = 8;
 const POLL_BITS: u32 = 2;
-const RESERVED_BITS: u32 = 2;
+const POLL_ERA_BITS: u32 = 2;
 const CPU_HINT_BITS: u32 = 16;
 const EPOCH_BITS: u32 = 32;
 
 const STATUS_SHIFT: u32 = 0;
 const REASON_SHIFT: u32 = STATUS_SHIFT + STATUS_BITS;
 const POLL_SHIFT: u32 = REASON_SHIFT + REASON_BITS;
-const _RESERVED_SHIFT: u32 = POLL_SHIFT + POLL_BITS;
-const CPU_HINT_SHIFT: u32 = _RESERVED_SHIFT + RESERVED_BITS;
+const POLL_ERA_SHIFT: u32 = POLL_SHIFT + POLL_BITS;
+const CPU_HINT_SHIFT: u32 = POLL_ERA_SHIFT + POLL_ERA_BITS;
 const EPOCH_SHIFT: u32 = CPU_HINT_SHIFT + CPU_HINT_BITS;
 
 const STATUS_MASK: u64 = (1u64 << STATUS_BITS) - 1;
@@ -49,9 +58,14 @@ const EPOCH_MASK: u64 = (1u64 << EPOCH_BITS) - 1;
 const POLL_ARMED_BIT: u64 = 1u64 << POLL_SHIFT;
 /// Bit 13: a wake was aimed at this task while it was not `Blocked`.
 const POLL_PENDING_BIT: u64 = 1u64 << (POLL_SHIFT + 1);
+/// Bits 14..16: the live token's generation. See the [module docs](self).
+const POLL_ERA_MASK: u64 = (1u64 << POLL_ERA_BITS) - 1;
+
+/// Number of distinct token generations before the counter wraps.
+pub const POLL_ERA_MODULUS: u8 = 1u8 << POLL_ERA_BITS;
 
 const _: () = assert!(
-    STATUS_BITS + REASON_BITS + POLL_BITS + RESERVED_BITS + CPU_HINT_BITS + EPOCH_BITS == 64
+    STATUS_BITS + REASON_BITS + POLL_BITS + POLL_ERA_BITS + CPU_HINT_BITS + EPOCH_BITS == 64
 );
 
 /// Snapshot view of a [`TaskState`] word — the unpacked form.
@@ -65,6 +79,9 @@ pub struct TaskStateView {
     /// A wake landed while this task was not `Blocked`. See the
     /// [module docs](self).
     pub poll_pending: bool,
+    /// Generation of the live token, wrapping at [`POLL_ERA_MODULUS`]. See the
+    /// [module docs](self).
+    pub poll_era: u8,
 }
 
 impl TaskStateView {
@@ -82,7 +99,8 @@ impl TaskStateView {
         } else {
             0
         };
-        (s << STATUS_SHIFT) | (r << REASON_SHIFT) | (e << EPOCH_SHIFT) | a | p
+        let g = ((self.poll_era as u64) & POLL_ERA_MASK) << POLL_ERA_SHIFT;
+        (s << STATUS_SHIFT) | (r << REASON_SHIFT) | (e << EPOCH_SHIFT) | a | p | g
     }
 
     #[inline]
@@ -96,6 +114,7 @@ impl TaskStateView {
             epoch,
             poll_armed: (word & POLL_ARMED_BIT) != 0,
             poll_pending: (word & POLL_PENDING_BIT) != 0,
+            poll_era: ((word >> POLL_ERA_SHIFT) & POLL_ERA_MASK) as u8,
         }
     }
 }
@@ -115,6 +134,7 @@ impl TaskState {
             epoch: 0,
             poll_armed: false,
             poll_pending: false,
+            poll_era: 0,
         };
         Self(AtomicU64::new(view.pack()))
     }
@@ -294,21 +314,26 @@ impl TaskState {
         }
     }
 
-    /// Claim the poll-waiter slot, or refuse because one is already live.
-    /// Clears `pending` in the same CAS, so a token never begins life
-    /// pre-signalled by a wake aimed at the previous holder.
+    /// Claim the poll-waiter slot, returning the new token's era, or `None`
+    /// because one is already live.
+    ///
+    /// Bumps the era and clears `pending` in the same CAS, so a token never
+    /// begins life pre-signalled and no wake registered under the previous
+    /// holder's era can address this one.
     #[inline]
     #[must_use = "a refused claim means a PollWaiter is already live for this task"]
-    pub fn poll_arm(&self) -> bool {
+    pub fn poll_arm(&self) -> Option<u8> {
         loop {
             let current_word = self.0.load(Ordering::Acquire);
             let current = TaskStateView::unpack(current_word);
             if current.poll_armed {
-                return false;
+                return None;
             }
+            let era = current.poll_era.wrapping_add(1) % POLL_ERA_MODULUS;
             let next = TaskStateView {
                 poll_armed: true,
                 poll_pending: false,
+                poll_era: era,
                 ..current
             };
             match self.0.compare_exchange_weak(
@@ -317,10 +342,18 @@ impl TaskState {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return true,
+                Ok(_) => return Some(era),
                 Err(_) => continue,
             }
         }
+    }
+
+    /// The live token's era, or `None` when no token is armed. Read by
+    /// registration so a wake can name the era it was made under.
+    #[inline]
+    pub fn poll_era(&self) -> Option<u8> {
+        let current = TaskStateView::unpack(self.0.load(Ordering::Acquire));
+        current.poll_armed.then_some(current.poll_era)
     }
 
     /// Release the poll-waiter slot and discard any unconsumed wake.
@@ -346,18 +379,23 @@ impl TaskState {
         }
     }
 
-    /// Record a wake for a task that is not parked yet; `false` means no token
-    /// is armed and the caller must fall back to its ordinary wake path.
+    /// Record a wake for a task that is not parked yet; `false` means the wake
+    /// found no token of `era` to take it and the caller must fall back to its
+    /// ordinary wake path.
+    ///
+    /// `era` is the generation the *registration* was made under. Refusing a
+    /// mismatch is what stops a wake owed to a finished poll from marking a
+    /// later poll's token — see the [module docs](self).
     ///
     /// The epoch is deliberately not bumped: this records a wake rather than
     /// transitioning, and a bump would fail a concurrent comparator that has no
     /// reason to retry.
     #[inline]
-    pub fn poll_set_pending(&self) -> bool {
+    pub fn poll_set_pending(&self, era: u8) -> bool {
         loop {
             let current_word = self.0.load(Ordering::Acquire);
             let current = TaskStateView::unpack(current_word);
-            if !current.poll_armed {
+            if !current.poll_armed || current.poll_era != era {
                 return false;
             }
             if current.poll_pending {
@@ -386,6 +424,11 @@ impl TaskState {
     /// Fused deliberately: a separate flag test before a separate block CAS
     /// would let a wake land between them, setting a bit nobody re-reads
     /// against a task about to become `Blocked`.
+    ///
+    /// Gated on [`TaskStatus::can_transition_to`] like every other path into
+    /// `Blocked`: publishing a transition the state machine forbids is how a
+    /// task stamped terminal by a peer gets restored to a live status and never
+    /// reaches cleanup. An illegal `expected` is `Err`, having written nothing.
     #[inline]
     pub fn poll_consume_or_block(
         &self,
@@ -410,7 +453,7 @@ impl TaskState {
                     Err(_) => continue,
                 }
             }
-            if current.status != expected {
+            if current.status != expected || !expected.can_transition_to(TaskStatus::Blocked) {
                 return Err(current);
             }
             let next = TaskStateView {

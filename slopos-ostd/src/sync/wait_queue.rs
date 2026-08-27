@@ -31,6 +31,7 @@ use crate::mm::KBox;
 use crate::sync::BspToken;
 use crate::sync::intrusive::IntrusiveLinkedList;
 use crate::sync::spin::SpinLock;
+use crate::sync::wait_node::NO_POLL_ERA;
 use crate::sync::wait_node::WaitNode;
 use crate::sync::wait_node::WaitQueueRole;
 
@@ -185,13 +186,13 @@ pub unsafe trait WaitQueueBackend: Send + Sync + 'static {
     /// Consulted only by the interruptible wait tier.
     fn current_task_has_deliverable_signal(&self) -> bool;
 
-    /// Claim the current task's poll-waiter slot, or refuse because one is
-    /// already live. Must return `false` when there is no current task.
-    fn poll_arm_current(&self) -> bool;
+    /// Claim the current task's poll-waiter slot, yielding the new token's
+    /// era, or `None` because one is already live or there is no current task.
+    fn poll_arm_current(&self) -> Option<u8>;
 
-    /// Whether the current task holds a live poll-waiter token. Must return
-    /// `false` when there is no current task.
-    fn poll_armed_current(&self) -> bool;
+    /// The current task's live poll-token era, or `None` when none is armed or
+    /// there is no current task.
+    fn poll_era_current(&self) -> Option<u8>;
 
     /// Release the current task's poll-waiter slot, discarding any unconsumed
     /// wake.
@@ -200,10 +201,10 @@ pub unsafe trait WaitQueueBackend: Send + Sync + 'static {
     /// Clear an unconsumed wake on the current task, keeping the token armed.
     fn poll_clear_pending_current(&self);
 
-    /// Record a wake against `task`'s armed poll token, reporting whether one
-    /// was armed to take it. `false` obliges the caller to fall back to its
-    /// ordinary wake path.
-    fn poll_set_pending(&self, task: WaitTaskHandle) -> bool;
+    /// Record a wake against `task`'s poll token of generation `era`, reporting
+    /// whether that token was live to take it. `false` obliges the caller to
+    /// fall back to its ordinary wake path.
+    fn poll_set_pending(&self, task: WaitTaskHandle, era: u32) -> bool;
 
     /// Consume a pending poll wake or park the current task for at most
     /// `timeout_ms`, in a single state compare-exchange. Same out-of-lock
@@ -242,15 +243,15 @@ unsafe impl WaitQueueBackend for UnregisteredBackend {
     fn current_task_has_deliverable_signal(&self) -> bool {
         false
     }
-    fn poll_arm_current(&self) -> bool {
-        false
+    fn poll_arm_current(&self) -> Option<u8> {
+        None
     }
-    fn poll_armed_current(&self) -> bool {
-        false
+    fn poll_era_current(&self) -> Option<u8> {
+        None
     }
     fn poll_disarm_current(&self) {}
     fn poll_clear_pending_current(&self) {}
-    fn poll_set_pending(&self, _task: WaitTaskHandle) -> bool {
+    fn poll_set_pending(&self, _task: WaitTaskHandle, _era: u32) -> bool {
         false
     }
     fn poll_block_current_timeout(&self, _timeout_ms: u32) {}
@@ -273,12 +274,20 @@ pub struct WaitQueueOps {
     pub swap_parked_queue: fn(*mut c_void) -> *mut c_void,
     pub current_task_is_killed: fn() -> bool,
     pub current_task_has_deliverable_signal: fn() -> bool,
-    pub poll_arm_current: fn() -> bool,
-    pub poll_armed_current: fn() -> bool,
+    pub poll_arm_current: fn() -> u32,
+    pub poll_era_current: fn() -> u32,
     pub poll_disarm_current: fn(),
     pub poll_clear_pending_current: fn(),
-    pub poll_set_pending: fn(WaitTaskHandle) -> bool,
+    pub poll_set_pending: fn(WaitTaskHandle, u32) -> bool,
     pub poll_block_current_timeout: fn(u32),
+}
+
+/// Decode an ops-table era. The table is a plain `fn` table, so `Option<u8>`
+/// travels as a `u32` with [`NO_POLL_ERA`] standing for `None` rather than as a
+/// layout the table cannot state.
+#[inline]
+fn era_from_abi(era: u32) -> Option<u8> {
+    (era != NO_POLL_ERA).then_some(era as u8)
 }
 
 struct OpsBackend(&'static WaitQueueOps);
@@ -319,11 +328,11 @@ unsafe impl WaitQueueBackend for OpsBackend {
     fn current_task_has_deliverable_signal(&self) -> bool {
         (self.0.current_task_has_deliverable_signal)()
     }
-    fn poll_arm_current(&self) -> bool {
-        (self.0.poll_arm_current)()
+    fn poll_arm_current(&self) -> Option<u8> {
+        era_from_abi((self.0.poll_arm_current)())
     }
-    fn poll_armed_current(&self) -> bool {
-        (self.0.poll_armed_current)()
+    fn poll_era_current(&self) -> Option<u8> {
+        era_from_abi((self.0.poll_era_current)())
     }
     fn poll_disarm_current(&self) {
         (self.0.poll_disarm_current)()
@@ -331,8 +340,8 @@ unsafe impl WaitQueueBackend for OpsBackend {
     fn poll_clear_pending_current(&self) {
         (self.0.poll_clear_pending_current)()
     }
-    fn poll_set_pending(&self, task: WaitTaskHandle) -> bool {
-        (self.0.poll_set_pending)(task)
+    fn poll_set_pending(&self, task: WaitTaskHandle, era: u32) -> bool {
+        (self.0.poll_set_pending)(task, era)
     }
     fn poll_block_current_timeout(&self, timeout_ms: u32) {
         (self.0.poll_block_current_timeout)(timeout_ms)
@@ -379,29 +388,36 @@ pub(crate) fn unblock_task_by_id(task: WaitTaskHandle) -> i32 {
     backend().unblock_task(task)
 }
 
-/// Deliver a wake to `task`, recording it against the task's poll token when
-/// the waiter registered through [`WaitQueue::enqueue_current`].
+/// Deliver a wake to `task`, recording it against the poll token of generation
+/// `poll_era` when the registration named one.
 ///
-/// The lost-wake fix. A heap-owned node belongs to a poll/select-style caller
-/// that registers on N queues and only afterwards parks, so a wake can arrive
-/// while it is still `Running` — where `unblock_task` finds nothing to do and
-/// returns, dropping the wake. Setting the durable token first means the
-/// caller's block CAS consumes it instead of sleeping out its budget.
+/// The lost-wake fix. A poll/select-style caller registers on N queues and only
+/// afterwards parks, so a wake can arrive while it is still `Running` — where
+/// `unblock_task` finds nothing to do and returns, dropping the wake. Setting
+/// the durable token first means the caller's block CAS consumes it instead of
+/// sleeping out its budget.
 ///
-/// `poll_set_pending` reports `false` when no token is armed, which is both
-/// the stack-pinned `wait_event*` case (its own `has_woken` covers it) and a
-/// poll waiter whose `PollWaiter` has already been dropped. Both want the
-/// ordinary wake, so the fallback is unconditional rather than a branch on
-/// node flavour: a wake must never be delivered by neither path.
+/// `poll_era` is the generation the *registration* was made under, read off the
+/// node rather than from the task at delivery time. This runs after the queue
+/// lock is released, and in that window the waiter can finish its poll, disarm,
+/// and a fresh poll on the same task can arm; addressing "whichever token is
+/// armed now" would hand that new poll a wake it was never owed, and its first
+/// block would return without parking. `poll_set_pending` refuses an era that
+/// is not the live one.
+///
+/// It reports `false` for a stack-pinned `wait_event*` node (its own
+/// `has_woken` covers that case), for a registration made with no token, and
+/// for a stale era. All three want the ordinary wake, so the unblock is
+/// unconditional: a wake must never be delivered by neither path.
 #[inline]
-fn deliver_wake(task: WaitTaskHandle, heap_owned: bool) {
+fn deliver_wake(task: WaitTaskHandle, poll_era: u32) {
     let bk = backend();
     // Token first, then the unblock. A poll waiter already parked is `Blocked`
     // with its token armed, and the unblock is what moves it; one still
     // `Running` has the wake carried by the token instead. Setting the token
     // after the unblock would leave a window where neither carries it.
-    if heap_owned {
-        let _ = bk.poll_set_pending(task);
+    if poll_era != NO_POLL_ERA {
+        let _ = bk.poll_set_pending(task, poll_era);
     }
     let _ = bk.unblock_task(task);
 }
@@ -732,6 +748,12 @@ impl WaitQueue {
     /// that register on several queues and then block once. The heap-owned
     /// [`WaitNode`] is freed by [`WaitQueue::remove_current`] or by whichever
     /// wake reaches it first.
+    ///
+    /// The node records the poll token's era, if one is armed, so a wake
+    /// delivered after this poll has finished cannot be applied to the next
+    /// one's token. With no token armed the registration still queues — the
+    /// token makes a wake *durable* across the register-block gap, it is not a
+    /// precondition for being woken — and the wake takes the ordinary path.
     pub fn enqueue_current(&self) -> bool {
         let bk = backend();
         if !bk.is_runtime_initialised() {
@@ -748,6 +770,7 @@ impl WaitQueue {
             Err(_) => return false,
         };
         node.set_task(task);
+        node.set_poll_era(bk.poll_era_current().map_or(NO_POLL_ERA, u32::from));
         let raw = KBox::into_raw(node);
         // SAFETY: `into_raw` returns a non-null pointer to the allocation we
         // just produced.
@@ -798,18 +821,22 @@ impl WaitQueue {
                 let n = unsafe { nn.as_ref() };
                 let task = n.task();
                 let heap_owned = n.is_heap_owned();
+                // Read under the lock, before the node can be freed below: the
+                // delivery happens outside it and must name the era this
+                // registration was made under, not the one live on arrival.
+                let poll_era = n.poll_era();
                 // Both stores land before the lock is released: the wake signal
                 // for the consumer's post-unlock recheck, and the back-pointer
                 // clear that a heap-owned node's `Drop` reads outside the lock.
                 let _ = n.has_woken_swap_true();
                 n.queue_clear();
-                (nn, task, heap_owned)
+                (nn, task, heap_owned, poll_era)
             })
         };
 
         match popped {
             None => false,
-            Some((nn, task, heap_owned)) => {
+            Some((nn, task, heap_owned, poll_era)) => {
                 self.generation.fetch_add(1, Ordering::Relaxed);
                 if heap_owned {
                     // SAFETY: `heap_owned` implies `enqueue_current` produced
@@ -820,7 +847,7 @@ impl WaitQueue {
                         drop(KBox::from_raw(nn.as_ptr()));
                     }
                 }
-                deliver_wake(task, heap_owned);
+                deliver_wake(task, poll_era);
                 true
             }
         }
@@ -840,22 +867,23 @@ impl WaitQueue {
                     let n = unsafe { nn.as_ref() };
                     let task = n.task();
                     let heap_owned = n.is_heap_owned();
+                    let poll_era = n.poll_era();
                     let _ = n.has_woken_swap_true();
                     n.queue_clear();
-                    (nn, task, heap_owned)
+                    (nn, task, heap_owned, poll_era)
                 })
             };
 
             match popped {
                 None => break,
-                Some((nn, task, heap_owned)) => {
+                Some((nn, task, heap_owned, poll_era)) => {
                     if heap_owned {
                         // SAFETY: see `wake_one`.
                         unsafe {
                             drop(KBox::from_raw(nn.as_ptr()));
                         }
                     }
-                    deliver_wake(task, heap_owned);
+                    deliver_wake(task, poll_era);
                     woken += 1;
                 }
             }
