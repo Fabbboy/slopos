@@ -19,13 +19,12 @@ use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegme
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
 use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES};
-use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
 use crate::tlb::TlbProcessKey;
 use crate::user_mappings::{
-    ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_mark_cow_4kb, ostd_mark_range_user_4kb,
-    ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_virt_to_phys_4kb,
+    ostd_get_pte_flags_4kb, ostd_map_4kb_user_fresh, ostd_map_4kb_user_shared, ostd_mark_cow_4kb,
+    ostd_mark_range_user_4kb, ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_virt_to_phys_4kb,
 };
 use crate::vma_region::{Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion};
 use slopos_abi::task::INVALID_PROCESS_ID;
@@ -180,17 +179,8 @@ fn map_user_range(
     let mut mapped: u32 = 0;
 
     while current < end_addr {
-        let phys = alloc_kernel_page();
-        if phys.is_null() {
-            klog_info!("map_user_range: Physical allocation failed");
-            if let Err(err) = rollback_range(vm_space, current, start_addr, &mut mapped) {
-                klog_info!("map_user_range: rollback failed: {:?}", err);
-            }
-            return Err(-1);
-        }
-        if let Err(err) = ostd_map_4kb_user(vm_space, VirtAddr::new(current), phys, map_flags) {
+        if let Err(err) = ostd_map_4kb_user_fresh(vm_space, VirtAddr::new(current), map_flags) {
             klog_info!("map_user_range: OSTD cursor map failed: {:?}", err);
-            free_page_frame(phys);
             if let Err(rollback_err) = rollback_range(vm_space, current, start_addr, &mut mapped) {
                 klog_info!("map_user_range: rollback failed: {:?}", rollback_err);
             }
@@ -1571,24 +1561,21 @@ fn load_segment_pages(
             }
             existing_phys
         } else {
-            let new_phys = alloc_kernel_page();
-            if new_phys.is_null() {
-                return Err(ElfError::NullPointer);
-            }
-            if let Err(err) = ostd_map_4kb_user(vm_space, VirtAddr::new(dst), new_phys, map_flags) {
-                klog_info!("load_segment_pages: OSTD map failed: {:?}", err);
-                free_page_frame(new_phys);
-                return Err(ElfError::NullPointer);
-            }
+            let new_phys = match ostd_map_4kb_user_fresh(vm_space, VirtAddr::new(dst), map_flags) {
+                Ok(pa) => pa,
+                Err(err) => {
+                    klog_info!("load_segment_pages: OSTD map failed: {:?}", err);
+                    return Err(ElfError::NullPointer);
+                }
+            };
             pages_mapped += 1;
             new_phys
         };
 
         let dest_virt = phys.to_virt();
         if dest_virt.is_null() {
-            if existing_phys.is_null() {
-                free_page_frame(phys);
-            }
+            // Mapped by now either way, so the leaf owns it and the caller's
+            // rollback unmaps the range.
             return Err(ElfError::NullPointer);
         }
 
@@ -2560,9 +2547,12 @@ fn process_vm_mmap_inner(
         for i in 0..page_count {
             let vaddr = start_addr + (i as u64) * PAGE_SIZE_4KB;
             let paddr = PhysAddr::new(phys.as_u64() + (i as u64) * PAGE_SIZE_4KB);
-            if let Err(err) =
-                ostd_map_4kb_user(vm_space_for_shared, VirtAddr::new(vaddr), paddr, pte_flags)
-            {
+            if let Err(err) = ostd_map_4kb_user_shared(
+                vm_space_for_shared,
+                VirtAddr::new(vaddr),
+                paddr,
+                pte_flags,
+            ) {
                 klog_info!("process_vm_mmap shared: OSTD cursor map failed: {:?}", err);
                 for j in 0..i {
                     let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
@@ -2864,7 +2854,7 @@ fn clone_cow_walk_shared_vma(
     let mut cow_pages: u32 = 0;
     for &(addr, phys, flags_bits) in snapshot.iter() {
         let vaddr = VirtAddr::new(addr);
-        if let Err(err) = ostd_map_4kb_user(child_vm_space, vaddr, phys, flags_bits) {
+        if let Err(err) = ostd_map_4kb_user_shared(child_vm_space, vaddr, phys, flags_bits) {
             klog_info!("clone_cow shared: OSTD child map failed: {:?}", err);
             return Err(());
         }
@@ -2894,7 +2884,9 @@ fn clone_cow_walk_anon_vma(
             | PageFlags::USER.bits()
             | PageFlags::PRESENT.bits();
 
-        if let Err(err) = ostd_map_4kb_user(child_vm_space, vaddr, phys, child_flags) {
+        // The parent's live PTE is the other holder; the child's mapping adds
+        // a ref rather than claiming a page it does not own.
+        if let Err(err) = ostd_map_4kb_user_shared(child_vm_space, vaddr, phys, child_flags) {
             klog_info!("clone_cow anon: OSTD child map failed: {:?}", err);
             return Err(());
         }

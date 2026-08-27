@@ -1407,7 +1407,7 @@ use crate::cow::is_cow_fault;
 use crate::paging_defs::PageFlags;
 use crate::process_vm::process_vm_with_vm_space;
 use crate::tests::test_fixtures::ProcessVmGuard;
-use crate::user_mappings::ostd_map_4kb_user;
+use crate::user_mappings::ostd_map_4kb_user_fresh;
 
 pub fn test_process_vm_create_destroy_memory() -> TestResult {
     let Some(vm) = ProcessVmGuard::new() else {
@@ -1541,21 +1541,12 @@ pub fn test_cow_page_isolation() -> TestResult {
     );
     assert_test!(test_addr != 0, "process_vm_alloc failed");
 
-    let phys = alloc_kernel_page();
-    assert_not_null!(phys.as_u64() as *const u8, "alloc page frame");
-
     let map_result = process_vm_with_vm_space(parent.process, |vs| {
-        ostd_map_4kb_user(
-            vs,
-            VirtAddr::new(test_addr),
-            phys,
-            PageFlags::USER_RW.bits(),
-        )
+        ostd_map_4kb_user_fresh(vs, VirtAddr::new(test_addr), PageFlags::USER_RW.bits())
     });
-    if !matches!(map_result, Some(Ok(()))) {
-        free_page_frame(phys);
+    let Some(Ok(phys)) = map_result else {
         return fail!("map page in parent");
-    }
+    };
 
     if let Some(virt) = phys.to_virt_checked() {
         let ptr = virt.as_mut_ptr::<u8>();
@@ -1598,21 +1589,12 @@ pub fn test_cow_fault_handling() -> TestResult {
     };
 
     let test_addr = 0x2000u64;
-    let phys = alloc_kernel_page();
-    assert_not_null!(phys.as_u64() as *const u8, "alloc page frame");
-
     let map_result = process_vm_with_vm_space(vm.process, |vs| {
-        ostd_map_4kb_user(
-            vs,
-            VirtAddr::new(test_addr),
-            phys,
-            PageFlags::USER_RO.bits(),
-        )
+        ostd_map_4kb_user_fresh(vs, VirtAddr::new(test_addr), PageFlags::USER_RO.bits())
     });
-    if !matches!(map_result, Some(Ok(()))) {
-        free_page_frame(phys);
+    let Some(Ok(_phys)) = map_result else {
         return fail!("map page as RO");
-    }
+    };
 
     vm.mark_cow(test_addr);
 

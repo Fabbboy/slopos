@@ -14,7 +14,6 @@ use crate::syscall::signal::{
     deliver_pending_signal, deliver_pending_signal_on_irq_exit, syscall_kill, syscall_rt_sigaction,
     syscall_rt_sigprocmask, syscall_rt_sigreturn,
 };
-use slopos_abi::addr::PhysAddr;
 use slopos_abi::fs::O_RDONLY;
 use slopos_abi::signal::{
     NSIG, SA_NODEFER, SA_RESTART, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGCONT,
@@ -34,7 +33,6 @@ use slopos_abi::task::{
     INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_KERNEL_MODE,
     TASK_FLAG_NET_ADMIN, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TaskStatus,
 };
-use slopos_mm::page_alloc::{alloc_kernel_page, free_page_frame};
 use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
@@ -195,22 +193,15 @@ fn map_user_rw_page(table: FdTable) -> Option<u64> {
         return None;
     }
 
-    let phys: PhysAddr = alloc_kernel_page();
-    if phys.is_null() {
-        return None;
-    }
-
     let mapped = slopos_mm::process_vm::process_vm_with_vm_space(process, |vs| {
-        slopos_mm::user_mappings::ostd_map_4kb_user(
+        slopos_mm::user_mappings::ostd_map_4kb_user_fresh(
             vs,
             slopos_abi::addr::VirtAddr::new(base),
-            phys,
             PageFlags::USER_RW.bits(),
         )
         .is_ok()
     });
     if !matches!(mapped, Some(true)) {
-        free_page_frame(phys);
         return None;
     }
 

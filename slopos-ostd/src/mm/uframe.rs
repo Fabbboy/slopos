@@ -135,18 +135,30 @@ impl<M: AnyUFrameMeta> core::fmt::Debug for UFrame<M> {
 }
 
 impl UFrame<AnonymousMeta> {
-    /// Wrap a freshly-allocated 4 KiB user paddr that this `UFrame` will own
-    /// through META_SLOTS. The first call for a paddr does `from_unused` (slot
-    /// UNUSED → TYPED, ref count = 1); a later call for the same paddr (e.g.
-    /// fork(2)'s child mapping the parent's pages) falls through to
-    /// `from_in_use`, bumping the existing slot's ref count. `Drop` of the LAST
-    /// wrapper returns the page to the registered frame allocator.
-    pub fn wrap_user_paddr(paddr: Paddr) -> Result<Self, FrameError> {
-        match Frame::<AnonymousMeta>::from_unused(paddr, AnonymousMeta::default()) {
-            Ok(frame) => Ok(Self(frame)),
-            Err(FrameError::StateMismatch) => Ok(Self(Frame::<AnonymousMeta>::from_in_use(paddr)?)),
-            Err(e) => Err(e),
-        }
+    /// Claim a freshly-allocated 4 KiB user paddr: slot UNUSED → TYPED, ref
+    /// count 1. `Drop` of the last wrapper returns the page to the registered
+    /// frame allocator.
+    ///
+    /// [`FrameError::StateMismatch`] means the slot was already live, i.e. the
+    /// caller does not in fact own this page. That is a refusal rather than an
+    /// alias because the two differ in who frees the page, and a caller that
+    /// asked to claim has an allocation it must undo.
+    pub fn claim_user_paddr(paddr: Paddr) -> Result<Self, FrameError> {
+        Ok(Self(Frame::<AnonymousMeta>::from_unused(
+            paddr,
+            AnonymousMeta::default(),
+        )?))
+    }
+
+    /// Take an additional ref on a 4 KiB user page that is **already live** —
+    /// fork's child mapping the parent's pages, or a second mapping of a memfd
+    /// page. The page is freed when the last of them drops, so an alias
+    /// outliving its origin cannot dangle.
+    ///
+    /// [`FrameError::StateMismatch`] means the slot is UNUSED or BUSY: nobody
+    /// owns the page, so there is no ref to share.
+    pub fn alias_user_paddr(paddr: Paddr) -> Result<Self, FrameError> {
+        Ok(Self(Frame::<AnonymousMeta>::from_in_use(paddr)?))
     }
 }
 
@@ -562,7 +574,8 @@ pub fn coalesce_io_runs<M: AnyUFrameMeta>(
 pub fn redup_frames(frames: &[UFrame<AnonymousMeta>]) -> Option<KVec<UFrame<AnonymousMeta>>> {
     let mut out = KVec::with_capacity(frames.len()).ok()?;
     for f in frames.iter() {
-        out.push(UFrame::<AnonymousMeta>::wrap_user_paddr(f.paddr()).ok()?)
+        // `f` is a live ref on each page, so this is an alias by construction.
+        out.push(UFrame::<AnonymousMeta>::alias_user_paddr(f.paddr()).ok()?)
             .ok()?;
     }
     Some(out)

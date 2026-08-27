@@ -1,6 +1,7 @@
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::mm::KArc;
-use slopos_ostd::mm::frame::{Paddr, reference_count_at};
+use slopos_ostd::mm::frame::{AnonymousMeta, Paddr, reference_count_at};
+use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 
 use crate::error::MmError;
@@ -80,11 +81,21 @@ fn resolve_multi_ref(
 
     copy_full_page(old_virt, new_virt);
 
+    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(new_phys.as_u64())) {
+        Ok(f) => f,
+        Err(e) => {
+            free_page_frame(new_phys);
+            slopos_ostd::klog_info!("cow::resolve_multi_ref: claim failed: {:?}", e);
+            return Err(MmError::MappingFailed);
+        }
+    };
+
+    // A refusal returns the copy, whose drop frees it, and leaves the original
+    // leaf in place, so the fault retries against an unmodified address space.
     let displaced =
-        match ostd_replace_4kb_user(vm_space, aligned_vaddr, new_phys, PageFlags::USER_RW.bits()) {
+        match ostd_replace_4kb_user(vm_space, aligned_vaddr, frame, PageFlags::USER_RW.bits()) {
             Ok(displaced) => displaced,
-            Err(err) => {
-                free_page_frame(new_phys);
+            Err((_, err)) => {
                 if err == MapError::WouldBlock {
                     return Err(MmError::Retry);
                 }

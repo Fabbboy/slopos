@@ -10,7 +10,7 @@
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::klog_warn;
 use slopos_ostd::mm::KArc;
-use slopos_ostd::mm::frame::{AnonymousMeta, Paddr, RingMeta};
+use slopos_ostd::mm::frame::{AnonymousMeta, FrameError, Paddr, RingMeta};
 use slopos_ostd::mm::page_property::{CachePolicy, PageProperty};
 use slopos_ostd::mm::page_size::Size4Kb;
 use slopos_ostd::mm::page_table::PteFlags;
@@ -121,78 +121,133 @@ fn record_spins(spins: usize) {
     }
 }
 
-/// Map a 4 KiB user page into `vm_space` at `va`, pointing at the
-/// already-allocated physical page `pa`.
+fn log_frame_wrap_failure(what: &str, pa: PhysAddr, va: VirtAddr, e: FrameError) {
+    let snap = slopos_ostd::mm::frame::slot_snapshot(Paddr::new(pa.as_u64()));
+    let (slots, max_pa, inited) = slopos_ostd::mm::frame::meta_slots_coverage();
+    klog_warn!(
+        "USERMAP: {}(Anon) FAILED pa=0x{:x} va=0x{:x} frame_err={:?} \
+         slot_kind={:?} raw_rc=0x{:x} | META_SLOTS inited={} slots={} max_pa=0x{:x}",
+        what,
+        pa.as_u64(),
+        va.as_u64(),
+        e,
+        snap.kind,
+        snap.raw_ref_count,
+        inited,
+        slots,
+        max_pa,
+    );
+}
+
+/// Map a 4 KiB user page the caller **owns** into `vm_space` at `va`.
+///
+/// Takes the owning [`UFrame`] rather than a `PhysAddr` so the page has one
+/// owner at every instant: on success the leaf PTE holds it, and on refusal it
+/// comes back in the error. A caller holding a bare paddr across this call had
+/// no way to know which, which is what made every error path a double-free.
+///
+/// Use [`ostd_map_4kb_user_shared`] for a page owned elsewhere.
 ///
 /// # Errors
 ///
-/// Returns `MapError::Overlap` if a leaf is already present at `va`,
-/// `MapError::IntermediateAllocFailed` on intermediate page-table
+/// Returns the frame beside `MapError::Overlap` if a leaf is already present
+/// at `va`, `MapError::IntermediateAllocFailed` on intermediate page-table
 /// allocation failure, or any other variant the cursor surfaces.
 pub fn ostd_map_4kb_user(
+    vm_space: &mut KArc<VmSpace>,
+    va: VirtAddr,
+    frame: UFrame<AnonymousMeta>,
+    flags: u64,
+) -> Result<(), (UFrame<AnonymousMeta>, MapError)> {
+    let prop = page_flags_to_property(flags);
+    let vs = match vm_space_get_mut(vm_space) {
+        Ok(vs) => vs,
+        Err(e) => return Err((frame, e)),
+    };
+    let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
+    let mut cursor = match vs.cursor_mut(range) {
+        Ok(c) => c,
+        Err(e) => return Err((frame, e)),
+    };
+    cursor.map::<Size4Kb, AnonymousMeta>(frame, prop)
+}
+
+/// Allocate a fresh zeroed page and map it at `va`, freeing it if the map is
+/// refused. The common shape for demand paging, `brk` and ELF load: the caller
+/// wants a page there and owns it only for the duration of the call.
+///
+/// `Err(MapError::IntermediateAllocFailed)` also covers the buddy being empty,
+/// since to the caller both are "no page is mapped at `va`".
+pub fn ostd_map_4kb_user_fresh(
+    vm_space: &mut KArc<VmSpace>,
+    va: VirtAddr,
+    flags: u64,
+) -> Result<PhysAddr, MapError> {
+    let pa = crate::page_alloc::alloc_kernel_page();
+    if pa.is_null() {
+        return Err(MapError::IntermediateAllocFailed);
+    }
+    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(pa.as_u64())) {
+        Ok(f) => f,
+        Err(e) => {
+            log_frame_wrap_failure("claim_user_paddr", pa, va, e);
+            crate::page_alloc::free_page_frame(pa);
+            return Err(MapError::PathCorrupt);
+        }
+    };
+    // Sole ref, so dropping the refused frame is the free.
+    ostd_map_4kb_user(vm_space, va, frame, flags).map_err(|(_, e)| e)?;
+    Ok(pa)
+}
+
+/// Map a 4 KiB user page owned by someone else — a memfd's registry entry, or
+/// the parent's PTE across fork. Takes a `PhysAddr` because the caller has no
+/// handle to give: the ref this adds is the mapping's own, and the page lives
+/// until every holder drops.
+///
+/// A refusal drops that added ref and nothing else, so unlike
+/// [`ostd_map_4kb_user`] there is nothing to hand back.
+pub fn ostd_map_4kb_user_shared(
     vm_space: &mut KArc<VmSpace>,
     va: VirtAddr,
     pa: PhysAddr,
     flags: u64,
 ) -> Result<(), MapError> {
-    let vs = vm_space_get_mut(vm_space)?;
-    let prop = page_flags_to_property(flags);
-    let pa_ostd = Paddr::new(pa.as_u64());
-    let frame = match UFrame::<AnonymousMeta>::wrap_user_paddr(pa_ostd) {
+    let frame = match UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(pa.as_u64())) {
         Ok(f) => f,
         Err(e) => {
-            let snap = slopos_ostd::mm::frame::slot_snapshot(pa_ostd);
-            let (slots, max_pa, inited) = slopos_ostd::mm::frame::meta_slots_coverage();
-            klog_warn!(
-                "USERMAP: wrap_user_paddr(Anon) FAILED pa=0x{:x} va=0x{:x} frame_err={:?} \
-                 slot_kind={:?} raw_rc=0x{:x} | META_SLOTS inited={} slots={} max_pa=0x{:x}",
-                pa.as_u64(),
-                va.as_u64(),
-                e,
-                snap.kind,
-                snap.raw_ref_count,
-                inited,
-                slots,
-                max_pa,
-            );
+            log_frame_wrap_failure("alias_user_paddr", pa, va, e);
             return Err(MapError::PathCorrupt);
         }
     };
-    let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
-    let mut cursor = vs.cursor_mut(range)?;
-    // TODO(frame-ownership): dropping the returned frame here is the
-    // double-free; the caller still frees `pa`. Removed when this takes an
-    // owned `UFrame` rather than a `PhysAddr`.
-    cursor
-        .map::<Size4Kb, AnonymousMeta>(frame, prop)
-        .map_err(|(_, e)| e)
+    ostd_map_4kb_user(vm_space, va, frame, flags).map_err(|(_, e)| e)
 }
 
-/// Unmap the 4 KiB user leaf at `va` and map `pa` in its place on one cursor.
-/// `unmap` flushes only this CPU, so the caller holds the displaced frame until
-/// after a cross-CPU shootdown of `va`.
+/// Swap the 4 KiB user leaf at `va` for the caller-owned `frame`, returning
+/// the frame the leaf held. One cursor, one walk, and no window in which two
+/// owned frames are live across a fallible step.
+///
+/// `replace` invalidates this CPU only, so the displaced frame must outlive a
+/// cross-CPU shootdown of `va`.
 #[must_use = "dropping the displaced frame before the TLB shootdown frees a page a peer may still translate"]
+#[allow(clippy::type_complexity)]
 pub fn ostd_replace_4kb_user(
     vm_space: &mut KArc<VmSpace>,
     va: VirtAddr,
-    pa: PhysAddr,
+    frame: UFrame<AnonymousMeta>,
     flags: u64,
-) -> Result<Option<UFrame<AnonymousMeta>>, MapError> {
+) -> Result<Option<UFrame<AnonymousMeta>>, (UFrame<AnonymousMeta>, MapError)> {
     let prop = page_flags_to_property(flags);
-    let vs = vm_space_get_mut(vm_space)?;
+    let vs = match vm_space_get_mut(vm_space) {
+        Ok(vs) => vs,
+        Err(e) => return Err((frame, e)),
+    };
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
-    let mut cursor = vs.cursor_mut(range)?;
-    // Unmap before the wrap: a fallible step between could free a page the caller frees.
-    let displaced = cursor.unmap::<Size4Kb, AnonymousMeta>()?;
-    let frame = UFrame::<AnonymousMeta>::wrap_user_paddr(Paddr::new(pa.as_u64()))
-        .map_err(|_| MapError::PathCorrupt)?;
-    // TODO(frame-ownership): as `ostd_map_4kb_user`, and this arm also drops
-    // `displaced` before its cross-CPU shootdown. Both go with the `replace`
-    // cursor primitive.
-    cursor
-        .map::<Size4Kb, AnonymousMeta>(frame, prop)
-        .map_err(|(_, e)| e)?;
-    Ok(displaced)
+    let mut cursor = match vs.cursor_mut(range) {
+        Ok(c) => c,
+        Err(e) => return Err((frame, e)),
+    };
+    cursor.replace::<Size4Kb, AnonymousMeta>(frame, prop)
 }
 
 /// Unmap a 4 KiB user page from `vm_space` at `va`. The `UFrame` is dropped

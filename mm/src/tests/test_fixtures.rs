@@ -3,13 +3,13 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 use crate::cow::handle_cow_fault;
 use crate::demand::handle_demand_fault;
 use crate::error::MmError;
-use crate::page_alloc::{alloc_kernel_page, free_page_frame};
+
 use crate::paging_defs::PageFlags;
 use crate::process_vm::{
     create_process_vm, destroy_process_vm, init_process_vm, process_vm_clone_cow,
     process_vm_user_va_to_paddr, process_vm_with_vm_space,
 };
-use crate::user_mappings::{ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_mark_cow_4kb};
+use crate::user_mappings::{ostd_get_pte_flags_4kb, ostd_map_4kb_user_fresh, ostd_mark_cow_4kb};
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_ostd::process::ProcessId;
 
@@ -61,20 +61,10 @@ impl ProcessVmGuard {
 
     /// Returns the physical address backing the new mapping.
     pub fn map_test_page(&self, vaddr: u64, flags: u64) -> Option<PhysAddr> {
-        let phys = alloc_kernel_page();
-        if phys.is_null() {
-            return None;
-        }
-        let result = process_vm_with_vm_space(self.process, |vs| {
-            ostd_map_4kb_user(vs, VirtAddr::new(vaddr), phys, flags)
-        });
-        match result {
-            Some(Ok(())) => Some(phys),
-            _ => {
-                free_page_frame(phys);
-                None
-            }
-        }
+        process_vm_with_vm_space(self.process, |vs| {
+            ostd_map_4kb_user_fresh(vs, VirtAddr::new(vaddr), flags).ok()
+        })
+        .flatten()
     }
 
     /// Page-offset bits are preserved; `PhysAddr::NULL` if no leaf is present.

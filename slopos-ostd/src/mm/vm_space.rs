@@ -929,6 +929,99 @@ impl<'a> CursorMut<'a> {
         Ok(self.unmap_inner::<S, M>()?.map(UFrame::<M>::from_frame))
     }
 
+    /// Swap the leaf at the cursor's current vaddr for `frame`, returning the
+    /// frame the leaf held. The COW write-fault primitive.
+    ///
+    /// Not `unmap` followed by `map`: between those two the caller holds *two*
+    /// owned frames across a fallible step, and a refusal there drops the
+    /// displaced one — which `unmap` invalidated on this CPU only, so peers
+    /// still translate the page it hands to the allocator. Ordering the pair
+    /// cannot fix that; only doing the fallible walk before either frame moves
+    /// can, which is what this does.
+    ///
+    /// The returned frame carries the same obligation as [`Self::unmap`]'s:
+    /// hold it until after a cross-CPU shootdown of `va`.
+    pub fn replace<S: PageSize, M: AnyUFrameMeta>(
+        &mut self,
+        frame: UFrame<M>,
+        prop: PageProperty,
+    ) -> Result<Option<UFrame<M>>, (UFrame<M>, MapError)> {
+        if self.cur.as_u64() >= self.range.end.as_u64() {
+            return Err((frame, MapError::OutOfBounds));
+        }
+        if self.cur.as_u64() & (S::BYTES - 1) != 0 {
+            return Err((frame, MapError::UnalignedCursor));
+        }
+        let Some(map_end) = self.cur.as_u64().checked_add(S::BYTES) else {
+            return Err((frame, MapError::OutOfBounds));
+        };
+        if map_end > self.range.end.as_u64() {
+            return Err((frame, MapError::OutOfBounds));
+        }
+        if frame.paddr().as_u64() & (S::BYTES - 1) != 0 {
+            return Err((frame, MapError::UnalignedFrame));
+        }
+
+        // Everything fallible happens here, before either frame moves. What
+        // follows is a `Frame::from_raw_at` over a paddr this leaf owns, then
+        // one PTE store.
+        let (leaf_table_phys, leaf_index) = match self.walk_to_leaf_for_map::<S>(prop.user) {
+            Ok(leaf) => leaf,
+            Err(e) => return Err((frame, e)),
+        };
+        let pte = entry_in_table(leaf_table_phys, leaf_index);
+
+        let displaced_paddr = pte.is_present().then(|| pte.address());
+        let displaced = if let Some(paddr) = displaced_paddr {
+            if pte.is_huge() != S::HUGE_BIT {
+                return Err((frame, MapError::SizeMismatch));
+            }
+            let owns_no_ref = PageProperty::from_leaf_flags(pte.flags()).software
+                & PageProperty::SOFTWARE_NO_FRAME_REF
+                != 0;
+            if owns_no_ref {
+                // A `map_io` leaf: reclaiming it would fabricate a handle over
+                // a paddr with no `MetaSlot`. Refuse rather than guess.
+                return Err((frame, MapError::NotKernelMapping));
+            }
+            // SAFETY: the leaf is present and does not carry
+            // SOFTWARE_NO_FRAME_REF, so a `map` leaked exactly one ref into it
+            // via `Frame::into_raw`; the PTE overwrite below is the only path
+            // that held it, and `from_raw_at` re-wraps without bumping.
+            match unsafe { Frame::<M>::from_raw_at(paddr) } {
+                Ok(f) => Some(UFrame::<M>::from_frame(f)),
+                Err(_) => return Err((frame, MapError::PathCorrupt)),
+            }
+        } else {
+            None
+        };
+
+        let inner = frame.into_frame();
+        let paddr = inner.paddr();
+        let _slot = inner.into_raw();
+
+        let mut flags = prop.to_leaf_flags();
+        if !flags.contains(PteFlags::PRESENT) {
+            flags |= PteFlags::PRESENT;
+        }
+        if S::HUGE_BIT {
+            flags |= PteFlags::HUGE;
+        }
+        pte.set(paddr, flags);
+        flush_leaf_local::<S>(self.cur);
+        self.dirty = true;
+
+        // The displaced paddr, captured before the overwrite above.
+        if let (Some(old), Some(hook)) = (displaced_paddr, current_cursor_unmap_hook()) {
+            hook.after_unmap(
+                self.cur,
+                old,
+                self.space.mm_ctx_handle.load(Ordering::Acquire),
+            );
+        }
+        Ok(displaced)
+    }
+
     /// Kernel-half sibling of [`Self::unmap`], yielding the sensitive
     /// `Frame<M>` that [`Self::map_kernel`] leaked into the leaf.
     /// Dropping it returns the page to the registered allocator.

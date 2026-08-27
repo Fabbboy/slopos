@@ -6,11 +6,11 @@ use slopos_testing::{assert_test, fail, pass};
 use crate::cow::is_cow_fault;
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
-use crate::page_alloc::{alloc_kernel_page, free_page_frame};
+
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::{process_vm_clone_cow, process_vm_with_vm_space};
 use crate::tests::test_fixtures::ProcessVmGuard;
-use crate::user_mappings::ostd_map_4kb_user;
+use crate::user_mappings::ostd_map_4kb_user_fresh;
 use slopos_abi::addr::VirtAddr;
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_ostd::mm::frame::{AnonymousMeta, Frame, Paddr, reference_count_at};
@@ -297,40 +297,24 @@ pub fn test_cow_no_collateral_damage() -> TestResult {
     let addr1: u64 = 0x7000;
     let addr2: u64 = 0x8000;
 
-    let phys1 = alloc_kernel_page();
-    let phys2 = alloc_kernel_page();
-
-    if phys1.is_null() || phys2.is_null() {
-        if !phys1.is_null() {
-            free_page_frame(phys1);
-        }
-        if !phys2.is_null() {
-            free_page_frame(phys2);
-        }
-        return fail!("alloc pages for collateral test");
-    }
+    let map_addr1 = process_vm_with_vm_space(vm.process, |vs| {
+        ostd_map_4kb_user_fresh(vs, VirtAddr::new(addr1), PageFlags::USER_RO.bits())
+    });
+    let Some(Ok(phys1)) = map_addr1 else {
+        return fail!("map page 1");
+    };
+    let map_addr2 = process_vm_with_vm_space(vm.process, |vs| {
+        ostd_map_4kb_user_fresh(vs, VirtAddr::new(addr2), PageFlags::USER_RO.bits())
+    });
+    let Some(Ok(phys2)) = map_addr2 else {
+        return fail!("map page 2");
+    };
 
     if let Some(v1) = phys1.to_virt_checked() {
         page_io::write_bytes(v1.as_mut_ptr::<u8>(), 0x11, PAGE_SIZE_4KB as usize);
     }
     if let Some(v2) = phys2.to_virt_checked() {
         page_io::write_bytes(v2.as_mut_ptr::<u8>(), 0x22, PAGE_SIZE_4KB as usize);
-    }
-
-    let map_addr1 = process_vm_with_vm_space(vm.process, |vs| {
-        ostd_map_4kb_user(vs, VirtAddr::new(addr1), phys1, PageFlags::USER_RO.bits())
-    });
-    if !matches!(map_addr1, Some(Ok(()))) {
-        free_page_frame(phys1);
-        free_page_frame(phys2);
-        return fail!("map page 1");
-    }
-    let map_addr2 = process_vm_with_vm_space(vm.process, |vs| {
-        ostd_map_4kb_user(vs, VirtAddr::new(addr2), phys2, PageFlags::USER_RO.bits())
-    });
-    if !matches!(map_addr2, Some(Ok(()))) {
-        free_page_frame(phys2);
-        return fail!("map page 2");
     }
 
     vm.mark_cow(addr1);

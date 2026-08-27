@@ -116,7 +116,7 @@ impl PinnedUserBuffer {
             // Mask off the in-page byte offset `ostd_virt_to_phys_4kb` folds in;
             // a UFrame owns a whole page-aligned frame.
             let page_pa = pa.as_u64() & !PAGE_MASK;
-            let frame = UFrame::<AnonymousMeta>::wrap_user_paddr(Paddr::new(page_pa))
+            let frame = UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(page_pa))
                 .map_err(|_| PinError::NotAnonymous)?;
             frames.push(frame).map_err(|_| PinError::OutOfMemory)?;
             page_va = page_va.wrapping_add(PAGE_SIZE as u64);

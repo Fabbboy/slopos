@@ -5,6 +5,9 @@ use slopos_abi::addr::VirtAddr;
 use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 
+use slopos_ostd::mm::frame::{AnonymousMeta, Paddr};
+use slopos_ostd::mm::uframe::UFrame;
+
 use crate::error::MmError;
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::PAGE_SIZE_4KB;
@@ -81,12 +84,12 @@ pub fn handle_demand_fault(
         return Err(MmError::Retry);
     }
 
+    // One bounded reclaim-and-retry: a demand fault has no syscall return
+    // path to back off on. Here and not inside `try_charge` — the account
+    // arena takes no locks by construction, and a reclaim hook there would
+    // give it an inbound edge from every charge site at once.
     let mut phys = alloc_kernel_page();
     if phys.is_null() {
-        // One bounded reclaim-and-retry: a demand fault has no syscall return
-        // path to back off on. Here and not inside `try_charge` — the account
-        // arena takes no locks by construction, and a reclaim hook there would
-        // give it an inbound edge from every charge site at once.
         if slopos_ostd::mm::reclaim::run(1) != 0 {
             phys = alloc_kernel_page();
         }
@@ -95,9 +98,20 @@ pub fn handle_demand_fault(
         }
     }
 
+    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(phys.as_u64())) {
+        Ok(f) => f,
+        Err(e) => {
+            free_page_frame(phys);
+            slopos_ostd::klog_info!("demand::handle_demand_fault: claim failed: {:?}", e);
+            return Err(MmError::MappingFailed);
+        }
+    };
+
     let pte_flags = region.to_page_flags().bits();
-    if let Err(err) = ostd_map_4kb_user(vm_space, VirtAddr::new(aligned_addr), phys, pte_flags) {
-        free_page_frame(phys);
+    // Sole ref, so dropping the refused frame is the free.
+    if let Err((_, err)) =
+        ostd_map_4kb_user(vm_space, VirtAddr::new(aligned_addr), frame, pte_flags)
+    {
         if err == MapError::WouldBlock {
             return Err(MmError::Retry);
         }
