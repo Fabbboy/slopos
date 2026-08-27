@@ -255,7 +255,46 @@ slopos_testing::stest!(
     suite = kernel_mapping
 );
 slopos_testing::stest!(name = test_kernel_pml4_roots_agree, suite = kernel_mapping);
+/// A refused `kernel_map_4kb_frame` must release the page, not strand it.
+/// `map_kernel` refuses a leaf below the higher half before touching the
+/// tables, which is the arm reachable without corrupting anything first.
+pub fn test_kernel_map_frame_refusal_releases_page() -> TestResult {
+    // Canonical, 4 KiB-aligned, and below HIGHER_HALF_START.
+    let low_va = VirtAddr::new(0x0000_7F00_0000_0000);
+
+    let Some(frame) = Frame::<KernelMeta>::alloc_zeroed() else {
+        return fail!("typed frame allocation");
+    };
+    let pa = PhysAddr::new(frame.paddr().as_u64());
+    assert_test!(
+        reference_count_at(pa) == 1,
+        "a fresh frame should hold exactly one reference"
+    );
+
+    let rc = kernel_map_4kb_frame(low_va, frame, PageFlags::KERNEL_RW.bits());
+    let held_after = reference_count_at(pa);
+
+    assert_test!(
+        rc != 0,
+        "a kernel map below the higher half must be refused"
+    );
+    assert_test!(
+        !kernel_is_mapped(low_va),
+        "the refused map installed a leaf anyway"
+    );
+    assert_test!(
+        held_after == 0,
+        "the refused page is still held by {} owner(s) -- it was leaked",
+        held_after
+    );
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_kernel_map_io_owns_no_frame,
+    suite = kernel_mapping
+);
+slopos_testing::stest!(
+    name = test_kernel_map_frame_refusal_releases_page,
     suite = kernel_mapping
 );

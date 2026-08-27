@@ -35,15 +35,20 @@ fn kernel_leaf_property(va: VirtAddr, flags: u64) -> PageProperty {
 /// any cursor error (alignment, already-mapped, intermediate alloc fail).
 ///
 /// **Takes ownership of `pa`.** On success the leaf owns the page and
-/// [`kernel_unmap_4kb`] hands it back; on failure it returns to the frame
-/// allocator. Either way the caller must not free it again, and `pa` must be
-/// allocator-owned RAM — use [`kernel_map_io_4kb`] for anything else.
+/// [`kernel_unmap_4kb`] hands it back; on failure the page returns to the
+/// frame allocator. Either way the caller must not free it again, and `pa`
+/// must be allocator-owned RAM — use [`kernel_map_io_4kb`] for anything else.
+///
+/// The unaligned-argument arm is the one exception: no frame was claimed, so
+/// there is nothing to release and `pa` is still the caller's.
 pub fn kernel_map_4kb(va: VirtAddr, pa: PhysAddr, flags: u64) -> c_int {
     if !va.is_aligned(PAGE_SIZE_4KB) || !pa.is_aligned(PAGE_SIZE_4KB) {
         return -1;
     }
     let frame = match Frame::<KernelMeta>::from_unused(Paddr::new(pa.as_u64()), KernelMeta) {
         Ok(f) => f,
+        // The slot was not claimable, so `pa` is live under another owner and
+        // freeing it here would release a page this call never held.
         Err(_) => return -1,
     };
     kernel_map_4kb_frame(va, frame, flags)
@@ -52,6 +57,9 @@ pub fn kernel_map_4kb(va: VirtAddr, pa: PhysAddr, flags: u64) -> c_int {
 /// [`kernel_map_4kb`] for a caller that already holds the frame: the cursor
 /// consumes it and leaks its single reference into the leaf entry, so the
 /// page's owner is the page table rather than nobody.
+///
+/// Consumes `frame` on every path. A refusal drops it, which returns the page
+/// to the allocator — the ownership half of [`kernel_map_4kb`]'s contract.
 pub fn kernel_map_4kb_frame(va: VirtAddr, frame: Frame<KernelMeta>, flags: u64) -> c_int {
     if !va.is_aligned(PAGE_SIZE_4KB) {
         return -1;

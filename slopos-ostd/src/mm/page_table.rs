@@ -8,6 +8,8 @@
 //! [`Frame::from_raw`] keeps the slot's ref count exact — one ref owned by
 //! the parent PTE — so map / unmap can neither double-free nor leak.
 
+#[cfg(feature = "test-helpers")]
+use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use bitflags::bitflags;
@@ -260,6 +262,26 @@ pub(crate) enum WalkOutcome {
 /// entries blocking a deeper target; `Query` / `Mutate` return whichever leaf
 /// is found first, huge or 4 KiB, without splitting — callers compare
 /// `outcome.leaf_level` against their `S::LEVEL` razor.
+/// Fail the next `n` intermediate page-table allocations, so a test can reach
+/// the `IntermediateAllocFailed` arm without exhausting the buddy — which on a
+/// live kernel would take every other CPU down with it.
+#[cfg(feature = "test-helpers")]
+static INTERMEDIATE_ALLOC_FAILURES: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(feature = "test-helpers")]
+pub fn fail_next_intermediate_allocs(n: u32) {
+    INTERMEDIATE_ALLOC_FAILURES.store(n, Ordering::Release);
+}
+
+#[cfg(feature = "test-helpers")]
+fn intermediate_alloc_should_fail() -> bool {
+    INTERMEDIATE_ALLOC_FAILURES
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            n.checked_sub(1).filter(|_| n > 0)
+        })
+        .is_ok()
+}
+
 pub(crate) fn walk_to_leaf(
     pml4_phys: Paddr,
     vaddr: VirtAddr,
@@ -390,6 +412,11 @@ fn step_down(
     match mode {
         WalkMode::Query | WalkMode::Mutate => return Ok(StepOutcome::NotPresent),
         WalkMode::Create => {}
+    }
+
+    #[cfg(feature = "test-helpers")]
+    if intermediate_alloc_should_fail() {
+        return Err(WalkError::AllocFailed);
     }
 
     let alloc = current_frame_allocator().ok_or(WalkError::AllocUninitialised)?;
