@@ -27,7 +27,7 @@ own doc-comments — not duplicated here.
 |---|---|---|
 | `slopos_ostd::mm::frame` | `proofs/frame_refcount.rs` | `Frame<M>` ref-count: no double-free, no use-after-free, `ref_count > 0` ⇒ allocated, free-listed ⇒ slot reset-before-free (I1–I4) |
 | `slopos_ostd::mm::slab` | `proofs/slab_lifetime.rs` | `HeapSlot` lifetime: a slot can't outlive its slab (Inv. 9); a cell fits any in-range type (Inv. 10) |
-| `slopos_ostd::mm::vm_space` | `proofs/vm_space_cursor.rs` | `Cursor`: page-table well-formedness, balanced map/unmap/map_kernel/map_io, user-visible leaves are insensitive frames (Inv. 4 + 5) |
+| `slopos_ostd::mm::vm_space` | `proofs/vm_space_cursor.rs` | `Cursor`: page-table well-formedness, balanced map/unmap/map_kernel/map_io, user-visible leaves are insensitive frames (Inv. 4 + 5), and a refused map returns the offered frame rather than dropping it (REF-CONSERVE) |
 | `slopos_ostd::task` ownership core **LOGIC** | `proofs/task_ownership.rs` | Task ownership: the existence reference is flag-elected and parked/released at most once (T1), container transitions conserve the strong count (T2), registered ⟺ holds its existence reference (T3), no use-after-free (T4), exactly one winner of the 1→0 release with destruction exactly once (T5), a reap never fires on a dispatch-pinned task (T6), destruction implies full detachment (T7) |
 | `slopos_ring` index/state-machine **LOGIC** | `proofs/ring_cursor.rs` + `proofs/ring_layout.rs` | SlopRing cursors: CQ no-overwrite, CQ-full correctness, overflow monotone-latch, cq_tail advance-exactly-one, in-flight cap, submit/consume bound; masked SQE/CQE indices in bounds + `locate` no-OOB/no-straddle |
 | `slopos_net::tcp` zero-copy send queue **LOGIC** | `proofs/tcp_zc_pin.rs` | TCP `MSG_ZEROCOPY` pin lifetime: every (re)transmit reads in-bounds of its pin (INV-TCPZC-PIN-IN-BOUNDS); a pin is held across retransmits and freed only on cumulative ACK / teardown, never mid-DMA (INV-TCPZC-HELD-UNTIL-ACK) |
@@ -45,12 +45,24 @@ own doc-comments — not duplicated here.
 > tier-2 argument is enforced there, not in prose.
 >
 > The Verus block covers all four mutators — `map`, `map_kernel`, `map_io`,
-> `unmap` — with `Inv. 4 + 5` conditioned on user visibility, plus three
+> `unmap` — with `Inv. 4 + 5` conditioned on user visibility, plus four
 > broken-variant witnesses (`broken_double_leak`, `broken_map_kernel_user`,
-> `broken_unmap_reclaims_io`) showing the `Overlap` guard, `map_kernel`'s
-> `!prop.user` guard, and `unmap`'s software-bit branch are each
-> load-bearing. It does **not** read the surrounding prose: the two-tier
-> premise above is reviewed text, not a checked claim.
+> `broken_unmap_reclaims_io`, `broken_map_failed_drops`) showing the `Overlap`
+> guard, `map_kernel`'s `!prop.user` guard, `unmap`'s software-bit branch, and
+> `map`'s hand-back-on-refusal are each load-bearing. It does **not** read the
+> surrounding prose: the two-tier premise above is reviewed text, not a
+> checked claim.
+>
+> `caller_holds_frame` and the `MapFailed` step were added after the model
+> verified green against a tree whose refused map dropped the frame: `map`
+> took `UFrame<M>` by value and returned a bare `MapError`, so `?` on any
+> fallible step after the move freed the page while the caller still held the
+> `PhysAddr` it had passed in and freed it again. The model had no vocabulary
+> for the failure path, so it had nothing to say about it. Conservation is
+> stated as a property of the *transition*
+> (`ref_conserve_map_attempt`), not of a state: on the `Overlap` path the
+> caller gets its frame back while the leaf still holds the different one it
+> already had, so no state predicate relates the two.
 >
 > This is a *scalability* gap vs. CortenMM's range-disjoint parallelism, not a
 > *soundness* one; see `notes/cortenmm.md`. Re-attempt the fine-grained proof

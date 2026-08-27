@@ -15,6 +15,13 @@
 //          unmapping decrements exactly once. Inv. 4 + Inv. 5 hold across the
 //          operation.
 //
+//   (REF-CONSERVE)
+//          A map *attempt* neither duplicates nor destroys the frame: after
+//          it, exactly one of the leaf PTE and the caller owns the page.
+//          `map` takes its `UFrame<M>` by value, so a refusal with no channel
+//          to return it drops the frame and frees the page under a caller
+//          that still holds the `PhysAddr` it passed in.
+//
 // Concurrency control is coarse lock-per-`VmSpace`, strictly more conservative
 // than CortenMM's range-disjoint parallelism: `CursorMut<'a>` holds
 // `&'a mut VmSpace`, so the borrow checker admits at most one mutating cursor
@@ -60,6 +67,16 @@ pub struct PtPath {
     /// user-visible, which is what lets `map_kernel` take a sensitive
     /// `Frame<M>`.
     pub leaf_is_uframe: bool,
+    /// The caller of the most recent map attempt got back the frame it
+    /// offered. `map` takes `UFrame<M>` **by value**, so the move happens at
+    /// the call site; only a refusal that *returns* the frame sets this.
+    ///
+    /// Deliberately not part of [`pt_inv`]: on the `Overlap` path a refused
+    /// map hands the offered frame back *while* the leaf still holds a
+    /// different one, so no state predicate relating this to `pte_refs` is
+    /// true. Conservation is a property of the transition, stated as
+    /// [`ref_conserve_map_attempt`].
+    pub caller_holds_frame: bool,
 }
 
 /// The inductive page-table invariant; every `Step` preserves it.
@@ -94,6 +111,7 @@ pub open spec fn pt_init(s: PtPath) -> bool {
     &&& s.leaf_owns_ref == false
     &&& s.leaf_user_visible == false
     &&& s.leaf_is_uframe == false
+    &&& s.caller_holds_frame == false
 }
 
 /// One cursor operation against the path at the current vaddr.
@@ -121,6 +139,15 @@ pub enum Step {
     /// `CursorMut::protect::<S>(prop)`. Leaf flags only: no structural change,
     /// no ref movement.
     Protect,
+    /// A map attempt the cursor **refuses**: `Overlap` on a present leaf, or
+    /// `IntermediateAllocFailed` / `PathCorrupt` out of the Create-mode walk
+    /// when the buddy is exhausted or a `MetaSlot` is not claimable.
+    ///
+    /// The page table is left as it was — a refused map installs no leaf — and
+    /// the frame goes back to the caller. That hand-back is the whole content
+    /// of the step: it is what `Result<(), (UFrame<M>, MapError)>` expresses
+    /// and what a bare `MapError` cannot.
+    MapFailed,
 }
 
 /// Each arm mirrors the corresponding `CursorMut` method body.
@@ -128,7 +155,15 @@ pub open spec fn step(s: PtPath, t: Step) -> PtPath {
     match t {
         Step::Map =>
             if s.leaf_present {
-                PtPath { pdpt_linked: true, pd_linked: true, pt_linked: true, ..s }
+                // `Overlap`: refused. Modelled by `MapFailed`, not here — this
+                // arm is the structural no-op the walk still performs.
+                PtPath {
+                    pdpt_linked: true,
+                    pd_linked: true,
+                    pt_linked: true,
+                    caller_holds_frame: true,
+                    ..s
+                }
             } else {
                 PtPath {
                     pdpt_linked: true,
@@ -139,11 +174,18 @@ pub open spec fn step(s: PtPath, t: Step) -> PtPath {
                     leaf_owns_ref: true,
                     leaf_user_visible: true,
                     leaf_is_uframe: true,
+                    caller_holds_frame: false,
                 }
             },
         Step::MapKernel =>
             if s.leaf_present {
-                PtPath { pdpt_linked: true, pd_linked: true, pt_linked: true, ..s }
+                PtPath {
+                    pdpt_linked: true,
+                    pd_linked: true,
+                    pt_linked: true,
+                    caller_holds_frame: true,
+                    ..s
+                }
             } else {
                 // Not user-visible, so Inv. 4 + Inv. 5's hypothesis never
                 // fires and `leaf_is_uframe` is free to be false.
@@ -156,12 +198,15 @@ pub open spec fn step(s: PtPath, t: Step) -> PtPath {
                     leaf_owns_ref: true,
                     leaf_user_visible: false,
                     leaf_is_uframe: false,
+                    caller_holds_frame: false,
                 }
             },
         Step::MapIo =>
             if s.leaf_present {
                 PtPath { pdpt_linked: true, pd_linked: true, pt_linked: true, ..s }
             } else {
+                // `map_io` is handed a bare `Paddr` and owns nothing, so there
+                // is no frame for a caller to get back either way.
                 PtPath {
                     pdpt_linked: true,
                     pd_linked: true,
@@ -171,6 +216,7 @@ pub open spec fn step(s: PtPath, t: Step) -> PtPath {
                     leaf_owns_ref: false,
                     leaf_user_visible: false,
                     leaf_is_uframe: false,
+                    caller_holds_frame: false,
                 }
             },
         Step::Unmap =>
@@ -188,6 +234,11 @@ pub open spec fn step(s: PtPath, t: Step) -> PtPath {
             },
         Step::Protect =>
             s,
+        Step::MapFailed =>
+            // Intermediates linked and huge pages split on the way down
+            // survive the refusal, owned by their parent PTE and reclaimed by
+            // `VmSpace::drop`.
+            PtPath { caller_holds_frame: true, ..s },
     }
 }
 
@@ -292,6 +343,38 @@ pub proof fn ref_map_then_unmap_roundtrips(s: PtPath)
 {
 }
 
+/// (REF-CONSERVE) MAIN THEOREM for the failure path. Every map *attempt* ends
+/// with the offered frame in exactly one place: installed in the leaf, or back
+/// with the caller. Stated as an exclusive-or over the transition, because no
+/// state predicate says it — on the `Overlap` path the caller gets its frame
+/// back while the leaf still holds the *other* one it was already holding.
+///
+/// This is what `Result<(), (UFrame<M>, MapError)>` discharges and a bare
+/// `MapError` cannot.
+pub proof fn ref_conserve_map_attempt(s: PtPath)
+    requires
+        pt_inv(s),
+    ensures
+        step(s, Step::Map).caller_holds_frame
+            != (step(s, Step::Map).pte_refs == 1 && !s.leaf_present),
+        step(s, Step::MapFailed).caller_holds_frame,
+        step(s, Step::MapFailed).leaf_present == s.leaf_present,
+        step(s, Step::MapFailed).pte_refs == s.pte_refs,
+{
+}
+
+/// (REF-CONSERVE) A refused map is idempotent on the page table: repeating it
+/// neither accumulates refs nor installs a leaf, so the bounded retry the
+/// demand-fault path performs cannot leak.
+pub proof fn ref_conserve_map_failed_idempotent(s: PtPath)
+    requires
+        pt_inv(s),
+    ensures
+        step(step(s, Step::MapFailed), Step::MapFailed) == step(s, Step::MapFailed),
+        pt_inv(step(s, Step::MapFailed)),
+{
+}
+
 /// (Inv. 4 + Inv. 5) In every reachable state a present user-visible leaf is
 /// an insensitive frame. Two carriers hold this up and the proof needs both:
 /// the `UFrame<M>` argument type of `map`, and the `!prop.user` guard on
@@ -345,6 +428,7 @@ pub proof fn broken_double_leak_violates_refcount()
         leaf_owns_ref: true,
         leaf_user_visible: true,
         leaf_is_uframe: true,
+        caller_holds_frame: false,
     };
     assert(pt_inv(mapped));
     let double = broken_double_leak(mapped);
@@ -369,6 +453,7 @@ pub open spec fn broken_map_sensitive(s: PtPath) -> PtPath {
         leaf_owns_ref: true,
         leaf_user_visible: true,
         leaf_is_uframe: false,
+        caller_holds_frame: false,
     }
 }
 
@@ -392,6 +477,7 @@ pub proof fn broken_map_sensitive_violates_inv45()
         leaf_owns_ref: false,
         leaf_user_visible: false,
         leaf_is_uframe: false,
+        caller_holds_frame: false,
     };
     assert(pt_inv(empty));
     let sensitive = broken_map_sensitive(empty);
@@ -418,6 +504,7 @@ pub open spec fn broken_map_kernel_user(s: PtPath) -> PtPath {
         leaf_owns_ref: true,
         leaf_user_visible: true,
         leaf_is_uframe: false,
+        caller_holds_frame: false,
     }
 }
 
@@ -441,6 +528,7 @@ pub proof fn broken_map_kernel_user_violates_inv45()
         leaf_owns_ref: false,
         leaf_user_visible: false,
         leaf_is_uframe: false,
+        caller_holds_frame: false,
     };
     assert(pt_inv(empty));
     let leaked = broken_map_kernel_user(empty);
@@ -450,6 +538,61 @@ pub proof fn broken_map_kernel_user_violates_inv45()
     assert(exists|s: PtPath| #![trigger broken_map_kernel_user(s)] pt_inv(s) && !pt_inv(broken_map_kernel_user(s)));
     assert forall|s: PtPath| pt_inv(s) implies #[trigger] pt_inv(step(s, Step::MapKernel)) by {
         step_preserves(s, Step::MapKernel);
+    }
+}
+
+/// A `map` whose signature is `Result<(), MapError>`: the refusal has no
+/// channel to return the frame, so `?` drops it and the page goes back to the
+/// allocator while the caller still holds the `PhysAddr` it passed in.
+pub open spec fn broken_map_failed_drops(s: PtPath) -> PtPath {
+    PtPath { caller_holds_frame: false, ..s }
+}
+
+/// Witness that the hand-back is load-bearing: after a refused map the frame
+/// is in neither place. The leaf does not hold it and the caller did not get
+/// it back, so the only remaining reference was the one `?` dropped — which
+/// freed the page, under a caller whose own error path frees it again
+/// (`mm/src/demand.rs`, `mm/src/process_vm.rs`).
+///
+/// Stated against `ref_conserve_map_attempt`'s post-condition rather than as a
+/// `pt_inv` violation, since conservation is a property of the transition.
+pub proof fn broken_map_failed_drops_violates_conservation()
+    ensures
+        exists|s: PtPath|
+            #![trigger broken_map_failed_drops(step(s, Step::MapFailed))]
+            pt_inv(s) && !s.leaf_present
+                && broken_map_failed_drops(step(s, Step::MapFailed)).pte_refs == 0
+                && !broken_map_failed_drops(step(s, Step::MapFailed)).caller_holds_frame,
+        forall|s: PtPath| pt_inv(s) ==> #[trigger] step(s, Step::MapFailed).caller_holds_frame,
+{
+    // Reachable: the init state, where the demand-fault path finds an absent
+    // leaf and the Create-mode walk then fails on an exhausted buddy.
+    let empty = PtPath {
+        pdpt_linked: false,
+        pd_linked: false,
+        pt_linked: false,
+        leaf_present: false,
+        pte_refs: 0,
+        leaf_owns_ref: false,
+        leaf_user_visible: false,
+        leaf_is_uframe: false,
+        caller_holds_frame: false,
+    };
+    assert(pt_inv(empty));
+    let refused = step(empty, Step::MapFailed);
+    assert(refused.caller_holds_frame);
+    let dropped = broken_map_failed_drops(refused);
+    assert(dropped.pte_refs == 0);
+    assert(!dropped.caller_holds_frame);
+    assert(pt_inv(empty) && !empty.leaf_present && dropped.pte_refs == 0
+        && !dropped.caller_holds_frame);
+    assert(exists|s: PtPath|
+        #![trigger broken_map_failed_drops(step(s, Step::MapFailed))]
+        pt_inv(s) && !s.leaf_present
+            && broken_map_failed_drops(step(s, Step::MapFailed)).pte_refs == 0
+            && !broken_map_failed_drops(step(s, Step::MapFailed)).caller_holds_frame);
+    assert forall|s: PtPath| pt_inv(s) implies #[trigger] step(s, Step::MapFailed).caller_holds_frame by {
+        ref_conserve_map_attempt(s);
     }
 }
 
@@ -489,6 +632,7 @@ pub proof fn broken_unmap_reclaims_io_violates_refcount()
         leaf_owns_ref: false,
         leaf_user_visible: false,
         leaf_is_uframe: false,
+        caller_holds_frame: false,
     };
     assert(pt_inv(io_leaf));
     let fabricated = broken_unmap_reclaims_io(io_leaf);
