@@ -1,24 +1,7 @@
 # SlopOS Known Issues
 
-Last updated: 2026-08-26
+Last updated: 2026-08-27
 
-
----
-
-## A non-`WouldBlock` cursor error in `ostd_map_4kb_user` double-frees
-
-**Status**: Open
-**Severity**: Medium (frees a page a peer may still translate)
-**Component**: `mm/src/user_mappings.rs:141-164`
-
-Once `UFrame::wrap_user_paddr` has wrapped the frame, a later failure of
-`vs.cursor_mut(range)?` or `cursor.map(...)` drops the `UFrame` — which frees
-the page — while the caller's error path also calls `free_page_frame`
-(`mm/src/demand.rs:100`). The page is freed twice.
-
-The fix is for `map` to hand the frame back on error, so ownership is never
-ambiguous. Pre-existing; the demand-fault retry work narrowed rather than
-widened the reachable arms.
 
 ---
 
