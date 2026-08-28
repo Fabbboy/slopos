@@ -305,6 +305,10 @@ check-tests-host:
 check-test-count: _build-run-tests
     scripts/check_test_count.sh
 
+[doc("SMP gate: assert every online CPU is eligible for task placement")]
+check-sched-spread *ARGS:
+    scripts/check_sched_spread.sh {{ARGS}}
+
 [doc("Lockdep ratchet: assert the validator boots ACTIVE and no pool nears its ceiling")]
 check-lockdep-headroom: _build-run-tests
     scripts/check_lockdep_headroom.sh
@@ -369,6 +373,7 @@ check-framekernel-gates:
     scripts/check_safe_contract_surface.sh --self-test
     scripts/check_charge_linearity.sh --self-test
     scripts/check_quota_headroom.sh --self-test
+    scripts/check_sched_spread.sh --self-test
     scripts/check_vendor_pin.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh

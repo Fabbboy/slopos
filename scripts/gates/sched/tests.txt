@@ -1,0 +1,24 @@
+# Measured by: scripts/check_sched_spread.sh --variant tests --emit-allowlist
+#
+# eligible-lag     <phase> <n>  online CPUs allowed to be ineligible
+# allow-ineligible <phase> <m>  which CPUs that lag may name
+# require-dispatch <phase> <b>  every online CPU must dispatch something
+# min-online       <n>          floor on the online CPU count
+#
+# A lag above 0 outside the boot phase is a bug, not a number to raise:
+# it means a CPU is dispatching work that no placement decision can see.
+# require-dispatch is zero-versus-non-zero, never a volume: how many
+# switches a CPU makes varies with the machine, so a floor above zero
+# fails on a runner that is merely faster or slower.
+
+eligible-lag	boot	1
+allow-ineligible	boot	0x1
+require-dispatch	boot	0
+eligible-lag	post-kernel-tests	1
+allow-ineligible	post-kernel-tests	0x1
+require-dispatch	post-kernel-tests	0
+eligible-lag	post-userland-tests	0
+allow-ineligible	post-userland-tests	0x0
+require-dispatch	post-userland-tests	1
+
+min-online	2

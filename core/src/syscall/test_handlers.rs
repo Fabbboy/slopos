@@ -107,6 +107,7 @@ define_syscall!(syscall_run_userland_tests (ctx) cap(TestHarness)
     slopos_ostd::kdiag::kdiag_dump_lock_graph("post-userland-tests");
     slopos_sched::quota_console::quota_report("post-userland-tests");
     slopos_sched::per_cpu::ap_pause_report("post-userland-tests");
+    slopos_sched::lifecycle::sched_cpu_report("post-userland-tests");
     report_reclaim();
 
     let _ = utest_rc;

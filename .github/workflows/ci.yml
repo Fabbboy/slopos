@@ -120,6 +120,15 @@ jobs:
       - name: Lockdep headroom ratchet
         run: scripts/check_lockdep_headroom.sh --log ci-test.log
 
+      # The invariant here is not a measured ceiling but a structural one: a CPU
+      # that is online must be eligible for task placement. It shipped broken —
+      # the scheduler boot step reset the runqueues of three APs that were
+      # already running, and the machine spent every boot placing 100 % of forks
+      # and wakeups on CPU 0 while the other three scavenged by work stealing.
+      # Nothing else on the wire says so.
+      - name: SMP placement-eligibility gate
+        run: scripts/check_sched_spread.sh --log ci-test.log
+
       - name: Upload test log on failure
         if: failure()
         uses: actions/upload-artifact@v7
