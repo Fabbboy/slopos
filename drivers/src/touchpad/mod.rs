@@ -253,7 +253,6 @@ fn register_cascade(gsi: u32, edge: bool, active_low: bool) -> bool {
         if pinctrl::service_pending() {
             TOUCHPAD_WAKER.arm_and_wake();
         }
-        crate::apic::send_eoi();
     }) {
         Ok(h) => h,
         Err(_) => return false,

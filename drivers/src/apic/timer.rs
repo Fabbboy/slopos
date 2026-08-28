@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_ostd::{klog_debug, klog_info};
+use slopos_ostd::klog_info;
 
 use super::regs::*;
 use super::{
@@ -72,6 +72,9 @@ pub fn calibrate() -> u64 {
 
 /// Fire an interrupt on IDT `vector` every `ms` milliseconds.
 ///
+/// Deliberately silent: every timer ISR that follows a one-shot calls this, and
+/// klog spins on the UART with interrupts disabled.
+///
 /// Returns `false` if [`calibrate`] has not run or the computed initial count
 /// does not fit a `u32`.
 pub fn set_periodic_ms(vector: u8, ms: u32) -> bool {
@@ -106,13 +109,6 @@ pub fn set_periodic_ms(vector: u8, ms: u32) -> bool {
     let lvt = (vector as u32) | LAPIC_TIMER_PERIODIC;
     write_timer_lvt(lvt);
     write_register(LAPIC_TIMER_ICR, count as u32);
-
-    klog_debug!(
-        "APIC TIMER: Periodic mode — vector 0x{:x}, {}ms, count {}",
-        vector,
-        ms,
-        count,
-    );
 
     true
 }

@@ -34,7 +34,7 @@ fn idt_get_gate_fn(vector: u8, entry: *mut c_void) -> c_int {
 
 static PLATFORM_SERVICES: PlatformServices = PlatformServices {
     timer_ticks: || slopos_core::irq::get_timer_ticks(),
-    // The LAPIC timer runs at a fixed 100 Hz; there is no PIT fallback.
+    // Only the BSP's ISR advances the counter, so 100 Hz is its real rate.
     timer_frequency: || 100,
     timer_poll_delay_ms: |ms| hpet::delay_ms(ms),
     timer_sleep_ms: |ms| hpet::delay_ms(ms),
