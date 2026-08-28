@@ -92,6 +92,57 @@ pub fn get_total_ready_tasks_all_cpus() -> u32 {
     per_cpu::get_total_ready_tasks()
 }
 
+/// Emit the per-CPU scheduler participation report for `phase`, which
+/// `scripts/check_sched_spread.sh` grades.
+///
+/// A CPU that is online but not placement-eligible still dispatches whatever
+/// work stealing hands it, so nothing else on the wire distinguishes it.
+pub fn sched_cpu_report(phase: &str) {
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let mut online = 0u64;
+    let mut eligible = 0u64;
+    for cpu_id in 0..cpu_count.min(64) {
+        if slopos_arch::pcr::is_cpu_online(cpu_id) {
+            online |= 1u64 << cpu_id;
+        }
+        if per_cpu::cpu_accepts_placement(cpu_id) {
+            eligible |= 1u64 << cpu_id;
+        }
+    }
+    klog_info!(
+        "SCHEDCPU[{}]: cpus={} online=0x{:x} eligible=0x{:x}",
+        phase,
+        cpu_count,
+        online,
+        eligible,
+    );
+    for cpu_id in 0..cpu_count.min(64) {
+        // Zeros rather than a skipped line for a CPU with no runqueue yet: an
+        // absent row and an idle row must not read the same to the gate.
+        let (switches, ticks, idle) = per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            (
+                sched.total_switches.load(Ordering::Relaxed),
+                sched.total_ticks.load(Ordering::Relaxed),
+                sched.idle_time.load(Ordering::Relaxed),
+            )
+        })
+        .unwrap_or((0, 0, 0));
+        let (pulled, pushed) = crate::work_steal::migration_counts(cpu_id);
+        klog_info!(
+            "SCHEDCPU[{}]: cpu={} online={} eligible={} switches={} ticks={} idle={} pulled={} pushed={}",
+            phase,
+            cpu_id,
+            u8::from(slopos_arch::pcr::is_cpu_online(cpu_id)),
+            u8::from(per_cpu::cpu_accepts_placement(cpu_id)),
+            switches,
+            ticks,
+            idle,
+            pulled,
+            pushed,
+        );
+    }
+}
+
 pub fn send_reschedule_ipi(target_cpu: usize) {
     use slopos_arch::arch::idt::RESCHEDULE_IPI_VECTOR;
 

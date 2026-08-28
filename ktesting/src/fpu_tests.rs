@@ -10,7 +10,9 @@ use crate::{fail, pass};
 fn fpu_xmm_roundtrip_a() -> TestResult {
     let pattern_lo: u64 = 0x_DEAD_BEEF_CAFE_BABE;
     let pattern_hi: u64 = 0x_1234_5678_9ABC_DEF0;
-    let readback = cpu_state::xmm0_roundtrip([pattern_lo, pattern_hi]);
+    // The switch path saves the vector file for user tasks only, so a
+    // preemption here would lose this kernel task's registers.
+    let readback = IrqDisabled::with(|_| cpu_state::xmm0_roundtrip([pattern_lo, pattern_hi]));
 
     if readback == [pattern_lo, pattern_hi] {
         TestResult::Pass
@@ -23,7 +25,7 @@ fn fpu_xmm_roundtrip_a() -> TestResult {
 fn fpu_xmm_roundtrip_b() -> TestResult {
     let pattern2_lo: u64 = 0x_FFFF_0000_AAAA_5555;
     let pattern2_hi: u64 = 0x_0123_4567_89AB_CDEF;
-    let readback = cpu_state::xmm1_roundtrip([pattern2_lo, pattern2_hi]);
+    let readback = IrqDisabled::with(|_| cpu_state::xmm1_roundtrip([pattern2_lo, pattern2_hi]));
 
     if readback == [pattern2_lo, pattern2_hi] {
         TestResult::Pass

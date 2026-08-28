@@ -123,16 +123,19 @@ fn map_ioapic_mmio(phys: u64) -> Option<MmioRegion> {
     MmioRegion::map(PhysAddr::new(phys), IOAPIC_REGION_SIZE)
 }
 
-fn ioapic_find_controller(gsi: u32) -> Option<IoapicController> {
+/// Run `f` against the controller owning `gsi`, with `IOAPIC_TABLE` held.
+///
+/// The guard must span the register access, not just the lookup: `read_reg` /
+/// `write_reg` are a select-then-access pair on one IOREGSEL/IOWIN window, so
+/// interleaved callers write into each other's selected register.
+fn with_controller<R>(gsi: u32, f: impl FnOnce(&IoapicController) -> R) -> Option<R> {
     let table = IOAPIC_TABLE.lock();
-    table.controllers[..table.count]
-        .iter()
-        .find(|ctrl| {
-            let start = ctrl.gsi_base;
-            let end = ctrl.gsi_base + ctrl.gsi_count.saturating_sub(1);
-            gsi >= start && gsi <= end
-        })
-        .cloned()
+    let ctrl = table.controllers[..table.count].iter().find(|ctrl| {
+        let start = ctrl.gsi_base;
+        let end = ctrl.gsi_base + ctrl.gsi_count.saturating_sub(1);
+        gsi >= start && gsi <= end
+    })?;
+    Some(f(ctrl))
 }
 
 #[inline]
@@ -188,27 +191,34 @@ fn find_iso(irq: u8) -> Option<IoapicIso> {
 }
 
 fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
-    let Some(ctrl) = ioapic_find_controller(gsi) else {
-        klog_info!("IOAPIC: No controller for requested GSI");
-        return -1;
-    };
+    let outcome = with_controller(gsi, |ctrl| {
+        let pin = gsi.saturating_sub(ctrl.gsi_base);
+        if pin >= ctrl.gsi_count {
+            return -1;
+        }
 
-    let pin = gsi.saturating_sub(ctrl.gsi_base);
-    if pin >= ctrl.gsi_count {
-        klog_info!("IOAPIC: Pin out of range for mask request");
-        return -1;
+        let reg = ioapic_entry_low_index(pin);
+        let mut value = ctrl.read_reg(reg);
+        if mask {
+            value |= IOAPIC_FLAG_MASK;
+        } else {
+            value &= !IOAPIC_FLAG_MASK;
+        }
+
+        ctrl.write_reg(reg, value);
+        0
+    });
+    match outcome {
+        None => {
+            klog_info!("IOAPIC: No controller for requested GSI");
+            -1
+        }
+        Some(-1) => {
+            klog_info!("IOAPIC: Pin out of range for mask request");
+            -1
+        }
+        Some(rc) => rc,
     }
-
-    let reg = ioapic_entry_low_index(pin);
-    let mut value = ctrl.read_reg(reg);
-    if mask {
-        value |= IOAPIC_FLAG_MASK;
-    } else {
-        value &= !IOAPIC_FLAG_MASK;
-    }
-
-    ctrl.write_reg(reg, value);
-    0
 }
 
 fn populate_from_madt(madt: &Madt) {
@@ -316,23 +326,30 @@ pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
         return -1;
     }
 
-    let Some(ctrl) = ioapic_find_controller(gsi) else {
-        klog_info!("IOAPIC: No IOAPIC handles requested GSI");
-        return -1;
-    };
-
-    let pin = gsi.saturating_sub(ctrl.gsi_base);
-    if pin >= ctrl.gsi_count {
-        klog_info!("IOAPIC: Calculated pin outside controller range");
-        return -1;
-    }
-
     let writable_flags = flags & IOAPIC_REDIR_WRITABLE_MASK;
     let low = vector as u32 | writable_flags;
     let high = (lapic_id as u32) << 24;
 
-    ctrl.write_reg(ioapic_entry_high_index(pin), high);
-    ctrl.write_reg(ioapic_entry_low_index(pin), low);
+    let outcome = with_controller(gsi, |ctrl| {
+        let pin = gsi.saturating_sub(ctrl.gsi_base);
+        if pin >= ctrl.gsi_count {
+            return None;
+        }
+        ctrl.write_reg(ioapic_entry_high_index(pin), high);
+        ctrl.write_reg(ioapic_entry_low_index(pin), low);
+        Some(pin)
+    });
+    let pin = match outcome {
+        None => {
+            klog_info!("IOAPIC: No IOAPIC handles requested GSI");
+            return -1;
+        }
+        Some(None) => {
+            klog_info!("IOAPIC: Calculated pin outside controller range");
+            return -1;
+        }
+        Some(Some(pin)) => pin,
+    };
 
     klog_info!(
         "IOAPIC: Configured GSI {} (pin {}) -> vector 0x{:x}, LAPIC 0x{:x}, low=0x{:x}, high=0x{:x}",

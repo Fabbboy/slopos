@@ -120,7 +120,6 @@ pub(crate) fn is_scheduling_active() -> bool {
         && PREEMPTION_ENABLED.load(Ordering::Acquire) != 0
 }
 
-use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
 use slopos_mm::process_vm::{
     process_vm_activate_by_handle, process_vm_get_cr3_phys_by_handle, unpack_process_vm_handle,
 };
@@ -269,12 +268,6 @@ pub(super) fn install_idle_task(cpu_id: usize, task: &Task) {
     slopos_arch::pcr::set_idle_task(cpu_id, core::ptr::from_ref(task).cast::<()>().cast_mut());
 }
 
-fn switch_to_kernel_address_space() {
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
-    tlb::enter_lazy_tlb(cpu_id);
-    kernel_vm_space().lock().activate_kernel_master();
-}
-
 /// Pre-switch housekeeping. Must run with interrupts disabled, from the scheduler
 /// hot path only, so the sequencing matches the dispatch state machine.
 fn prepare_switch_to(
@@ -284,14 +277,19 @@ fn prepare_switch_to(
 ) {
     let next = next_window.task();
     let xcr0 = active_xcr0();
+    let is_user_mode = next.flags & TASK_FLAG_USER_MODE != 0;
 
     slopos_ostd::task::switch::pcr_round_trip_swap(prev_window, next_window);
 
-    if let Some(prev_window) = prev_window {
+    // The kernel is built `+soft-float`, so a kernel-mode task owns nothing in
+    // the XCR0 register file. This elides work with no subject; deferring a
+    // user task's save to a trap would be lazy FPU switching (CVE-2018-3665).
+    if let Some(prev_window) = prev_window
+        && prev_window.task().flags & TASK_FLAG_USER_MODE != 0
+    {
         prev_window.task().fpu_save_current(prev_window, xcr0);
     }
 
-    let is_user_mode = next.flags & TASK_FLAG_USER_MODE != 0;
     let new_pid = if is_user_mode {
         next.process_id
     } else {
@@ -310,42 +308,38 @@ fn prepare_switch_to(
         tlb::enter_lazy_tlb(cpu_id);
     }
 
-    let fs = if is_user_mode {
+    // Both are read only on a ring-3 → ring-0 transition, which cannot happen
+    // while a kernel-mode task is current, and the next user switch writes them.
+    if is_user_mode {
         let raw = next.fs_base();
-        if raw == 0 || slopos_abi::addr::VirtAddr::is_canonical(raw) {
+        let fs = if raw == 0 || slopos_abi::addr::VirtAddr::is_canonical(raw) {
             raw
         } else {
             0
-        }
-    } else {
-        0
-    };
-    slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, fs);
+        };
+        slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, fs);
 
-    let kernel_rsp = if is_user_mode {
-        match next.kernel_stack_top {
+        let kernel_rsp = match next.kernel_stack_top {
             kst if kst != 0 => kst,
             _ => kernel_stack_top() as u64,
-        }
-    } else {
-        kernel_stack_top() as u64
-    };
-    platform::gdt_set_kernel_rsp0(kernel_rsp);
+        };
+        platform::gdt_set_kernel_rsp0(kernel_rsp);
+    }
 
     let _ = cpu_id;
     if let Some(handle) = next_vm {
         // The handle fails to resolve if its slot was rebound to another process
         // since this task was built; fall back to the kernel master.
         if !matches!(process_vm_activate_by_handle(handle), Ok(true)) {
-            kernel_vm_space().lock().activate_kernel_master();
+            slopos_ostd::mm::vm_space::activate_kernel_master_cr3();
         }
     } else {
-        kernel_vm_space().lock().activate_kernel_master();
+        slopos_ostd::mm::vm_space::activate_kernel_master_cr3();
     }
 
     // A rejected image is already reset to the init state; the CPU is mid-switch
     // with interrupts off, so stopping here would be a machine-wide halt.
-    if !next_window.task().fpu_restore_to_cpu(next_window, xcr0) {
+    if is_user_mode && !next_window.task().fpu_restore_to_cpu(next_window, xcr0) {
         klog_warn!(
             "SCHED: CPU {} rejected task {} FPU image; reset to init state",
             cpu_id,
@@ -834,9 +828,36 @@ pub fn publish_new_task(task: &TaskRef) -> c_int {
     rc
 }
 
+/// Strip `task` from whichever ready queue holds it.
+///
+/// The placements refused below hold no queue membership: enqueue CASes to
+/// `ReadyQueue` before linking. `Migrating` is not among them — a thief CASes
+/// out of `ReadyQueue` before unlinking, so it may still be linked.
+///
+/// A wake racing this call is the caller's `status()` re-check to catch, not
+/// this function's.
 pub fn unschedule_task(task: &Task) -> c_int {
+    match task.sched_placement() {
+        SchedPlacement::None
+        | SchedPlacement::OnCpu
+        | SchedPlacement::Waking
+        | SchedPlacement::RemoteWake
+        | SchedPlacement::Nascent
+        | SchedPlacement::Held => return 0,
+        SchedPlacement::ReadyQueue | SchedPlacement::Migrating => {}
+    }
+
+    // Stamped before the link, under the same lock `remove_task` takes.
+    let last_cpu = task.last_cpu() as usize;
+    if per_cpu::with_cpu_scheduler(last_cpu, |sched| sched.remove_task(task)) == Some(0) {
+        return 0;
+    }
+
     let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
+        if cpu_id == last_cpu {
+            continue;
+        }
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.remove_task(task);
         });
@@ -1059,7 +1080,14 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     dispatch(cpu_id, idle_task);
     slopos_ostd::sync::rcu_note_qs();
 
-    switch_to_kernel_address_space();
+    // No CR3 reload: `prepare_switch_to(next = idle)` already loaded the
+    // master, and `execute_task`'s early returns never switched away from it.
+    debug_assert!(
+        slopos_ostd::mm::vm_space::kernel_master_pml4().is_none_or(|master| {
+            slopos_arch::cpu::control_regs::read_cr3() & 0x000F_FFFF_FFFF_F000 == master.as_u64()
+        }),
+        "idle resumed on an address space that is not the kernel master",
+    );
     super::task::cleanup_current_task_after_switch(&dispatch_ref);
 
     // Re-enqueue a task preempted or already woken before its yield completed,
@@ -1820,6 +1848,10 @@ pub fn scheduler_timer_tick() {
     {
         return;
     }
+
+    // After the inbox drain, so a just-arrived remote wake counts toward this
+    // CPU's load rather than being pushed straight back out.
+    super::work_steal::periodic_balance();
 
     let Some(current) = current else {
         return;

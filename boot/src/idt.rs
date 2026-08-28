@@ -454,7 +454,11 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     }
 
     if vector == LAPIC_TIMER_VECTOR {
-        slopos_core::irq::increment_timer_ticks();
+        // BSP only: `platform::timer_frequency()` reports the 100 Hz of one
+        // LAPIC, so every CPU bumping this ran the clock at `cpu_count x 100`.
+        if slopos_arch::pcr::get_current_cpu() == 0 {
+            slopos_core::irq::increment_timer_ticks();
+        }
         // EOI before the handler avoids starving the timer when the handler is
         // slow; the gate cleared IF, so the next tick stays pending until IRET
         // rather than nesting.

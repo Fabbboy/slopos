@@ -367,6 +367,7 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     slopos_ostd::kdiag::kdiag_dump_lock_graph("post-kernel-tests");
     slopos_sched::quota_console::quota_report("post-kernel-tests");
     slopos_sched::per_cpu::ap_pause_report("post-kernel-tests");
+    slopos_sched::lifecycle::sched_cpu_report("post-kernel-tests");
 
     // Shutdown is always deferred to `SYSCALL_RUN_USERLAND_TESTS`, which merges
     // these counters, so that both phases run before QEMU exits.
@@ -534,6 +535,7 @@ fn boot_step_lockdep_report_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     slopos_ostd::kdiag::kdiag_dump_lock_graph("boot");
     slopos_sched::quota_console::quota_report("boot");
     slopos_sched::per_cpu::ap_pause_report("boot");
+    slopos_sched::lifecycle::sched_cpu_report("boot");
 }
 
 crate::boot_init!(

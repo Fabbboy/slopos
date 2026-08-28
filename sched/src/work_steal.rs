@@ -1,21 +1,21 @@
-//! Work stealing for SMP load balancing, with three anti-ping-pong guards:
-//! an imbalance threshold, cache-hot protection, and a per-CPU cooldown
-//! between scans. Each is tuned by a constant below.
+//! SMP load balancing: an idle CPU pulls work, and a loaded CPU pushes it.
+//!
+//! Pull alone cannot correct an imbalance in which no CPU is idle, because
+//! nobody reaches the idle loop to scan. [`periodic_balance`] closes that case.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::per_cpu::{
-    affinity_allows_cpu, enqueue_task_on_cpu, get_cpu_ready_count, try_steal_task_from_cpu,
+    affinity_allows_cpu, enqueue_task_on_cpu, is_schedulable_cpu, try_steal_task_from_cpu,
     with_cpu_scheduler, with_local_scheduler,
 };
 use super::task::TaskRef;
 use super::task_struct::Task;
 use slopos_arch::{get_cpu_count, get_current_cpu};
-use slopos_ostd::{kdiag_timestamp, klog_debug};
+use slopos_ostd::kdiag_timestamp;
 
-/// Minimum load difference (in queued tasks) between victim and thief before a
-/// steal is considered. At a 1-task difference the steal would immediately
-/// create a reverse imbalance → ping-pong.
+/// Minimum load difference between victim and thief before a task is moved. At
+/// a 1-task difference the move creates a reverse imbalance → ping-pong.
 const IMBALANCE_THRESHOLD: u32 = 2;
 
 /// TSC cycles a task must have been off-CPU before it is eligible for stealing.
@@ -24,12 +24,31 @@ const IMBALANCE_THRESHOLD: u32 = 2;
 /// Linux's documented default.
 const MIGRATION_COST_CYCLES: u64 = 0;
 
-/// Minimum timer ticks between work-steal scans on a given CPU: with a 10 ms
-/// tick period, 3 ticks ≈ 30 ms.
+/// Minimum timer ticks between *proactive* work-steal scans on a given CPU:
+/// with a 10 ms tick period, 3 ticks ≈ 30 ms.
 const STEAL_COOLDOWN_TICKS: u64 = 3;
+
+/// Timer ticks between push-balance passes.
+const BALANCE_INTERVAL_TICKS: u64 = 8;
 
 static LAST_STEAL_TICK: [AtomicU64; slopos_arch::MAX_CPUS] =
     [const { AtomicU64::new(0) }; slopos_arch::MAX_CPUS];
+
+static STEALS: [AtomicU64; slopos_arch::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; slopos_arch::MAX_CPUS];
+static PUSHES: [AtomicU64; slopos_arch::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; slopos_arch::MAX_CPUS];
+
+/// Tasks `cpu_id` has pulled from a peer and pushed to one.
+pub fn migration_counts(cpu_id: usize) -> (u64, u64) {
+    if cpu_id >= slopos_arch::MAX_CPUS {
+        return (0, 0);
+    }
+    (
+        STEALS[cpu_id].load(Ordering::Relaxed),
+        PUSHES[cpu_id].load(Ordering::Relaxed),
+    )
+}
 
 /// Attempt to steal a task from another CPU's ready queue; `true` when one was
 /// stolen and enqueued locally.
@@ -41,11 +60,14 @@ pub fn try_work_steal() -> bool {
         return false;
     }
 
-    if !steal_cooldown_elapsed(cpu_id) {
+    let thief_load = get_cpu_load(cpu_id);
+
+    // The cooldown bounds *proactive* scanning; an idle CPU has no work to
+    // take cycles from.
+    if thief_load != 0 && !steal_cooldown_elapsed(cpu_id) {
         return false;
     }
 
-    let thief_load = get_cpu_load(cpu_id);
     let start = (cpu_id + 1) % cpu_count;
 
     for i in 0..cpu_count {
@@ -64,7 +86,7 @@ pub fn try_work_steal() -> bool {
             // migration window.
             match with_local_scheduler(|sched| sched.enqueue_migrated(task)) {
                 Ok(()) => {
-                    klog_debug!("WORK_STEAL: CPU {} stole task from CPU {}", cpu_id, victim);
+                    STEALS[cpu_id].fetch_add(1, Ordering::Relaxed);
                     return true;
                 }
                 Err(task) => return_to_victim(victim, task),
@@ -125,8 +147,81 @@ fn return_to_victim(victim: usize, task: TaskRef) {
     crate::task::task_put(task);
 }
 
+/// Runnable tasks on `cpu_id`, counting the one currently running.
+///
+/// Queued-only reads 1-running-plus-1-queued as load 1, which never reaches
+/// [`IMBALANCE_THRESHOLD`] against an idle CPU's 0.
 pub fn get_cpu_load(cpu_id: usize) -> u32 {
-    get_cpu_ready_count(cpu_id)
+    with_cpu_scheduler(cpu_id, |sched| sched.effective_load()).unwrap_or(0)
+}
+
+/// Push one queued task from this CPU to the least-loaded eligible peer, and
+/// report whether one moved.
+///
+/// Driven from the timer tick because `try_work_steal` runs only from the idle
+/// loop: with every CPU holding at least one task, nobody is there to pull.
+pub fn periodic_balance() -> bool {
+    let cpu_id = get_current_cpu();
+    let cpu_count = get_cpu_count();
+    if cpu_count <= 1 {
+        return false;
+    }
+
+    if !balance_interval_elapsed(cpu_id) {
+        return false;
+    }
+
+    let my_load = get_cpu_load(cpu_id);
+    if my_load < IMBALANCE_THRESHOLD {
+        return false;
+    }
+
+    let Some((target, target_load)) = least_loaded_peer(cpu_id) else {
+        return false;
+    };
+    if my_load < target_load.saturating_add(IMBALANCE_THRESHOLD) {
+        return false;
+    }
+
+    let Some(task) = try_steal_task_from_cpu(cpu_id) else {
+        return false;
+    };
+
+    if !affinity_allows_cpu(task.cpu_affinity(), target) {
+        return_to_victim(cpu_id, task);
+        return false;
+    }
+
+    task.inc_migration_count();
+    if enqueue_task_on_cpu(target, &task) != 0 {
+        return_to_victim(cpu_id, task);
+        return false;
+    }
+    crate::task::task_put(task);
+    crate::lifecycle::send_reschedule_ipi(target);
+    PUSHES[cpu_id].fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Phase-shifted by `cpu_id` so the CPUs do not all scan on the same tick.
+fn balance_interval_elapsed(cpu_id: usize) -> bool {
+    let ticks = with_cpu_scheduler(cpu_id, |s| s.total_ticks.load(Ordering::Relaxed)).unwrap_or(0);
+    ticks.wrapping_add(cpu_id as u64) % BALANCE_INTERVAL_TICKS == 0
+}
+
+fn least_loaded_peer(exclude: usize) -> Option<(usize, u32)> {
+    let cpu_count = get_cpu_count();
+    let mut best: Option<(usize, u32)> = None;
+    for cpu_id in 0..cpu_count {
+        if cpu_id == exclude || !is_schedulable_cpu(cpu_id, 0) {
+            continue;
+        }
+        let load = get_cpu_load(cpu_id);
+        if best.is_none_or(|(_, best_load)| load < best_load) {
+            best = Some((cpu_id, load));
+        }
+    }
+    best
 }
 
 pub fn find_least_loaded_cpu(exclude: usize) -> Option<usize> {
