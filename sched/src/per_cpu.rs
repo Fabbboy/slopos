@@ -193,9 +193,6 @@ impl ReadyQueue {
     /// Detach the tail task for migration, handing the thief the owning
     /// reference this queue held.
     fn steal_from_tail(&self) -> Option<TaskRef> {
-        if self.list.len() <= 1 {
-            return None;
-        }
         let last = self.list.iter().last()?;
         // Borrowed, not reclaimed: both CASes below can fail, and taking the
         // reference would release a membership the queue keeps.
@@ -880,8 +877,20 @@ pub fn init_all_percpu_schedulers() {
         return;
     }
 
+    // `init` drops the enabled flag `is_schedulable_cpu` filters on, so
+    // resetting a running CPU strands its queue and hides it from every
+    // placement decision for the rest of the boot. The hermetic test scope
+    // resets a *paused* AP deliberately and restores the flag on the way out.
+    let aps_parked = are_aps_paused();
     for cpu_id in 0..MAX_CPUS {
         if let Some(sched) = cpu_scheduler(cpu_id) {
+            if sched.is_enabled() && !aps_parked && cpu_id != slopos_arch::pcr::get_current_cpu() {
+                klog_info!(
+                    "SCHED: refusing to reset the live runqueue of CPU {} —                      scheduler init ran after that CPU entered its scheduler loop",
+                    cpu_id
+                );
+                continue;
+            }
             sched.init(cpu_id);
         }
     }
@@ -935,9 +944,13 @@ pub fn enqueue_task_on_cpu(cpu_id: usize, task: &TaskRef) -> i32 {
     .unwrap_or(-1)
 }
 
+/// Detach one queued task from `cpu_id` for migration.
+///
+/// Refuses only an empty queue; whether the move is worth making is the
+/// caller's imbalance test, which sees the running task and the whole tier set.
 pub fn try_steal_task_from_cpu(cpu_id: usize) -> Option<TaskRef> {
     with_cpu_scheduler(cpu_id, |sched| {
-        if sched.total_ready_count() <= 1 {
+        if sched.total_ready_count() == 0 {
             return None;
         }
         sched.steal_task()
@@ -1146,7 +1159,13 @@ pub(crate) fn affinity_allows_cpu(affinity: u32, cpu_id: usize) -> bool {
     mask != 0 && (affinity & mask) != 0
 }
 
-fn is_schedulable_cpu(cpu_id: usize, affinity: u32) -> bool {
+/// Whether the placement helpers would consider `cpu_id` for an unrestricted
+/// task.
+pub fn cpu_accepts_placement(cpu_id: usize) -> bool {
+    is_schedulable_cpu(cpu_id, 0)
+}
+
+pub(crate) fn is_schedulable_cpu(cpu_id: usize, affinity: u32) -> bool {
     let cpu_count = slopos_arch::pcr::get_cpu_count();
     if cpu_id >= cpu_count {
         return false;

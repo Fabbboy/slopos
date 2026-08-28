@@ -158,6 +158,35 @@ pub fn register_kernel_master_pml4<'brand>(_token: &BspToken<'brand>, paddr: Phy
     );
 }
 
+/// The registered kernel-master PML4 base, or `None` before boot registers it.
+pub fn kernel_master_pml4() -> Option<PhysAddr> {
+    let master = KERNEL_MASTER_PML4.load(Ordering::Acquire);
+    (master != KERNEL_MASTER_UNINIT).then(|| PhysAddr::new(master))
+}
+
+/// Load the registered kernel-master PML4 into this CPU's CR3, without the
+/// `KERNEL_VM_SPACE` lock the scheduler would otherwise take on every switch.
+///
+/// Nothing [`VmSpace::activate`] reads through `&self` varies for the master:
+/// its base is write-once, its `mm_ctx_handle` is permanently zero, and
+/// `select_cr3`'s invalid-context arm answers `(PCID 0, flush)` either way.
+///
+/// No-op before registration, where CR3 already holds the master.
+pub fn activate_kernel_master_cr3() {
+    let master = KERNEL_MASTER_PML4.load(Ordering::Acquire);
+    if master == KERNEL_MASTER_UNINIT {
+        return;
+    }
+    if let Some(hook) = current_cursor_unmap_hook() {
+        hook.on_activate(0);
+    }
+    // SAFETY: `register_kernel_master_pml4`'s contract is exactly
+    // `write_cr3_pcid`'s — a 4 KiB-aligned, HHDM-reachable PML4 whose kernel
+    // half is canonical and lives for the static lifetime of the kernel — and
+    // PCID 0 with `no_flush == false` is the flushing load it asks for.
+    unsafe { write_cr3_pcid(PhysAddr::new(master), Pcid::KERNEL, false) };
+}
+
 /// Trait the consumer-side TLB / Lazy-User-Flush coordinator implements.
 /// `mm_ctx_handle` is an opaque `u64` whose meaning is defined entirely
 /// by the consumer — OSTD only stashes it on each `VmSpace` (via
