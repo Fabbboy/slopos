@@ -283,11 +283,12 @@ where
     );
     // SAFETY: this CPU is performing the switch with interrupts disabled
     // (asserted above), so the window cannot be re-entered on this CPU. The
-    // dispatch-reference half holds for both endpoints by different routes: the
-    // ready queue hands the dispatcher its reference on the incoming task, and
-    // a CPU's idle task is pinned by `task_is_dispatch_pinned`'s idle disjunct.
-    // The publication below adds the current-task disjunct for the incoming
-    // endpoint.
+    // dispatch-reference half holds for both endpoints, by three routes:
+    // the ready queue hands the dispatcher its reference on the incoming task
+    // (moved into the per-CPU owning slot by `publish`, so it outlives this
+    // frame); an *outgoing* ordinary task is covered by its own `on_cpu` and
+    // current-task disjuncts, both still set here; and a CPU's idle task, at
+    // either end, is pinned by `task_is_dispatch_pinned`'s idle disjunct.
     let next_window = unsafe { SwitchWindow::new(next) };
 
     publish();
@@ -312,6 +313,53 @@ where
     // dispatch reference until the switch tail parks it.
     let prev_window = unsafe { SwitchWindow::new(prev) };
     prepare(Some(&prev_window), &next_window)
+}
+
+/// Function every task calls the first time it is dispatched, before its entry
+/// point runs.
+///
+/// A resumed task returns into the frame that switched away from it, where the
+/// scheduler finishes its predecessor's switch. A first dispatch has no such
+/// frame, and without this the predecessor is left Ready, off-CPU and unqueued.
+pub type TaskEntryHook = extern "sysv64" fn();
+
+struct EntryHookSlot(UnsafeCell<MaybeUninit<TaskEntryHook>>);
+// SAFETY: writes are gated by `ENTRY_HOOK_INSTALLED.swap(true, AcqRel)`
+// (one-shot); reads happen after the flag is observed Acquire.
+unsafe impl Sync for EntryHookSlot {}
+
+static ENTRY_HOOK_SLOT: EntryHookSlot = EntryHookSlot(UnsafeCell::new(MaybeUninit::uninit()));
+static ENTRY_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// One-shot wiring point for the task-entry hook. The `&BspToken<'brand>`
+/// witnesses BSP-only init.
+pub fn register_task_entry_hook<'brand>(_token: &BspToken<'brand>, hook: TaskEntryHook) {
+    let was_installed = ENTRY_HOOK_INSTALLED.swap(true, Ordering::AcqRel);
+    assert!(!was_installed, "register_task_entry_hook called twice");
+    // SAFETY: the swap above transitioned us from "uninstalled" to "installed"
+    // exclusively; no other writer can be racing.
+    unsafe {
+        (*ENTRY_HOOK_SLOT.0.get()).write(hook);
+    }
+}
+
+/// Internal: run the registered first-dispatch hook, if any.
+///
+/// A task built before registration finds no hook, which is reachable only in
+/// early boot, before any task has a predecessor to finish.
+extern "sysv64" fn dispatch_task_entry() {
+    if !ENTRY_HOOK_INSTALLED.load(Ordering::Acquire) {
+        return;
+    }
+    // SAFETY: paired Release in `register_task_entry_hook`.
+    let hook = unsafe { *(*ENTRY_HOOK_SLOT.0.get()).as_ptr() };
+    hook()
+}
+
+/// The first-dispatch hook, for callers that are not the naked trampoline.
+#[inline]
+pub fn run_task_entry_hook() {
+    dispatch_task_entry()
 }
 
 /// Function the task-entry trampoline calls when the entry point returns.
@@ -400,8 +448,13 @@ extern "sysv64" fn dispatch_task_exit() -> ! {
 #[unsafe(naked)]
 pub unsafe extern "sysv64" fn task_entry_trampoline() {
     naked_asm!(
-        // r12 = entry point function pointer
-        // r13 = argument
+        // r12 = entry point function pointer, r13 = argument; both callee-saved
+        // across the hook, which is why it takes and returns nothing.
+
+        // Before the `sti`: the handover slot it drains must not be observed by
+        // a timer-driven re-entrant dispatch.
+        "call {task_entry}",
+
         "mov rdi, r13",
 
         // The switch restored RFLAGS with IF cleared, so a fresh kernel thread
@@ -415,6 +468,7 @@ pub unsafe extern "sysv64" fn task_entry_trampoline() {
 
         "ud2",
 
+        task_entry = sym dispatch_task_entry,
         task_exit = sym dispatch_task_exit,
     );
 }

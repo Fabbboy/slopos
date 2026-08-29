@@ -173,6 +173,15 @@ pub struct ProcessorControlRegion {
     /// after leaving the IRQ-off switch window.
     pub previous_task: AtomicPtr<()>,
 
+    /// Owning reference to the task this CPU is running.
+    ///
+    /// The counted companion to [`Self::current_task`], which stays a bare
+    /// borrow because `__safestack_pointer_address` reads it from asm at a
+    /// frozen offset. Holding it here rather than in the dispatcher's frame is
+    /// what lets a task be dispatched directly from its predecessor, whose
+    /// frame sits on a stack the successor may outlive.
+    pub current_task_ref: AtomicPtr<()>,
+
     /// Panic-recovery nesting depth for this CPU: nested catch scopes unwind
     /// one level at a time, and only the CPU that entered recovery observes
     /// it as active.
@@ -333,6 +342,7 @@ impl ProcessorControlRegion {
             panic_in_flight: AtomicU32::new(0),
             interrupt_nesting: AtomicU32::new(0),
             previous_task: AtomicPtr::new(ptr::null_mut()),
+            current_task_ref: AtomicPtr::new(ptr::null_mut()),
             recovery_depth: AtomicU32::new(0),
             current_task_id: AtomicU32::new(u32::MAX),
             current_task_priority: AtomicU8::new(PRIORITY_NONE),
@@ -1439,6 +1449,19 @@ pub fn take_previous_task() -> *mut () {
             .previous_task
             .swap(ptr::null_mut(), Ordering::Acquire)
     }
+}
+
+/// Install this CPU's owning reference to the task it is about to run,
+/// returning the one it replaces — which the caller must dispose of, normally
+/// by parking it with [`defer_previous_task`].
+#[inline]
+pub fn install_current_task(task: *mut ()) -> *mut () {
+    if !GS_BASE_SET.is_set() {
+        return ptr::null_mut();
+    }
+    // SAFETY: GS_BASE is installed (checked above), and only the running CPU
+    // writes its own current-task reference slot.
+    unsafe { current_pcr().current_task_ref.swap(task, Ordering::AcqRel) }
 }
 
 /// Returns `u32::MAX` (`INVALID_PROCESS_ID`) if GS_BASE has not yet been

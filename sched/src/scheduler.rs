@@ -394,6 +394,16 @@ fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task:
         save_live_recovery_depth(current);
     }
 
+    // Idle owns no reference, so this clears the slot and hands back whatever
+    // the outgoing task held.
+    let prev_raw = slopos_arch::pcr::install_current_task(core::ptr::null_mut());
+    if let Some(prev_node) = NonNull::new(prev_raw.cast::<Task>()) {
+        assert!(
+            slopos_arch::pcr::defer_previous_task(prev_node.as_ptr().cast()).is_ok(),
+            "previous-task slot was not drained before the next switch"
+        );
+    }
+
     slopos_ostd::task::run_switch(
         current,
         idle_task,
@@ -409,8 +419,30 @@ fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task:
             switch_context(prev_ctx, next_ctx);
         },
     );
-    // Reached when this task is resumed by a later dispatch.
     switch_abort_guard.disarm();
+}
+
+/// Switch `current` directly into `next_ref`, a task already claimed by
+/// [`claim_next_task`].
+fn switch_to_claimed_task(cpu_id: usize, current: &Task, next_ref: TaskRef) {
+    if let Some(returned) = execute_task_owned(cpu_id, Some(current), next_ref) {
+        abandon_claim(cpu_id, returned);
+    }
+}
+
+/// [`execute_task`] taking ownership of the incoming task's reference, handing
+/// it back if the switch is refused.
+fn execute_task_owned(
+    cpu_id: usize,
+    from_task: Option<&Task>,
+    next_ref: TaskRef,
+) -> Option<TaskRef> {
+    let node = next_ref.node();
+    // A borrow with no destructor, unlike a second guard: a count held here
+    // would go unreleased for as long as this task is descheduled — or forever.
+    slopos_ostd::task::with_parked_node(node, |to_task: &Task| {
+        execute_task(cpu_id, from_task, to_task, next_ref)
+    })
 }
 
 #[inline]
@@ -903,7 +935,27 @@ pub(crate) fn dispatch_pid_ok(pid: u32) -> bool {
     pid == INVALID_PROCESS_ID || pid <= slopos_mm::memory_layout_defs::MAX_PROCESS_ID
 }
 
-fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
+/// Switch `cpu_id` from `from_task` into `to_task`.
+///
+/// Returns `handover` back when the switch is **refused** — a corrupt
+/// `switch_ctx` or an unusable address space — in which case `to_task` has been
+/// terminated and no register switch occurred; the caller unwinds the claim.
+///
+/// # Ownership across a switch
+///
+/// On the switched path this does not return until the *calling* task is
+/// dispatched again, which may be never. No handle may outlive the call: a
+/// `TaskRef` local would run its `Drop` on resume, releasing a count for a task
+/// the frame no longer describes. `handover` is therefore moved into
+/// `PCR.current_task_ref` below and the reference it displaces parked in
+/// `previous_task`, since the frame that would otherwise hold either belongs to
+/// a task the successor may outlive.
+fn execute_task(
+    cpu_id: usize,
+    from_task: Option<&Task>,
+    to_task: &Task,
+    handover: TaskRef,
+) -> Option<TaskRef> {
     let pid = to_task.process_id;
     let to_id = to_task.task_id;
 
@@ -925,7 +977,7 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
             text_end,
         );
         let _ = crate::task::task_terminate(to_id);
-        return;
+        return Some(handover);
     }
     if rsp < USER_SPACE_TOP {
         klog_info!(
@@ -934,7 +986,7 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
             rsp,
         );
         let _ = crate::task::task_terminate(to_id);
-        return;
+        return Some(handover);
     }
 
     // A handle whose slot now belongs to another process, or one resolving to a
@@ -954,7 +1006,7 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
                     pid,
                 );
                 let _ = crate::task::task_terminate(to_id);
-                return;
+                return Some(handover);
             }
             Err(err) => {
                 klog_info!(
@@ -964,7 +1016,7 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
                     err,
                 );
                 let _ = crate::task::task_terminate(to_id);
-                return;
+                return Some(handover);
             }
         }
     }
@@ -984,6 +1036,16 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
         from_task,
         to_task,
         || {
+            // The last point still executing as the outgoing task, so the only
+            // place the handover can happen.
+            let next_node = handover.into_placement();
+            let prev_raw = slopos_arch::pcr::install_current_task(next_node.as_ptr().cast());
+            if let Some(prev_node) = NonNull::new(prev_raw.cast::<Task>()) {
+                assert!(
+                    slopos_arch::pcr::defer_previous_task(prev_node.as_ptr().cast()).is_ok(),
+                    "previous-task slot was not drained before the next switch"
+                );
+            }
             dispatch(cpu_id, to_task);
             slopos_ostd::sync::rcu_note_qs();
         },
@@ -996,9 +1058,16 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
         },
     );
     switch_abort_guard.disarm();
+    None
 }
 
-pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool {
+/// Dequeue and claim the highest-priority ready task for `cpu_id`.
+///
+/// On success the returned reference carries the CPU's exclusive dispatch
+/// claim: the task is `Running`, `on_cpu`, and `executing_task` is set. On
+/// failure every one of those is unwound and the reference released, so a
+/// caller that gets `None` owes nothing.
+fn claim_next_task(cpu_id: usize) -> Option<TaskRef> {
     // Drain cross-core wakes before the pick: a just-pushed remote wake is not
     // yet visible in the ready queues. `cpu_id` is the owning CPU, which is
     // `drain_remote_inbox`'s single-consumer contract.
@@ -1007,11 +1076,8 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     // The dequeue hands over the queue's owning reference rather than releasing
     // it, so the task stays pinned for the whole dispatch window below —
     // including the unbounded `on_cpu` spin.
-    let Some(dispatch_ref) =
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.dequeue_highest_priority()).flatten()
-    else {
-        return false;
-    };
+    let dispatch_ref =
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.dequeue_highest_priority()).flatten()?;
     let next_task: &Task = &dispatch_ref;
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
@@ -1025,7 +1091,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
         });
         core::hint::spin_loop();
         super::task::task_put(dispatch_ref);
-        return false;
+        return None;
     }
 
     if next_task.is_exited() || !next_task.is_ready() {
@@ -1035,7 +1101,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
             sched.set_executing_task(false);
         });
         super::task::task_put(dispatch_ref);
-        return false;
+        return None;
     }
 
     // Wait out the prior CPU's switch-out tail rather than publish a second
@@ -1064,7 +1130,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
             sched.set_executing_task(false);
         });
         super::task::task_put(dispatch_ref);
-        return false;
+        return None;
     }
 
     // Before the validation in execute_task: a concurrent `task_terminate` must
@@ -1072,23 +1138,72 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     // this CPU is about to run on.
     next_task.set_on_cpu(true);
 
-    execute_task(cpu_id, Some(idle_task), next_task);
+    Some(dispatch_ref)
+}
 
+/// Release a dispatch claim taken by [`claim_next_task`] for a switch that did
+/// not happen, putting the task back where a later dispatch can find it.
+fn abandon_claim(cpu_id: usize, dispatch_ref: TaskRef) {
+    let task: &Task = &dispatch_ref;
+    let task_id = task.task_id;
+    if !task.is_exited() && task.is_running() {
+        let _ = task_set_state(task_id, TaskStatus::Ready);
+    }
+    if task.is_ready() {
+        let rc =
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enqueue_from_on_cpu(&dispatch_ref))
+                .unwrap_or(-1);
+        if rc != 0 {
+            let _ = publish_ready_from_current_owner(&dispatch_ref, task_id, "abandon_claim");
+        }
+    } else {
+        let _ = task.sched_placement_compare_exchange(SchedPlacement::OnCpu, SchedPlacement::None);
+    }
+    // After the republish, as everywhere else: a peer must never see the task
+    // Ready, off-CPU and unqueued.
+    task.set_on_cpu(false);
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_executing_task(false);
+    });
+    super::task::task_put(dispatch_ref);
+}
+
+pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool {
+    let Some(dispatch_ref) = claim_next_task(cpu_id) else {
+        return false;
+    };
+    // Idle owns no reference of its own — it is pinned by
+    // `task_is_dispatch_pinned`'s idle disjunct — so nothing is displaced here.
+    if let Some(returned) = execute_task_owned(cpu_id, Some(idle_task), dispatch_ref) {
+        abandon_claim(cpu_id, returned);
+        return false;
+    }
+
+    // Reached only when a task switched back to idle and parked itself for us.
     let timestamp = kdiag_timestamp();
-    task_record_context_switch(Some(next_task), Some(idle_task), timestamp);
+    task_record_context_switch(None, Some(idle_task), timestamp);
 
     dispatch(cpu_id, idle_task);
     slopos_ostd::sync::rcu_note_qs();
 
-    // No CR3 reload: `prepare_switch_to(next = idle)` already loaded the
-    // master, and `execute_task`'s early returns never switched away from it.
+    // No CR3 reload: `prepare_switch_to(next = idle)` already loaded the master.
     debug_assert!(
         slopos_ostd::mm::vm_space::kernel_master_pml4().is_none_or(|master| {
             slopos_arch::cpu::control_regs::read_cr3() & 0x000F_FFFF_FFFF_F000 == master.as_u64()
         }),
         "idle resumed on an address space that is not the kernel master",
     );
-    super::task::cleanup_current_task_after_switch(&dispatch_ref);
+
+    finish_pending_switch(cpu_id);
+    true
+}
+
+/// The post-switch tail: run by the CPU that has just switched *into* a task,
+/// on behalf of the task it switched *away from*. IRQ-off, so the heavy
+/// cleanup a dead task needs is left to [`drain_previous_task`].
+fn finish_switch(cpu_id: usize, dispatch_ref: TaskRef) {
+    let next_task: &Task = &dispatch_ref;
+    let next_task_id = next_task.task_id;
 
     // Re-enqueue a task preempted or already woken before its yield completed,
     // keeping `on_cpu=true` until any Ready task has a queue/inbox membership: a
@@ -1164,19 +1279,30 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     // Acquire loads of `on_cpu`.
     next_task.set_on_cpu(false);
 
-    // The successor reclaims and releases this reference after the IRQ-off
-    // switch window ends, while executing on the idle stack.
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_executing_task(false);
+    });
+
+    // Re-parked rather than released: this runs interrupts-off inside the
+    // switch window, and a dead task's release needs a context that can take
+    // locks and wait for TLB acks. `drain_previous_task`, called by every path
+    // once it leaves the window, is that context.
     let parked = dispatch_ref.into_placement();
     assert!(
         slopos_arch::pcr::defer_previous_task(parked.as_ptr().cast()).is_ok(),
         "previous-task slot was not drained before the next switch"
     );
+}
 
-    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.set_executing_task(false);
-    });
-
-    true
+/// Finish the predecessor's switch, if this CPU has one pending. Called
+/// interrupts-off from every resume point; see [`execute_task`] for why the
+/// handover travels through the PCR rather than a stack frame.
+pub(crate) fn finish_pending_switch(cpu_id: usize) {
+    let previous = slopos_arch::pcr::take_previous_task().cast::<Task>();
+    let Some(node) = NonNull::new(previous) else {
+        return;
+    };
+    finish_switch(cpu_id, TaskRef::from_placement(node));
 }
 
 /// Scoped interrupt-enable window for the idle dispatcher's deferred-drop work,
@@ -1210,6 +1336,9 @@ impl Drop for RestoreInterruptState {
 
 /// Release the outgoing dispatch reference from this CPU's deferred slot;
 /// `false` if none was parked.
+///
+/// Called once each switch path has left the interrupts-off window, which is
+/// what makes it the right place for a dead task's cleanup.
 #[inline]
 pub(crate) fn drain_previous_task() -> bool {
     let previous = slopos_arch::pcr::take_previous_task().cast::<Task>();
@@ -1217,14 +1346,23 @@ pub(crate) fn drain_previous_task() -> bool {
         return false;
     };
 
-    // The allocator-heavy reap is deliberately not run in this switch tail: the
-    // latch defers it to the idle dispatcher, which frees the outgoing stack on
-    // the successor's stack with interrupts enabled. Sampled before the release —
-    // afterwards the pointer must not be touched.
+    // Sampled before the release — afterwards the pointer must not be touched.
     let dispatch_ref = TaskRef::from_placement(node);
-    let terminated = dispatch_ref.status() == TaskStatus::Terminated;
+    let needs_cleanup = matches!(
+        dispatch_ref.status(),
+        TaskStatus::Terminated | TaskStatus::Zombie
+    );
+    if needs_cleanup {
+        // Not in the switch tail: `destroy_process_vm` takes a lock and waits
+        // for cross-CPU TLB acks, neither of which is legal with interrupts
+        // off. Runs on the successor's stack, so the dying task's is free (I3).
+        let _window = RestoreInterruptState::open_window();
+        slopos_ostd::task::run_off_lock(|| {
+            super::task::cleanup_current_task_after_switch(&dispatch_ref);
+        });
+    }
     super::task::task_put(dispatch_ref);
-    if terminated {
+    if needs_cleanup {
         super::task::arm_deferred_reap();
     }
     true
@@ -1288,13 +1426,35 @@ fn schedule_internal() {
         return;
     }
 
+    // Direct task→task handoff, skipping the second `prepare_switch_to` and the
+    // third dispatch that going through idle would cost. A failed claim falls
+    // through to the idle switch below.
+    if let Some(current_ref) = current.as_ref() {
+        if let Some(next_ref) = claim_next_task(cpu_id) {
+            let next: &Task = &next_ref;
+            if next.task_id != current_ref.id() {
+                switch_to_claimed_task(cpu_id, current_ref.task(), next_ref);
+                // Reached on resume; the tail is for whatever this task
+                // displaced then. Before re-enabling interrupts, or a
+                // timer-driven dispatch parks into the still-occupied slot.
+                finish_pending_switch(cpu_id);
+                let _ = drain_previous_task();
+                cpu::restore_flags(irq_flags);
+                return;
+            }
+            abandon_claim(cpu_id, next_ref);
+        }
+    }
+
     // Re-enqueueing before the switch is the wake-before-switch-complete SMP
-    // race; it happens in `run_ready_task_from_idle` once `on_cpu` is cleared.
+    // race; it happens in `finish_switch` once `on_cpu` is cleared.
     switch_from_current_to_idle(
         cpu_id,
         current.as_ref().map(|current| current.task()),
         idle.task(),
     );
+    finish_pending_switch(cpu_id);
+    let _ = drain_previous_task();
     cpu::restore_flags(irq_flags);
 }
 
@@ -1679,11 +1839,23 @@ extern "sysv64" fn ostd_task_exit_hook() -> ! {
     scheduler_task_exit_impl()
 }
 
+/// ABI shim for `register_task_entry_hook`: completes the predecessor's switch
+/// on a task's first dispatch, which has no switching frame to return into.
+///
+/// Runs interrupts-off — the trampoline calls it ahead of its `sti` — so the
+/// tail and the release are ordered the same way as on every other resume path.
+extern "sysv64" fn ostd_task_entry_hook() {
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    finish_pending_switch(cpu_id);
+    let _ = drain_previous_task();
+}
+
 /// Install the OSTD task-exit hook. Must run once at boot, after the scheduler
 /// is initialised and before any task can return from its entry function; the
 /// OSTD registration is one-shot.
 pub fn install_ostd_task_exit_hook<'b>(token: &slopos_ostd::sync::BspToken<'b>) {
     slopos_ostd::task::switch::register_task_exit_hook(token, ostd_task_exit_hook);
+    slopos_ostd::task::switch::register_task_entry_hook(token, ostd_task_entry_hook);
     slopos_ostd::panic_recovery::register_oops_task_id_provider(current_task_id);
 }
 

@@ -117,8 +117,13 @@ The invariants the gate protects:
   synchronous cross-CPU TLB drains.
 - **I4** Wake and enqueue allocate nothing; a `KArc` clone is one atomic.
 - **I5** `current` is a borrow (`CurrentTask`), never an owned handle. PCR
-  offset 40 stays raw and ABI-frozen. `IdleTask` is the same shape for the
-  idle slot.
+  offset 40 stays raw and ABI-frozen — `__safestack_pointer_address` reads it
+  from asm on every instrumented prologue. `IdleTask` is the same shape for the
+  idle slot. The CPU separately holds *one* owning reference to the running
+  task in `PCR.current_task_ref`, which is what lets a task be dispatched
+  directly from its predecessor: a reference living in the dispatching frame
+  would be owned by a stack the successor outlives. Idle owns none, being
+  pinned by `task_is_dispatch_pinned`'s idle disjunct.
 - **I6** Lookup is weak-upgrade only. Fabricating a strong reference from a
   raw pointer is not a thing that can be written.
 - **I7** `KArc` is fallible everywhere and saturates on refcount overflow.

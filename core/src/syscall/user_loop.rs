@@ -36,6 +36,9 @@ fn placeholder_vm_space() -> &'static KArc<VmSpace> {
 /// seeded so `switch_registers` rets here on first dispatch. `extern "sysv64"`
 /// because the address is stored there as a synthetic return address.
 extern "sysv64" fn user_task_first_run() -> ! {
+    // Before anything that can block or enable interrupts: the handover slot it
+    // drains must not be observed by a re-entrant dispatch.
+    slopos_ostd::task::run_task_entry_hook();
     user_task_loop()
 }
 
