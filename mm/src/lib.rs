@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aslr;
+pub mod cache_census;
 pub mod cow;
 pub mod demand;
 pub mod elf;

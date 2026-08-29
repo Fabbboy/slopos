@@ -47,6 +47,8 @@ fn ap_late_entry(cpu_idx: usize) -> ! {
         // Must run before any CR3 load that embeds a non-zero PCID.
         slopos_mm::mmu::init_ap();
 
+        slopos_mm::pat::pat_init_ap();
+
         // Limine may start APs in x2APIC mode; the kernel uses xAPIC MMIO for
         // all LAPIC access, and the transition back must go x2APIC → disabled →
         // xAPIC. Must precede `apic::enable()`, which writes through MMIO.

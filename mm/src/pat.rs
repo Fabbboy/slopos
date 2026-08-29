@@ -30,7 +30,7 @@ pub const MEM_TYPE_UC_MINUS: u8 = 0x07;
 
 /// WC replaces the architectural default's WT entries at PA1 and PA5; the
 /// resulting layout follows Linux's.
-const PAT_VALUE: u64 = (MEM_TYPE_WB as u64)
+pub const PAT_VALUE: u64 = (MEM_TYPE_WB as u64)
     | ((MEM_TYPE_WC as u64) << 8)
     | ((MEM_TYPE_UC_MINUS as u64) << 16)
     | ((MEM_TYPE_UC as u64) << 24)
@@ -57,32 +57,9 @@ pub fn pat_supported() -> bool {
     (edx & CPUID_FEAT_EDX_PAT) != 0
 }
 
-/// The cache-disable / WBINVD / TLB-flush sequence below is the Intel SDM's
-/// mandated PAT-change procedure; its ordering is not optional.
-///
-/// # Safety
-///
-/// This function must be called:
-/// - Early in boot, before any memory is mapped with WC
-/// - Only once (subsequent calls are no-ops)
-/// - With interrupts that might access memory disabled
-pub fn pat_init() {
-    if !PAT_INIT.init_once() {
-        klog_debug!("PAT: Already initialized, skipping");
-        return;
-    }
-
-    if !pat_supported() {
-        panic!("PAT: Not supported by CPU - SlopOS requires PAT for framebuffer performance");
-    }
-
-    PAT_SUPPORTED.mark_set();
-
-    klog_debug!("PAT: Initializing Page Attribute Table with WC support");
-
-    let old_pat = cpu::read_msr(Msr::PAT);
-    klog_debug!("PAT: Current value: 0x{:016x}", old_pat);
-
+/// The cache-disable / WBINVD / TLB-flush sequence is the Intel SDM's mandated
+/// PAT-change procedure; its ordering is not optional.
+fn write_pat_msr_sdm_sequence() {
     let flags = cpu::save_flags_cli();
 
     cpu::wbinvd();
@@ -107,5 +84,33 @@ pub fn pat_init() {
             PAT_VALUE, new_pat
         );
     }
+}
+
+/// Program the BSP's PAT. Must run before any memory is mapped WC.
+pub fn pat_init() {
+    if !PAT_INIT.init_once() {
+        klog_debug!("PAT: Already initialized, skipping");
+        return;
+    }
+
+    if !pat_supported() {
+        panic!("PAT: Not supported by CPU - SlopOS requires PAT for framebuffer performance");
+    }
+
+    PAT_SUPPORTED.mark_set();
+
+    write_pat_msr_sdm_sequence();
+
     klog_info!("PAT: Initialized with WC support (PA1=WC, PA5=WC)");
+}
+
+/// Program the calling AP's PAT.
+///
+/// `IA32_PAT` is per-CPU: an AP left on the firmware default has PA1=WT, so the
+/// framebuffer PTE that write-combines on the BSP writes through here.
+pub fn pat_init_ap() {
+    if !pat_supported() {
+        panic!("PAT: Not supported by CPU - SlopOS requires PAT for framebuffer performance");
+    }
+    write_pat_msr_sdm_sequence();
 }

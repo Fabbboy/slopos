@@ -315,7 +315,9 @@ pub fn fb_flip_from_shm_damage(
         let Some(dst_ptr) = fb.checked_ptr(0, copy_size) else {
             return -1;
         };
+        let t0 = slopos_arch::tsc::rdtsc();
         slopos_ostd::util::ptr_buf::copy_bytes(dst_ptr, shm_ptr, copy_size);
+        crate::blit_census::record(t0, slopos_arch::tsc::rdtsc(), copy_size);
         return framebuffer_flush(core::ptr::null(), 0);
     }
 
@@ -324,15 +326,19 @@ pub fn fb_flip_from_shm_damage(
     // Kernel syscall path validates this pointer and length before calling us.
     let any_failed = slopos_ostd::util::ptr_buf::with_buf(damage, region_count, |regions| {
         let mut any_failed = false;
+        let mut blit_bytes = 0usize;
+        let t0 = slopos_arch::tsc::rdtsc();
         for rect in regions {
             if !rect.is_valid() {
                 continue;
             }
+            blit_bytes += rect.area().max(0) as usize * fb.info.bytes_per_pixel() as usize;
             if !copy_rect_from_shm(&fb, shm_ptr, copy_size, rect.x0, rect.y0, rect.x1, rect.y1) {
                 any_failed = true;
                 // Partial presentation beats none, so keep going.
             }
         }
+        crate::blit_census::record(t0, slopos_arch::tsc::rdtsc(), blit_bytes);
         any_failed
     });
     let flush = framebuffer_flush(damage, region_count as u32);

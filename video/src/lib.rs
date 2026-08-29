@@ -18,6 +18,7 @@ use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_info, klog_warn};
 use slopos_sched::task::register_task_resource_cleanup_hook;
 
+pub mod blit_census;
 pub mod fblog;
 pub mod framebuffer;
 pub mod graphics;

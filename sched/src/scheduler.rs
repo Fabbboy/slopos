@@ -1971,6 +1971,10 @@ pub fn scheduler_timer_tick() {
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
+    // The tick is the only context that reaches every CPU; a peer's PAT/MTRR
+    // MSRs are readable only by that peer.
+    slopos_mm::cache_census::record_current_cpu();
+
     // Tick-driven so the on-screen log renders even when dispatch is wedged,
     // which is exactly when it is needed.
     if cpu_id == 0 {

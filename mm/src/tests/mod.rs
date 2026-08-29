@@ -1,5 +1,6 @@
 // lib.rs gates this entire module behind #[cfg(feature = "test-hooks")].
 
+pub mod cache_census_tests;
 pub mod kernel_mapping_tests;
 pub mod mmio_tests;
 pub mod quiesce_tests;
