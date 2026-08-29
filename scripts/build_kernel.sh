@@ -146,6 +146,7 @@ GATE_INPUTS=(
     "$SCRIPT_DIR/check_stack_sizes.sh"
     "$SCRIPT_DIR/check_kernel_softfloat.sh"
     "$SCRIPT_DIR/check_registry_sections.sh"
+    "$SCRIPT_DIR/check_bootstrap_stack_rewind.sh"
     "$SCRIPT_DIR/llvm_tool.sh"
     "$SCRIPT_DIR/gates/stack/${VARIANT}.txt"
     "$SCRIPT_DIR/gates/vector/${VARIANT}.txt"
@@ -175,9 +176,15 @@ if [ -n "$GATE_KEY" ] && [ "$(cat "$GATE_STAMP" 2>/dev/null)" = "$GATE_KEY" ]; t
     echo "check_stack_sizes: skipped (${VARIANT} kernel + gates unchanged since last pass)"
     echo "check_kernel_softfloat: skipped (${VARIANT} kernel + gates unchanged since last pass)"
     echo "check_registry_sections: skipped (${VARIANT} kernel + gates unchanged since last pass)"
+    echo "check_bootstrap_stack_rewind: skipped (${VARIANT} kernel + gates unchanged since last pass)"
 else
     "$SCRIPT_DIR/check_stack_sizes.sh" --variant "$VARIANT" "$KERNEL_ELF"
     "$SCRIPT_DIR/check_kernel_softfloat.sh" --variant "$VARIANT" "$KERNEL_ELF"
     "$SCRIPT_DIR/check_registry_sections.sh" "$KERNEL_ELF"
+    # Release-only in effect, but run for every variant: in dev/tests the
+    # rewinding function is itself instrumented and its epilogue restores the
+    # slot, so the bug is invisible at runtime there. The ELF still shows the
+    # store, which is the whole reason this is a gate and not a kernel test.
+    "$SCRIPT_DIR/check_bootstrap_stack_rewind.sh" --variant "$VARIANT" "$KERNEL_ELF"
     [ -n "$GATE_KEY" ] && printf '%s\n' "$GATE_KEY" > "$GATE_STAMP"
 fi

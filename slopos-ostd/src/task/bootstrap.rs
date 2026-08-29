@@ -157,15 +157,20 @@ pub fn ap_bootstrap_unsafe_sp(i: usize) -> *mut u8 {
     ((top as usize) & !0xF) as *mut u8
 }
 
-/// Seed every bootstrap Task stub with a valid `unsafe_stack_sp`.
+/// Seed every *AP* bootstrap Task stub with a valid `unsafe_stack_sp`.
 ///
-/// Single-writer: must run exactly once on the BSP before any AP
-/// trampoline reads `current_task->unsafe_stack_sp`.
+/// The BSP's stub is deliberately not touched: `limine_entry.s` seeded it, and
+/// by the time this runs from `smp_init` it is the live allocation pointer of
+/// the data stack the whole boot chain is executing on. Storing the top back
+/// would free every caller's frame out from under it.
+///
+/// Single-writer: must run exactly once on the BSP before any AP trampoline
+/// reads `current_task->unsafe_stack_sp`.
 pub fn init_bootstrap_tasks() {
-    BSP_BOOTSTRAP_TASK
-        .0
-        .unsafe_stack_sp
-        .store(bsp_bootstrap_unsafe_sp() as u64, Ordering::Release);
+    debug_assert!(
+        BSP_BOOTSTRAP_TASK.0.unsafe_stack_sp.load(Ordering::Acquire) != 0,
+        "BSP bootstrap data-stack pointer must already be seeded by limine_entry.s"
+    );
 
     for (i, stub) in AP_BOOTSTRAP_TASKS.0.iter().enumerate() {
         stub.unsafe_stack_sp

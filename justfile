@@ -368,6 +368,7 @@ check-framekernel-gates:
     scripts/check_stack_sizes.sh --self-test
     scripts/check_kernel_softfloat.sh --self-test
     scripts/check_registry_sections.sh --self-test
+    scripts/check_bootstrap_stack_rewind.sh --self-test
     scripts/check_authority_reachability.sh --self-test
     scripts/check_lockdep_headroom.sh --self-test
     scripts/check_safe_contract_surface.sh --self-test
@@ -383,6 +384,7 @@ check-framekernel-gates:
     scripts/check_stack_sizes.sh --variant dev {{build_dir}}/kernel-dev.elf
     scripts/check_kernel_softfloat.sh --variant dev {{build_dir}}/kernel-dev.elf
     scripts/check_registry_sections.sh {{build_dir}}/kernel-dev.elf
+    scripts/check_bootstrap_stack_rewind.sh --variant dev {{build_dir}}/kernel-dev.elf
     scripts/check_authority_reachability.sh --variant dev {{build_dir}}/kernel-dev.elf
     scripts/check_wait_predicate_purity.sh
     scripts/check_wait_result_handling.sh
