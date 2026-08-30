@@ -165,8 +165,7 @@ fn test_cancel() -> bool {
 
 /// OP_WRITE on an unconnected TCP socket must complete inline with a
 /// socket-layer errno, which no pipe/regular fd yields — proving the ring took
-/// the `FileKind::Socket` path. In-process TCP loopback never completes its
-/// handshake here, so a real data round-trip is not available.
+/// the `FileKind::Socket` path. `socket_roundtrip` covers the connected case.
 fn test_socket_dispatch() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
         return false;
@@ -944,6 +943,70 @@ fn test_connect_unix_refused() -> bool {
     }
 }
 
+/// A real TCP data round-trip over loopback, driven entirely by the ring:
+/// OP_SEND on the client, OP_READ on the accepted peer.
+fn test_socket_roundtrip() -> bool {
+    const PORT: u16 = 18201;
+    const PAYLOAD: &[u8] = b"slopring-roundtrip";
+
+    let Ok(listener) = net::socket(AF_INET, SOCK_STREAM, 0) else {
+        return false;
+    };
+    if net::bind_any(listener.raw(), PORT).is_err() || net::listen(listener.raw(), 4).is_err() {
+        return false;
+    }
+    let Ok(client) = net::socket(AF_INET, SOCK_STREAM, 0) else {
+        return false;
+    };
+    let addr = SockAddrIn {
+        family: AF_INET,
+        port: PORT.to_be(),
+        addr: [127, 0, 0, 1],
+        _pad: [0; 8],
+    };
+    if net::connect(client.raw(), &addr).is_err() {
+        return false;
+    }
+    let Ok(peer) = net::accept(listener.raw(), None) else {
+        return false;
+    };
+
+    let Ok(mut ring) = Ring::setup(8) else {
+        return false;
+    };
+
+    let mut send_sqe = Sqe::ZERO;
+    send_sqe.opcode = OP_SEND;
+    send_sqe.fd = client.raw();
+    send_sqe.addr = PAYLOAD.as_ptr() as u64;
+    send_sqe.len = PAYLOAD.len() as u32;
+    send_sqe.user_data = 0xd1;
+    if ring.push_sqe(&send_sqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    match ring.wait_completion() {
+        Ok(cqe) if cqe.user_data == 0xd1 && cqe.res == PAYLOAD.len() as i32 => {}
+        _ => return false,
+    }
+
+    let mut buf = [0u8; 64];
+    let mut read_sqe = Sqe::ZERO;
+    read_sqe.opcode = OP_READ;
+    read_sqe.fd = peer.raw();
+    read_sqe.addr = buf.as_mut_ptr() as u64;
+    read_sqe.len = buf.len() as u32;
+    read_sqe.user_data = 0xd2;
+    if ring.push_sqe(&read_sqe).is_err() || ring.submit().is_err() {
+        return false;
+    }
+    match ring.wait_completion() {
+        Ok(cqe) if cqe.user_data == 0xd2 && cqe.res == PAYLOAD.len() as i32 => {
+            &buf[..PAYLOAD.len()] == PAYLOAD
+        }
+        _ => false,
+    }
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     ("setup", test_setup),
     ("nop", test_nop),
@@ -953,6 +1016,7 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ("select3_pingpong", test_select3_pingpong),
     ("socket_dispatch", test_socket_dispatch),
     ("send_socket_dispatch", test_send_socket_dispatch),
+    ("socket_roundtrip", test_socket_roundtrip),
     ("recvmsg_efault", test_recvmsg_efault),
     (
         "recvfrom_null_addr2_efault",

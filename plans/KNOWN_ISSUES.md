@@ -40,48 +40,6 @@ stack, so it would ship with an unfalsifiable assertion.
 
 ---
 
-## A loopback TCP connection never completes its handshake
-
-**Status**: Open
-**Severity**: Low (coverage, not correctness — no shipped path uses AF_INET loopback)
-**Component**: `net/src/loopback.rs`, `drivers/src/virtio_net.rs:885-940`
-
-A TCP connection to `127.0.0.1` stays in `SYN_SENT`. Three tests give up
-coverage to work around it and say so:
-
-- `userland/src/bin/tests/multishot_test.rs:9` — `accept_multishot` is covered
-  only by construction and drop-cancel, never by a completed accept.
-- `userland/src/bin/tests/ring_test.rs:168` — no socket data round-trip.
-- `userland/src/bin/tests/ip_e2e_test.rs:516` — dials an off-box peer because
-  loopback cannot complete.
-
-The handshake failure itself is **not diagnosed**; what follows is what was
-observed while looking, and is a separate defect on its own terms.
-
-`poll_loopback()` — the only drain of `DevIndex(0)` — is defined inside the
-virtio-net driver (`drivers/src/virtio_net.rs:912`) and called from
-`run_napi_burst` (`:904`) *after* two early returns that test the physical NIC:
-no device handle, or `!ready || !link_is_up`, and the function returns before
-reaching it (`:886-894`). Loopback delivery is therefore conditional on a
-virtio NIC being present and up, which is a layering inversion — `lo` is
-registered by `net/src/loopback.rs` and has nothing to do with that driver.
-The same function re-implements L2 parsing rather than going through
-`ingress::net_rx` (`:924-940`), so loopback traffic also skips XDP and MAC
-filtering.
-
-Under QEMU the NIC *is* ready, so `poll_loopback()` does run and this does not
-by itself explain the stalled handshake. Both want fixing; the ordering is to
-move the loopback drain out of the driver first, then re-test the handshake
-against a stack where delivery no longer depends on unrelated hardware.
-
-Fixing this would recover the `accept_multishot` and ring socket round-trip
-coverage above. It would **not** remove the need for an off-box peer in
-`curl_e2e`/`ip_e2e`: those assert route-aware source selection over `eth0`, and
-`source_ip_for(127.0.0.1)` must return a loopback address by design — which
-`net/src/tests/tcp_live_tests.rs:196` pins.
-
----
-
 ## A task on an AP can stall behind three unbounded or O(CPUs) scheduler waits
 
 **Status**: Open

@@ -314,6 +314,10 @@ impl DeviceHandle {
     pub fn features(&self) -> NetDeviceFeatures {
         self.dev.features()
     }
+
+    pub fn kind(&self) -> IfaceKind {
+        self.dev.kind()
+    }
 }
 
 impl fmt::Debug for DeviceHandle {

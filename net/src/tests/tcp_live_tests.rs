@@ -282,6 +282,80 @@ fn test_tcp_nonblocking_connect_returns_einprogress() -> TestResult {
     pass!()
 }
 
+/// A full loopback handshake through the live device, on a **wildcard** bind.
+///
+/// This is the shape `nc -l` installs and the one that was broken: the SYN-ACK
+/// was sourced from `0.0.0.0`, so the client's PCB was never found and the
+/// connection sat in `SYN_SENT` while a RST leaked out of the default route.
+/// Covers the loopback drain too — nothing else delivers `lo` traffic.
+fn test_loopback_wildcard_handshake_completes() -> TestResult {
+    use slopos_abi::net::{AF_INET, SOCK_STREAM};
+
+    const PORT: u16 = 18080;
+
+    let listener = socket::socket_create(AF_INET, SOCK_STREAM, 0, socket::SocketOwner::UNOWNED);
+    if listener < 0 {
+        return fail!("socket_create(listener) failed: {}", listener);
+    }
+    let listener = listener as u32;
+
+    let rc = socket::socket_bind(listener, [0, 0, 0, 0], PORT);
+    if rc != 0 {
+        let _ = socket::socket_close(listener);
+        return fail!("bind(0.0.0.0:{}) failed: {}", PORT, rc);
+    }
+    let rc = socket::socket_listen(listener, 4);
+    if rc != 0 {
+        let _ = socket::socket_close(listener);
+        return fail!("listen failed: {}", rc);
+    }
+
+    let client = socket::socket_create(AF_INET, SOCK_STREAM, 0, socket::SocketOwner::UNOWNED);
+    if client < 0 {
+        let _ = socket::socket_close(listener);
+        return fail!("socket_create(client) failed: {}", client);
+    }
+    let client = client as u32;
+    let _ = socket::socket_set_nonblocking(client, true);
+    let _ = socket::socket_connect(client, [127, 0, 0, 1], PORT);
+
+    let established = await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
+        socket::socket_lookup_tcp_idx(client)
+            .and_then(tcp::get_state)
+            .filter(|s| *s == tcp::TcpState::Established)
+    });
+
+    let accepted = established.and_then(|_| {
+        await_env(ENV_FAILSAFE_MS, POLL_INTERVAL_MS, || {
+            let rc = socket::socket_accept(listener, core::ptr::null_mut(), core::ptr::null_mut());
+            (rc >= 0).then_some(rc)
+        })
+    });
+
+    if let Some((fd, _)) = accepted {
+        let _ = socket::socket_close(fd as u32);
+    }
+    let _ = socket::socket_close(client);
+    let _ = socket::socket_close(listener);
+
+    let Some((_, waited)) = established else {
+        return fail!(
+            "a loopback connect to a wildcard listener did not reach ESTABLISHED within {}ms",
+            ENV_FAILSAFE_MS
+        );
+    };
+    klog_info!(
+        "tcp_live: loopback wildcard handshake completed in {}ms",
+        waited
+    );
+
+    assert_test!(
+        accepted.is_some(),
+        "the handshake completed but accept() never yielded the connection"
+    );
+    pass!()
+}
+
 slopos_testing::stest!(name = test_route_table_has_default, suite = tcp_live);
 slopos_testing::stest!(name = test_iface_has_ipv4, suite = tcp_live);
 slopos_testing::stest!(name = test_arp_resolve_gateway, suite = tcp_live);
@@ -296,5 +370,9 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = test_tcp_syn_transmit, suite = tcp_live);
 slopos_testing::stest!(
     name = test_tcp_nonblocking_connect_returns_einprogress,
+    suite = tcp_live
+);
+slopos_testing::stest!(
+    name = test_loopback_wildcard_handshake_completes,
     suite = tcp_live
 );

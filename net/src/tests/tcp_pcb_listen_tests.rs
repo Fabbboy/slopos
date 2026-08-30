@@ -330,6 +330,46 @@ pub fn test_listen_syn_queue_is_bounded() -> TestResult {
     pass!()
 }
 
+/// A wildcard listener must accept onto the address the SYN arrived on.
+///
+/// Sourcing the SYN-ACK from `0.0.0.0` instead makes the client's `table::find`
+/// miss its own PCB, so the handshake never completes and the reply is routed
+/// off-box by the default route.
+pub fn test_listen_wildcard_sources_synack_from_syn_destination() -> TestResult {
+    let tuple = TcpTuple {
+        local_ip: [0, 0, 0, 0],
+        local_port: LOCAL_PORT,
+        remote_ip: [0, 0, 0, 0],
+        remote_port: 0,
+    };
+    let syn = SynQueue::with_capacity(SockAddr::new(Ipv4Addr([0, 0, 0, 0]), Port(LOCAL_PORT)))
+        .expect("syn queue alloc");
+    let mut pcb = Pcb::new(tuple, PcbState::Listen(ListenState::with_syn_queue(syn)));
+
+    let actions = ListenState::on_segment(
+        &mut pcb,
+        &incoming(40000),
+        &hdr(TCP_FLAG_SYN, 1000, 0),
+        &[],
+        0,
+    );
+
+    let Some(seg) = actions.segments().next() else {
+        return fail!("a wildcard listener must answer a SYN with a SYN-ACK");
+    };
+    assert_eq_test!(
+        seg.tuple.local_ip,
+        LOCAL_IP,
+        "SYN-ACK is sourced from the SYN's destination, not the wildcard bind"
+    );
+    assert_eq_test!(
+        seg.tuple.remote_ip,
+        REMOTE_IP,
+        "SYN-ACK is addressed to the peer"
+    );
+    pass!()
+}
+
 slopos_testing::stest!(name = test_listen_rst_is_ignored, suite = tcp_pcb_listen);
 slopos_testing::stest!(
     name = test_listen_rst_retires_the_half_open_entry,
@@ -363,5 +403,9 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_listen_syn_queue_is_bounded,
+    suite = tcp_pcb_listen
+);
+slopos_testing::stest!(
+    name = test_listen_wildcard_sources_synack_from_syn_destination,
     suite = tcp_pcb_listen
 );

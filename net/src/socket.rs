@@ -693,6 +693,12 @@ fn be_port(port: u16) -> [u8; 2] {
 }
 
 pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
+    // `0.0.0.0` resolves to the default route, so such a segment would leave
+    // over the NIC addressed to nobody. Refuse rather than emit a martian.
+    if Ipv4Addr(seg.tuple.remote_ip).is_unspecified() {
+        return errno_i32(ERRNO_EINVAL);
+    }
+
     let mut opt_len = 0usize;
     if seg.mss.is_some() {
         opt_len += 4;

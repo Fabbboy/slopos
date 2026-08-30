@@ -84,6 +84,14 @@ pub fn input(
     payload: &[u8],
     now_ms: u64,
 ) -> Actions {
+    // A reply to an unspecified source is routed by the default route, so it
+    // leaves over the NIC addressed to 0.0.0.0. Drop rather than answer: no
+    // legitimate segment carries one, and the RST is what reaches the wire.
+    if Ipv4Addr(src_ip).is_unspecified() {
+        klog_debug!("tcp: segment from an unspecified source, dropping");
+        return Actions::new();
+    }
+
     let incoming_tuple = TcpTuple {
         local_ip: dst_ip,
         local_port: hdr.dst_port,

@@ -127,6 +127,8 @@ pub struct SynQueue {
     /// O(n) scan with `n <= SYN_QUEUE_MAX`; a hash table would allocate under
     /// a cli-lock.
     entries: KVec<(TcpFourTuple, SynRecvEntry)>,
+    /// The listener's bind address, which may be wildcard. Identifies the queue
+    /// in a dump; never keys an entry — that is the segment's own destination.
     local: SockAddr,
 }
 
@@ -149,10 +151,14 @@ impl SynQueue {
         })
     }
 
-    fn four_tuple(&self, remote: SockAddr) -> TcpFourTuple {
+    /// `local` is the segment's own destination, not the listener's bind: a
+    /// wildcard listener accepts onto the address the SYN arrived on, so the
+    /// child — and the SYN-ACK's source — must carry that concrete address
+    /// rather than `0.0.0.0` (RFC 1122 §4.2.3.7).
+    fn four_tuple(&self, local: SockAddr, remote: SockAddr) -> TcpFourTuple {
         TcpFourTuple {
-            local_ip: self.local.ip,
-            local_port: self.local.port,
+            local_ip: local.ip,
+            local_port: local.port,
             remote_ip: remote.ip,
             remote_port: remote.port,
         }
@@ -165,6 +171,7 @@ impl SynQueue {
     /// slot.
     pub fn on_syn(
         &mut self,
+        local: SockAddr,
         remote: SockAddr,
         irs: u32,
         peer_mss: u16,
@@ -172,7 +179,7 @@ impl SynQueue {
         timestamp: u64,
         peer_tsval: Option<u32>,
     ) -> Option<TcpOutSegment> {
-        let four_tuple = self.four_tuple(remote);
+        let four_tuple = self.four_tuple(local, remote);
 
         if let Some((_, entry)) = self.entries.iter().find(|(ft, _)| *ft == four_tuple) {
             return Some(build_syn_ack_from(entry, &four_tuple));
@@ -197,7 +204,7 @@ impl SynQueue {
 
         let entry = SynRecvEntry {
             remote,
-            local: self.local,
+            local,
             iss,
             irs,
             retries: 0,
@@ -230,8 +237,13 @@ impl SynQueue {
     /// Complete a handshake: match the final ACK against a queued entry.
     ///
     /// `None` means no entry matched — the caller answers that with a RST.
-    pub fn on_ack(&mut self, remote: SockAddr, ack_num: u32) -> Option<AcceptedConn> {
-        let four_tuple = self.four_tuple(remote);
+    pub fn on_ack(
+        &mut self,
+        local: SockAddr,
+        remote: SockAddr,
+        ack_num: u32,
+    ) -> Option<AcceptedConn> {
+        let four_tuple = self.four_tuple(local, remote);
         let idx = self
             .entries
             .iter()
@@ -297,8 +309,8 @@ impl SynQueue {
     }
 
     /// Forget a half-open connection the peer reset.
-    pub fn remove(&mut self, remote: SockAddr) -> bool {
-        let four_tuple = self.four_tuple(remote);
+    pub fn remove(&mut self, local: SockAddr, remote: SockAddr) -> bool {
+        let four_tuple = self.four_tuple(local, remote);
         let Some(idx) = self.entries.iter().position(|(ft, _)| *ft == four_tuple) else {
             return false;
         };
@@ -394,10 +406,6 @@ impl TcpListenState {
 
     pub fn backlog(&self) -> usize {
         self.backlog
-    }
-
-    pub fn local_addr(&self) -> SockAddr {
-        self.local
     }
 
     pub fn clear(&mut self) {

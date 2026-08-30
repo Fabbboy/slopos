@@ -86,7 +86,11 @@ fn net_rx_inner(handle: &DeviceHandle, mut pkt: PacketBuf) {
         crate::xdp::XdpAction::Pass => {}
         crate::xdp::XdpAction::Drop => return,
         crate::xdp::XdpAction::Tx => {
-            let _ = handle.tx(pkt);
+            // On loopback, tx() re-queues into the very ring this poll is
+            // draining, so a Tx verdict would feed itself.
+            if handle.kind() != crate::iface::IfaceKind::Loopback {
+                let _ = handle.tx(pkt);
+            }
             return;
         }
         crate::xdp::XdpAction::Redirect(dev) => {

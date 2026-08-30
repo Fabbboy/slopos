@@ -52,13 +52,14 @@ impl ListenState {
     ) -> Actions {
         let mut actions = Actions::new();
         let remote = SockAddr::new(Ipv4Addr(incoming.remote_ip), Port(incoming.remote_port));
+        let local = SockAddr::new(Ipv4Addr(incoming.local_ip), Port(incoming.local_port));
 
         let PcbState::Listen(listen) = &mut pcb.state else {
             return actions;
         };
 
         if hdr.is_rst() {
-            listen.syn.remove(remote);
+            listen.syn.remove(local, remote);
             return actions;
         }
 
@@ -67,6 +68,7 @@ impl ListenState {
             let peer_mss = parsed.mss.unwrap_or(DEFAULT_MSS);
             let peer_tsval = parsed.timestamp.map(|(v, _)| v);
             if let Some(syn_ack) = listen.syn.on_syn(
+                local,
                 remote,
                 hdr.seq_num,
                 peer_mss,
@@ -81,7 +83,7 @@ impl ListenState {
 
         // An ACK matching no half-open handshake: RFC 793 §3.4 answers with RST.
         if hdr.is_ack() {
-            if let Some(accepted) = listen.syn.on_ack(remote, hdr.ack_num) {
+            if let Some(accepted) = listen.syn.on_ack(local, remote, hdr.ack_num) {
                 actions.accepted = Some(accepted);
                 actions.notify |= SocketNotify::ACCEPT_WAKE;
             } else {

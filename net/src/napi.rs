@@ -59,3 +59,20 @@ pub fn wake_napi() {
         f();
     }
 }
+
+/// Drain the software devices — today just `lo` — through the ordinary ingress
+/// pipeline, returning the packet count.
+///
+/// Lives here rather than in a NIC driver so loopback delivery is not
+/// conditional on unrelated hardware being present and up.
+pub fn poll_software_devices(budget: usize) -> u32 {
+    let Some(handle) = crate::loopback::handle() else {
+        return 0;
+    };
+    let packets = handle.poll_rx(budget, &crate::pool::PACKET_POOL);
+    let count = packets.len() as u32;
+    for pkt in packets {
+        crate::ingress::net_rx(handle, pkt);
+    }
+    count
+}

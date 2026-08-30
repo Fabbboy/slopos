@@ -513,11 +513,11 @@ fn queries_honour_their_ifindex_filter() -> bool {
 /// connections", so the assertion is that the row for *our* connection says
 /// ESTABLISHED — a value only phase two can produce.
 ///
-/// The connection goes to QEMU's in-network echo peer, because a loopback
-/// connection never leaves `SYN_SENT`, so the only TCP connection this machine
-/// can complete goes out over `eth0`. Dialling the peer rather than a public
-/// resolver keeps the case answerable on a host with no egress, and the peer is
-/// forked per connection, so nothing here contends with another test.
+/// The connection goes to QEMU's in-network echo peer so the row exercises a
+/// real off-box path over `eth0` rather than loopback. Dialling the peer rather
+/// than a public resolver keeps the case answerable on a host with no egress,
+/// and the peer is forked per connection, so nothing here contends with another
+/// test.
 fn socket_query_resolves_a_live_tcp_state() -> bool {
     use std::io::Write as _;
     use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};

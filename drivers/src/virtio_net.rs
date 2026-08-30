@@ -60,6 +60,8 @@ const RX_RING_SIZE: usize = 64;
 const TX_RING_SIZE: usize = 64;
 const NAPI_BUDGET: u32 = 64;
 
+const LOOPBACK_POLL_BUDGET: usize = 32;
+
 /// Max descriptors in one zero-copy SG TX chain (header + payload runs): a
 /// `<= 1472`-byte datagram spans at most 2 pages, so 4 leaves headroom.
 const MAX_TX_SG_DESCS: usize = 4;
@@ -883,14 +885,18 @@ pub fn transmit_udp_packet(
 /// Drain one NAPI burst. Returns the NIC packet count so the caller can re-arm
 /// the waker when budget was exhausted.
 fn run_napi_burst() -> u32 {
+    // Before the NIC-readiness gate below: loopback delivery must not depend on
+    // a physical NIC being present and up.
+    let software = slopos_net::napi::poll_software_devices(LOOPBACK_POLL_BUDGET);
+
     let Some(handle) = get_device_handle() else {
-        return 0;
+        return software;
     };
 
     {
         let state = VIRTIO_NET_STATE.lock();
         if !state.device.ready || !link_is_up(&state) {
-            return 0;
+            return software;
         }
     }
 
@@ -901,45 +907,7 @@ fn run_napi_burst() -> u32 {
     }
     NAPI_CONTEXT.add_processed(processed);
 
-    poll_loopback();
-
-    processed
-}
-
-/// Drain the loopback device (DevIndex 0), which stores TX'd packets
-/// internally, back through ingress so they appear as received local traffic.
-/// Gated like `ingress::net_rx`, which this path bypasses, so a hermetic scope holds.
-fn poll_loopback() {
-    use slopos_net::netdev::DEVICE_REGISTRY;
-    use slopos_net::types::DevIndex;
-
-    if slopos_net::ingress::dataplane_quiesced() {
-        return;
-    }
-
-    let lo_packets = DEVICE_REGISTRY.poll_rx_by_index(DevIndex(0), 32, &PACKET_POOL);
-
-    for pkt in lo_packets {
-        // Loopback bypasses MAC filtering.
-        let checksum_rx = true; // Loopback doesn't need checksum verification.
-        let data = pkt.payload();
-        if data.len() >= slopos_net::ETH_HEADER_LEN {
-            let ethertype_raw = u16::from_be_bytes([data[12], data[13]]);
-            let mut pkt = pkt;
-            pkt.set_l2(pkt.head());
-            pkt.set_l3(pkt.head() + slopos_net::ETH_HEADER_LEN as u16);
-            if pkt.pull_header(slopos_net::ETH_HEADER_LEN).is_ok() {
-                match slopos_net::EtherType::from_u16(ethertype_raw) {
-                    Some(slopos_net::EtherType::Ipv4) => {
-                        slopos_net::ipv4::handle_rx(DevIndex(0), pkt, checksum_rx);
-                    }
-                    _ => {
-                        // Loopback only handles IPv4 for now.
-                    }
-                }
-            }
-        }
-    }
+    processed + software
 }
 
 /// Force a synchronous NAPI poll cycle from a non-IRQ context, for test

@@ -2,15 +2,25 @@
 //! into the local ingress pipeline on the next NAPI poll — no wire, no ARP.
 
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
 use slopos_ostd::{KArc, KVec, KVecDeque};
 
-use super::netdev::{NetDevice, NetDeviceFeatures, NetDeviceStats};
+use super::netdev::{DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats};
 use super::packetbuf::PacketBuf;
 use super::pool::PacketPool;
 use super::types::{MacAddr, NetError};
 
 const LOOPBACK_QUEUE_CAPACITY: usize = 256;
+
+/// Retained from registration rather than re-minted per poll: a `DeviceHandle`
+/// owns the device's TX serialization lock, so a second one would not serialise
+/// against the first.
+static LOOPBACK_HANDLE: OnceLock<DeviceHandle> = OnceLock::new();
+
+/// The `lo` handle, once [`init_loopback`] has registered the device.
+pub fn handle() -> Option<&'static DeviceHandle> {
+    LOOPBACK_HANDLE.get()
+}
 
 struct LoopbackInner {
     queue: KVecDeque<PacketBuf>,
@@ -143,6 +153,8 @@ pub fn init_loopback() {
 
     let lo_index = handle.index();
     klog_info!("loopback: registered as dev {}", lo_index);
+
+    LOOPBACK_HANDLE.call_once(|| handle);
 
     // Attach after registration returns, never from inside it: an administrative
     // down takes the interface table then the registry, so creating the row

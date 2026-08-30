@@ -43,7 +43,7 @@ pub fn test_syn_queue_overflow() -> TestResult {
 
     for i in 0..SYN_QUEUE_MAX as u16 {
         let client = client_addr(i);
-        let result = syn.on_syn(client, 1000 + i as u32, 1460, false, 0, None);
+        let result = syn.on_syn(local_addr(), client, 1000 + i as u32, 1460, false, 0, None);
         assert_test!(
             result.is_some(),
             "SYN {} should succeed (queue not full yet)"
@@ -53,7 +53,7 @@ pub fn test_syn_queue_overflow() -> TestResult {
     assert_eq_test!(syn.len(), SYN_QUEUE_MAX, "SYN queue at capacity");
 
     let overflow_client = client_addr(SYN_QUEUE_MAX as u16);
-    let overflow_result = syn.on_syn(overflow_client, 9999, 1460, false, 0, None);
+    let overflow_result = syn.on_syn(local_addr(), overflow_client, 9999, 1460, false, 0, None);
     assert_test!(
         overflow_result.is_none(),
         "SYN queue full -> silently dropped (no RST)"
@@ -76,7 +76,7 @@ pub fn test_accept_queue_overflow() -> TestResult {
 
     for i in 0..3u16 {
         let client = client_addr(i);
-        let syn_ack = syn.on_syn(client, 1000 + i as u32, 1460, false, 0, None);
+        let syn_ack = syn.on_syn(local_addr(), client, 1000 + i as u32, 1460, false, 0, None);
         assert_test!(syn_ack.is_some(), "SYN should succeed");
     }
     assert_eq_test!(syn.len(), 3, "3 entries in SYN queue");
@@ -87,11 +87,11 @@ pub fn test_accept_queue_overflow() -> TestResult {
     for i in 0..3u16 {
         let client = client_addr(i);
         let syn_ack = syn
-            .on_syn(client, 1000 + i as u32, 1460, false, 0, None)
+            .on_syn(local_addr(), client, 1000 + i as u32, 1460, false, 0, None)
             .expect("duplicate SYN retransmits SYN-ACK");
         let ack_num = syn_ack.seq_num.wrapping_add(1);
 
-        let accepted = syn.on_ack(client, ack_num);
+        let accepted = syn.on_ack(local_addr(), client, ack_num);
         assert_test!(
             accepted.is_some(),
             "a matching final ACK always completes the handshake"
@@ -124,7 +124,7 @@ pub fn test_syn_ack_retransmit_exhaustion() -> TestResult {
     let mut syn = make_syn_queue();
 
     let client = client_addr(0);
-    let syn_ack = syn.on_syn(client, 5000, 1460, false, 0, None);
+    let syn_ack = syn.on_syn(local_addr(), client, 5000, 1460, false, 0, None);
     assert_test!(syn_ack.is_some(), "initial SYN accepted");
     assert_eq_test!(syn.len(), 1, "1 entry in SYN queue");
 
@@ -165,11 +165,11 @@ pub fn test_duplicate_syn_retransmits() -> TestResult {
     let mut syn = make_syn_queue();
 
     let client = client_addr(42);
-    let first = syn.on_syn(client, 7000, 1460, false, 0, None);
+    let first = syn.on_syn(local_addr(), client, 7000, 1460, false, 0, None);
     assert_test!(first.is_some(), "first SYN accepted");
     let first_iss = first.unwrap().seq_num;
 
-    let dup = syn.on_syn(client, 7000, 1460, false, 100, None);
+    let dup = syn.on_syn(local_addr(), client, 7000, 1460, false, 100, None);
     assert_test!(dup.is_some(), "duplicate SYN triggers SYN-ACK retransmit");
     let dup_iss = dup.unwrap().seq_num;
 
@@ -368,7 +368,7 @@ pub fn test_listen_state_clear() -> TestResult {
     let mut syn = make_syn_queue();
     let mut listen = make_listen(16);
 
-    let _ = syn.on_syn(client_addr(0), 1000, 1460, false, 0, None);
+    let _ = syn.on_syn(local_addr(), client_addr(0), 1000, 1460, false, 0, None);
     assert_eq_test!(syn.len(), 1, "SYN queue has 1 entry");
 
     let accepted = crate::tcp::listener::AcceptedConn {
