@@ -1,12 +1,18 @@
 #![feature(restricted_std)]
 
-//! End-to-end TCP recv proof: sends a TCP-DNS query to a public resolver and
-//! asserts a response byte arrives inside the 5-second budget curl uses.
+//! End-to-end TCP proof: opens a connection to a peer off this machine, sends a
+//! frame and asserts the same bytes come back inside the budget curl uses.
 //!
-//! Target is 53/tcp on public resolvers: TCP-DNS is mandatory by RFC 7766 and
-//! SLIRP NATs those addresses normally, unlike its own gateway and DNS-alias
-//! IPs. Reachability is per address, so several are tried; every address
-//! refusing is a failure, never a skip.
+//! The peer is QEMU's in-network echo responder (`slopos_userland::net::ECHO_PEER_ADDR`,
+//! a `guestfwd` wired up by `scripts/qemu_run.sh`), not a public address. It is
+//! reached over `eth0` through the ordinary route, ARP and source-selection
+//! paths, so every kernel property here is exercised exactly as a public
+//! destination would exercise it — while a host with no egress can still answer
+//! the question. A failure is therefore about SlopOS, which is the only reason
+//! this test is worth running.
+//!
+//! The reply is compared byte-for-byte against what was sent, so a truncated,
+//! duplicated or reordered delivery fails.
 
 use slopos_userland as _;
 
@@ -14,64 +20,106 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::time::{Duration, Instant};
 
-/// Tried in order; the first that completes a handshake is the target.
-const TEST_DST_IPS: [Ipv4Addr; 3] = [
-    Ipv4Addr::new(8, 8, 8, 8),
-    Ipv4Addr::new(1, 1, 1, 1),
-    Ipv4Addr::new(9, 9, 9, 9),
-];
-const TEST_DST_PORT: u16 = 53;
-const IO_TIMEOUT: Duration = Duration::from_secs(5);
-/// 2-byte TCP-DNS length prefix + a minimal valid DNS query for `.`
-/// (root, type=NS). The response is never parsed; resolver answers vary.
-const TCP_DNS_QUERY: &[u8] = &[
-    0x00, 0x11, // 17-byte DNS message
-    0xab, 0xcd, // ID
-    0x01, 0x00, // flags: standard query, RD=1
-    0x00, 0x01, // QDCOUNT=1
-    0x00, 0x00, // ANCOUNT
-    0x00, 0x00, // NSCOUNT
-    0x00, 0x00, // ARCOUNT
-    0x00, // QNAME=root
-    0x00, 0x02, // QTYPE=NS
-    0x00, 0x01, // QCLASS=IN
-];
+use slopos_userland::net::{ECHO_PEER_ADDR, ECHO_PEER_PORT};
 
-/// Connects to the first reachable target and names every refusal: one
-/// filtered address and no route off the machine are different faults.
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The peer is one emulated hop away with no internet in the path, so a
+/// handshake that has not completed by now is a fault rather than slowness.
+/// Deliberately far below the harness's 120 s silence budget: the 30 s the
+/// kernel's blocking connect would otherwise spend is most of that budget for
+/// a result already known.
+const CONNECT_BUDGET: Duration = Duration::from_secs(2);
+
+/// Distinctive and not a round length: a stack that returns a zeroed or
+/// half-filled buffer fails the comparison rather than matching by accident.
+const ECHO_PAYLOAD: &[u8] = b"slopos-echo-0123456789-abcdefghij";
+
+fn peer_addr() -> SocketAddrV4 {
+    SocketAddrV4::new(
+        Ipv4Addr::new(
+            ECHO_PEER_ADDR[0],
+            ECHO_PEER_ADDR[1],
+            ECHO_PEER_ADDR[2],
+            ECHO_PEER_ADDR[3],
+        ),
+        ECHO_PEER_PORT,
+    )
+}
+
+/// Connect to the echo peer, naming the elapsed time on both paths.
 ///
-/// Each attempt is announced before it blocks: three serial connect deadlines
-/// exceed the harness's silence budget.
-fn connect_any() -> Result<(SocketAddrV4, TcpStream, u128), String> {
-    let mut refusals = String::new();
-    for ip in TEST_DST_IPS {
-        let addr = SocketAddrV4::new(ip, TEST_DST_PORT);
-        println!("curl_e2e: connecting to {addr}");
-        // Blocking `connect` is the path curl takes; `connect_timeout` layers
-        // std's nonblocking-poll plumbing on top and can mask a TCP-state
-        // regression behind a poll bug.
-        let connect_start = Instant::now();
-        match TcpStream::connect(&addr) {
-            Ok(stream) => return Ok((addr, stream, connect_start.elapsed().as_millis())),
-            Err(err) => {
-                if !refusals.is_empty() {
-                    refusals.push_str("; ");
-                }
-                refusals.push_str(&format!(
-                    "{} in {} ms kind={:?} raw={:?}",
+/// The connect is announced before it blocks: output on the wire is what resets
+/// the harness's silence watchdog, and a failing connect is exactly the case
+/// with nothing else to say.
+///
+/// Blocking `connect` on purpose — it is the path curl takes, and
+/// `connect_timeout` layers std's nonblocking-poll plumbing on top, which can
+/// hide a TCP-state regression behind a poll bug. The budget is enforced by
+/// checking the elapsed time after the fact rather than by arming a timer, so
+/// what is measured is the connect itself.
+fn connect_peer() -> Result<(SocketAddrV4, TcpStream, u128), String> {
+    let addr = peer_addr();
+    println!("curl_e2e: connecting to {addr}");
+    let started = Instant::now();
+    match TcpStream::connect(&addr) {
+        Ok(stream) => {
+            let elapsed = started.elapsed();
+            if elapsed > CONNECT_BUDGET {
+                return Err(format!(
+                    "connected to {} but took {} ms, over the {} ms budget for a peer one \
+                     emulated hop away",
                     addr,
-                    connect_start.elapsed().as_millis(),
+                    elapsed.as_millis(),
+                    CONNECT_BUDGET.as_millis(),
+                ));
+            }
+            Ok((addr, stream, elapsed.as_millis()))
+        }
+        Err(err) => Err(format!(
+            "connect to {} failed after {} ms: kind={:?} raw={:?}",
+            addr,
+            started.elapsed().as_millis(),
+            err.kind(),
+            err.raw_os_error(),
+        )),
+    }
+}
+
+/// Read exactly `want` bytes, or say how many arrived before the stream stopped.
+///
+/// A single `read` returning fewer bytes is legal TCP, so looping is what makes
+/// "the reply is complete" a real assertion rather than a property of how the
+/// segments happened to land.
+fn read_exact_echo(stream: &mut TcpStream, want: usize) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(want);
+    let mut chunk = [0u8; 256];
+    while out.len() < want {
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                return Err(format!(
+                    "peer closed after {} of {} byte(s)",
+                    out.len(),
+                    want
+                ));
+            }
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Err(err) => {
+                return Err(format!(
+                    "read failed with {} of {} byte(s) received: kind={:?} raw={:?}",
+                    out.len(),
+                    want,
                     err.kind(),
                     err.raw_os_error(),
                 ));
             }
         }
     }
-    Err(format!("connect to every target failed: {refusals}"))
+    Ok(out)
 }
 
-fn run_tcp_recv() -> (bool, String) {
-    let (addr, mut stream, connect_ms) = match connect_any() {
+fn run_tcp_echo() -> (bool, String) {
+    let (addr, mut stream, connect_ms) = match connect_peer() {
         Ok(v) => v,
         Err(diag) => return (false, diag),
     };
@@ -84,7 +132,7 @@ fn run_tcp_recv() -> (bool, String) {
     }
 
     let send_start = Instant::now();
-    if let Err(err) = stream.write_all(TCP_DNS_QUERY) {
+    if let Err(err) = stream.write_all(ECHO_PAYLOAD) {
         return (
             false,
             format!(
@@ -98,33 +146,29 @@ fn run_tcp_recv() -> (bool, String) {
     let send_ms = send_start.elapsed().as_millis();
 
     let recv_start = Instant::now();
-    let mut buf = [0u8; 1024];
-    let res = stream.read(&mut buf);
+    let echoed = read_exact_echo(&mut stream, ECHO_PAYLOAD.len());
     let recv_ms = recv_start.elapsed().as_millis();
 
-    let n = match res {
-        Ok(n) => n,
-        Err(err) => {
+    let echoed = match echoed {
+        Ok(bytes) => bytes,
+        Err(diag) => {
             return (
                 false,
-                format!(
-                    "read failed after {} ms: kind={:?} raw={:?} (connect={} ms send={} ms)",
-                    recv_ms,
-                    err.kind(),
-                    err.raw_os_error(),
-                    connect_ms,
-                    send_ms,
-                ),
+                format!("{diag} (connect={connect_ms} ms send={send_ms} ms recv={recv_ms} ms)"),
             );
         }
     };
 
-    if n == 0 {
+    if echoed != ECHO_PAYLOAD {
         return (
             false,
             format!(
-                "read returned EOF (n=0) before any data — peer closed without responding (connect={} ms send={} ms recv={} ms)",
-                connect_ms, send_ms, recv_ms,
+                "echo mismatch: sent {} byte(s), got {} byte(s) that differ — the bytes \
+                 reached the recv buffer corrupted or out of order. sent={:?} got={:?}",
+                ECHO_PAYLOAD.len(),
+                echoed.len(),
+                ECHO_PAYLOAD,
+                echoed.as_slice(),
             ),
         );
     }
@@ -132,14 +176,18 @@ fn run_tcp_recv() -> (bool, String) {
     (
         true,
         format!(
-            "peer={} connect={} ms send={} ms recv={} ms n={} first_byte=0x{:02x}",
-            addr, connect_ms, send_ms, recv_ms, n, buf[0],
+            "peer={} connect={} ms send={} ms recv={} ms echoed={} byte(s) verbatim",
+            addr,
+            connect_ms,
+            send_ms,
+            recv_ms,
+            echoed.len(),
         ),
     )
 }
 
-fn run_tcp_recv_diag() -> (bool, String) {
-    let (ok, diag) = run_tcp_recv();
+fn run_tcp_echo_diag() -> (bool, String) {
+    let (ok, diag) = run_tcp_echo();
     if !ok {
         let hint = if diag.contains("connect to") {
             " — SYN/SYN-ACK path broken (src_ip routing, ARP, or RX demux)"
@@ -147,8 +195,10 @@ fn run_tcp_recv_diag() -> (bool, String) {
             " — TX data path broken (TCP send buffer / poll_transmit)"
         } else if diag.contains("read failed") {
             " — RX data path broken (peer responded but kernel never enqueued into recv buffer)"
-        } else if diag.contains("EOF") {
-            " — peer reset/FIN before responding (often src_ip still bogus, server rejected request)"
+        } else if diag.contains("peer closed") {
+            " — peer reset/FIN before echoing (often src_ip still bogus)"
+        } else if diag.contains("echo mismatch") {
+            " — bytes arrived corrupted: reassembly, sequence handling or buffer copy"
         } else {
             ""
         };
@@ -160,8 +210,15 @@ fn run_tcp_recv_diag() -> (bool, String) {
 
 /// A loopback `local_addr` on an outbound socket means `first_ipv4()` has
 /// leaked into `socket_connect` in place of route-aware source selection.
+///
+/// The peer being on-link rather than past the gateway does not weaken this:
+/// loopback registers as `DevIndex(0)`, ahead of the NIC, so a `first_ipv4()`
+/// regression still yields `127.0.0.1` for any destination whose route names
+/// `eth0`. Source selection for a destination reached *via the default route*
+/// is pinned separately, in the kernel phase, by
+/// `net::tests::tcp_live::test_source_ip_for_external_uses_nic`.
 fn run_local_addr_is_not_loopback() -> (bool, String) {
-    let (_addr, stream, _connect_ms) = match connect_any() {
+    let (_addr, stream, _connect_ms) = match connect_peer() {
         Ok(v) => v,
         Err(diag) => return (false, format!("{diag} — cannot probe local_addr")),
     };
@@ -181,7 +238,7 @@ fn run_local_addr_is_not_loopback() -> (bool, String) {
             false,
             format!(
                 "outbound socket's local_addr is {} — `first_ipv4()` regression has crept back in. \
-                 source_ip_for(external) must return the NIC's DHCP-assigned address.",
+                 source_ip_for(off-box) must return the NIC's DHCP-assigned address.",
                 ip
             ),
         );
@@ -205,7 +262,7 @@ fn main() {
             "tcp_local_addr_is_not_loopback",
             run_local_addr_is_not_loopback,
         ),
-        ("tcp_recv_external_http_returns_data", run_tcp_recv_diag),
+        ("tcp_recv_returns_data", run_tcp_echo_diag),
     ];
     for (name, f) in cases {
         let (ok, diag) = f();

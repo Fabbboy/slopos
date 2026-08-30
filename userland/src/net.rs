@@ -62,6 +62,17 @@ pub fn resolve_host_raw(host: &str) -> Result<[u8; 4], ResolveError> {
     resolve_host(host).map(|addr| addr.0)
 }
 
+/// TCP echo peer that QEMU's user-mode backend answers on, configured by
+/// `scripts/qemu_run.sh` as a `guestfwd` that forks `/bin/cat` per connection.
+///
+/// Tests needing a peer that completes a handshake and returns bytes dial this
+/// rather than a public address: it is reached over `eth0` with the same route,
+/// ARP and source-selection paths as any off-box destination, but does not
+/// require the host to have egress. A test that dials the internet instead can
+/// only fail for reasons that are not about SlopOS.
+pub const ECHO_PEER_ADDR: [u8; 4] = [10, 0, 2, 100];
+pub const ECHO_PEER_PORT: u16 = 9999;
+
 #[cfg(test)]
 mod tests {
     use super::*;

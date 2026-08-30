@@ -18,6 +18,7 @@ set -euo pipefail
 #   QEMU_ENABLE_ISA_EXIT, QEMU_PCI_DEVICES,
 #   OVMF_DIR,
 #   NET, NET_PORTS,
+#   ECHO_PEER_ADDR, ECHO_PEER_PORT, ECHO_PEER_CMD,
 #   BOOT_LOG_TIMEOUT, LOG_FILE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,6 +88,13 @@ QEMU_PCI_DEVICES="${QEMU_PCI_DEVICES:-}"
 
 NET="${NET:-0}"
 NET_PORTS="${NET_PORTS:-7777,8080,8081}"
+
+# Must stay inside 10.0.2.0/24 and be neither the gateway (.2) nor the DNS stub
+# (.3) — `slirp_add_exec` rejects all three — and outside the DHCP range, which
+# starts at .15.
+ECHO_PEER_ADDR="${ECHO_PEER_ADDR:-10.0.2.100}"
+ECHO_PEER_PORT="${ECHO_PEER_PORT:-9999}"
+ECHO_PEER_CMD="${ECHO_PEER_CMD:-/bin/cat}"
 
 OVMF_DIR="${OVMF_DIR:-${REPO_ROOT}/third_party/ovmf}"
 OVMF_CODE="${OVMF_DIR}/OVMF_CODE.fd"
@@ -364,6 +372,23 @@ if [[ "$NET" =~ ^(1|true|on|yes)$ ]]; then
     echo "Network port forwarding enabled: ${NET_PORTS}"
 fi
 
+# ── In-network TCP echo peer ────────────────────────────────────────────────
+# SLIRP answers TCP on this address from inside the guest network, forking
+# ECHO_PEER_CMD per connection with the socket on stdin/stdout, and ARPs for it
+# like any host on the segment (libslirp's arp_input replies for every
+# exec_list address). So the guest reaches it over eth0 through the ordinary
+# route, neighbour and source-selection paths, with no egress off the host.
+#
+# Absence is fatal rather than silently dropped: a missing peer would present
+# as the connection failures these tests exist to detect.
+if [ ! -x "$ECHO_PEER_CMD" ]; then
+    echo "qemu_run.sh: echo peer command '$ECHO_PEER_CMD' is not executable." >&2
+    echo "  The userland network tests dial ${ECHO_PEER_ADDR}:${ECHO_PEER_PORT} and need it." >&2
+    echo "  Override with ECHO_PEER_CMD=/path/to/responder." >&2
+    exit 1
+fi
+NET_GUESTFWD=",guestfwd=tcp:${ECHO_PEER_ADDR}:${ECHO_PEER_PORT}-cmd:${ECHO_PEER_CMD}"
+
 # ── Debug-mode plumbing ─────────────────────────────────────────────────────
 # Set QEMU_DEBUG=1 to enable the QEMU monitor on a Unix socket plus the GDB
 # stub on TCP :1234. The monitor lets you run `info cpus`, `info registers`,
@@ -421,7 +446,7 @@ QEMU_ARGS+=(
     # No `dns=`: it sets the guest-visible address of SLIRP's own stub, not an
     # upstream to forward to, so naming a public resolver moves the stub
     # somewhere nothing replies from and every lookup times out.
-    -netdev "user,id=slopnet0${NET_HOSTFWD}"
+    -netdev "user,id=slopnet0${NET_HOSTFWD}${NET_GUESTFWD}"
     -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"
     -boot "order=d,menu=off"
     "${SERIAL_ARGS[@]}"

@@ -59,7 +59,9 @@ ARGS=(
     -drive "file=$FS_IMAGE,if=none,id=vd0,format=raw"
     -object "iothread,id=iot0"
     -device "virtio-blk-pci,drive=vd0,disable-legacy=on,iothread=iot0"
-    -netdev "user,id=slopnet0,dns=1.1.1.1"
+    # Same in-network echo peer `qemu_run.sh` configures, so a network failure
+    # reproduced under gdb sees the environment the test ran in.
+    -netdev "user,id=slopnet0,dns=1.1.1.1,guestfwd=tcp:10.0.2.100:9999-cmd:/bin/cat"
     -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"
     -boot "order=d,menu=off"
     -device "isa-debug-exit,iobase=0xf4,iosize=0x01"

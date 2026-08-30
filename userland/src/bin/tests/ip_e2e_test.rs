@@ -513,36 +513,34 @@ fn queries_honour_their_ifindex_filter() -> bool {
 /// connections", so the assertion is that the row for *our* connection says
 /// ESTABLISHED — a value only phase two can produce.
 ///
-/// TCP-DNS to a public resolver, because a loopback connection never leaves
-/// `SYN_SENT`, so the only TCP connection this machine can complete goes out
-/// over `eth0`. Port 53 over TCP is mandatory by RFC 7766.
-///
-/// `8.8.8.8` is tried last, and the order is load-bearing: another test in this
-/// suite connects to that address directly, and two tests contending for one
-/// external endpoint in a single boot presents as intermittency.
+/// The connection goes to QEMU's in-network echo peer, because a loopback
+/// connection never leaves `SYN_SENT`, so the only TCP connection this machine
+/// can complete goes out over `eth0`. Dialling the peer rather than a public
+/// resolver keeps the case answerable on a host with no egress, and the peer is
+/// forked per connection, so nothing here contends with another test.
 fn socket_query_resolves_a_live_tcp_state() -> bool {
     use std::io::Write as _;
     use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
     use std::time::Duration;
 
-    const RESOLVERS: [[u8; 4]; 3] = [[1, 1, 1, 1], [9, 9, 9, 9], [8, 8, 8, 8]];
+    use slopos_userland::net::{ECHO_PEER_ADDR, ECHO_PEER_PORT};
 
-    let mut connected = None;
-    for peer in RESOLVERS {
-        let addr = SocketAddrV4::new(Ipv4Addr::new(peer[0], peer[1], peer[2], peer[3]), 53);
-        if let Ok(stream) = TcpStream::connect(addr) {
-            connected = Some((peer, stream));
-            break;
-        }
+    let peer = ECHO_PEER_ADDR;
+    let addr = SocketAddrV4::new(
+        Ipv4Addr::new(peer[0], peer[1], peer[2], peer[3]),
+        ECHO_PEER_PORT,
+    );
+    // Announced before the connect blocks: output is what resets the harness's
+    // silence watchdog, and a connect that never completes has nothing else to
+    // say for as long as it takes to give up.
+    eprintln!("ip_e2e_test: connecting to {addr}");
+    let Ok(mut stream) = TcpStream::connect(addr) else {
         eprintln!(
-            "ip_e2e_test: {}.{}.{}.{}:53 did not answer",
-            peer[0], peer[1], peer[2], peer[3]
+            "ip_e2e_test: {addr} did not answer; cannot open a connection to observe. \
+             The peer is a QEMU guestfwd wired up by scripts/qemu_run.sh."
         );
-    }
-    let Some((peer, mut stream)) = connected else {
-        eprintln!("ip_e2e_test: no public resolver reachable over TCP; cannot open a connection");
-        // Not a pass: an unreachable network makes this case unable to answer,
-        // and saying "ok" would claim a proof it does not have.
+        // Not a pass: without a connection this case cannot answer, and saying
+        // "ok" would claim a proof it does not have.
         return false;
     };
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -560,20 +558,17 @@ fn socket_query_resolves_a_live_tcp_state() -> bool {
 
     // Matched on the exact four-tuple, not "any ESTABLISHED row": every other
     // process's rows are in this answer too. Ports are host byte order in this
-    // struct, unlike `SockAddrIn` — 53 read big-endian would be 13568 — so a
-    // byte-order slip surfaces here too.
+    // struct, unlike `SockAddrIn`, so a byte-order slip surfaces here as a port
+    // with its bytes swapped rather than as a missing row.
     let ours = q
         .iter()
-        .find(|row| row.remote_addr == peer && row.remote_port == 53);
+        .find(|row| row.remote_addr == peer && row.remote_port == ECHO_PEER_PORT);
     let Some(row) = ours else {
         eprintln!(
-            "ip_e2e_test: {} row(s), none to {}.{}.{}.{}:53 — our own connection is missing \
+            "ip_e2e_test: {} row(s), none to {} — our own connection is missing \
              from a query that returns every socket",
             q.len(),
-            peer[0],
-            peer[1],
-            peer[2],
-            peer[3]
+            addr
         );
         for row in &q {
             eprintln!(
