@@ -810,10 +810,19 @@ impl DataState {
             ClosePhase::FinWait1 | ClosePhase::LastAck | ClosePhase::Closing => 1u32,
             _ => 0,
         };
+        // Our SYN occupies `iss` and is likewise not in the send map. It is
+        // still outstanding whenever `snd_una` has not moved past it, which is
+        // what a close out of `SYN_RECEIVED` leaves behind.
+        let syn_offset = if self.snd_una.raw() == self.iss.raw() {
+            1u32
+        } else {
+            0
+        };
         let expected = self
             .snd_una
             .distance_to(self.snd_nxt)
-            .saturating_sub(fin_offset);
+            .saturating_sub(fin_offset)
+            .saturating_sub(syn_offset);
         debug_assert_eq!(
             self.sendmap.total_bytes(),
             expected,

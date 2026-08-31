@@ -601,6 +601,8 @@ fn close_syn_recv_transition(
     let window = s.rcv_wnd;
     let now_ms = clock::now_ms();
     let ts_enabled = s.ts_enabled;
+    // The `Data` state arms its own RTO; left pending, this one fires against it.
+    let handshake_timer = s.retransmit_token;
     let mut ds = slopos_ostd::KBox::try_init(DataState::init_from_syn_recv(s))?;
     ds.close_phase = ClosePhase::FinWait1;
     ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
@@ -610,6 +612,9 @@ fn close_syn_recv_transition(
         None
     };
     pcb.state = PcbState::Data(ds);
+    if let Some(token) = handshake_timer {
+        NET_TIMER_WHEEL.cancel(token);
+    }
     pcb.assert_invariants();
     let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
     seg.timestamp = ts;
@@ -726,6 +731,7 @@ fn shutdown_write_syn_recv_transition(
     let window = s.rcv_wnd;
     let now_ms = clock::now_ms();
     let ts_enabled = s.ts_enabled;
+    let handshake_timer = s.retransmit_token;
     let mut ds = slopos_ostd::KBox::try_init(DataState::init_from_syn_recv(s))?;
     ds.close_phase = ClosePhase::FinWait1;
     ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
@@ -735,6 +741,9 @@ fn shutdown_write_syn_recv_transition(
         None
     };
     pcb.state = PcbState::Data(ds);
+    if let Some(token) = handshake_timer {
+        NET_TIMER_WHEEL.cancel(token);
+    }
     pcb.assert_invariants();
     let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
     seg.timestamp = ts;
@@ -1174,38 +1183,64 @@ pub fn poll_transmit(
     .flatten()
 }
 
-/// `None` means not in `SynSent`: fall through to the data path. `Some(Nothing)` means exhausted.
-fn on_syn_retransmit(id: ConnId) -> Option<RetransmitAction> {
+/// A retransmit timer fired on a half-open connection, in either direction.
+///
+/// `None` means neither handshake state: fall through to the data path.
+/// `Some(Nothing)` means the attempt is exhausted and the PCB is gone.
+///
+/// `SynRecv` is reached here only through a simultaneous open; a listener's
+/// half-open entries retransmit from `SynQueue` instead. One budget spans both
+/// arms, since a crossed SYN answers the SYN already sent.
+fn on_handshake_retransmit(id: ConnId) -> Option<RetransmitAction> {
     enum SynOutcome {
-        NotSynSent,
-        Exhausted,
+        NotHandshake,
+        Exhausted(&'static str),
         Resend(TcpOutSegment),
     }
 
     let outcome = table::with_pcb_mut(id, |pcb| {
         let tuple = pcb.tuple;
-        let PcbState::SynSent(s) = &mut pcb.state else {
-            return SynOutcome::NotSynSent;
-        };
-        s.retransmit_token = None;
-        if s.retransmits >= ACTIVE_SYN_RETRIES_MAX {
-            return SynOutcome::Exhausted;
-        }
-        s.retransmits = s.retransmits.saturating_add(1);
-        s.rto_ms = s.rto_ms.saturating_mul(2);
+        let now_ms = clock::now_ms();
+        match &mut pcb.state {
+            PcbState::SynSent(s) => {
+                s.retransmit_token = None;
+                if s.retransmits >= ACTIVE_SYN_RETRIES_MAX {
+                    return SynOutcome::Exhausted("SYN");
+                }
+                s.retransmits = s.retransmits.saturating_add(1);
+                s.rto_ms = s.rto_ms.saturating_mul(2);
 
-        let seg = SegmentBuilder::active_syn(tuple, s.iss.raw(), s.our_wscale)
-            .with_timestamp(clock::now_ms() as u32, 0);
-        let token = NET_TIMER_WHEEL.schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
-        s.retransmit_token = Some(token);
-        SynOutcome::Resend(seg)
+                let seg = SegmentBuilder::active_syn(tuple, s.iss.raw(), s.our_wscale)
+                    .with_timestamp(now_ms as u32, 0);
+                let token =
+                    NET_TIMER_WHEEL.schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
+                s.retransmit_token = Some(token);
+                SynOutcome::Resend(seg)
+            }
+            PcbState::SynRecv(s) => {
+                s.retransmit_token = None;
+                if s.retransmits >= ACTIVE_SYN_RETRIES_MAX {
+                    return SynOutcome::Exhausted("SYN-ACK");
+                }
+                s.retransmits = s.retransmits.saturating_add(1);
+                s.rto_ms = s.rto_ms.saturating_mul(2);
+
+                let seg = s.syn_ack(tuple, now_ms);
+                let token =
+                    NET_TIMER_WHEEL.schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
+                s.retransmit_token = Some(token);
+                SynOutcome::Resend(seg)
+            }
+            _ => SynOutcome::NotHandshake,
+        }
     })?;
 
     match outcome {
-        SynOutcome::NotSynSent => None,
-        SynOutcome::Exhausted => {
+        SynOutcome::NotHandshake => None,
+        SynOutcome::Exhausted(what) => {
             klog_debug!(
-                "tcp: SYN retransmits exhausted id={} -> releasing",
+                "tcp: {} retransmits exhausted id={} -> releasing",
+                what,
                 id.raw()
             );
             table::release(id);
@@ -1228,7 +1263,7 @@ pub fn on_retransmit(conn_id: u32) -> RetransmitAction {
         return RetransmitAction::Nothing;
     }
 
-    if let Some(action) = on_syn_retransmit(id) {
+    if let Some(action) = on_handshake_retransmit(id) {
         return action;
     }
 

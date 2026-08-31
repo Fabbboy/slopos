@@ -1717,7 +1717,8 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                 }
                 return 0;
             }
-            Some(TcpState::SynSent) => {}
+            // `SynReceived` here is a simultaneous open still in flight.
+            Some(TcpState::SynSent | TcpState::SynReceived) => {}
             None => {
                 let mut table = NEW_SOCKET_TABLE.lock();
                 if let Some(sock) = table.get_mut(sock_idx as usize) {
@@ -1807,7 +1808,7 @@ pub fn socket_connect_nonblock(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                 }
                 0
             }
-            Some(TcpState::SynSent) => errno_i32(ERRNO_EAGAIN),
+            Some(TcpState::SynSent | TcpState::SynReceived) => errno_i32(ERRNO_EAGAIN),
             _ => {
                 let mut table = NEW_SOCKET_TABLE.lock();
                 if let Some(sock) = table.get_mut(sock_idx as usize) {

@@ -4,16 +4,16 @@
 
 use core::mem;
 
-use super::super::actions::{Actions, SocketNotify};
+use super::super::actions::{Actions, SocketNotify, TimerOp};
 use super::super::header::{
     DEFAULT_MSS, DEFAULT_WINDOW_SIZE, TCP_FLAG_ACK, TcpHeader, parse_tcp_options,
 };
 use super::super::segment::SegmentBuilder;
 use super::super::seq::{SeqNum, seq_gt, seq_le};
 use super::data::DataState;
-use super::syn_recv::SynRecvState;
+use super::syn_recv::{OpenOrigin, SynRecvState};
 use super::{Pcb, PcbState};
-use crate::timer::TimerToken;
+use crate::timer::{TimerKind, TimerToken};
 
 #[derive(Debug)]
 pub struct SynSentState {
@@ -94,15 +94,19 @@ impl SynSentState {
         } else {
             iss
         };
-        let (snd_wscale, wscale_enabled, snd_wnd) = if let Some(shift) = opts.window_scale {
-            (shift, true, (hdr.window_size as u32) << shift)
-        } else {
-            (0, false, hdr.window_size as u32)
+        // RFC 7323 §2.2: a SYN's own window is never scaled.
+        let (snd_wscale, wscale_enabled) = match opts.window_scale {
+            Some(shift) => (shift, true),
+            None => (0, false),
         };
+        let snd_wnd = hdr.window_size as u32;
         let our_wscale = if wscale_enabled { s.our_wscale } else { 0 };
 
         // Left armed, this fires a data retransmit against a PCB whose send buffer is empty.
         let syn_retransmit = s.retransmit_token.take();
+        // The crossed SYN answers our SYN; it does not grant a fresh budget.
+        let retransmits = s.retransmits;
+        let rto_ms = s.rto_ms;
 
         // Drop the &mut borrow of pcb.state before writing it back.
         let _ = s;
@@ -155,24 +159,25 @@ impl SynSentState {
             syn_recv.snd_wscale = snd_wscale;
             syn_recv.wscale_enabled = wscale_enabled;
             syn_recv.our_wscale = our_wscale;
+            syn_recv.sack_permitted = opts.sack_permitted;
             syn_recv.ts_enabled = ts_offered;
+            syn_recv.retransmits = retransmits;
+            syn_recv.rto_ms = rto_ms;
+            syn_recv.origin = OpenOrigin::Simultaneous;
             if let Some((tsval, _)) = opts.timestamp {
                 syn_recv.peer_tsval = tsval;
             }
+            actions.push_segment(syn_recv.syn_ack(tuple, now_ms));
             let _old = mem::replace(&mut pcb.state, PcbState::SynRecv(syn_recv));
 
-            let mut syn_ack_seg = SegmentBuilder::syn_ack(
-                tuple,
-                iss.raw(),
-                rcv_nxt.raw(),
-                DEFAULT_WINDOW_SIZE,
-                DEFAULT_MSS,
-            );
-            if ts_offered {
-                let peer_ts = opts.timestamp.map(|(v, _)| v).unwrap_or(0);
-                syn_ack_seg.timestamp = Some((now_ms as u32, peer_ts));
-            }
-            actions.push_segment(syn_ack_seg);
+            // Nothing else would: the SYN timer was just cancelled, and
+            // `SynQueue`'s `TcpSynAck` covers only a listener's half-open
+            // entries. `input_process_established` substitutes the real key.
+            actions.push_timer(TimerOp::Schedule {
+                kind: TimerKind::TcpRetransmit,
+                key: 0,
+                delay_ms: rto_ms as u64,
+            });
         }
         // Silences an unused warning for `TCP_FLAG_ACK`, used only via the
         // builder.

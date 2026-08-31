@@ -21,25 +21,6 @@ nothing in the type system or the gates enforces that.
 
 ---
 
-## A simultaneous-open TCP connection never retransmits its SYN-ACK
-
-**Status**: Open
-**Severity**: Low (affects only simultaneous open, which no test reaches)
-**Component**: `net/src/tcp/`
-
-`SynRecvState` carries `retransmits` and `retransmit_token`, written once at
-construction and never read, and the `SynSent` -> `SynRecv` transition arms no
-timer. The ordinary passive open is unaffected: a listener's SYN-ACKs go
-through `SynQueue::on_retransmit` on a `TcpSynAck` timer, which does back off
-and does give up. What is uncovered is the case where both peers send a SYN and
-neither is a listener.
-
-The fix has the same shape as the landed active-open one. It is not done
-because the tree has no test that reaches `SynRecv` from `SynSent` on a live
-stack, so it would ship with an unfalsifiable assertion.
-
----
-
 ## A task on an AP can stall behind three unbounded or O(CPUs) scheduler waits
 
 **Status**: Open

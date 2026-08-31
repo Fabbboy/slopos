@@ -242,8 +242,19 @@ impl SegmentBuilder {
         }
     }
 
+    /// `wscale` is `Some` only when the peer's SYN carried the option: RFC 7323
+    /// §2.3 enables scaling only if both SYNs offered it, and scaling a window
+    /// the peer reads raw accepts sequence space it never granted.
     #[inline]
-    pub fn syn_ack(tuple: TcpTuple, seq: u32, ack: u32, window: u16, mss: u16) -> TcpOutSegment {
+    pub fn syn_ack(
+        tuple: TcpTuple,
+        seq: u32,
+        ack: u32,
+        window: u16,
+        mss: u16,
+        wscale: Option<u8>,
+        sack_permitted: bool,
+    ) -> TcpOutSegment {
         TcpOutSegment {
             tuple,
             seq_num: seq,
@@ -251,8 +262,8 @@ impl SegmentBuilder {
             flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
             window_size: window,
             mss: Some(mss),
-            wscale: None,
-            sack_permitted: false,
+            wscale,
+            sack_permitted,
             sack_blocks: [(0, 0); 4],
             sack_block_count: 0,
             timestamp: None,
