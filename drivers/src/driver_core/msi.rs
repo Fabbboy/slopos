@@ -9,9 +9,9 @@
 use slopos_ostd::irq::{IrqAllocator, OwnedIrq};
 use slopos_ostd::{KVec, klog_debug};
 
-use crate::driver_core::bound::BoundDevice;
 use crate::msi::{self, MsiCapability};
 use crate::msix::{self, MsixCapability, MsixTable};
+use crate::pci::BoundDevice;
 
 pub enum IrqMechanism {
     /// Per-queue vectors via the MSI-X table.

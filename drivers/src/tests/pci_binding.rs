@@ -1,8 +1,8 @@
 //! PCI declarative-match + binding/claim regression tests.
 //!
-//! Exercises the registry's matchmaker core (`MatchIndex` + `matchmake`) over
-//! synthetic drivers and devices with a heap-backed claim sink, so nothing
-//! touches real hardware or the live `CLAIMED_BY` table.
+//! Exercises the registry's matchmaker core (`MatchIndex` + the generic
+//! `probe_bus`) over synthetic drivers and devices with a heap-backed claim
+//! sink, so nothing touches real hardware or the live `CLAIMED_BY` table.
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -11,10 +11,10 @@ use slopos_ostd::dev::Devres;
 use slopos_ostd::{AllocError, KVec};
 use slopos_testing::{TestResult, fail, pass};
 
-use crate::driver_core::bound::BoundDevice;
+use crate::driver_core::bus::{ClaimSink, DriverIndex, probe_bus};
 use crate::pci::{
-    ClaimSink, MatchIndex, PciDeviceInfo, PciDriverEntry, PciMatch, PciProbeError, ProbeOutcome,
-    matchmake,
+    BoundDevice, MatchIndex, PciBus, PciDeviceInfo, PciDriverEntry, PciMatch, PciProbeError,
+    ProbeOutcome,
 };
 
 fn device(vendor: u16, dev: u16, class: u8, subclass: u8) -> PciDeviceInfo {
@@ -192,7 +192,7 @@ pub fn test_binding_records_claim() -> TestResult {
         Ok(c) => c,
         Err(_) => return fail!("claim sink out of memory"),
     };
-    if matchmake(&idx, devices.len(), &|i| devices.get(i).copied(), &claims).is_err() {
+    if probe_bus::<PciBus>(&idx, devices.len(), &|i| devices.get(i).copied(), &claims).is_err() {
         return fail!("matchmake out of memory");
     }
     match claims.owner(0) {
@@ -238,7 +238,7 @@ pub fn test_dup_claim_prevention() -> TestResult {
         Ok(c) => c,
         Err(_) => return fail!("claim sink out of memory"),
     };
-    if matchmake(&idx, devices.len(), &|i| devices.get(i).copied(), &claims).is_err() {
+    if probe_bus::<PciBus>(&idx, devices.len(), &|i| devices.get(i).copied(), &claims).is_err() {
         return fail!("matchmake out of memory");
     }
     if claims.owner(0) != Some("t3-a") {
@@ -296,7 +296,7 @@ pub fn test_specific_beats_generic() -> TestResult {
         Ok(c) => c,
         Err(_) => return fail!("claim sink out of memory"),
     };
-    if matchmake(&idx, devices.len(), &|i| devices.get(i).copied(), &claims).is_err() {
+    if probe_bus::<PciBus>(&idx, devices.len(), &|i| devices.get(i).copied(), &claims).is_err() {
         return fail!("matchmake out of memory");
     }
     let spec = T4_SPECIFIC_SEQ.load(Ordering::Relaxed);
@@ -353,7 +353,7 @@ pub fn test_deferred_then_bound() -> TestResult {
         Ok(c) => c,
         Err(_) => return fail!("claim sink out of memory"),
     };
-    if matchmake(&idx, devices.len(), &|i| devices.get(i).copied(), &claims).is_err() {
+    if probe_bus::<PciBus>(&idx, devices.len(), &|i| devices.get(i).copied(), &claims).is_err() {
         return fail!("matchmake out of memory");
     }
     if claims.owner(0) != Some("t5-defer") {
@@ -398,7 +398,7 @@ pub fn test_binding_release_on_probe_failure() -> TestResult {
         Ok(c) => c,
         Err(_) => return fail!("claim sink out of memory"),
     };
-    if matchmake(&idx, devices.len(), &|i| devices.get(i).copied(), &claims).is_err() {
+    if probe_bus::<PciBus>(&idx, devices.len(), &|i| devices.get(i).copied(), &claims).is_err() {
         return fail!("matchmake out of memory");
     }
     if claims.owner(0).is_some() {

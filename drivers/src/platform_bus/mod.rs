@@ -5,9 +5,9 @@
 //! matchmaker that binds exactly one driver per device with devres-managed
 //! resource ownership.
 //!
-//! [`matchmake`] is decoupled from the live ACPI enumeration and the global
-//! claim table so it is exercisable over synthetic devices + drivers in-QEMU
-//! (see `tests/platform_binding.rs`).
+//! Binding runs through the bus-agnostic [`probe_bus`] matchmaker, so it is
+//! exercisable over synthetic devices + drivers in-QEMU (see
+//! `tests/platform_binding.rs`).
 
 use slopos_acpi::aml::{self, AcpiPlatformDevice, HhdmHost};
 use slopos_acpi::fadt::Fadt;
@@ -17,8 +17,14 @@ use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{AllocError, KVec, klog_info, klog_warn};
 
-use crate::driver_core::platform_bound::BoundPlatformDevice;
-pub use crate::pci::ProbeOutcome;
+use crate::driver_core::bus::{
+    Binding, Bus, ClaimSink, ClaimTable, LinearIndex, ProbeError, probe_bus,
+};
+
+/// The platform [`BoundDevice`](crate::driver_core::bus::BoundDevice) instance.
+pub type BoundPlatformDevice<'d> = crate::driver_core::bus::BoundDevice<'d, PlatformBus>;
+
+pub use crate::driver_core::bus::ProbeOutcome;
 
 /// Maximum I/O-port windows recorded per platform device (the keyboard uses 2).
 pub const MAX_PLATFORM_IO: usize = 4;
@@ -89,14 +95,10 @@ impl PlatformMatch {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PlatformProbeError {
-    /// Matched, but post-inspection rules rejected it.
-    Mismatch,
-    OutOfMemory,
-    DeviceFault,
-    Unsupported,
-}
+/// Reason a platform probe rejected a candidate device. The variant set is
+/// shared across buses; the alias is what keeps a platform driver's signatures
+/// reading in its own vocabulary.
+pub type PlatformProbeError = ProbeError;
 
 /// Static, link-section-resident platform-driver descriptor.
 #[repr(C)]
@@ -118,6 +120,35 @@ pub struct PlatformDriverEntry {
 impl PlatformDriverEntry {
     fn entry_matches(&self, dev: &PlatformDeviceInfo) -> bool {
         self.match_table.iter().any(|m| m.matches(dev))
+    }
+}
+
+/// The platform (ACPI) bus's device/driver model.
+pub struct PlatformBus;
+
+impl Bus for PlatformBus {
+    type Device = PlatformDeviceInfo;
+    type DriverEntry = PlatformDriverEntry;
+
+    const NAME: &'static str = "platform";
+
+    fn entry_name(entry: &PlatformDriverEntry) -> &'static str {
+        entry.name
+    }
+
+    fn priority(entry: &PlatformDriverEntry) -> u8 {
+        entry.priority
+    }
+
+    fn matches(entry: &PlatformDriverEntry, dev: &PlatformDeviceInfo) -> bool {
+        entry.entry_matches(dev)
+    }
+
+    fn probe(
+        entry: &PlatformDriverEntry,
+        bound: &mut BoundPlatformDevice<'_>,
+    ) -> Result<ProbeOutcome, ProbeError> {
+        (entry.probe)(bound)
     }
 }
 
@@ -264,111 +295,25 @@ pub fn acpi_has_8042(rsdp_phys: u64) -> bool {
         .unwrap_or(false)
 }
 
-enum ClaimSlot {
-    Unclaimed,
-    Claimed {
-        #[allow(dead_code)]
-        name: &'static str,
-        // Held for its `Drop`: keeps the device's resources alive for the
-        // binding's lifetime.
-        #[allow(dead_code)]
-        devres: Devres,
-    },
-}
-
-struct ClaimTable {
-    slots: [ClaimSlot; MAX_PLATFORM_DEVICES],
-}
-
-impl ClaimTable {
-    const fn new() -> Self {
-        Self {
-            slots: [const { ClaimSlot::Unclaimed }; MAX_PLATFORM_DEVICES],
-        }
-    }
-
-    fn is_claimed(&self, dev_idx: usize) -> bool {
-        matches!(self.slots.get(dev_idx), Some(ClaimSlot::Claimed { .. }))
-    }
-
-    fn claim(&mut self, dev_idx: usize, name: &'static str, devres: Devres) {
-        if dev_idx < self.slots.len() {
-            self.slots[dev_idx] = ClaimSlot::Claimed { name, devres };
-        }
-    }
-}
-
-static CLAIMED_BY: SpinLock<ClaimTable> = SpinLock::new(
+static CLAIMED_BY: SpinLock<ClaimTable<MAX_PLATFORM_DEVICES>> = SpinLock::new(
     ClaimTable::new(),
     lock_class!("platform.CLAIMED_BY", LOCK_LEVEL_RESOURCE),
 );
 
-/// Abstracts the live `CLAIMED_BY` static (boot) from a heap-backed sink (tests).
-pub(crate) trait PlatformClaimSink {
-    fn is_claimed(&self, dev_idx: usize) -> bool;
-    fn record(&self, dev_idx: usize, name: &'static str, devres: Devres);
-}
-
 struct GlobalClaims;
 
-impl PlatformClaimSink for GlobalClaims {
+impl ClaimSink for GlobalClaims {
     fn is_claimed(&self, dev_idx: usize) -> bool {
         CLAIMED_BY.lock().is_claimed(dev_idx)
     }
     fn record(&self, dev_idx: usize, name: &'static str, devres: Devres) {
-        CLAIMED_BY.lock().claim(dev_idx, name, devres);
+        CLAIMED_BY.lock().claim(dev_idx, Binding::new(name), devres);
     }
 }
 
-/// Offer each device to its candidate drivers in priority order, binding the
-/// first that returns `Bound`. Probe runs with no lock held; the resource bag
-/// drops on `Declined`/`Err`, or moves into the claim slot on `Bound`.
-pub(crate) fn matchmake(
-    devices: &[PlatformDeviceInfo],
-    drivers: &[&'static PlatformDriverEntry],
-    claims: &dyn PlatformClaimSink,
-) -> Result<(), AllocError> {
-    let mut cands: KVec<usize> = KVec::new();
-    for (dev_idx, dev) in devices.iter().enumerate() {
-        if claims.is_claimed(dev_idx) {
-            continue;
-        }
-        cands.clear();
-        for (di, drv) in drivers.iter().enumerate() {
-            if drv.entry_matches(dev) {
-                cands.push(di)?;
-            }
-        }
-        cands.sort_unstable_by(|&a, &b| {
-            drivers[a]
-                .priority
-                .cmp(&drivers[b].priority)
-                .then(a.cmp(&b))
-        });
-        for k in 0..cands.len() {
-            let drv = drivers[cands[k]];
-            let mut devres = Devres::new();
-            let mut bound = BoundPlatformDevice::new(dev, &mut devres);
-            match (drv.probe)(&mut bound) {
-                Ok(ProbeOutcome::Bound) => {
-                    drop(bound);
-                    claims.record(dev_idx, drv.name, devres);
-                    break;
-                }
-                Ok(ProbeOutcome::Declined) => continue,
-                Err(e) => {
-                    klog_warn!(
-                        "platform: {} declined device {}: {:?}",
-                        drv.name,
-                        dev_idx,
-                        e
-                    );
-                    continue;
-                }
-            }
-        }
-    }
-    Ok(())
+/// The name of the driver that has claimed device `dev_idx`, if any.
+pub fn platform_device_owner(dev_idx: usize) -> Option<&'static str> {
+    CLAIMED_BY.lock().owner(dev_idx)
 }
 
 /// Runs once at boot on the BSP, after `pci_probe_drivers`.
@@ -411,7 +356,9 @@ pub fn probe_drivers(rsdp_phys: u64, debug: bool) {
         devices.len()
     );
 
-    if matchmake(devices.as_slice(), drivers.as_slice(), &GlobalClaims).is_err() {
+    let idx = LinearIndex::<PlatformBus>::from_entries(drivers);
+    let count = devices.len();
+    if probe_bus::<PlatformBus>(&idx, count, &|i| devices.get(i).copied(), &GlobalClaims).is_err() {
         klog_warn!("platform: matchmake out of memory");
     }
 }

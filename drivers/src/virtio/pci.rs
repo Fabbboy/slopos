@@ -1,8 +1,8 @@
 //! VirtIO PCI capability parsing, device initialization, and MSI-X/MSI setup
 
-use crate::driver_core::bound::BoundDevice;
 use crate::driver_core::msi::{self as core_msi, IrqMechanism};
 use crate::msix;
+use crate::pci::BoundDevice;
 use crate::pci_defs::{PCI_COMMAND_BUS_MASTER, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET};
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};

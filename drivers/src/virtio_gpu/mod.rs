@@ -30,7 +30,7 @@ use slopos_kernel_services::syscall_services::scanout::{
     self, ClaimOutcome, GpuControlFns, InstallCtx, ScanoutId, ScanoutProvider,
 };
 
-use crate::driver_core::bound::BoundDevice;
+use crate::pci::BoundDevice;
 use crate::pci::{PciMatch, PciProbeError, ProbeOutcome};
 use crate::virtio::{
     self, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,

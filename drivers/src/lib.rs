@@ -35,7 +35,7 @@ pub mod virtio_net;
 pub mod xe;
 pub mod xe_logic;
 
-pub use driver_core::{BoundDevice, BoundError};
-pub use pci::{PciMatch, PciProbeError, ProbeOutcome};
+pub use driver_core::{BoundError, Bus, ProbeError};
+pub use pci::{BoundDevice, PciMatch, PciProbeError, ProbeOutcome};
 pub use ps2::keyboard;
 pub use ps2::mouse;

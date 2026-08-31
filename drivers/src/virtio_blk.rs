@@ -10,7 +10,7 @@ use slopos_ostd::sync::WaitAbort;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitQueue};
 use slopos_ostd::{klog_debug, klog_info, write_field, write_init_field};
 
-use crate::driver_core::bound::BoundDevice;
+use crate::pci::BoundDevice;
 use crate::pci::{PciMatch, PciProbeError, ProbeOutcome};
 use crate::virtio::{
     self, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,

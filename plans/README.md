@@ -15,9 +15,20 @@ editing.
 | Document | Scope |
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
-| `driver-framework-base.html` | Driver-framework base: unified Bus model, platform/ACPI registry, deferred-probe/hotplug/unbind |
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
+
+The driver-framework base has **landed and its plan is retired**. One `Bus` trait
+(`drivers/src/driver_core/bus.rs`) and one generic `probe_bus` matchmaker drive both the
+PCI (`.driver_registry`) and platform/ACPI (`.platform_driver_registry`) registries; each
+keeps its own `#[repr(C)]` entry type and enumerator, and shares the binding protocol,
+the devres claim table and `BoundDevice<B>`. Every device driver binds declaratively —
+`boot_init!` carries no device drivers. Read the code rather than a document:
+`driver_core::bus` for the model, `drivers/src/pci.rs` and `drivers/src/platform_bus/` for
+the two instances, and `drivers/src/tests/bus_generic.rs` for what the protocol guarantees.
+Deferred-probe-to-fixpoint, unbind and hotplug were the plan's Phase 2 and are deliberately
+not planned in the mid term; the `Deferred` outcome and the Binding-above-Devres slot order
+are the seams they would build on.
 
 The authority model has **landed and its plan is retired**. Authority is a flat
 per-capability mask whose classification is total by compile-time construction:

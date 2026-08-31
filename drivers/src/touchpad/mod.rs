@@ -1,19 +1,20 @@
 //! I²C-HID touchpad subsystem: ACPI discovery, HID-over-I²C transport, report
-//! parsing and gesture generation, wired up by [`init`] from a boot step.
+//! parsing and gesture generation.
 //!
-//! Input is interrupt-driven when the device's GpioInt can be wired through the
-//! PCH pinctrl controller ([`crate::pinctrl`]); otherwise a polling thread drains
+//! Binds as a platform (ACPI) driver on `PNP0C50` — see [`platform`]. Input is
+//! interrupt-driven when the device's GpioInt can be wired through the PCH
+//! pinctrl controller ([`crate::pinctrl`]); otherwise a polling thread drains
 //! reports.
 
 pub mod gesture;
 pub mod i2c_hid;
+pub mod platform;
 pub mod report;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use slopos_ostd::lock_class;
 
-use slopos_acpi::aml::{self, AcpiI2cHid, HhdmHost};
-use slopos_acpi::tables::AcpiTables;
+use slopos_acpi::aml::AcpiI2cHid;
 use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
 use slopos_ostd::{KArc, klog_info, klog_warn};
@@ -40,17 +41,26 @@ struct TouchpadRuntime {
 
 static TOUCHPAD: OnceLock<TouchpadRuntime> = OnceLock::new();
 
-/// Discover and bring up the I²C-HID touchpad, then start polling.
+/// Why the touchpad could not be brought up on a bus that was found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TouchpadError {
+    /// The ACPI-named I²C controller was never claimed by the PCI probe.
+    NoParentBus,
+    /// The device did not answer the HID-over-I²C bring-up handshake.
+    BringUp,
+    /// No usable absolute X/Y digitizer fields in the report descriptor.
+    NoDigitizer,
+}
+
+/// Bring up the discovered I²C-HID touchpad and start delivering input.
 /// `width`/`height` bound the cursor; `debug` (`tp.debug=on`) traces bring-up.
-pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bool) {
-    let Some(tables) = AcpiTables::from_phys(rsdp_phys) else {
-        return;
-    };
-    let host = HhdmHost;
-    let Some(found) = aml::scan_i2c_hid(&tables, &host, debug) else {
-        klog_info!("touchpad: no I2C-HID device found in ACPI namespace");
-        return;
-    };
+pub(crate) fn bring_up(
+    found: &AcpiI2cHid,
+    width: u32,
+    height: u32,
+    debug: bool,
+    force_poll: bool,
+) -> Result<(), TouchpadError> {
     klog_info!(
         "touchpad: ACPI I2C-HID ctrl_idx={} addr={:#04x} desc_reg={:#06x} speed={}Hz",
         found.controller_index,
@@ -64,14 +74,14 @@ pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bo
             "touchpad: I2C controller index {} not claimed by PCI probe",
             found.controller_index
         );
-        return;
+        return Err(TouchpadError::NoParentBus);
     };
 
     let hid = match I2cHid::bring_up(bus, found.slave_addr as u8, found.hid_desc_reg) {
         Ok(h) => h,
         Err(e) => {
             klog_warn!("touchpad: I2C-HID bring-up failed: {:?}", e);
-            return;
+            return Err(TouchpadError::BringUp);
         }
     };
 
@@ -79,7 +89,7 @@ pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bo
         Ok(d) => d,
         Err(e) => {
             klog_warn!("touchpad: report descriptor fetch failed: {:?}", e);
-            return;
+            return Err(TouchpadError::BringUp);
         }
     };
     let format = report::parse_report_descriptor(rdesc.as_slice());
@@ -110,7 +120,7 @@ pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bo
     }
     if pad_x <= 1 || pad_y <= 1 {
         klog_warn!("touchpad: no usable X/Y digitizer fields; aborting");
-        return;
+        return Err(TouchpadError::NoDigitizer);
     }
 
     let engine = GestureEngine::new(width as i32, height as i32, pad_x, pad_y);
@@ -122,13 +132,14 @@ pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bo
     };
     TOUCHPAD.call_once(move || rt);
 
-    if try_interrupt_mode(&found, force_poll) {
-        return;
+    if try_interrupt_mode(found, force_poll) {
+        return Ok(());
     }
     match slopos_ostd::spawn_kernel_io!(&POLL_STOP, poll_thread) {
         Ok(_) => klog_info!("touchpad: ready (polling every {}ms)", POLL_MS),
         Err(e) => klog_warn!("touchpad: failed to spawn poll thread: {:?}", e),
     }
+    Ok(())
 }
 
 /// IO-APIC line the Intel PCH GPIO controller (`INTC1055`) funnels pad interrupts

@@ -7,7 +7,7 @@ use slopos_kernel_services::driver_runtime::{LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOU
 use slopos_ostd::klog_info;
 
 use crate::driver_core::BoundError;
-use crate::driver_core::platform_bound::BoundPlatformDevice;
+use crate::platform_bus::BoundPlatformDevice;
 use crate::platform_bus::{
     MAX_PLATFORM_IO, PlatformDeviceInfo, PlatformIoWindow, PlatformIrq, PlatformMatch,
     PlatformProbeError, ProbeOutcome,

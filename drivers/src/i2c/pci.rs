@@ -11,8 +11,8 @@ use slopos_ostd::{klog_info, klog_warn};
 
 use super::designware::{DesignWareI2c, I2cError};
 use super::{I2cBus, register_bus};
-use crate::driver_core::bound::BoundDevice;
 use crate::hpet;
+use crate::pci::BoundDevice;
 use crate::pci::{
     PciProbeError, ProbeOutcome, pci_alloc_mmio, pci_config_read16, pci_config_read32,
     pci_config_write16, pci_config_write32, pci_find_capability,

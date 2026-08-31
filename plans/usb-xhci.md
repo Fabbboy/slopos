@@ -22,6 +22,7 @@ networking, etc. Current input path is `drivers/src/ps2/`. Very high effort
   - SCSI command set (INQUIRY, READ, WRITE)
   - Integrate with VFS as block device
 
-Fit with the driver framework: build on the match-table/binding registry and
-devres-managed probe resources from `driver-framework-base.html`; MSI-X per
-the existing VirtIO discipline (no legacy line IRQs).
+Fit with the driver framework: build on the shipped match-table/binding registry
+and devres-managed probe resources — a `Bus` impl in `drivers/src/driver_core/bus.rs`
+alongside the PCI and platform ones, bound by the same generic `probe_bus`; MSI-X
+per the existing VirtIO discipline (no legacy line IRQs).

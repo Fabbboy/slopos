@@ -1,6 +1,6 @@
 //! Platform (ACPI) bus matchmaker regression tests.
 //!
-//! Exercises [`crate::platform_bus::matchmake`] over synthetic devices +
+//! Exercises the generic [`probe_bus`] over synthetic platform devices +
 //! drivers with a heap-backed claim sink — no ACPI namespace, no real hardware,
 //! no live claim table.
 
@@ -11,11 +11,33 @@ use slopos_ostd::dev::Devres;
 use slopos_ostd::{AllocError, KVec};
 use slopos_testing::{TestResult, fail, pass};
 
-use crate::driver_core::platform_bound::BoundPlatformDevice;
+use crate::driver_core::bus::{ClaimSink, LinearIndex, probe_bus};
 use crate::platform_bus::{
-    MAX_PLATFORM_IO, PlatformClaimSink, PlatformDeviceInfo, PlatformDriverEntry, PlatformIoWindow,
-    PlatformMatch, PlatformProbeError, ProbeOutcome, matchmake,
+    BoundPlatformDevice, MAX_PLATFORM_IO, PlatformBus, PlatformDeviceInfo, PlatformDriverEntry,
+    PlatformIoWindow, PlatformMatch, PlatformProbeError, ProbeOutcome,
 };
+
+/// Build the linear driver index the platform bus uses in production over an
+/// explicit synthetic driver set.
+fn index_of(
+    drivers: &[&'static PlatformDriverEntry],
+) -> Result<LinearIndex<PlatformBus>, AllocError> {
+    let mut entries = KVec::new();
+    for &e in drivers {
+        entries.push(e)?;
+    }
+    Ok(LinearIndex::from_entries(entries))
+}
+
+/// Run the generic matchmaker over `devices` with `drivers` as the registry.
+fn run(
+    devices: &[PlatformDeviceInfo],
+    drivers: &[&'static PlatformDriverEntry],
+    claims: &dyn ClaimSink,
+) -> Result<(), AllocError> {
+    let idx = index_of(drivers)?;
+    probe_bus::<PlatformBus>(&idx, devices.len(), &|i| devices.get(i).copied(), claims)
+}
 
 fn device(id: &'static [u8]) -> PlatformDeviceInfo {
     PlatformDeviceInfo {
@@ -48,7 +70,7 @@ impl TestClaims {
     }
 }
 
-impl PlatformClaimSink for TestClaims {
+impl ClaimSink for TestClaims {
     fn is_claimed(&self, dev_idx: usize) -> bool {
         self.bound
             .borrow()
@@ -86,8 +108,8 @@ pub fn test_platform_binding_records_claim() -> TestResult {
         Ok(c) => c,
         Err(_) => return fail!("claim sink OOM"),
     };
-    let drivers: [&'static PlatformDriverEntry; 1] = [&T1_DRV];
-    if matchmake(&devices, &drivers, &claims).is_err() {
+    let drivers: &[&'static PlatformDriverEntry] = &[&T1_DRV];
+    if run(&devices, drivers, &claims).is_err() {
         return fail!("matchmake OOM");
     }
     match claims.owner(0) {
@@ -134,8 +156,8 @@ pub fn test_platform_specific_beats_generic() -> TestResult {
         Ok(c) => c,
         Err(_) => return fail!("claim sink OOM"),
     };
-    let drivers: [&'static PlatformDriverEntry; 2] = [&T2_GENERIC_DRV, &T2_SPECIFIC_DRV];
-    if matchmake(&devices, &drivers, &claims).is_err() {
+    let drivers: &[&'static PlatformDriverEntry] = &[&T2_GENERIC_DRV, &T2_SPECIFIC_DRV];
+    if run(&devices, drivers, &claims).is_err() {
         return fail!("matchmake OOM");
     }
     let spec = T2_SPECIFIC_SEQ.load(Ordering::Relaxed);
@@ -188,8 +210,8 @@ pub fn test_platform_dup_claim_prevention() -> TestResult {
         Ok(c) => c,
         Err(_) => return fail!("claim sink OOM"),
     };
-    let drivers: [&'static PlatformDriverEntry; 2] = [&T3_A, &T3_B];
-    if matchmake(&devices, &drivers, &claims).is_err() {
+    let drivers: &[&'static PlatformDriverEntry] = &[&T3_A, &T3_B];
+    if run(&devices, drivers, &claims).is_err() {
         return fail!("matchmake OOM");
     }
     if claims.owner(0) != Some("t3-a") {
@@ -218,8 +240,8 @@ pub fn test_platform_probe_failure_unbinds() -> TestResult {
         Ok(c) => c,
         Err(_) => return fail!("claim sink OOM"),
     };
-    let drivers: [&'static PlatformDriverEntry; 1] = [&T4_DRV];
-    if matchmake(&devices, &drivers, &claims).is_err() {
+    let drivers: &[&'static PlatformDriverEntry] = &[&T4_DRV];
+    if run(&devices, drivers, &claims).is_err() {
         return fail!("matchmake OOM");
     }
     if claims.owner(0).is_some() {
@@ -228,8 +250,53 @@ pub fn test_platform_probe_failure_unbinds() -> TestResult {
     pass!()
 }
 
+static T5_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+
+fn t5_defer_probe(_b: &mut BoundPlatformDevice<'_>) -> Result<ProbeOutcome, PlatformProbeError> {
+    if T5_ATTEMPTS.fetch_add(1, Ordering::Relaxed) == 0 {
+        Err(PlatformProbeError::Deferred)
+    } else {
+        Ok(ProbeOutcome::Bound)
+    }
+}
+
+static T5_DEFER: PlatformDriverEntry = PlatformDriverEntry {
+    name: "t5-defer",
+    match_table: &[PlatformMatch::HidCid(b"PNP0303")],
+    priority: 128,
+    fallback: None,
+    probe: t5_defer_probe,
+};
+
+/// The platform bus inherited the deferred-retry pass from the generic
+/// matchmaker. No in-tree platform driver defers today — this covers the
+/// mechanism, not a consumer.
+pub fn test_platform_deferred_then_bound() -> TestResult {
+    T5_ATTEMPTS.store(0, Ordering::Relaxed);
+    let devices = [device(b"PNP0303")];
+    let claims = match TestClaims::new(devices.len()) {
+        Ok(c) => c,
+        Err(_) => return fail!("claim sink OOM"),
+    };
+    let drivers: &[&'static PlatformDriverEntry] = &[&T5_DEFER];
+    if run(&devices, drivers, &claims).is_err() {
+        return fail!("matchmake OOM");
+    }
+    if claims.owner(0) != Some("t5-defer") {
+        return fail!("deferred driver should bind on the retry pass");
+    }
+    match T5_ATTEMPTS.load(Ordering::Relaxed) {
+        2 => pass!(),
+        n => fail!("expected 2 probe attempts (defer then bind), got {}", n),
+    }
+}
+
 slopos_testing::stest!(
     name = test_platform_binding_records_claim,
+    suite = platform_binding
+);
+slopos_testing::stest!(
+    name = test_platform_deferred_then_bound,
     suite = platform_binding
 );
 slopos_testing::stest!(

@@ -12,26 +12,24 @@ use slopos_ostd::pci::{Bdf, EcamConfigSpace};
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
 use slopos_ostd::{AllocError, KBTreeMap, KVec, Pod, klog_info, klog_warn};
 
-use crate::driver_core::bound::BoundDevice;
+use crate::driver_core::bus::{
+    Binding, Bus, ClaimSink, ClaimTable, DriverIndex, ProbeError, probe_bus, push_unique,
+    sort_candidates,
+};
+
+/// The PCI [`BoundDevice`](crate::driver_core::bus::BoundDevice) instance.
+pub type BoundDevice<'d> = crate::driver_core::bus::BoundDevice<'d, PciBus>;
+
+/// Reason a PCI probe rejected a candidate device. The variant set is shared
+/// across buses; the alias is what keeps a PCI driver's signatures reading in
+/// its own vocabulary.
+pub type PciProbeError = ProbeError;
+
+pub use crate::driver_core::bus::ProbeOutcome;
 
 pub use crate::pci_defs::*;
 
 const PCI_SECONDARY_BUS_OFFSET: u16 = 0x19;
-
-/// Reason a PCI probe rejected a candidate device.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PciProbeError {
-    /// Initial vendor/device match passed but post-inspection rules
-    /// rejected the candidate (e.g., feature negotiation failed).
-    Mismatch,
-    OutOfMemory,
-    DeviceFault,
-    /// A required capability (e.g., MSI-X) is unavailable on the device.
-    Unsupported,
-    /// Matched and would bind, but a dependency is not ready; the registry
-    /// retries it in a later bounded pass.
-    Deferred,
-}
 
 /// One declarative match rule in a driver's `match_table`.
 #[repr(C)]
@@ -80,32 +78,6 @@ impl PciMatch {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProbeOutcome {
-    /// The claim is recorded by device index; no other driver is offered this
-    /// device.
-    Bound,
-    /// Matched but deliberately did not bind; lower-priority candidates are
-    /// still offered the device.
-    Declined,
-}
-
-/// A driver's claim on a device, stored in the per-device claim slot once its
-/// probe returns [`ProbeOutcome::Bound`].
-pub struct Binding {
-    name: &'static str,
-}
-
-impl Binding {
-    pub const fn new(name: &'static str) -> Self {
-        Self { name }
-    }
-
-    pub fn name(&self) -> &'static str {
-        self.name
-    }
-}
-
 /// Every field is `'static`-constructible so the struct fits into a `static`
 /// placed in the `.driver_registry` link section by [`crate::pci_driver!`].
 #[repr(C)]
@@ -130,6 +102,35 @@ pub struct PciDriverEntry {
 impl PciDriverEntry {
     fn entry_matches(&self, dev: &PciDeviceInfo) -> bool {
         self.match_table.iter().any(|m| m.matches(dev)) || self.fallback.map_or(false, |f| f(dev))
+    }
+}
+
+/// The PCI bus's device/driver model.
+pub struct PciBus;
+
+impl Bus for PciBus {
+    type Device = PciDeviceInfo;
+    type DriverEntry = PciDriverEntry;
+
+    const NAME: &'static str = "PCI";
+
+    fn entry_name(entry: &PciDriverEntry) -> &'static str {
+        entry.name
+    }
+
+    fn priority(entry: &PciDriverEntry) -> u8 {
+        entry.priority
+    }
+
+    fn matches(entry: &PciDriverEntry, dev: &PciDeviceInfo) -> bool {
+        entry.entry_matches(dev)
+    }
+
+    fn probe(
+        entry: &PciDriverEntry,
+        bound: &mut BoundDevice<'_>,
+    ) -> Result<ProbeOutcome, ProbeError> {
+        (entry.probe)(bound)
     }
 }
 
@@ -1063,10 +1064,7 @@ pub fn pci_get_device(index: usize) -> Option<PciDeviceInfo> {
 
 /// The name of the driver that has claimed device `dev_idx`, if any.
 pub fn pci_device_owner(dev_idx: usize) -> Option<&'static str> {
-    match CLAIMED_BY.lock().slots.get(dev_idx) {
-        Some(ClaimSlot::Claimed { binding, .. }) => Some(binding.name()),
-        _ => None,
-    }
+    CLAIMED_BY.lock().owner(dev_idx)
 }
 
 const fn vd_key_of(dev: &PciDeviceInfo) -> u32 {
@@ -1120,18 +1118,16 @@ impl MatchIndex {
         }
         Ok(idx)
     }
+}
 
-    pub(crate) fn entry(&self, li: u16) -> &'static PciDriverEntry {
+impl DriverIndex<PciBus> for MatchIndex {
+    fn entry(&self, li: u16) -> &'static PciDriverEntry {
         self.entries[li as usize]
     }
 
     /// Collect the candidate driver indices for `dev` into `out`, deduplicated
     /// and sorted by (priority, link-index) ascending — specific beats generic.
-    pub(crate) fn candidates_for(
-        &self,
-        dev: &PciDeviceInfo,
-        out: &mut KVec<u16>,
-    ) -> Result<(), AllocError> {
+    fn candidates_for(&self, dev: &PciDeviceInfo, out: &mut KVec<u16>) -> Result<(), AllocError> {
         out.clear();
         if let Some(bucket) = self.by_vd.get(&vd_key_of(dev)) {
             for &li in bucket.iter() {
@@ -1146,75 +1142,17 @@ impl MatchIndex {
         for &li in self.catch_all.iter() {
             push_unique(out, li)?;
         }
-        out.sort_unstable_by(|&a, &b| {
-            let pa = self.entries[a as usize].priority;
-            let pb = self.entries[b as usize].priority;
-            pa.cmp(&pb).then(a.cmp(&b))
-        });
+        sort_candidates::<PciBus>(self.entries.as_slice(), out);
         Ok(())
-    }
-}
-
-/// Append `li` to `out` unless it is already present (a driver with two
-/// matching rules must only probe a device once).
-fn push_unique(out: &mut KVec<u16>, li: u16) -> Result<(), AllocError> {
-    if !out.contains(&li) {
-        out.push(li)?;
-    }
-    Ok(())
-}
-
-/// Per-device ownership slot. The binding is declared first so it drops first:
-/// an unbind must quiesce the driver before the resource bag releases what a
-/// late interrupt could still touch.
-enum ClaimSlot {
-    Unclaimed,
-    Claimed {
-        binding: Binding,
-        // Held for its `Drop`, which releases the device's acquired resources.
-        #[allow(dead_code)]
-        devres: Devres,
-    },
-}
-
-/// Records which driver owns each enumerated device, indexed by device index.
-struct ClaimTable {
-    slots: [ClaimSlot; PCI_MAX_DEVICES],
-}
-
-impl ClaimTable {
-    const fn new() -> Self {
-        Self {
-            slots: [const { ClaimSlot::Unclaimed }; PCI_MAX_DEVICES],
-        }
-    }
-
-    fn is_claimed(&self, dev_idx: usize) -> bool {
-        matches!(self.slots.get(dev_idx), Some(ClaimSlot::Claimed { .. }))
-    }
-
-    /// Moving the resource bag is allocation-free (just its `KVec` header), so
-    /// this is safe under the `CLAIMED_BY` lock.
-    fn claim(&mut self, dev_idx: usize, binding: Binding, devres: Devres) {
-        if dev_idx < self.slots.len() {
-            self.slots[dev_idx] = ClaimSlot::Claimed { binding, devres };
-        }
     }
 }
 
 // RESOURCE(1) < REGISTRY(2): never nested with `ENUM_STATE`, so the lock graph
 // stays acyclic regardless of which numeric level is larger.
-static CLAIMED_BY: SpinLock<ClaimTable> = SpinLock::new(
+static CLAIMED_BY: SpinLock<ClaimTable<PCI_MAX_DEVICES>> = SpinLock::new(
     ClaimTable::new(),
     lock_class!("pci.CLAIMED_BY", LOCK_LEVEL_RESOURCE),
 );
-
-/// Abstracts the live `CLAIMED_BY` static (boot) from a heap-backed map (unit
-/// tests), so the matchmaker core is exercisable over synthetic devices.
-pub(crate) trait ClaimSink {
-    fn is_claimed(&self, dev_idx: usize) -> bool;
-    fn record(&self, dev_idx: usize, name: &'static str, devres: Devres);
-}
 
 struct GlobalClaims;
 
@@ -1226,90 +1164,6 @@ impl ClaimSink for GlobalClaims {
     fn record(&self, dev_idx: usize, name: &'static str, devres: Devres) {
         CLAIMED_BY.lock().claim(dev_idx, Binding::new(name), devres);
     }
-}
-
-/// Offer each device to its candidate drivers in priority order, recording the
-/// first that binds, then run one bounded deferred-retry pass.
-///
-/// `probe` runs with neither the `ENUM_STATE` nor the `CLAIMED_BY` lock held,
-/// so it may block and allocate.
-pub(crate) fn matchmake(
-    idx: &MatchIndex,
-    device_count: usize,
-    get_device: &dyn Fn(usize) -> Option<PciDeviceInfo>,
-    claims: &dyn ClaimSink,
-) -> Result<(), AllocError> {
-    let mut cands: KVec<u16> = KVec::new();
-    let mut deferred: KVec<(u16, usize)> = KVec::new();
-
-    for dev_idx in 0..device_count {
-        if claims.is_claimed(dev_idx) {
-            continue;
-        }
-        let Some(dev) = get_device(dev_idx) else {
-            continue;
-        };
-        idx.candidates_for(&dev, &mut cands)?;
-        for k in 0..cands.len() {
-            let li = cands[k];
-            let e = idx.entry(li);
-            if !e.entry_matches(&dev) {
-                continue;
-            }
-            // On `Bound` the bag moves into the claim slot; otherwise it drops
-            // here, releasing every acquired resource in reverse order.
-            let mut devres = Devres::new();
-            let mut bound = BoundDevice::new(&dev, &mut devres);
-            match (e.probe)(&mut bound) {
-                Ok(ProbeOutcome::Bound) => {
-                    drop(bound);
-                    claims.record(dev_idx, e.name, devres);
-                    break;
-                }
-                Ok(ProbeOutcome::Declined) => continue,
-                Err(PciProbeError::Deferred) => {
-                    deferred.push((li, dev_idx))?;
-                    continue;
-                }
-                Err(other) => {
-                    klog_info!("PCI: {} declined device {}: {:?}", e.name, dev_idx, other);
-                    continue;
-                }
-            }
-        }
-    }
-
-    for n in 0..deferred.len() {
-        let (li, dev_idx) = deferred[n];
-        if claims.is_claimed(dev_idx) {
-            continue;
-        }
-        let Some(dev) = get_device(dev_idx) else {
-            continue;
-        };
-        let e = idx.entry(li);
-        if !e.entry_matches(&dev) {
-            continue;
-        }
-        let mut devres = Devres::new();
-        let mut bound = BoundDevice::new(&dev, &mut devres);
-        match (e.probe)(&mut bound) {
-            Ok(ProbeOutcome::Bound) => {
-                drop(bound);
-                claims.record(dev_idx, e.name, devres);
-            }
-            Ok(ProbeOutcome::Declined) => {}
-            Err(err) => {
-                klog_info!(
-                    "PCI: {} gave up on device {} after deferral: {:?}",
-                    e.name,
-                    dev_idx,
-                    err
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Match every enumerated PCI device to a driver and bind exactly one per
@@ -1324,13 +1178,16 @@ pub fn pci_probe_drivers() {
         }
     };
     let device_count = pci_get_device_count();
-    if matchmake(&idx, device_count, &|i| pci_get_device(i), &GlobalClaims).is_err() {
+    if probe_bus::<PciBus>(&idx, device_count, &|i| pci_get_device(i), &GlobalClaims).is_err() {
         klog_warn!("PCI: matchmaker ran out of memory; some devices may be unbound");
     }
 }
 
 /// Allocation-free probe used only when [`MatchIndex::build`] cannot allocate.
 /// Drivers are tried in link order, so binding is correct but unordered.
+///
+/// Deliberately not generic: PCI is the only bus whose devices live in a fixed
+/// array, so it is the only one with an allocation-free path to enumerate.
 fn pci_probe_drivers_fallback() {
     let device_count = pci_get_device_count();
     for dev_idx in 0..device_count {

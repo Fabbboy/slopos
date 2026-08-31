@@ -284,25 +284,21 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     pci_probe_drivers();
     klog_debug!("PCI subsystem initialized.");
 
-    // Non-PCI ACPI platform devices (the i8042 at PNP0303 and friends), after
-    // PCI so any controller dependencies are already claimed.
+    // Non-PCI ACPI platform devices (the i8042 at PNP0303, the I²C-HID touchpad
+    // at PNP0C50), after PCI so any controller dependencies are already claimed.
     let rsdp_phys = limine_protocol::get_rsdp_phys_address();
     if rsdp_phys != 0 {
         let pdbg = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline())
             .map(|s| s.contains("platform.debug"))
             .unwrap_or(false);
+        install_touchpad_config(rsdp_phys);
         slopos_drivers::platform_bus::probe_drivers(rsdp_phys, pdbg);
     }
 }
 
-fn boot_step_touchpad_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
-    if slopos_drivers::i2c::lpss_disabled() {
-        return;
-    }
-    let rsdp_phys = limine_protocol::get_rsdp_phys_address();
-    if rsdp_phys == 0 {
-        return;
-    }
+/// The touchpad probe cannot reach the framebuffer geometry or the cmdline, so
+/// the boot step hands them over before the platform bus binds it.
+fn install_touchpad_config(rsdp_phys: u64) {
     let (width, height) = limine_protocol::boot_info()
         .framebuffer
         .map(|fb| (fb.info.width, fb.info.height))
@@ -311,10 +307,20 @@ fn boot_step_touchpad_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let debug = cmdline.map(|s| s.contains("tp.debug")).unwrap_or(false);
     let force_poll = cmdline.map(|s| s.contains("tp.poll")).unwrap_or(false);
     if debug {
-        // Lost-wake diagnostics: a stranded-task sweep in the tick path.
+        // Lost-wake diagnostics: a stranded-task sweep in the tick path. Stays
+        // here rather than in the probe — `slopos-drivers` does not depend on
+        // `slopos-sched`.
         slopos_sched::sleep::arm_strand_sweep();
     }
-    slopos_drivers::touchpad::init(rsdp_phys, width, height, debug, force_poll);
+    slopos_drivers::touchpad::platform::set_config(
+        slopos_drivers::touchpad::platform::TouchpadConfig {
+            rsdp_phys,
+            width,
+            height,
+            debug,
+            force_poll,
+        },
+    );
 }
 
 use slopos_testing::config_from_cmdline;
@@ -521,13 +527,6 @@ crate::boot_init!(
     b"pci\0",
     boot_step_pci_init_fn,
     flags = boot_init_priority(80)
-);
-crate::boot_init!(
-    BOOT_STEP_TOUCHPAD_INIT,
-    drivers,
-    b"touchpad\0",
-    boot_step_touchpad_init_fn,
-    flags = boot_init_priority(82)
 );
 /// Runs immediately before the test step, by which point every driver has taken
 /// its locks once, so the counters read as boot steady state.

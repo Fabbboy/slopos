@@ -45,5 +45,8 @@ expect-test-registry many
 
 # Library smallsort monomorphizations: scratch is the element size, not
 # reducible without changing the sorted element type.
-2248	*sort4_stable*slopos_drivers3pci*MatchIndex14candidates_for*
-2248	*sort4_stable*slopos_drivers12platform_bus9matchmake*
+2248	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*3pci6PciBus*
+2248	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*12platform_bus11PlatformBus*
+# The synthetic third bus in tests/bus_generic.rs; same monomorphization, and
+# only in the tests kernel.
+2248	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*5tests11bus_generic7TestBus*

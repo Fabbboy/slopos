@@ -1,4 +1,5 @@
 pub mod apic_timer_tests;
+pub mod bus_generic;
 pub mod devres_tests;
 pub mod ecam_tests;
 pub mod hpet_tests;

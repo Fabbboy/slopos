@@ -44,6 +44,7 @@ expect-test-registry few
 2072	*slopos_core7syscall16process_handlers18syscall_spawn_path*
 
 # Library smallsort monomorphizations: scratch is the element size, not
-# reducible without changing the sorted element type.
-2248	*sort4_stable*slopos_drivers3pci*MatchIndex14candidates_for*
-2248	*sort4_stable*slopos_drivers12platform_bus9matchmake*
+# reducible without changing the sorted element type. One per bus, since
+# `sort_candidates` monomorphizes over the `Bus` impl.
+2248	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*3pci6PciBus*
+2248	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*12platform_bus11PlatformBus*

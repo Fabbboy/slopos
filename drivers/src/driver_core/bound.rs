@@ -1,22 +1,24 @@
-//! `BoundDevice` — the single capability handed to a driver's `probe`.
+//! Bus-agnostic [`BoundDevice`] vends, plus the PCI-only ones.
 //!
-//! Every vend hands ownership to the device's [`Devres`] bag, so a probe that
-//! fails partway releases what it took in reverse order; on success the bag
-//! lives for the binding's lifetime.
+//! The struct itself lives in [`crate::driver_core::bus`]; its inherent impls
+//! are split so each bus's vends sit beside the bus that needs them. A method
+//! name may appear in only one of the three impls — a collision between the
+//! generic impl and a bus-specific one is a duplicate definition, not a
+//! shadow.
 
 use slopos_abi::PhysAddr;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
-use slopos_ostd::dev::Devres;
 use slopos_ostd::io::port::IoPortError;
 use slopos_ostd::irq::{IrqAllocator, IrqContext, IrqError};
 use slopos_ostd::mm::{DmaCoherent, DmaDirection, DmaError, DmaStream, IoMem};
 
-use crate::pci_defs::PciDeviceInfo;
+use crate::driver_core::bus::{BoundDevice, Bus};
+use crate::pci::PciBus;
 
 /// Why a [`BoundDevice`] vend failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoundError {
-    /// The heap could not box the resource or grow the [`Devres`] bag.
+    /// The heap could not box the resource or grow the `Devres` bag.
     OutOfMemory,
     Dma(DmaError),
     Irq(IrqError),
@@ -27,24 +29,7 @@ pub enum BoundError {
     MapFailed,
 }
 
-/// The capability a probe drives to acquire device resources.
-pub struct BoundDevice<'d> {
-    info: &'d PciDeviceInfo,
-    res: &'d mut Devres,
-}
-
-impl<'d> BoundDevice<'d> {
-    pub fn new(info: &'d PciDeviceInfo, res: &'d mut Devres) -> Self {
-        Self { info, res }
-    }
-
-    /// `PciDeviceInfo` is `Copy`: snapshot it (`let info = *bound.info();`) to
-    /// free the borrow for subsequent `&mut self` vend calls.
-    #[inline]
-    pub fn info(&self) -> &PciDeviceInfo {
-        self.info
-    }
-
+impl<'d, B: Bus + 'static> BoundDevice<'d, B> {
     /// Escape hatch for resource kinds without a dedicated vend method; `res`
     /// drops on probe failure or unbind.
     pub fn attach<T: Send + Sync + 'static>(&mut self, res: T) -> Result<&T, BoundError> {
@@ -76,19 +61,6 @@ impl<'d> BoundDevice<'d> {
         self.res.attach(region).map_err(|_| BoundError::OutOfMemory)
     }
 
-    pub fn map_bar(&mut self, bar: u8, offset: u32, len: usize) -> Result<&IoMem, BoundError> {
-        let b = self
-            .info
-            .bars
-            .get(bar as usize)
-            .ok_or(BoundError::NoSuchBar)?;
-        if b.base == 0 || b.is_io != 0 {
-            return Err(BoundError::NoSuchBar);
-        }
-        let phys = PhysAddr::new(b.base.wrapping_add(offset as u64));
-        self.map_region(phys, len)
-    }
-
     /// Allocate an IDT vector, install `handler` on it, and hand the owned
     /// binding to the bag. Returns the vector by value, so no borrow lingers.
     pub fn request_irq<F>(&mut self, handler: F) -> Result<u8, BoundError>
@@ -104,5 +76,20 @@ impl<'d> BoundDevice<'d> {
             .attach(owned)
             .map_err(|_| BoundError::OutOfMemory)?;
         Ok(vector)
+    }
+}
+
+impl<'d> BoundDevice<'d, PciBus> {
+    pub fn map_bar(&mut self, bar: u8, offset: u32, len: usize) -> Result<&IoMem, BoundError> {
+        let b = self
+            .info
+            .bars
+            .get(bar as usize)
+            .ok_or(BoundError::NoSuchBar)?;
+        if b.base == 0 || b.is_io != 0 {
+            return Err(BoundError::NoSuchBar);
+        }
+        let phys = PhysAddr::new(b.base.wrapping_add(offset as u64));
+        self.map_region(phys, len)
     }
 }

@@ -24,7 +24,7 @@ use slopos_ostd::klog_info;
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
-use crate::driver_core::bound::BoundDevice;
+use crate::pci::BoundDevice;
 use crate::pci::{PciMatch, PciProbeError, ProbeOutcome};
 use crate::pci_defs::PCI_CLASS_DISPLAY;
 use crate::xe_logic::cmdline::XeConfig;

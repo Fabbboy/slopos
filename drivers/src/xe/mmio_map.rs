@@ -4,7 +4,8 @@
 
 use slopos_mm::mmio::MmioRegion;
 
-use crate::driver_core::bound::{BoundDevice, BoundError};
+use crate::driver_core::bound::BoundError;
+use crate::pci::BoundDevice;
 use crate::xe_logic::regs;
 
 /// Map BAR0 (GTTMMADR) and return an owned handle over the full register window.

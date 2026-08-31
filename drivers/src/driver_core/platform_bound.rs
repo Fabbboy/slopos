@@ -1,36 +1,17 @@
-//! `BoundPlatformDevice` — the capability handed to a platform (ACPI) driver's
-//! `probe`, the non-PCI sibling of [`crate::driver_core::bound::BoundDevice`].
+//! The platform (ACPI) bus's [`BoundDevice`] vends.
 //!
-//! A platform device's resources are the I/O ports and legacy (IOAPIC-routed)
-//! IRQ line its ACPI `_CRS` declares. Every vend hands ownership to the device's
-//! [`Devres`] bag, so a probe that fails partway releases what it touched, in
-//! reverse order, when the registry drops the bag.
+//! A platform device's own resources are the I/O ports and legacy
+//! (IOAPIC-routed) IRQ line its ACPI `_CRS` declares; the MMIO/DMA/IRQ vends it
+//! shares with every other bus live in [`crate::driver_core::bound`].
 
-use slopos_ostd::dev::Devres;
 use slopos_ostd::io::port::{IoPort, IoPortRegistry};
 use slopos_ostd::irq::{IRQ_BASE_VECTOR, IrqAllocator, IrqContext};
 
 use crate::driver_core::bound::BoundError;
-use crate::platform_bus::PlatformDeviceInfo;
+use crate::driver_core::bus::BoundDevice;
+use crate::platform_bus::PlatformBus;
 
-/// The capability a platform driver's probe drives to acquire its resources.
-pub struct BoundPlatformDevice<'d> {
-    info: &'d PlatformDeviceInfo,
-    res: &'d mut Devres,
-}
-
-impl<'d> BoundPlatformDevice<'d> {
-    pub fn new(info: &'d PlatformDeviceInfo, res: &'d mut Devres) -> Self {
-        Self { info, res }
-    }
-
-    /// `PlatformDeviceInfo` is `Copy`, so a probe can snapshot it before
-    /// vending and free the borrow.
-    #[inline]
-    pub fn info(&self) -> &PlatformDeviceInfo {
-        self.info
-    }
-
+impl<'d> BoundDevice<'d, PlatformBus> {
     /// Reserve a single I/O port. The returned handle is a `Copy`; the bag cell
     /// is the ownership anchor.
     pub fn reserve_io_port(&mut self, port: u16) -> Result<IoPort<u8>, BoundError> {

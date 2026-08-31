@@ -170,9 +170,17 @@ require-phase post-userland-tests
 #               186 on three runs of one pinned ISO, which also settles that
 #               boot's count is deterministic per build: an earlier 71/72/73
 #               spread was across different builds, not different runs.
-boot	classes	71
-post-kernel-tests	classes	186
-post-userland-tests	classes	196
+#   2026-08-31  +1 in all three phases: `TOUCHPAD_PLATFORM`
+#               (drivers/src/touchpad/platform.rs), the single lock holding the
+#               boot-installed touchpad config and the ACPI discovery result now
+#               that the touchpad binds as a platform driver instead of running
+#               from a boot step. It registers during boot, when the boot step
+#               installs the config, so every later phase inherits it. Uniform
+#               +1 with no edge movement is the signature of one new
+#               declaration site, which is what this is.
+boot	classes	72
+post-kernel-tests	classes	187
+post-userland-tests	classes	197
 
 # Boot edges and chains — exact, because boot has no test scheduling in it and
 # measures 43 edges and 110 chains on every run recorded here.
