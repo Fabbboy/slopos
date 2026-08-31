@@ -9,7 +9,7 @@
 //! exercisable over synthetic devices + drivers in-QEMU (see
 //! `tests/platform_binding.rs`).
 
-use slopos_acpi::aml::{self, AcpiPlatformDevice, HhdmHost};
+use slopos_acpi::aml::{self, AcpiI2cHid, AcpiPlatformDevice, HhdmHost};
 use slopos_acpi::fadt::Fadt;
 use slopos_acpi::tables::AcpiTables;
 use slopos_ostd::dev::Devres;
@@ -59,6 +59,8 @@ pub struct PlatformDeviceInfo {
     pub irq: Option<PlatformIrq>,
     /// `_STA` presence (`None` if unevaluable / EC-gated — not "absent").
     pub present: Option<bool>,
+    /// The I²C connector, for a device matched by [`PlatformMatch::I2cHid`].
+    pub i2c: Option<AcpiI2cHid>,
 }
 
 impl PlatformDeviceInfo {
@@ -75,22 +77,28 @@ impl PlatformDeviceInfo {
 }
 
 /// A declarative match rule: the device's `_HID` or `_CID` equals this id.
+///
+/// The variant also selects the walker that resolves the device's resources,
+/// because those live in different parts of the namespace: a legacy device
+/// declares I/O ports and an IRQ in `_CRS` small descriptors, while an
+/// I²C-attached one declares an `I2cSerialBus` connector plus a `GpioInt` and
+/// hides its descriptor register behind a `_DSM`.
 #[derive(Clone, Copy)]
 pub enum PlatformMatch {
-    /// Match an EISA/PNP id like `b"PNP0303"`.
+    /// Match an EISA/PNP id like `b"PNP0303"`, resolving `_CRS` I/O + IRQ.
     HidCid(&'static [u8]),
+    /// Match an EISA/PNP id like `b"PNP0C50"`, resolving the I²C-HID connector.
+    I2cHid(&'static [u8]),
 }
 
 impl PlatformMatch {
     pub fn matches(&self, dev: &PlatformDeviceInfo) -> bool {
-        match self {
-            PlatformMatch::HidCid(id) => *id == dev.matched_id,
-        }
+        self.id() == dev.matched_id
     }
 
     pub fn id(&self) -> &'static [u8] {
         match self {
-            PlatformMatch::HidCid(id) => id,
+            PlatformMatch::HidCid(id) | PlatformMatch::I2cHid(id) => id,
         }
     }
 }
@@ -240,6 +248,21 @@ fn build_info(matched_id: &'static [u8], dev: &AcpiPlatformDevice) -> PlatformDe
         io_count,
         irq,
         present: dev.present,
+        i2c: None,
+    }
+}
+
+/// An I²C-attached device has no `_CRS` I/O window or IOAPIC line of its own:
+/// its connector *is* its resource. `present` is left unknown because the
+/// `_DSM` walk does not evaluate `_STA`.
+fn build_i2c_info(matched_id: &'static [u8], found: AcpiI2cHid) -> PlatformDeviceInfo {
+    PlatformDeviceInfo {
+        matched_id,
+        io: [PlatformIoWindow::default(); MAX_PLATFORM_IO],
+        io_count: 0,
+        irq: None,
+        present: None,
+        i2c: Some(found),
     }
 }
 
@@ -264,9 +287,20 @@ fn enumerate(tables: &AcpiTables, debug: bool) -> Result<KVec<PlatformDeviceInfo
                 matched = true;
                 continue;
             }
-            if let Some(found) = aml::find_acpi_platform_device(tables, &host, &[id], debug) {
-                devices.push(build_info(id, &found))?;
-                matched = true;
+            match m {
+                PlatformMatch::HidCid(_) => {
+                    if let Some(found) = aml::find_acpi_platform_device(tables, &host, &[id], debug)
+                    {
+                        devices.push(build_info(id, &found))?;
+                        matched = true;
+                    }
+                }
+                PlatformMatch::I2cHid(_) => {
+                    if let Some(found) = aml::scan_i2c_hid(tables, &host, debug) {
+                        devices.push(build_i2c_info(id, found))?;
+                        matched = true;
+                    }
+                }
             }
         }
         if !matched {

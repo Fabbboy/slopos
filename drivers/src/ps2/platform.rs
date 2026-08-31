@@ -140,6 +140,7 @@ fn i8042_fallback(has_8042: bool) -> Option<PlatformDeviceInfo> {
             active_low: false,
         }),
         present: None,
+        i2c: None,
     })
 }
 

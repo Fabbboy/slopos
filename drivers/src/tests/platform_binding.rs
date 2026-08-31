@@ -46,6 +46,7 @@ fn device(id: &'static [u8]) -> PlatformDeviceInfo {
         io_count: 0,
         irq: None,
         present: None,
+        i2c: None,
     }
 }
 

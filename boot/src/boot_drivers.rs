@@ -291,14 +291,14 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         let pdbg = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline())
             .map(|s| s.contains("platform.debug"))
             .unwrap_or(false);
-        install_touchpad_config(rsdp_phys);
+        install_touchpad_config();
         slopos_drivers::platform_bus::probe_drivers(rsdp_phys, pdbg);
     }
 }
 
 /// The touchpad probe cannot reach the framebuffer geometry or the cmdline, so
 /// the boot step hands them over before the platform bus binds it.
-fn install_touchpad_config(rsdp_phys: u64) {
+fn install_touchpad_config() {
     let (width, height) = limine_protocol::boot_info()
         .framebuffer
         .map(|fb| (fb.info.width, fb.info.height))
@@ -314,7 +314,6 @@ fn install_touchpad_config(rsdp_phys: u64) {
     }
     slopos_drivers::touchpad::platform::set_config(
         slopos_drivers::touchpad::platform::TouchpadConfig {
-            rsdp_phys,
             width,
             height,
             debug,
