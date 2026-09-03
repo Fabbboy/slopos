@@ -1,17 +1,26 @@
 # Persistent Storage
 
-Make a file written on one boot readable on the next. SlopOS has an ext2
-implementation, a virtio-blk driver, a write-back block cache, ordered
-writeback and a background flusher, and none of it adds up to persistence:
-the root filesystem is a RAM image, so nothing written to `/` outlives the
-boot. The disk is opened read-write at `/mnt` on every default boot, which
-makes the second problem reachable today rather than only under
-`root=virtio` — writes that reach the disk make those blocks unreadable on
-the next boot, because the verity trailer's build-time CRCs no longer
-describe them.
+Make a file written on one boot readable on the next, on the root filesystem
+and under failure. A file written under `/mnt` and `fsync`ed already survives a
+reboot — `just test-persist` boots one image twice and reads the payload back —
+but that is the narrow case, and it works partly by accident:
 
-This plan closes both, then fills the write-path and durability gaps that a
-persistent root turns from latent into load-bearing.
+- **The root is still RAM.** Nothing written to `/` outlives the boot; the disk
+  is a secondary mount at `/mnt`, and `root=virtio` is exercised by no recipe,
+  test or CI job.
+- **Verity is not running.** The trailer header falls outside the block
+  device's reported capacity, so `build_verified` silently returns the device
+  unwrapped (G2, `CVSS.md` SLOPOS-2026-0053). The write-then-reboot round trip
+  passes because nothing is checking the blocks it rewrote — fix verity and G2's
+  contradiction becomes reachable.
+- **The write surface has holes.** No `truncate`, so an existing file cannot be
+  overwritten; no `rename`, `rmdir`, `symlink` or working `chmod`; no seal on
+  disk, which is what `/bin` write protection rests on.
+- **A crash is not survivable.** A failed operation leaves partial metadata in
+  the cache, nothing repairs a dirty image, and every persisted file is stamped
+  `mtime = 0` because there is no wall clock.
+
+This plan closes those, in that order.
 
 ## Why this matters beyond files
 
@@ -120,6 +129,21 @@ the cache anyway because `BlockNum::is_valid()` treats 0 as absent
 superblock**, and `mark_dirty_on_disk` rewrites it on every boot of the shipped
 verified image without tripping anything.
 
+**And on the shipped images none of it runs.** `gen_verity.py` makes the 32-byte
+header the last 32 bytes of the *file*; the kernel reads it at
+`capacity() - 32`, and `capacity()` is `capacity_sectors * 512`
+(`drivers/src/virtio_blk.rs:266`). `fs/assets/ext2-tests.img` is 16 793 632
+bytes — 32 800 sectors plus 32 — so the reported capacity rounds down by exactly
+the header, `parse_trailer` finds no magic, and `build_verified` returns the
+device **unwrapped** (`fs/src/verity.rs:157-159`). There is no klog line for
+that, so "verified" and "verification was never installed" are indistinguishable
+from a boot log. This is `CVSS.md` SLOPOS-2026-0053, and it is why
+`just test-persist` passes today rather than failing the way G2 predicts: a
+write survives a reboot because nothing is checking it. Fixing verity is what
+makes G2 bite, so Phase 1 must fix the reachability and the silent fail-open
+*first*, then decide what verity means on a writable device — otherwise the
+decision is made against a mechanism that is not running.
+
 
 ### G3 — The ext2 write surface has holes the VFS reports as "not supported"
 
@@ -164,16 +188,24 @@ This is a security finding. It needs a `CVSS.md` triage entry
 once `root=virtio` is a reachable configuration — and it must be closed in the
 same change that makes that path the default, not after.
 
-### G5 — Userland cannot ask for durability
+### G5 — Durability is invocable, but only at filesystem granularity
 
-There is no `fsync`, no `fdatasync`, no `sync`, and no `O_SYNC`. `SYSCALL_TABLE_SIZE`
-is 177 with 57 free slots. `FileSystem::sync` exists and `ext2_vfs_sync` works;
-nothing above the VFS calls either except shutdown. The only paths to stable
-storage are the 5 s flusher tick, cache eviction under pressure, and
-`ext2_vfs_shutdown_sync` on an orderly `kernel_shutdown` / `kernel_reboot`.
+`fsync(2)`, `fdatasync(2)` and `sync(2)` exist (177–179; `SYSCALL_TABLE_SIZE`
+is 180) and `std::fs::File::sync_all`/`sync_data` are wired to them. What is
+still missing is granularity and a per-file knob:
 
-An application that writes a config file and the machine loses power one second
-later loses the write, with no API it could have used to prevent that.
+- All three drive `FileSystem::sync`, which is **whole-filesystem**. There is
+  no per-inode writeback below the VFS, so `fsync` on one file commits every
+  dirty block on its filesystem and `fdatasync` is identical to `fsync`. The
+  syscall numbers are separate so splitting them later needs no userland
+  rebuild.
+- `ext2` holds one global sleeping mutex (`CACHED_EXT2`) across all of its
+  block I/O, so these syscalls make an unbounded, uncharged, system-wide
+  filesystem stall userland-reachable. The clean-filesystem fast path
+  (`dirty_count() == 0 && !superblock_dirty`) makes a spin loop cheap, but it
+  does not bound a sync issued while another task is writing.
+- There is no `O_SYNC`/`O_DSYNC`, so "I do not trust the flusher" is a
+  per-call decision rather than a per-descriptor one.
 
 ### G6 — A failed operation leaves partial metadata in the cache
 
@@ -287,50 +319,19 @@ coherent with the 128-entry ext2 `BlockCache`.
 ## 3. Plan
 
 Each phase ends green on `just test` plus the pre-commit gate sequence in
-`AGENTS.md`, with the one exception 0.5 names. Phases 0–3 and 5 are a
-dependency chain; 4 and 6 are parallelisable once 3 lands.
-
-### Phase 0 — A test harness that can observe persistence
-
-The evidence later phases are graded against. Two things block it that the gap
-list does not, and both must land first.
-
-- [ ] **0.1** Make the harness exit path flush. `qemu_signal_exit` writes
-  `isa-debug-exit` (port 0xF4) and only then calls `power::shutdown`
-  (`ktesting/src/qemu_signal.rs:14-17`); the port write terminates the VM, so
-  the second call is dead code and `flush_filesystems_for_shutdown`
-  (`boot/src/shutdown.rs:31-37`) never runs under the harness. Until this is
-  fixed no test can observe a durable write, and every image a test run touches
-  is left with `s_state == EXT2_ERROR_FS` because `mark_clean` never runs —
-  which would make 0.3's `e2fsck` fail for a reason unrelated to correctness.
-  Sync and mark clean *before* the port write.
-- [ ] **0.2** The durability API from Phase 2.1/2.2, pulled forward. A utest has
-  no way to ask for a flush, so "write then assert it survived" is not
-  expressible. Phase 0 and Phase 2 are one unit; 2.1 and 2.2 land here.
-- [ ] **0.3** `just check-fs-image` — `e2fsck -fn` on an image a boot wrote to.
-  e2fsprogs is already a hard build dependency, so this costs nothing new. An
-  image SlopOS wrote that `e2fsck` rejects is a bug in SlopOS, and it is the
-  only oracle for on-disk correctness we do not have to write ourselves.
-  Advisory until 3.0 lands: the operations Phase 3 adds are exactly the ones
-  with a partial-failure window.
-- [ ] **0.4** `just test-persist` — a two-boot recipe. Boot the tests ISO, run a
-  utest that writes a known payload and syncs, power down, boot the *same image*
-  again without rebuilding, assert the payload reads back. The image is
-  `fs/assets/ext2-tests.img` and `_iso-tests` rebuilds it every run
-  (`justfile:15`, `:83-85`, `:122`), so the recipe must skip that dependency and
-  drive `run_tests --no-build --iso … --fs-image …` for both boots.
-- [ ] **0.5** Land 0.3 and 0.4 as recipes *not* wired into `just test` or CI
-  until Phase 1 makes them pass. A red suite is not a commitable state
-  (`AGENTS.md`, Pre-commit); the baseline failure belongs in the commit body.
-
-The expected failure is specific: not a clean per-test `IoError` but a
-group-descriptor or inode-table read failing during mount or during `exec` of
-`/sbin/init` — a boot failure. The superblock survives, for the reason G2 gives.
+`AGENTS.md`. Phases 1–3 and 5 are a dependency chain; 4 and 6 are
+parallelisable once 3 lands.
 
 ### Phase 1 — Decide what verity means on a writable device
 
 G2 is a design contradiction rather than a bug to patch. Four shapes, and the
 decision must be made before anything durable is written.
+
+**1.0 comes first: make verity actually run.** Until SLOPOS-2026-0053 is fixed
+the mechanism is off on every shipped image, and every option below would be
+chosen against something that never executes. Only once it runs does
+`just test-persist` exhibit the failure G2 describes, and only then is that
+failure evidence for one option over another.
 
 **Option A — verity implies read-only.** A trailer present ⇒ the mount is
 read-only; a writable mount refuses to attach a verified device. Smallest
@@ -373,6 +374,19 @@ freezes the inodes of mutable files sharing it — and the bitmaps are shared by
 construction. C needs a per-block attestation bitmap and a rule for mixed
 blocks, which is most of D plus a build-time ext2 reader.
 
+- [ ] **1.0** Make verity run, before choosing between the options above.
+  Two parts. **Reachability**: the trailer's 32-byte header is the last 32
+  bytes of the file, but the kernel reads it at `capacity() - 32` and
+  `capacity()` is `capacity_sectors * 512`, so an image that is not a whole
+  number of sectors hides its own header. Pad in `gen_verity.py`, or search the
+  last sector for the magic; padding is smaller and keeps the kernel side one
+  read. **Fail loudly**: `build_verified` returns the device unwrapped when
+  `parse_trailer` yields `None`, so "no trailer" and "trailer I could not read"
+  are the same silent outcome. Log which happened at mount, and give a boot a
+  way to assert verification is installed — a check that can switch itself off
+  without saying so is not a check. Closing this is what makes the rest of
+  Phase 1 a real decision; it is also `CVSS.md` SLOPOS-2026-0053.
+
 - [ ] **1.1** Implement the decision. Under A the behaviour must be stated
   exactly, because it changes today's default boot (G1): a trailer-carrying
   device mounts read-only, `Ext2Fs::read_only` is set so `mark_dirty_on_disk`
@@ -390,40 +404,38 @@ blocks, which is most of D plus a build-time ext2 reader.
 - [ ] **1.4** Keep one recipe booting a verified read-only image. With A plus
   1.3 plus Phase 5's disk root, no shipped configuration would exercise
   `fs/src/verity.rs` at all, and untested code is code on death row.
-- [ ] **1.5** `just test-persist` (0.4) now gets past the second boot; wire it
-  and `check-fs-image` into CI.
+- [ ] **1.5** Wire `just test-persist` and `just check-fs-image` into CI. Both
+  recipes exist and both pass today; what is missing is the CI edge. Note that
+  `test-persist` passing is currently weak evidence — see 1.0 — and only becomes
+  a real persistence assertion once verity runs and the chosen option keeps it
+  green. `check_test_count.sh`, `check_lockdep_headroom.sh`,
+  `check_quota_headroom.sh` and `check_sched_spread.sh` all parse one shared
+  capture in CI; `test-persist` needs its own two boots and cannot reuse it.
 
-### Phase 2 — A durability contract userland can invoke
+### Phase 2 — Finish the durability contract
 
-2.1 and 2.2 land in Phase 0, which cannot be built without them; the rest
-follows once the write surface exists.
+The syscalls, the `slibc` bindings and the table/`CAP_COUNTS` wiring landed with
+the harness, which could not be built without them. What is left is granularity
+and the exposure they opened.
 
-- [ ] **2.1** `fsync(2)` and `fdatasync(2)` as syscalls, from the free slot
-  range, `cap(NoneFd)`. Both resolve the fd to its vnode and drive
-  `FileSystem::sync`. Per-inode sync is the correct semantic and the eventual
-  target; a first cut may sync the whole filesystem, provided the commit says
-  so plainly rather than implying a per-file guarantee it does not give. The fd
-  resolution must use `ProcessId`/`FdTable`, never a bare `u32` pid —
-  `check_process_designator.sh` scans `fs/src/fileio/`.
-- [ ] **2.2** `sync(2)`, `cap(NoneSelf)`. Walks the mount table calling
-  `FileSystem::sync` on each.
-- [ ] **2.2a** Bound the exposure. `CACHED_EXT2` is one global sleeping mutex
-  held across all block I/O (`fs/src/ext2_vfs.rs:31`, `:62`), so these two
-  syscalls make an unbounded, uncharged, system-wide filesystem stall directly
-  userland-reachable: a loop of `fsync` blocks every other process's path walk
-  and `exec`. Either rate-limit it, charge it, or state the exposure and the
-  trigger for fixing it.
+- [ ] **2.1** Per-inode sync. `fsync` currently drives `FileSystem::sync`, which
+  commits the whole filesystem; the trait has no per-inode entry point and ext2
+  has no per-inode writeback. Adding one makes `fdatasync` genuinely cheaper
+  than `fsync` and removes most of 2.2a's exposure by shrinking what a single
+  `fsync` has to hold the lock for.
+- [ ] **2.2** Bound the exposure. `CACHED_EXT2` is one global sleeping mutex
+  held across all block I/O (`fs/src/ext2_vfs.rs:31`, `:62`), so `fsync` and
+  `sync` make an unbounded, uncharged, system-wide filesystem stall directly
+  userland-reachable: a loop of `fsync` against a filesystem another task is
+  writing blocks every other process's path walk and `exec`. The clean-FS fast
+  path is what makes the *idle* case cheap and is not a bound. Either rate-limit
+  it, charge it, or narrow the lock.
 - [ ] **2.3** `O_SYNC` / `O_DSYNC` in `abi/src/fs.rs`, honoured in
   `vfs_file_ops::write` — the per-file "I do not trust the flusher" knob, and
   what `/etc/keymap` should be written with.
-- [ ] **2.4** Wire the new numbers into `SYSCALL_TABLE` and re-record
-  `CAP_COUNTS` in `core/src/syscall/handlers.rs`. That const histogram is a
-  compile-time assert; it will fail until updated, which is the intended
-  behaviour.
-- [ ] **2.5** `slibc` bindings so `std::fs::File::sync_all` and `sync_data`
-  stop being unimplemented.
-- [ ] **2.6** Tests: a utest that writes, `fsync`s, and asserts the block
-  device saw a flush; a stest that asserts `sync` leaves `dirty_count() == 0`.
+- [ ] **2.4** Tests beyond the persistence round-trip: a utest that writes,
+  `fsync`s, and asserts the block device saw a flush; a stest that asserts
+  `sync` leaves `dirty_count() == 0`.
 
 ### Phase 3 — Close the write surface
 
@@ -431,7 +443,8 @@ Everything here is implementing `FileSystem` methods on ext2 that the ext2
 layer below either already supports or nearly does.
 
 - [ ] **3.0** Allocation rollback first, not in Phase 4. Every operation below
-  has several writes before its commit point, and 0.3's `e2fsck` grades each
+  has several writes before its commit point, and `just check-fs-image`'s
+  `e2fsck` grades each
   one. Landing them before the rollback guard means the oracle reports real
   inconsistencies whose fix is deferred to the next phase.
 
@@ -545,7 +558,8 @@ cannot overwrite a file.
   existing proof of that path and must stay green). The `root=` knob keeps its
   three values; what changes is which one `auto` picks when a disk is present
   and healthy.
-- [ ] **5.4** `just test-persist` (0.1) joins CI.
+- [ ] **5.4** Extend `just test-persist` to the disk root: today it writes under
+  `/mnt`, which is where the disk is mounted while `/` is RAM.
 - [ ] **5.5** Disk-space accounting (G10) before the root is writable: a
   `ResourceKind` charged in `allocate_block`/`allocate_inode`, so one process
   cannot fill the disk and deny it to `/sbin/init`. Moves
@@ -600,9 +614,10 @@ Independent of 2–5; do it when a second device or a real disk demands it.
   new baseline with `TEST_COUNT_BASELINE=0 scripts/check_test_count.sh`.
 - **Gates beyond the obvious ones.** `check_drop_panic_free.sh` (3.0's rollback
   guard is a new `Drop` in `fs/`, which that gate scans and for which it already
-  carries a named exception), `check_process_designator.sh` (2.1 adds entry
-  points under `fs/src/fileio/`), `check_quota_headroom.sh` (5.5's new
-  `ResourceKind`), `check_sched_spread.sh` (Phase 5 changes when the flusher
+  carries a named exception), `check_process_designator.sh` (any new entry
+  point under `fs/src/fileio/`), `check_quota_headroom.sh` (5.5's new
+  `ResourceKind`; also moves on every added utest, because each is one more
+  charged process), `check_sched_spread.sh` (Phase 5 changes when the flusher
   kthread is placed).
 - **Licensing.** ext2's on-disk layout, feature bits, `errno` values and
   `s_last_orphan` semantics are interface facts and free to use. Upstream
@@ -615,8 +630,8 @@ Independent of 2–5; do it when a second device or a real disk demands it.
 
 ## 5. Effort and sequencing
 
-Phase 0 folds in Phase 2.1/2.2 and the harness fix — three days, not one.
-Phase 1 under Option A is a day; D is another day; B or C is a week. Phase 3 is
+Phase 1's 1.0 is hours; the option that follows it is a day under A, another
+day for D, a week for B or C. Phase 3 is
 the bulk, and 3.8 (`u32` → `u64`) is an ext2-wide API change rather than the
 one-line edit it reads as. Phase 4 is a week, of which 4.4 is most: deferred
 inode free needs a VFS-level open count the tree does not have, so it touches
@@ -626,5 +641,7 @@ days — the disk root by default moves four ratchets (`check_test_count.sh`,
 `check_authority_reachability.sh`), each needing a re-measure and a commit
 message explaining the delta. Phase 6 is unbounded and last.
 
-The minimum that delivers "a file survives a reboot": 0 → 1 → 3.0 → 3.1 → 3.5
-→ 3.5a → 5. Everything else is what makes it trustworthy.
+A file already survives a reboot on `/mnt` — `just test-persist` proves it —
+but only because verity is not running (1.0). The minimum that makes that
+trustworthy and moves it to `/`: 1 → 3.0 → 3.1 → 3.5 → 3.5a → 5. Everything
+else is what makes it durable under failure.

@@ -16,7 +16,7 @@ editing.
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
-| `persistent-storage.md` | Files that survive a reboot: verity-vs-writable, the ext2 write surface, durability syscalls, crash consistency |
+| `persistent-storage.md` | Files that survive a reboot: making verity run, verity-vs-writable, the ext2 write surface, crash consistency, the disk as `/` |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
