@@ -332,7 +332,7 @@ static POLL_LOG_BUDGET: AtomicU32 = AtomicU32::new(24);
 
 fn poll_log_ok() -> bool {
     POLL_LOG_BUDGET
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
             if v > 0 { Some(v - 1) } else { None }
         })
         .is_ok()

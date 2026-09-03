@@ -3,7 +3,6 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 #![feature(sync_unsafe_cell)]
-#![feature(c_variadic)]
 
 pub mod alloc;
 pub mod crt;

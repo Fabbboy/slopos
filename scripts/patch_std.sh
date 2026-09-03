@@ -61,8 +61,9 @@ echo "Patching Rust std source for SlopOS target..."
 # 1. Copy PAL files
 mkdir -p "$STD_SYS/pal/slopos"
 cp "$STD_PAL_SRC/pal/slopos/mod.rs"   "$STD_SYS/pal/slopos/mod.rs"
-cp "$STD_PAL_SRC/pal/slopos/futex.rs" "$STD_SYS/pal/slopos/futex.rs"
 cp "$STD_PAL_SRC/pal/slopos/os.rs"    "$STD_SYS/pal/slopos/os.rs"
+# A futex.rs from an older checkout would be dead but compiled; remove it.
+rm -f "$STD_SYS/pal/slopos/futex.rs"
 echo "  Copied pal/slopos/"
 
 # 2. Copy sys module files
@@ -135,16 +136,32 @@ i\
     echo "  Patched pal/mod.rs"
 fi
 
-# 3b. Alloc routing (no fallback — insert after the last zkvm entry)
+# 3b. Alloc routing. Matched through the zkvm arm's closing brace rather than by
+# line count, which lands the arm inside zkvm when upstream adds a line to it.
+# Every arm must bind `imp`: mod.rs re-exports `imp::{alloc, dealloc, realloc}`
+# and owns the GlobalAlloc impl itself.
 if ! grep -q 'target_os = "slopos"' "$STD_SYS/alloc/mod.rs" 2>/dev/null; then
-    sed_in_place '/target_os = "zkvm" => {/{
-N;N
-a\
+    perl_in_place 's/(target_os = "zkvm" => \{\n(?:[^\n]*\n)*?    \})/$1\n    target_os = "slopos" => {\n        mod slopos;\n        use slopos as imp;\n    }/' "$STD_SYS/alloc/mod.rs"
+    if ! grep -q 'target_os = "slopos"' "$STD_SYS/alloc/mod.rs" 2>/dev/null; then
+        echo "ERROR: alloc/mod.rs zkvm arm did not match; upstream shape changed"
+        exit 1
+    fi
+    echo "  Patched alloc/mod.rs"
+fi
+
+# 3b'. Futex routing (sys/sync/futex/<os>.rs since 2026-09-03). Its cfg_select!
+# fallback is `_ => {}`, so an unrouted target exports nothing at all.
+cp "$STD_PAL_SRC/sync_futex_slopos.rs" "$STD_SYS/sync/futex/slopos.rs"
+echo "  Copied sync/futex/slopos.rs"
+if ! grep -q 'target_os = "slopos"' "$STD_SYS/sync/futex/mod.rs" 2>/dev/null; then
+    sed_in_place '/^[[:space:]]*_ => {}/{
+i\
     target_os = "slopos" => {\
         mod slopos;\
+        pub use slopos::*;\
     }
-}' "$STD_SYS/alloc/mod.rs"
-    echo "  Patched alloc/mod.rs"
+}' "$STD_SYS/sync/futex/mod.rs"
+    echo "  Patched sync/futex/mod.rs"
 fi
 
 # 3c. Individual module routing with `_ =>` fallback
@@ -288,12 +305,15 @@ if slopos_before_no_threads "$TL_MOD"; then
     remove_slopos_before_no_threads "$TL_MOD"
     echo "  Removed stale slopos entry from no_threads storage arm in thread_local/mod.rs"
 fi
+# Matched as a whole set with flexible whitespace: upstream reflows this arm
+# between one line and one-target-per-line, which breaks a line-oriented anchor.
 if ! grep -q 'target_os = "slopos"' "$TL_MOD" 2>/dev/null; then
-    # Add slopos to the guard hermit/xous no-op arm (hermit immediately followed by xous)
-    sed_in_place '/target_os = "hermit",/,/target_os = "xous",/{
-/target_os = "xous",/a\
-            target_os = "slopos",
-}' "$TL_MOD"
+    perl_in_place 's/any\(\s*target_os = "hermit",\s*target_os = "xous",?\s*\)/any(target_os = "hermit", target_os = "xous", target_os = "slopos")/' "$TL_MOD"
+    if ! grep -q 'target_os = "slopos"' "$TL_MOD" 2>/dev/null; then
+        echo "ERROR: thread_local/mod.rs guard no-op arm did not match; upstream shape changed"
+        echo "       file: $TL_MOD"
+        exit 1
+    fi
     echo "  Patched thread_local/mod.rs"
 fi
 
@@ -330,16 +350,15 @@ if ! grep -q '^[[:space:]]*target_os = "slopos" => {' "$IO_ERROR" 2>/dev/null; t
 fi
 
 # 3h. sys/exit.rs — route slopos exit() to PAL instead of the intrinsics::abort() fallback.
-#     Anchors on "xous" (last arm before the fallback in fn exit) to avoid the
-#     unrelated unique_thread_exit cfg_select.
+#     Anchored on `fn exit`'s `_ =>` fallback, which the slopos arm must precede:
+#     placed after the wildcard it is dead and exit() compiles to a ud2.
 EXIT_RS="$STD_SYS/exit.rs"
 if [ -f "$EXIT_RS" ] && ! grep -q 'target_os = "slopos"' "$EXIT_RS" 2>/dev/null; then
-    sed_in_place '/crate::os::xous::ffi::exit/,/^[[:space:]]*}$/{
-        /^[[:space:]]*}$/a\
-        target_os = "slopos" => {\
-            crate::sys::pal::os::exit(code)\
-        }
-    }' "$EXIT_RS"
+    perl_in_place 's/(\n        )(_ => \{\n            let _ = code;\n            crate::intrinsics::abort\(\)\n        \})/$1target_os = "slopos" => {\n            crate::sys::pal::os::exit(code)\n        }$1$2/' "$EXIT_RS"
+    if ! grep -q 'target_os = "slopos"' "$EXIT_RS" 2>/dev/null; then
+        echo "ERROR: exit.rs fallback arm did not match; upstream shape changed"
+        exit 1
+    fi
     echo "  Patched exit.rs"
 fi
 
@@ -542,9 +561,43 @@ check_patched() {
     fi
 }
 
+# cfg_select! takes the first matching arm, so a slopos arm after the `_`
+# wildcard is dead and the target silently gets the fallback. That is not a
+# build error and presence-grepping cannot see it; it shipped once as a ud2 in
+# std::process::exit, reached only after a process had done its work.
+check_arm_precedes_fallback() {
+    local label="$1"
+    local file="$2"
+    if [ ! -f "$file" ]; then
+        return
+    fi
+    # Compare within each cfg_select! block: a file may hold several, and a
+    # fallback in an earlier block says nothing about an arm in a later one.
+    local report
+    report=$(awk '
+        /cfg_select!/ { block++; fallback[block] = 0 }
+        block == 0 { next }
+        /^[[:space:]]*_ =>/ { if (!fallback[block]) fallback[block] = NR }
+        /target_os = "slopos"/ {
+            if (fallback[block] && NR > fallback[block]) {
+                print NR " " fallback[block]
+                exit
+            }
+        }
+    ' "$file")
+    if [ -n "$report" ]; then
+        echo "  DEAD ARM: $label — slopos arm (line ${report% *}) follows the '_ =>' fallback (line ${report#* }) in the same cfg_select!"
+        echo "    file  : $file"
+        echo "    the arm is unreachable; slopos silently gets the fallback"
+        failed=1
+    fi
+}
+
 # Core PAL + routing surfaces
 check_patched "pal/mod.rs"                     "$STD_SYS/pal/mod.rs"                        'target_os = "slopos"'
-check_patched "alloc/mod.rs"                   "$STD_SYS/alloc/mod.rs"                      'target_os = "slopos"'
+check_patched "alloc/mod.rs"                   "$STD_SYS/alloc/mod.rs"                      'use slopos as imp;'
+check_patched "sync/futex/mod.rs"              "$STD_SYS/sync/futex/mod.rs"                 'target_os = "slopos"'
+check_patched "sync/futex/slopos.rs"           "$STD_SYS/sync/futex/slopos.rs"              'pub fn futex_wait'
 check_patched "args/mod.rs"                    "$STD_SYS/args/mod.rs"                       'target_os = "slopos"'
 check_patched "env/mod.rs"                     "$STD_SYS/env/mod.rs"                        'target_os = "slopos"'
 check_patched "stdio/mod.rs"                   "$STD_SYS/stdio/mod.rs"                      'target_os = "slopos"'
@@ -578,7 +631,20 @@ check_thread_local_native() {
 check_thread_local_native
 check_patched "io/error/mod.rs"                "$STD_SYS/io/error/mod.rs"                   'target_os = "slopos" => {'
 check_patched "io/error/slopos.rs"             "$STD_SYS/io/error/slopos.rs"                'fn decode_error_kind'
+check_patched "io/error/slopos.rs"             "$STD_SYS/io/error/slopos.rs"                'fn format_error'
 check_patched "exit.rs"                        "$STD_SYS/exit.rs"                           'target_os = "slopos"'
+check_arm_precedes_fallback "exit.rs"          "$STD_SYS/exit.rs"
+check_arm_precedes_fallback "stdio/mod.rs"     "$STD_SYS/stdio/mod.rs"
+check_arm_precedes_fallback "time/mod.rs"      "$STD_SYS/time/mod.rs"
+check_arm_precedes_fallback "thread/mod.rs"    "$STD_SYS/thread/mod.rs"
+check_arm_precedes_fallback "pipe/mod.rs"      "$STD_SYS/pipe/mod.rs"
+check_arm_precedes_fallback "random/mod.rs"    "$STD_SYS/random/mod.rs"
+check_arm_precedes_fallback "fs/mod.rs"        "$STD_SYS/fs/mod.rs"
+check_arm_precedes_fallback "process/mod.rs"   "$STD_SYS/process/mod.rs"
+check_arm_precedes_fallback "args/mod.rs"      "$STD_SYS/args/mod.rs"
+check_arm_precedes_fallback "env/mod.rs"       "$STD_SYS/env/mod.rs"
+check_arm_precedes_fallback "sync/futex/mod.rs" "$STD_SYS/sync/futex/mod.rs"
+check_arm_precedes_fallback "net/connection/socket/mod.rs" "$STD_SYS/net/connection/socket/mod.rs"
 check_patched "env_consts.rs"                  "$STD_SYS/env_consts.rs"                     'target_os = "slopos"'
 check_patched "sync/mutex/mod.rs"              "$STD_SYS/sync/mutex/mod.rs"                 'target_os = "slopos"'
 check_patched "sync/condvar/mod.rs"            "$STD_SYS/sync/condvar/mod.rs"               'target_os = "slopos"'

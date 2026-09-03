@@ -489,7 +489,7 @@ pub fn inject_buffer_alloc_failures(count: u32) {
 fn take_injected_alloc_failure() -> bool {
     use core::sync::atomic::Ordering;
     INJECTED_ALLOC_FAILURES
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
         .is_ok()
 }
 

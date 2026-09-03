@@ -182,6 +182,7 @@ pub mod netc {
     // Values follow the Linux numbering; keep them in lock-step with
     // `slopos-abi::syscall::errno_defs`.
     pub const EINTR: c_int = 4;
+    pub const EMSGSIZE: c_int = 90;
     pub const EISCONN: c_int = 106;
     pub const EINPROGRESS: c_int = 115;
 

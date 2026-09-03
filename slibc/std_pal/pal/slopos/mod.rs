@@ -5,7 +5,6 @@
 
 use crate::io;
 
-pub mod futex;
 pub mod os;
 
 pub fn unsupported<T>() -> io::Result<T> {

@@ -38,9 +38,8 @@ The slopos-ostd lib unit tests + integration tests cover, among others:
 ## How to run
 
 ```
-rustup component add miri --toolchain nightly-2026-05-25
-cargo +nightly-2026-05-25 miri setup     # one-time, ~5–10 min (builds Miri's std)
-just check-miri
+just check-miri     # adds the miri component and runs `miri setup` if needed
+                    # (first run ~5–10 min, building Miri's std)
 ```
 
 `just check-miri` runs the full slopos-ostd unit + integration test

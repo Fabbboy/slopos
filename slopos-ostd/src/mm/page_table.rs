@@ -276,7 +276,7 @@ pub fn fail_next_intermediate_allocs(n: u32) {
 #[cfg(feature = "test-helpers")]
 fn intermediate_alloc_should_fail() -> bool {
     INTERMEDIATE_ALLOC_FAILURES
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             n.checked_sub(1).filter(|_| n > 0)
         })
         .is_ok()

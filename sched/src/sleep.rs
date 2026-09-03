@@ -378,7 +378,7 @@ pub fn arm_strand_sweep() {
 
 fn strand_log_ok() -> bool {
     STRAND_LOG_BUDGET
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
             if v > 0 { Some(v - 1) } else { None }
         })
         .is_ok()

@@ -537,7 +537,7 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
         // whose `drop_in_place` is already running. This refusal-to-revive is
         // the line the use-after-free proof (I3) leans on.
         slot.ref_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |prev| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |prev| {
                 if prev == REF_COUNT_BUSY || prev == REF_COUNT_UNUSED || prev >= REF_COUNT_MAX {
                     None
                 } else {

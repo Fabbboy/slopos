@@ -34,7 +34,7 @@ pub fn quiesce_begin() {
 
 #[cfg(feature = "test-hooks")]
 pub fn quiesce_end() {
-    let _ = QUIESCE_DEPTH.fetch_update(Ordering::AcqRel, Ordering::Acquire, |d| {
+    let _ = QUIESCE_DEPTH.try_update(Ordering::AcqRel, Ordering::Acquire, |d| {
         Some(d.saturating_sub(1))
     });
 }

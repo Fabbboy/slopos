@@ -38,10 +38,10 @@ members = [
   "hermetic",
   "verification"
 ]
-# vendor/gimli is a pinned TCB annex reached via [patch.crates-io]; excluding
-# it from the workspace keeps workspace-wide tooling (cargo fmt --all) from
-# rewriting the content-hash-pinned tree.
-exclude = ["vendor/gimli"]
+# Pinned TCB annexes: their content hash IS the pin (scripts/check_vendor_pin.sh),
+# so workspace tooling must not ask for an edit. Both still build, via path dep
+# and [patch.crates-io].
+exclude = ["vendor/gimli", "vendor/unwinding"]
 resolver = "2"
 
 [workspace.package]
@@ -54,6 +54,11 @@ warnings = "deny"
 non_camel_case_types = "deny"
 non_snake_case = "deny"
 non_upper_case_globals = "deny"
+
+[workspace.lints.cargo]
+# Binary names are ABI, not style: each is a literal /bin/<name> in
+# program_registry, the exec grant table and initramfs.
+non_kebab_case_bins = "allow"
 
 [workspace.lints.clippy]
 type_complexity = "warn"
@@ -86,7 +91,6 @@ slopos-ring = { path = "ring" }
 slopos-sched = { path = "sched" }
 slopos-signalfd = { path = "signalfd" }
 slopos-slibc = { path = "slibc" }
-slopos-userland = { path = "userland" }
 slopos-terminal-core = { path = "terminal-core" }
 slopos-keymap-core = { path = "keymap-core" }
 slopos-chrome-core = { path = "chrome-core" }
@@ -99,7 +103,6 @@ slopos-windowing = { path = "windowing" }
 slopos-hermetic = { path = "hermetic" }
 paste = { version = "1.0", default-features = false }
 unwinding = { path = "vendor/unwinding", default-features = false, features = ["unwinder", "fde-gnu-eh-frame-hdr", "personality", "panic", "hide-trace"] }
-x86_64 = { version = "0.15.4", default-features = false, features = ["instructions"] }
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"

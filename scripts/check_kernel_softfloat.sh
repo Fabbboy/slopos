@@ -19,7 +19,7 @@
 # overwrites the whole file at once.
 #
 # The soft-float guarantee comes from `targets/x86_64-slos.json`
-# (`features: ...,-sse,...,+soft-float` + `rustc-abi: x86-softfloat`), not
+# (`features: ...,-sse,...,+soft-float` + `rustc-abi: softfloat`), not
 # from `.cargo/config.toml`: a `RUSTFLAGS` env var fully overrides
 # `target.*.rustflags`. And hand-written `asm!` is not subject to target
 # features at all, which is what makes this scan the only thing that would

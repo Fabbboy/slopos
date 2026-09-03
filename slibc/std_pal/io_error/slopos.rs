@@ -5,6 +5,7 @@
 //! negative-i64 values there are stored positive in
 //! `io::Error::raw_os_error`).
 
+use crate::fmt;
 use crate::io::ErrorKind;
 
 pub fn errno() -> i32 {
@@ -62,7 +63,7 @@ pub fn decode_error_kind(code: i32) -> ErrorKind {
     }
 }
 
-pub fn error_string(errno: i32) -> String {
+pub fn format_error(errno: i32, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let msg = match errno {
         1 => "operation not permitted",
         2 => "no such file or directory",
@@ -105,5 +106,5 @@ pub fn error_string(errno: i32) -> String {
         115 => "operation now in progress",
         _ => "unknown error",
     };
-    msg.to_string()
+    f.write_str(msg)
 }

@@ -313,7 +313,7 @@ impl<K, U> TaskInner<K, U> {
     pub fn add_total_runtime(&self, delta: u64) {
         let _ = self
             .total_runtime
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some(current.saturating_add(delta))
             });
     }
