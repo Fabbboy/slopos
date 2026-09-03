@@ -3,7 +3,7 @@
 
 Layout (little-endian), appended after the existing image content:
 
-    [ existing image: N full blocks ][ hash array: N × u32 ][ 32-byte header ]
+    [ image: N full blocks ][ pad ][ hash array: N × u32 ][ 32-byte header ]
 
 The 32-byte header is the LAST 32 bytes of the file, so the kernel locates the
 trailer from the block device's capacity alone — no filesystem parsing. Each
@@ -11,7 +11,15 @@ entry of the hash array is the CRC-32 (IEEE/zlib, the same `zlib.crc32` used
 here) of the corresponding 4 KiB data block; the header's `root` field is the
 CRC-32 of the whole hash array, so a corrupt array is self-detecting.
 
-Kernel side: fs/src/verity.rs (must keep the header layout + CRC in sync).
+The pad makes the finished file a whole number of 512-byte sectors. A block
+device reports its capacity in sectors, so an unpadded trailer whose header
+straddled the last partial sector would sit *beyond* the reported capacity and
+the kernel would never see it (SLOPOS-2026-0053). The pad goes before the
+hash array, never after the header, so the header stays the last 32 bytes.
+
+Kernel side: fs/src/verity.rs (must keep the header layout + CRC in sync). A
+trailer-carrying device is write-protected there: verification and
+writability are one decision, as in dm-verity.
 
 This is an INTEGRITY check (detects accidental corruption / tampering loudly at
 read time), not a cryptographic authenticity guarantee — see verity.rs docs.
@@ -25,6 +33,7 @@ MAGIC = 0x53565254  # 'TVRS' LE — SlopOS verity
 VERSION = 1
 ALGO_CRC32 = 1
 HEADER_FMT = "<IIIIQII"  # magic, version, algo, block_size, block_count(u64), root, reserved
+SECTOR_SIZE = 512
 
 EXT2_SUPERBLOCK_OFFSET = 1024
 EXT2_MAGIC = 0xEF53
@@ -74,11 +83,21 @@ def main() -> int:
     header = struct.pack(HEADER_FMT, MAGIC, VERSION, ALGO_CRC32, block_size, n, root, 0)
     assert len(header) == 32, f"header is {len(header)} bytes, expected 32"
 
+    unpadded = len(data) + len(arr) + len(header)
+    pad = (-unpadded) % SECTOR_SIZE
+
     with open(path, "ab") as f:
+        f.write(b"\0" * pad)
         f.write(bytes(arr))
         f.write(header)
 
-    print(f"verity: appended trailer for {n} blocks ({block_size}B), root crc 0x{root:08x}")
+    total = unpadded + pad
+    assert total % SECTOR_SIZE == 0, f"image is {total} bytes, not sector-aligned"
+
+    print(
+        f"verity: appended trailer for {n} blocks ({block_size}B), root crc 0x{root:08x},"
+        f" {pad}B pad, {total} bytes total"
+    )
     return 0
 
 

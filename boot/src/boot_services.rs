@@ -12,8 +12,12 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use slopos_drivers::virtio_blk;
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceIndex};
 use slopos_fs::ext2_vfs::EXT2_VFS_STATIC;
-use slopos_fs::vfs::{mount, unmount};
-use slopos_fs::{ext2_vfs_init_with_device, ext2_vfs_is_initialized, vfs_init_builtin_filesystems};
+use slopos_fs::verity::VerityStatus;
+use slopos_fs::vfs::{MOUNT_RDONLY, mount, unmount};
+use slopos_fs::{
+    ext2_vfs_init_with_device, ext2_vfs_is_initialized, ext2_vfs_is_read_only,
+    vfs_init_builtin_filesystems,
+};
 use slopos_ostd::KBox;
 use slopos_ostd::sync::InitFlag;
 
@@ -24,6 +28,16 @@ pub const ROOT_INITRAMFS: u8 = 1;
 pub const ROOT_VIRTIO: u8 = 2;
 
 static ROOT_MODE: AtomicU8 = AtomicU8::new(ROOT_AUTO);
+
+/// `verity=require`: a disk that is attached must come up verified, or the
+/// boot step fails. No disk at all is the initramfs-only case and passes. A
+/// check that can switch itself off without saying so is not a check; this is
+/// how a boot asserts it is running one.
+static VERITY_REQUIRED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_verity_required(required: bool) {
+    VERITY_REQUIRED.store(required, Ordering::Relaxed);
+}
 
 /// Set once the initramfs is unpacked, so [`boot_step_fs_init`] demotes the ext2
 /// disk to a `/mnt` secondary instead of replacing `/`.
@@ -94,35 +108,107 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     0
 }
 
+/// Mount flags for the ext2 disk: read-only when the filesystem or its device
+/// refuses writes, so the refusal reaches userland as `EROFS` at the VFS.
+fn ext2_mount_flags() -> u32 {
+    if ext2_vfs_is_read_only() {
+        MOUNT_RDONLY
+    } else {
+        0
+    }
+}
+
+/// Why disk0 did not come up verified. Under `verity=require` every arm is a
+/// failed boot step, not just the one that reached the trailer parse.
+#[derive(Debug, Clone, Copy)]
+enum DiskAttachOutcome {
+    NoDisk,
+    NotReady,
+    Unclaimable,
+    NoMemory,
+    MountFailed,
+    Mounted(slopos_fs::Ext2MountInfo),
+}
+
+fn attach_disk0() -> DiskAttachOutcome {
+    let Some(disk0) = virtio_blk::blk_device_by_index(BlockDeviceIndex(0)) else {
+        return DiskAttachOutcome::NoDisk;
+    };
+    if !virtio_blk::blk_is_ready(disk0) {
+        return DiskAttachOutcome::NotReady;
+    }
+    let token = match virtio_blk::open_writer(disk0) {
+        Ok(t) => t,
+        Err(e) => {
+            klog_info!("FS: could not claim disk0 write capability: {:?}", e);
+            return DiskAttachOutcome::Unclaimable;
+        }
+    };
+    let Ok(boxed) = KBox::try_new(token) else {
+        return DiskAttachOutcome::NoMemory;
+    };
+    let device: KBox<dyn BlockDevice + Send + Sync> = boxed;
+    match ext2_vfs_init_with_device(device) {
+        Ok(info) => DiskAttachOutcome::Mounted(info),
+        Err(e) => {
+            klog_info!("FS: virtio-blk disk0 found but ext2 init failed: {:?}", e);
+            DiskAttachOutcome::MountFailed
+        }
+    }
+}
+
 fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     register_fs_hooks();
 
-    // Absence is not an error: on real hardware the root came from the initramfs.
-    if let Some(disk0) = virtio_blk::blk_device_by_index(BlockDeviceIndex(0)) {
-        if virtio_blk::blk_is_ready(disk0) {
-            match virtio_blk::open_writer(disk0) {
-                Ok(token) => match KBox::try_new(token) {
-                    Ok(boxed) => {
-                        let device: KBox<dyn BlockDevice + Send + Sync> = boxed;
-                        if ext2_vfs_init_with_device(device).is_ok() {
-                            klog_info!("FS: ext2 initialized from virtio-blk disk0");
-                        } else {
-                            klog_info!("FS: virtio-blk disk0 found but ext2 init failed");
-                        }
-                    }
-                    Err(_) => klog_info!("FS: failed to allocate block-device handle for disk0"),
-                },
-                Err(e) => {
-                    klog_info!("FS: could not claim disk0 write capability: {:?}", e)
-                }
-            }
+    let outcome = attach_disk0();
+    if let DiskAttachOutcome::Mounted(info) = outcome {
+        klog_info!(
+            "FS: ext2 initialized from virtio-blk disk0 ({}, verity {})",
+            if info.read_only {
+                "read-only"
+            } else {
+                "read-write"
+            },
+            match info.verity {
+                VerityStatus::Absent => "absent",
+                VerityStatus::Verified { .. } => "enabled",
+            },
+        );
+    }
+    // Absence is not an error: on real hardware the root came from the
+    // initramfs. A disk that is there, though, must come up verified when the
+    // boot said so — and a disk that is there but could not be mounted is
+    // exactly the case the knob exists to catch.
+    if VERITY_REQUIRED.load(Ordering::Relaxed) {
+        let verified = matches!(
+            outcome,
+            DiskAttachOutcome::NoDisk
+                | DiskAttachOutcome::Mounted(slopos_fs::Ext2MountInfo {
+                    verity: VerityStatus::Verified { .. },
+                    ..
+                })
+        );
+        if !verified {
+            klog_info!(
+                "FS: verity=require but disk0 is not verified: {:?}",
+                outcome
+            );
+            return -1;
         }
     }
 
     if ROOTFS_IS_RAMFS.load(Ordering::Relaxed) {
         if ext2_vfs_is_initialized() {
-            match mount(b"/mnt", &EXT2_VFS_STATIC, 0) {
-                Ok(_) => klog_info!("VFS: mounted ext2 at /mnt (secondary)"),
+            let flags = ext2_mount_flags();
+            match mount(b"/mnt", &EXT2_VFS_STATIC, flags) {
+                Ok(_) => klog_info!(
+                    "VFS: mounted ext2 at /mnt (secondary, {})",
+                    if flags & MOUNT_RDONLY != 0 {
+                        "read-only"
+                    } else {
+                        "read-write"
+                    },
+                ),
                 Err(e) => klog_info!("VFS: failed to mount ext2 at /mnt: {:?}", e),
             }
         }
@@ -135,7 +221,7 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
             // tripped the one-shot init flag, so the call above returned without
             // mounting ext2.
             let _ = unmount(b"/");
-            match mount(b"/", &EXT2_VFS_STATIC, 0) {
+            match mount(b"/", &EXT2_VFS_STATIC, ext2_mount_flags()) {
                 Ok(_) => {
                     klog_info!("VFS: mounted / (ext2), /tmp (ramfs), /dev (devfs)");
                 }

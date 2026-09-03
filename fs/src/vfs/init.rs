@@ -3,10 +3,10 @@ use slopos_ostd::sync::InitFlag;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 
 use crate::devfs::DevFs;
-use crate::ext2_vfs::{EXT2_VFS_STATIC, ext2_vfs_is_initialized};
+use crate::ext2_vfs::{EXT2_VFS_STATIC, ext2_vfs_is_initialized, ext2_vfs_is_read_only};
 use crate::ramfs::RamFs;
 use crate::vfs::VfsResult;
-use crate::vfs::mount::mount;
+use crate::vfs::mount::{MOUNT_RDONLY, mount};
 
 static VFS_INIT: InitFlag = InitFlag::new();
 
@@ -20,7 +20,12 @@ pub fn vfs_init_builtin_filesystems() -> VfsResult<()> {
     }
 
     if ext2_vfs_is_initialized() {
-        mount(b"/", &EXT2_VFS_STATIC, 0)?;
+        let flags = if ext2_vfs_is_read_only() {
+            MOUNT_RDONLY
+        } else {
+            0
+        };
+        mount(b"/", &EXT2_VFS_STATIC, flags)?;
     } else {
         mount(b"/", &RAMFS_ROOT_STATIC, 0)?;
     }

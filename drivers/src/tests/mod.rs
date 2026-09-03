@@ -15,6 +15,7 @@ pub mod platform_acpi_tests;
 pub mod platform_binding;
 pub mod scanout_arbiter;
 pub mod touchpad_platform_tests;
+pub mod verity_artifact_tests;
 pub mod virtio_completion_tests;
 pub mod virtio_gpu_tests;
 pub mod virtio_msix_tests;

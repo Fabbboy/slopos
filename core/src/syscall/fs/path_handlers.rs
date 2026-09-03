@@ -186,6 +186,10 @@ define_syscall!(syscall_rename
     (ctx, old_path: UserCStr<USER_PATH_MAX>, new_path: UserCStr<USER_PATH_MAX>) cap(NoneFd)
     -> Result<(), Errno>
 {
-    slopos_fs::vfs::ops::vfs_rename(old_path.as_bytes(), new_path.as_bytes())
-        .map_err(|_| Errno::EINVAL)
+    slopos_fs::vfs::ops::vfs_rename(old_path.as_bytes(), new_path.as_bytes()).map_err(|e| match e {
+        slopos_fs::VfsError::ReadOnly => Errno::EROFS,
+        slopos_fs::VfsError::PermissionDenied => Errno::EACCES,
+        slopos_fs::VfsError::NotFound => Errno::ENOENT,
+        _ => Errno::EINVAL,
+    })
 });

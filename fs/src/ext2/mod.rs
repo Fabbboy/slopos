@@ -65,7 +65,8 @@ pub struct Ext2Fs<'a> {
     /// superblock stale; persisted only by [`Self::sync`], never mid-operation.
     superblock_dirty: bool,
     /// Refuses every mutating entry point. Set when the image declares a
-    /// read-only-compatible feature this implementation does not write.
+    /// read-only-compatible feature this implementation does not write, or
+    /// when the device itself refuses writes (a verity-attested image).
     read_only: bool,
 }
 
@@ -93,7 +94,7 @@ impl<'a> Ext2Fs<'a> {
         block_size: u32,
         inode_size: u16,
     ) -> Result<Self, Ext2Error> {
-        let read_only = superblock.requires_readonly();
+        let read_only = Self::read_only_for(&superblock, device);
         let geom = Ext2Geometry::derive(&superblock)?;
         Ok(Self {
             device,
@@ -114,6 +115,11 @@ impl<'a> Ext2Fs<'a> {
 
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// The one rule for whether a handle over `device` may mutate.
+    pub fn read_only_for(superblock: &Superblock, device: &dyn BlockDevice) -> bool {
+        superblock.requires_readonly() || device.write_protected()
     }
 
     /// Gate for every mutating entry point.

@@ -131,6 +131,7 @@ define_errnos! {
     EMFILE          =  24, "Too many open files";
     ENOSPC          =  28, "No space left on device";
     ESPIPE          =  29, "Illegal seek";
+    EROFS           =  30, "Read-only file system";
     EPIPE           =  32, "Broken pipe";
     ERANGE          =  34, "Numerical result out of range";
     ENAMETOOLONG    =  36, "File name too long";

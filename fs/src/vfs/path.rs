@@ -5,6 +5,23 @@ use crate::vfs::traits::{FileSystem, FileType, InodeId, VfsError, VfsResult};
 pub struct ResolvedPath {
     pub fs: &'static dyn FileSystem,
     pub inode: InodeId,
+    /// Of the mount the walk ended in.
+    pub mount_flags: u32,
+}
+
+impl ResolvedPath {
+    pub fn read_only(&self) -> bool {
+        self.mount_flags & crate::vfs::mount::MOUNT_RDONLY != 0
+    }
+
+    /// `Err(ReadOnly)` when the mount refuses mutation.
+    pub fn check_writable(&self) -> VfsResult<()> {
+        if self.read_only() {
+            Err(VfsError::ReadOnly)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 pub fn resolve_path(path: &[u8]) -> VfsResult<ResolvedPath> {
@@ -19,8 +36,8 @@ pub fn resolve_path(path: &[u8]) -> VfsResult<ResolvedPath> {
 /// is never honoured: the walk continues inside the covered directory of the
 /// filesystem underneath.
 fn resolve_canonical(path: &[u8]) -> VfsResult<ResolvedPath> {
-    let mut fs = mount_at(b"/").ok_or(VfsError::NotFound)?;
-    let mut current_inode = fs.root_inode();
+    let mut mounted = mount_at(b"/").ok_or(VfsError::NotFound)?;
+    let mut current_inode = mounted.fs.root_inode();
 
     // Byte offset in `path` of the end of the components consumed so far,
     // which is what the mount table is keyed on.
@@ -31,18 +48,19 @@ fn resolve_canonical(path: &[u8]) -> VfsResult<ResolvedPath> {
 
         // `canonicalise` has already resolved `.` and `..` lexically, so a
         // component here is always a real name.
-        if let Some(mounted) = mount_at(&path[..prefix_end]) {
-            fs = mounted;
-            current_inode = fs.root_inode();
+        if let Some(crossed) = mount_at(&path[..prefix_end]) {
+            mounted = crossed;
+            current_inode = mounted.fs.root_inode();
             continue;
         }
 
-        current_inode = fs.lookup(current_inode, component)?;
+        current_inode = mounted.fs.lookup(current_inode, component)?;
     }
 
     Ok(ResolvedPath {
-        fs,
+        fs: mounted.fs,
         inode: current_inode,
+        mount_flags: mounted.flags,
     })
 }
 

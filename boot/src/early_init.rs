@@ -665,6 +665,11 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         boot_info(b"Boot option: root=virtio\0");
     }
 
+    if cmdline.split_whitespace().any(|t| t == "verity=require") {
+        crate::boot_services::set_verity_required(true);
+        boot_info(b"Boot option: verity=require\0");
+    }
+
     // `sched.ap_pause_ms=0` disables the AP pause's wall-clock deadline and
     // falls back to its iteration budget, the escape hatch
     // `mce=monarchtimeout=` and `csd_lock_timeout=` both have.

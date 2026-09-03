@@ -1,12 +1,14 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 
 use crate::blockdev::BlockDevice;
 use crate::ext2::cache::BlockCache;
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode, Ext2Superblock};
+use crate::verity::{FsExtent, VerityError, VerityStatus};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_ostd::KBox;
+use slopos_ostd::klog_info;
 use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait};
 use slopos_ostd::sync::{InitFlag, Mutex};
 
@@ -26,11 +28,21 @@ struct CachedExt2 {
     superblock_dirty: bool,
 }
 
+/// How the device came up at mount, for the boot log and the mounter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ext2MountInfo {
+    pub verity: VerityStatus,
+    pub read_only: bool,
+}
+
 /// A *sleeping* mutex: ext2 block-device I/O waits are scheduler-backed, so
 /// the holder may legitimately deschedule mid-operation.
 static CACHED_EXT2: Mutex<Option<CachedExt2>> =
     Mutex::new(None, lock_class!("CACHED_EXT2", LOCK_LEVEL_RESOURCE));
 static EXT2_VFS_INIT: InitFlag = InitFlag::new();
+/// Every `Ext2Fs` built over the mounted device refuses mutation. Outside the
+/// lock so a query never waits on in-flight block I/O.
+static EXT2_READ_ONLY: AtomicBool = AtomicBool::new(false);
 
 /// Best-effort dirty-block count: the flusher's wait predicate reads only this
 /// and the stop flag, so it takes no lock.
@@ -223,37 +235,75 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
 
 pub static EXT2_VFS_STATIC: StaticExt2Vfs = StaticExt2Vfs;
 
-pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) -> VfsResult<()> {
+/// Mount the ext2 image on `device`. A verity trailer, when present, makes
+/// the mount read-only; a trailer that is present but unusable refuses the
+/// mount, so an image claiming attestation is never read unverified.
+pub fn ext2_vfs_init_with_device(
+    device: KBox<dyn BlockDevice + Send + Sync>,
+) -> VfsResult<Ext2MountInfo> {
     // A second call must error rather than silently drop the caller's
     // capability token, which would release the exclusive write claim.
     if !EXT2_VFS_INIT.init_once() {
         return Err(VfsError::AlreadyExists);
     }
-
-    let device = crate::verity::build_verified(device);
-
-    // Every failure below rolls the one-shot flag back, keeping `is_set()` in
-    // lockstep with `CACHED_EXT2` so a later attempt can retry.
-    let (superblock, block_size, inode_size) = match Ext2Fs::mount_params(&*device) {
-        Ok(parts) => parts,
+    match mount_device(device) {
+        Ok(info) => Ok(info),
         Err(e) => {
             EXT2_VFS_INIT.reset();
-            return Err(ext2_error_to_vfs(e));
+            Err(e)
         }
-    };
+    }
+}
 
-    let cache = match BlockCache::new(block_size) {
-        Ok(c) => c,
-        Err(e) => {
-            EXT2_VFS_INIT.reset();
-            return Err(ext2_error_to_vfs(e));
-        }
+fn mount_device(device: KBox<dyn BlockDevice + Send + Sync>) -> VfsResult<Ext2MountInfo> {
+    // The superblock is read off the raw device: a trailer can only be
+    // recognised relative to the extent the filesystem claims, and the
+    // sub-block read is one verity would not check anyway.
+    let (superblock, block_size, inode_size) =
+        Ext2Fs::mount_params(&*device).map_err(ext2_error_to_vfs)?;
+    let extent = FsExtent {
+        block_size,
+        blocks: superblock.blocks_count as u64,
     };
+    let (device, verity) = crate::verity::build_verified(device, extent).map_err(|e| {
+        klog_info!("verity: refusing to mount — {:?}", e);
+        verity_error_to_vfs(e)
+    })?;
+    log_verity_status(verity);
 
-    let Ok(mut guard) = CACHED_EXT2.lock() else {
-        EXT2_VFS_INIT.reset();
-        return Err(VfsError::Interrupted);
-    };
+    let read_only = Ext2Fs::read_only_for(&superblock, &*device);
+    install_cached(device, superblock, block_size, inode_size)?;
+    EXT2_READ_ONLY.store(read_only, Ordering::Release);
+
+    if !read_only {
+        start_flusher();
+    }
+    Ok(Ext2MountInfo { verity, read_only })
+}
+
+#[inline(never)]
+fn log_verity_status(verity: VerityStatus) {
+    match verity {
+        VerityStatus::Absent => klog_info!("verity: no trailer — image mounts unverified"),
+        VerityStatus::Verified { blocks, block_size } => klog_info!(
+            "verity: enabled — {} blocks of {} bytes, device write-protected",
+            blocks,
+            block_size,
+        ),
+    }
+}
+
+/// Build the cache, publish `CACHED_EXT2` and stamp the not-clean bit. Its
+/// own frame so the cache temporaries do not share one with the verity parse.
+#[inline(never)]
+fn install_cached(
+    device: KBox<dyn BlockDevice + Send + Sync>,
+    superblock: Ext2Superblock,
+    block_size: u32,
+    inode_size: u16,
+) -> VfsResult<()> {
+    let cache = BlockCache::new(block_size).map_err(ext2_error_to_vfs)?;
+    let mut guard = CACHED_EXT2.lock().map_err(|_| VfsError::Interrupted)?;
     *guard = Some(CachedExt2 {
         device,
         superblock,
@@ -262,23 +312,41 @@ pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) ->
         cache,
         superblock_dirty: false,
     });
-
-    // The not-clean bit is what tells a later fsck it must run. Without it a
-    // crash or an unflushed reboot leaves an image that still claims to be
-    // clean, so the damage is never repaired.
     if let Some(cached) = guard.as_mut() {
-        let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
-        if let Ok(mut fs) = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is) {
-            if fs.mark_dirty_on_disk().is_ok() {
-                cached.superblock = fs.superblock();
-            }
-        }
+        stamp_not_clean(cached);
     }
-    drop(guard);
-
-    start_flusher();
-
     Ok(())
+}
+
+/// The not-clean bit is what tells a later fsck it must run; without it a
+/// crash or an unflushed reboot leaves an image that still claims to be
+/// clean. A no-op on a read-only handle, so a write-protected device is never
+/// touched.
+#[inline(never)]
+fn stamp_not_clean(cached: &mut CachedExt2) {
+    let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
+    let Ok(mut fs) = Ext2Fs::new(&*cached.device, &mut cached.cache, sb, bs, is) else {
+        return;
+    };
+    if fs.mark_dirty_on_disk().is_ok() {
+        cached.superblock = fs.superblock();
+    }
+}
+
+/// Whether the mounted ext2 filesystem refuses every mutation. `false` when
+/// nothing is mounted.
+pub fn ext2_vfs_is_read_only() -> bool {
+    EXT2_VFS_INIT.is_set() && EXT2_READ_ONLY.load(Ordering::Acquire)
+}
+
+fn verity_error_to_vfs(e: VerityError) -> VfsError {
+    match e {
+        VerityError::UnsupportedTrailer => VfsError::NotSupported,
+        VerityError::CorruptTrailer
+        | VerityError::Geometry
+        | VerityError::Device
+        | VerityError::OutOfMemory => VfsError::IoError,
+    }
 }
 
 /// Takes the FS lock, so the caller must hold none. A no-op if no ext2
@@ -404,7 +472,7 @@ fn ext2_error_to_vfs(e: Ext2Error) -> VfsError {
         Ext2Error::InvalidSuperblock => VfsError::IoError,
         Ext2Error::UnsupportedBlockSize => VfsError::IoError,
         Ext2Error::UnsupportedFeature => VfsError::NotSupported,
-        Ext2Error::ReadOnly => VfsError::PermissionDenied,
+        Ext2Error::ReadOnly => VfsError::ReadOnly,
         Ext2Error::InvalidInode => VfsError::NotFound,
         Ext2Error::InvalidBlock => VfsError::IoError,
         Ext2Error::UnsupportedIndirection => VfsError::NotSupported,

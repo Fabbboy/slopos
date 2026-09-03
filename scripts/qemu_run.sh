@@ -211,6 +211,10 @@ ADD_NO_REBOOT=0
 # root-fs image (virtio-disk0) — so a buggy test cannot corrupt an on-disk
 # binary (the nightly-2026-05-25 io_capture incident). Recreated blank each run.
 ADD_SCRATCH_DISK=0
+# The shipped verified image (virtio-disk2), test harness only. disk0 is built
+# VERITY=off so the suite can write; without this no `just test` run would
+# exercise fs/src/verity.rs against a trailer a real device reports.
+ADD_VERIFIED_DISK=0
 
 case "$MODE" in
     test)
@@ -231,6 +235,12 @@ case "$MODE" in
         rm -f "$SCRATCH_IMG"
         truncate -s 8M "$SCRATCH_IMG"
         ADD_SCRATCH_DISK=1
+        VERIFIED_IMG="${VERIFIED_IMG:-${REPO_ROOT}/fs/assets/ext2.img}"
+        if [ -f "$VERIFIED_IMG" ]; then
+            ADD_VERIFIED_DISK=1
+        else
+            echo "qemu_run: no verified image at $VERIFIED_IMG — the verity artifact test will report it absent" >&2
+        fi
         ;;
     interactive|logged)
         if [ "$QEMU_ENABLE_ISA_EXIT" != "0" ]; then
@@ -440,6 +450,14 @@ if [ "$ADD_SCRATCH_DISK" = "1" ]; then
     QEMU_ARGS+=(
         -drive "file=$SCRATCH_IMG,if=none,id=virtio-disk1,format=raw"
         -device "virtio-blk-pci,drive=virtio-disk1,disable-legacy=on"
+    )
+fi
+if [ "$ADD_VERIFIED_DISK" = "1" ]; then
+    # snapshot=on: the file is what the next `just boot` runs from, and a bug
+    # is exactly when "the guest never writes it" is not to be trusted.
+    QEMU_ARGS+=(
+        -drive "file=$VERIFIED_IMG,if=none,id=virtio-disk2,format=raw,snapshot=on"
+        -device "virtio-blk-pci,drive=virtio-disk2,disable-legacy=on"
     )
 fi
 QEMU_ARGS+=(

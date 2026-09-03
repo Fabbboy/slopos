@@ -1,21 +1,29 @@
-//! Read-time block-integrity verification for the ext2 root filesystem.
+//! Read-time block-integrity verification for an attested ext2 image.
 //!
-//! `scripts/gen_verity.py` appends the trailer at the very END of the image, so
-//! the kernel locates it from `device.capacity()` alone.
+//! `scripts/gen_verity.py` appends the trailer at the very END of the image,
+//! sector-aligned, so the kernel locates it from `device.capacity()` alone.
 //!
-//! Scope: only blocks **not written since mount** are verified. CRC-32 is an
-//! integrity check, not an authenticity one: an adversary who rewrites a block,
-//! the hash array and the root is not defeated.
+//! A verified device is **write-protected**, as dm-verity is read-only by
+//! design: the hash array describes the bytes the image was built with, and a
+//! write would leave a block no trailer describes — unverifiable on this boot
+//! and a false integrity failure on the next. Refusing the write at the device
+//! is what keeps "verified" true.
+//!
+//! The filesystem's own extent decides whether the device's tail *is* a
+//! trailer. On a writable image the last filesystem block is ordinary data a
+//! user can fill, so magic found inside the extent is file contents, never a
+//! trailer to refuse the mount over.
+//!
+//! CRC-32 is an integrity check, not an authenticity one: an adversary who
+//! rewrites a block, the hash array and the root is not defeated.
 
-use slopos_ostd::lock_class;
-use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, KVec, klog_info};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError};
 
 // On-disk trailer (little-endian, appended at the end of the image):
-//   [ ext2 filesystem region ][ hash array: N×u32 ][ 32-byte header ]
-//                                                    ^ device.capacity() - 32
+//   [ ext2 region ][ pad to sector ][ hash array: N×u32 ][ 32-byte header ]
+//                                                         ^ capacity() - 32
 const VERITY_MAGIC: u32 = 0x5356_5254; // 'TVRS' LE — SlopOS verity
 const VERITY_VERSION: u32 = 1;
 const VERITY_ALGO_CRC32: u32 = 1;
@@ -55,34 +63,62 @@ pub fn crc32(data: &[u8]) -> u32 {
     crc ^ 0xFFFF_FFFF
 }
 
-#[inline]
-fn bit_get(words: &[u64], idx: usize) -> bool {
-    (words[idx / 64] >> (idx % 64)) & 1 != 0
+/// The byte range the filesystem claims, from its own superblock. A trailer
+/// lives beyond it or does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsExtent {
+    pub block_size: u32,
+    pub blocks: u64,
 }
 
-#[inline]
-fn bit_set(words: &mut [u64], idx: usize) {
-    words[idx / 64] |= 1u64 << (idx % 64);
+impl FsExtent {
+    fn bytes(&self) -> Option<u64> {
+        self.blocks.checked_mul(self.block_size as u64)
+    }
 }
 
-/// Verifies each fully-read, not-yet-written block against a trusted per-block
-/// CRC array.
+/// What [`build_verified`] found on the device. Three outcomes rather than a
+/// bool, because "no trailer" and "a trailer I refused" must never read alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerityStatus {
+    /// No trailer: the image was built `VERITY=off`, and mounts writable.
+    Absent,
+    /// A valid trailer covers `blocks` blocks; the device is write-protected.
+    Verified { blocks: u64, block_size: u32 },
+}
+
+/// A trailer was present and could not be trusted. The mount is refused: an
+/// image that claims attestation and cannot deliver it is not one to read
+/// unverified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerityError {
+    /// Header fields outside what this kernel implements.
+    UnsupportedTrailer,
+    /// The hash array does not match the root CRC in the header.
+    CorruptTrailer,
+    /// The trailer does not fit the device, or does not cover the filesystem
+    /// it sits behind.
+    Geometry,
+    /// The hash array or the device wrapper could not be allocated.
+    OutOfMemory,
+    /// The device failed the reads the trailer parse needs.
+    Device,
+}
+
+/// Verifies each fully-read block against a trusted per-block CRC array and
+/// refuses every write.
 pub struct VerifiedBlockDevice {
     inner: KBox<dyn BlockDevice + Send + Sync>,
     block_size: u32,
     /// Build-time CRC of every block `0..N`; immutable after mount.
     hashes: KVec<u32>,
-    /// Bit `i` set ⇒ block `i` was written since mount and is no longer
-    /// verified. Locked because the `&self` trait methods force interior
-    /// mutability.
-    written: SpinLock<KVec<u64>>,
 }
 
 impl BlockDevice for VerifiedBlockDevice {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
         self.inner.read_at(offset, buffer)?;
 
-        if buffer.is_empty() || self.hashes.is_empty() {
+        if buffer.is_empty() {
             return Ok(());
         }
 
@@ -92,49 +128,32 @@ impl BlockDevice for VerifiedBlockDevice {
         // Only blocks fully contained in the read are verified: sub-block direct
         // reads (the superblock at byte 1024) keep their own sanity checks.
         let mut b = offset.div_ceil(bs);
-        let written = self.written.lock();
         while b < n && (b + 1) * bs <= end {
             let idx = b as usize;
-            if !bit_get(written.as_slice(), idx) {
-                let buf_off = (b * bs - offset) as usize;
-                let block = &buffer[buf_off..buf_off + self.block_size as usize];
-                let got = crc32(block);
-                let want = self.hashes.as_slice()[idx];
-                if got != want {
-                    klog_info!(
-                        "verity: block {} integrity check FAILED (crc {:#010x} != expected {:#010x})",
-                        idx,
-                        got,
-                        want,
-                    );
-                    return Err(BlockDeviceError::IntegrityFailure);
-                }
+            let buf_off = (b * bs - offset) as usize;
+            let block = &buffer[buf_off..buf_off + self.block_size as usize];
+            let got = crc32(block);
+            let want = self.hashes.as_slice()[idx];
+            if got != want {
+                klog_info!(
+                    "verity: block {} integrity check FAILED (crc {:#010x} != expected {:#010x})",
+                    idx,
+                    got,
+                    want,
+                );
+                return Err(BlockDeviceError::IntegrityFailure);
             }
             b += 1;
         }
         Ok(())
     }
 
-    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
-        // The device write blocks on a scheduler-backed completion, so it runs
-        // outside the spinning `written` lock. Marked regardless of the result:
-        // a failed write leaves the block content unknown, so its build-time
-        // CRC must no longer be enforced.
-        let result = self.inner.write_at(offset, buffer);
-        if !buffer.is_empty() && !self.hashes.is_empty() {
-            let bs = self.block_size as u64;
-            let n = self.hashes.len() as u64;
-            let end = offset + buffer.len() as u64;
-            let first = offset / bs;
-            let last = (end - 1) / bs;
-            let mut written = self.written.lock();
-            let mut b = first;
-            while b <= last && b < n {
-                bit_set(written.as_mut_slice(), b as usize);
-                b += 1;
-            }
-        }
-        result
+    fn write_at(&self, _offset: u64, _buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        Err(BlockDeviceError::WriteProtected)
+    }
+
+    fn write_protected(&self) -> bool {
+        true
     }
 
     fn capacity(&self) -> u64 {
@@ -142,52 +161,63 @@ impl BlockDevice for VerifiedBlockDevice {
     }
 
     fn flush(&self) -> Result<(), BlockDeviceError> {
-        // The `written` bitset is in-memory only, so verity has no durability
-        // state of its own to barrier.
-        self.inner.flush()
+        Ok(())
     }
 }
 
-/// Wrap `device` if it carries a valid verity trailer; otherwise return it
-/// unchanged — images without a trailer mount unverified, and a corrupt trailer
-/// disables verity rather than blocking the mount.
+/// Wrap `device` if it carries a valid verity trailer beyond `fs`.
+///
+/// Returns the device unchanged with [`VerityStatus::Absent`] when there is
+/// no trailer, wrapped with [`VerityStatus::Verified`] when there is one, and
+/// `Err` — consuming the device — when a trailer is present but unusable.
 pub fn build_verified(
     device: KBox<dyn BlockDevice + Send + Sync>,
-) -> KBox<dyn BlockDevice + Send + Sync> {
-    let Some((block_size, hashes, written)) = parse_trailer(&*device) else {
-        return device;
+    fs: FsExtent,
+) -> Result<(KBox<dyn BlockDevice + Send + Sync>, VerityStatus), VerityError> {
+    let Some(header) = read_header(&*device, fs)? else {
+        return Ok((device, VerityStatus::Absent));
     };
 
-    match KBox::try_new(VerifiedBlockDevice {
+    let hashes = load_hashes(&*device, &header)?;
+    let status = VerityStatus::Verified {
+        blocks: header.block_count,
+        block_size: header.block_size,
+    };
+    let wrapped = KBox::try_new(VerifiedBlockDevice {
         inner: device,
-        block_size,
+        block_size: header.block_size,
         hashes,
-        written: SpinLock::new(
-            written,
-            lock_class!("VerifiedBlockDevice.written", LOCK_LEVEL_RESOURCE),
-        ),
-    }) {
-        Ok(boxed) => boxed,
-        // Unrecoverable rather than unlikely: the device handle is consumed by
-        // the failed allocation and cannot be got back.
-        Err(_) => panic!("verity: out of memory wrapping the root block device at mount"),
-    }
+    })
+    .map_err(|_| VerityError::OutOfMemory)?;
+    Ok((wrapped, status))
 }
 
-/// Read and validate the trailer from the end of `device`. Returns
-/// `(block_size, hashes, fresh-zeroed written-bitset)` on success.
-fn parse_trailer(device: &dyn BlockDevice) -> Option<(u32, KVec<u32>, KVec<u64>)> {
+struct TrailerHeader {
+    block_size: u32,
+    block_count: u64,
+    root: u32,
+}
+
+/// `Ok(None)` when the device's tail is not a trailer: it lies inside the
+/// filesystem's own extent, or carries no magic.
+fn read_header(
+    device: &dyn BlockDevice,
+    fs: FsExtent,
+) -> Result<Option<TrailerHeader>, VerityError> {
     let cap = device.capacity();
-    if cap < HEADER_SIZE {
-        return None;
+    let fs_bytes = fs.bytes().ok_or(VerityError::Geometry)?;
+    if cap < HEADER_SIZE || cap - HEADER_SIZE < fs_bytes {
+        return Ok(None);
     }
 
     let mut hdr = [0u8; HEADER_SIZE as usize];
-    device.read_at(cap - HEADER_SIZE, &mut hdr).ok()?;
+    device
+        .read_at(cap - HEADER_SIZE, &mut hdr)
+        .map_err(|_| VerityError::Device)?;
 
     let magic = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
     if magic != VERITY_MAGIC {
-        return None;
+        return Ok(None);
     }
     let version = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
     let algo = u32::from_le_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]);
@@ -199,56 +229,71 @@ fn parse_trailer(device: &dyn BlockDevice) -> Option<(u32, KVec<u32>, KVec<u64>)
 
     if version != VERITY_VERSION || algo != VERITY_ALGO_CRC32 || block_size == 0 {
         klog_info!(
-            "verity: unsupported trailer (version {} algo {} block_size {}) — disabling",
+            "verity: unsupported trailer (version {} algo {} block_size {})",
             version,
             algo,
             block_size,
         );
-        return None;
+        return Err(VerityError::UnsupportedTrailer);
     }
 
-    let n = block_count as usize;
-    let arr_bytes = n.checked_mul(4)?;
-    let arr_off = cap
-        .checked_sub(HEADER_SIZE)?
-        .checked_sub(arr_bytes as u64)?;
-
-    // A failed hash-array allocation disables verity rather than aborting the
-    // mount.
-    let mut bytes = KVec::<u8>::zeroed(arr_bytes).ok()?;
-    device.read_at(arr_off, bytes.as_mut_slice()).ok()?;
-    if crc32(bytes.as_slice()) != root {
-        klog_info!("verity: hash-array root mismatch (corrupt trailer) — disabling");
-        return None;
+    let arr_bytes = block_count.checked_mul(4).ok_or(VerityError::Geometry)?;
+    let data_bytes = block_count
+        .checked_mul(block_size as u64)
+        .ok_or(VerityError::Geometry)?;
+    let needed = data_bytes
+        .checked_add(arr_bytes)
+        .and_then(|v| v.checked_add(HEADER_SIZE))
+        .ok_or(VerityError::Geometry)?;
+    if needed > cap {
+        klog_info!(
+            "verity: trailer claims {} blocks of {} bytes, which does not fit a {}-byte device",
+            block_count,
+            block_size,
+            cap,
+        );
+        return Err(VerityError::Geometry);
+    }
+    // The cache reads whole filesystem blocks, and only a block the read fully
+    // contains is verified: a trailer with a larger block than the filesystem
+    // would verify nothing, silently. Fewer blocks than the filesystem would
+    // leave its tail unverified.
+    if block_size != fs.block_size || block_count < fs.blocks {
+        klog_info!(
+            "verity: trailer covers {} blocks of {} bytes, filesystem is {} of {}",
+            block_count,
+            block_size,
+            fs.blocks,
+            fs.block_size,
+        );
+        return Err(VerityError::Geometry);
     }
 
-    let mut hashes = KVec::<u32>::with_capacity(n).ok()?;
-    let mut i = 0usize;
-    while i < n {
-        let o = i * 4;
-        let h = u32::from_le_bytes([
-            bytes.as_slice()[o],
-            bytes.as_slice()[o + 1],
-            bytes.as_slice()[o + 2],
-            bytes.as_slice()[o + 3],
-        ]);
-        hashes.push(h).ok()?;
-        i += 1;
-    }
-
-    let words = n.div_ceil(64).max(1);
-    let mut written = KVec::<u64>::with_capacity(words).ok()?;
-    let mut w = 0usize;
-    while w < words {
-        written.push(0u64).ok()?;
-        w += 1;
-    }
-
-    klog_info!(
-        "verity: enabled — {} blocks of {} bytes, root crc {:#010x}",
-        n,
+    Ok(Some(TrailerHeader {
         block_size,
+        block_count,
         root,
-    );
-    Some((block_size, hashes, written))
+    }))
+}
+
+fn load_hashes(device: &dyn BlockDevice, header: &TrailerHeader) -> Result<KVec<u32>, VerityError> {
+    let n = usize::try_from(header.block_count).map_err(|_| VerityError::Geometry)?;
+    let arr_bytes = n.checked_mul(4).ok_or(VerityError::Geometry)?;
+    let arr_off = device.capacity() - HEADER_SIZE - arr_bytes as u64;
+
+    let mut bytes = KVec::<u8>::zeroed(arr_bytes).map_err(|_| VerityError::OutOfMemory)?;
+    device
+        .read_at(arr_off, bytes.as_mut_slice())
+        .map_err(|_| VerityError::Device)?;
+    if crc32(bytes.as_slice()) != header.root {
+        klog_info!("verity: hash-array root mismatch (corrupt trailer)");
+        return Err(VerityError::CorruptTrailer);
+    }
+
+    let mut hashes = KVec::<u32>::with_capacity(n).map_err(|_| VerityError::OutOfMemory)?;
+    for chunk in bytes.as_slice().chunks_exact(4) {
+        let h = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        hashes.push(h).map_err(|_| VerityError::OutOfMemory)?;
+    }
+    Ok(hashes)
 }

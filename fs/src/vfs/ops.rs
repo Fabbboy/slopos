@@ -6,6 +6,9 @@ use slopos_abi::fs::{FS_TYPE_DIRECTORY, FS_TYPE_FILE, FS_TYPE_UNKNOWN, UserFsEnt
 pub struct VfsHandle {
     pub inode: InodeId,
     pub fs: &'static dyn crate::vfs::FileSystem,
+    /// Granted at open, where the read-only mount and the seal were checked;
+    /// a handle without it cannot become a writer later.
+    writable: bool,
 }
 
 impl VfsHandle {
@@ -14,6 +17,9 @@ impl VfsHandle {
     }
 
     pub fn write(&self, offset: u64, buf: &[u8]) -> VfsResult<usize> {
+        if !self.writable {
+            return Err(VfsError::PermissionDenied);
+        }
         self.fs.write(self.inode, offset, buf)
     }
 
@@ -79,8 +85,11 @@ pub fn vfs_open_flags(path: &[u8], flags: VfsOpenFlags) -> VfsResult<VfsHandle> 
             }
             // Refused at open, not at the first write: a descriptor obtained
             // before the check is a descriptor that outlives it.
-            if stat.sealed && flags.writable {
-                return Err(VfsError::PermissionDenied);
+            if flags.writable {
+                resolved.check_writable()?;
+                if stat.sealed {
+                    return Err(VfsError::PermissionDenied);
+                }
             }
             if flags.truncate && flags.writable && stat.file_type == FileType::Regular {
                 resolved.fs.truncate(resolved.inode, 0)?;
@@ -88,14 +97,17 @@ pub fn vfs_open_flags(path: &[u8], flags: VfsOpenFlags) -> VfsResult<VfsHandle> 
             Ok(VfsHandle {
                 inode: resolved.inode,
                 fs: resolved.fs,
+                writable: flags.writable,
             })
         }
         Err(VfsError::NotFound) if flags.create => {
             let (parent, name) = resolve_parent(path)?;
+            parent.check_writable()?;
             let new_inode = parent.fs.create(parent.inode, name, FileType::Regular)?;
             Ok(VfsHandle {
                 inode: new_inode,
                 fs: parent.fs,
+                writable: flags.writable,
             })
         }
         Err(e) => Err(e),
@@ -117,18 +129,21 @@ pub fn vfs_stat(path: &[u8]) -> VfsResult<(u8, u32)> {
 
 pub fn vfs_mkdir(path: &[u8]) -> VfsResult<()> {
     let (parent, name) = resolve_parent(path)?;
+    parent.check_writable()?;
     parent.fs.create(parent.inode, name, FileType::Directory)?;
     Ok(())
 }
 
 pub fn vfs_set_mode(path: &[u8], mode: u16) -> VfsResult<()> {
     let resolved = resolve_path(path)?;
+    resolved.check_writable()?;
     resolved.fs.set_mode(resolved.inode, mode)
 }
 
 /// Seal `path` against every future mutation. One-way and un-clearable.
 pub fn vfs_set_sealed(path: &[u8]) -> VfsResult<()> {
     let resolved = resolve_path(path)?;
+    resolved.check_writable()?;
     resolved.fs.set_sealed(resolved.inode)
 }
 
@@ -146,6 +161,7 @@ pub fn vfs_unlink(path: &[u8]) -> VfsResult<()> {
         return Err(VfsError::PermissionDenied);
     }
     let (parent, name) = resolve_parent(path)?;
+    parent.check_writable()?;
     parent.fs.unlink(parent.inode, name)
 }
 
@@ -162,6 +178,8 @@ pub fn vfs_rename(old_path: &[u8], new_path: &[u8]) -> VfsResult<()> {
     if !core::ptr::eq(old_parent.fs, new_parent.fs) {
         return Err(VfsError::CrossDevice);
     }
+    old_parent.check_writable()?;
+    new_parent.check_writable()?;
 
     old_parent
         .fs

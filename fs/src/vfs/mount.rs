@@ -6,6 +6,22 @@ use crate::MAX_PATH_LEN;
 
 pub const MAX_MOUNTS: usize = 16;
 
+/// Every mutation through this mount fails with `EROFS` at the VFS, before
+/// the filesystem sees it.
+pub const MOUNT_RDONLY: u32 = 1 << 0;
+
+#[derive(Clone, Copy)]
+pub struct Mounted {
+    pub fs: &'static dyn FileSystem,
+    pub flags: u32,
+}
+
+impl Mounted {
+    pub fn read_only(&self) -> bool {
+        self.flags & MOUNT_RDONLY != 0
+    }
+}
+
 pub struct MountPoint {
     path: [u8; MAX_PATH_LEN],
     path_len: usize,
@@ -86,7 +102,7 @@ impl MountTable {
         Err(VfsError::NotFound)
     }
 
-    pub fn resolve(&self, path: &[u8]) -> VfsResult<(&'static dyn FileSystem, usize)> {
+    pub fn resolve(&self, path: &[u8]) -> VfsResult<(Mounted, usize)> {
         if path.is_empty() || path[0] != b'/' {
             return Err(VfsError::InvalidPath);
         }
@@ -122,7 +138,13 @@ impl MountTable {
         let (mp, match_len) = best_match.ok_or(VfsError::NotFound)?;
         let fs = mp.fs.ok_or(VfsError::NotFound)?;
 
-        Ok((fs, match_len))
+        Ok((
+            Mounted {
+                fs,
+                flags: mp.flags,
+            },
+            match_len,
+        ))
     }
 
     pub fn mount_count(&self) -> usize {
@@ -216,17 +238,22 @@ pub fn with_mount_table<R>(f: impl FnOnce(&MountTable) -> R) -> R {
 ///
 /// A per-component walk asks this at each step, so a mount crossed mid-path is
 /// honoured rather than resolved inside the filesystem underneath it.
-pub fn mount_at(path: &[u8]) -> Option<&'static dyn FileSystem> {
+pub fn mount_at(path: &[u8]) -> Option<Mounted> {
     let guard = MOUNT_TABLE.read();
     guard
         .mounts
         .iter()
         .find(|mp| mp.is_active() && mp.path_bytes() == path)
-        .and_then(|mp| mp.fs)
+        .and_then(|mp| {
+            mp.fs.map(|fs| Mounted {
+                fs,
+                flags: mp.flags,
+            })
+        })
 }
 
-pub fn resolve_mount<'a>(path: &'a [u8]) -> VfsResult<(&'static dyn FileSystem, &'a [u8])> {
-    let (fs, match_len) = {
+pub fn resolve_mount<'a>(path: &'a [u8]) -> VfsResult<(Mounted, &'a [u8])> {
+    let (mounted, match_len) = {
         let guard = MOUNT_TABLE.read();
         guard.resolve(path)?
     };
@@ -237,5 +264,5 @@ pub fn resolve_mount<'a>(path: &'a [u8]) -> VfsResult<(&'static dyn FileSystem, 
         &path[match_len..]
     };
 
-    Ok((fs, relative))
+    Ok((mounted, relative))
 }

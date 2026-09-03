@@ -103,6 +103,7 @@ pub enum VfsError {
     NotFile,
     IsDirectory,
     PermissionDenied,
+    /// The mount, the filesystem or the device refuses every mutation.
     ReadOnly,
     NoSpace,
     IoError,
@@ -129,7 +130,7 @@ impl VfsError {
             Self::NotFile => Errno::EINVAL,
             Self::IsDirectory => Errno::EISDIR,
             Self::PermissionDenied => Errno::EACCES,
-            Self::ReadOnly => Errno::EACCES,
+            Self::ReadOnly => Errno::EROFS,
             Self::NoSpace => Errno::ENOSPC,
             Self::IoError => Errno::EIO,
             Self::InvalidPath => Errno::EINVAL,

@@ -129,6 +129,21 @@ jobs:
       - name: SMP placement-eligibility gate
         run: scripts/check_sched_spread.sh --log ci-test.log
 
+      # The image the run above just wrote to, held to e2fsck and a clean
+      # superblock. Free: the image is already on disk and e2fsprogs is already
+      # installed. An image SlopOS wrote that e2fsck rejects is a bug in SlopOS.
+      - name: On-disk consistency of the image the suite wrote
+        run: just check-fs-image
+
+      # Two more boots, filtered to the persistence tests, on one image that
+      # is *not* rebuilt between them. Cannot reuse the capture above: the
+      # question is whether a write on boot N is readable on boot N+1, which
+      # one boot cannot answer. Kept in this job rather than a parallel one
+      # because a second job would rebuild the kernel, userland and images
+      # from scratch to save ~90 s of QEMU wall clock.
+      - name: Two-boot persistence check
+        run: just test-persist
+
       - name: Upload test log on failure
         if: failure()
         uses: actions/upload-artifact@v7

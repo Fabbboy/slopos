@@ -9,6 +9,9 @@ set -euo pipefail
 #
 # Environment:
 #   FS_IMAGE_SIZE - image size (default: 16M)
+#   VERITY        - `on` (default) appends the integrity trailer, which makes
+#                   the kernel mount the image read-only; `off` leaves the
+#                   image writable, for the images the test suite writes to.
 
 IMAGE_PATH="${1:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
 BUILD_DIR="${2:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
@@ -16,6 +19,11 @@ shift 2
 BINS=("$@")
 
 FS_IMAGE_SIZE="${FS_IMAGE_SIZE:-16M}"
+VERITY="${VERITY:-on}"
+case "$VERITY" in
+    on|off) ;;
+    *) echo "build_fs_image: VERITY must be 'on' or 'off', got '$VERITY'" >&2; exit 2 ;;
+esac
 
 # macOS: extend PATH to find e2fsprogs tools installed via Homebrew
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -102,11 +110,16 @@ if [ -d "$KEYMAPS_DIR" ]; then
 fi
 
 # Append a block-integrity (verity) trailer so the kernel detects on-disk
-# corruption of read-only content at read time (fs/src/verity.rs). Must be the
-# LAST step — it hashes the finished image. Optional: the kernel mounts
-# unverified if the trailer is absent.
-if command -v python3 >/dev/null 2>&1; then
+# corruption at read time (fs/src/verity.rs). A trailer makes the mount
+# read-only, so it must be the LAST step — it hashes the finished image — and
+# it must be skipped for an image a boot is expected to write to.
+if [ "$VERITY" = "off" ]; then
+    echo "verity: VERITY=off — $IMAGE_PATH will mount unverified and writable"
+elif command -v python3 >/dev/null 2>&1; then
     python3 "${SCRIPT_DIR}/gen_verity.py" "$IMAGE_PATH"
 else
-    echo "gen_verity: python3 not found — image will mount WITHOUT integrity verification" >&2
+    # Not a warning: a build that silently produced a writable image where a
+    # verified one was asked for is the fail-open this trailer exists to end.
+    echo "gen_verity: python3 is required to build a verified image (or pass VERITY=off)" >&2
+    exit 1
 fi

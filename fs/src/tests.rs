@@ -679,6 +679,48 @@ pub fn test_ext2_unsupported_ro_compat_forces_readonly() -> TestResult {
     }
 }
 
+/// A write-protected device forces the filesystem read-only whatever the
+/// superblock says: nothing must dirty a block the device will refuse.
+pub fn test_ext2_write_protected_device_forces_readonly() -> TestResult {
+    struct Protected(MemoryBlockDevice);
+    impl BlockDevice for Protected {
+        fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
+            self.0.read_at(offset, buffer)
+        }
+        fn write_at(&self, _offset: u64, _buffer: &[u8]) -> Result<(), BlockDeviceError> {
+            Err(BlockDeviceError::WriteProtected)
+        }
+        fn capacity(&self) -> u64 {
+            self.0.capacity()
+        }
+        fn write_protected(&self) -> bool {
+            true
+        }
+    }
+
+    let Some(inner) = build_minimal_ext2_image(64, 32) else {
+        return TestResult::Pass;
+    };
+    let device = Protected(inner);
+    mount_ext2!(device, cache, fs);
+    if !fs.is_read_only() {
+        return slopos_testing::fail!("a write-protected device must force read-only");
+    }
+    match fs.create_file(2, b"nope") {
+        Err(Ext2Error::ReadOnly) => {}
+        other => return slopos_testing::fail!("want ReadOnly, got {:?}", other.map(|_| ())),
+    }
+    if fs.mark_dirty_on_disk().is_err() || fs.mark_clean().is_err() {
+        return slopos_testing::fail!(
+            "superblock state writes must be no-ops on a read-only handle"
+        );
+    }
+    if fs.dirty_count() != 0 {
+        return slopos_testing::fail!("a read-only handle dirtied the cache");
+    }
+    TestResult::Pass
+}
+
 /// An inode larger than the block that holds it makes the inode-table offset
 /// arithmetic address outside the block it just read.
 pub fn test_ext2_inode_size_beyond_block_rejected() -> TestResult {
@@ -1214,44 +1256,69 @@ fn test_ext2_aaa_init() -> TestResult {
     }
 }
 
+/// Lay out `n` blocks of `bs` bytes plus a verity trailer in `img`, in the
+/// shape `gen_verity.py` writes. `corrupt_block` is flipped *after* its hash
+/// is recorded, so the stored hash no longer matches the bytes on disk.
+#[inline(never)]
+fn fill_verity_image(img: &mut [u8], bs: usize, n: usize, corrupt_block: Option<usize>) {
+    use crate::verity::crc32;
+    for i in 0..n {
+        for j in 0..bs {
+            img[i * bs + j] = ((i.wrapping_mul(31).wrapping_add(j)) & 0xFF) as u8;
+        }
+    }
+    let arr_off = n * bs;
+    for i in 0..n {
+        let h = crc32(&img[i * bs..(i + 1) * bs]).to_le_bytes();
+        img[arr_off + i * 4..arr_off + i * 4 + 4].copy_from_slice(&h);
+    }
+    if let Some(c) = corrupt_block {
+        img[c * bs] ^= 0xFF;
+    }
+    let root = crc32(&img[arr_off..arr_off + n * 4]);
+    let h = n * bs + n * 4;
+    img[h..h + 4].copy_from_slice(&0x5356_5254u32.to_le_bytes());
+    img[h + 4..h + 8].copy_from_slice(&1u32.to_le_bytes());
+    img[h + 8..h + 12].copy_from_slice(&1u32.to_le_bytes());
+    img[h + 12..h + 16].copy_from_slice(&(bs as u32).to_le_bytes());
+    img[h + 16..h + 24].copy_from_slice(&(n as u64).to_le_bytes());
+    img[h + 24..h + 28].copy_from_slice(&root.to_le_bytes());
+    img[h + 28..h + 32].copy_from_slice(&0u32.to_le_bytes());
+}
+
+/// A trailer-carrying `MemoryBlockDevice`, boxed but not yet wrapped, so a
+/// test can damage the trailer before `build_verified` sees it.
+fn build_verity_image(
+    bs: usize,
+    n: usize,
+    corrupt_block: Option<usize>,
+) -> Option<slopos_ostd::KBox<MemoryBlockDevice>> {
+    let total = n * bs + n * 4 + 32;
+    let dev = MemoryBlockDevice::allocate(total)?;
+    dev.with_buffer_mut(|img| fill_verity_image(img, bs, n, corrupt_block));
+    slopos_ostd::KBox::try_new(dev).ok()
+}
+
+fn verity_extent(bs: usize, n: usize) -> crate::verity::FsExtent {
+    crate::verity::FsExtent {
+        block_size: bs as u32,
+        blocks: n as u64,
+    }
+}
+
 /// Build an image with a verity trailer (`n` blocks of `bs` bytes) behind a
-/// `VerifiedBlockDevice`. `corrupt_block` is flipped *after* its hash is
-/// recorded, so the stored hash no longer matches the bytes on disk.
+/// `VerifiedBlockDevice`.
 fn build_verity_device(
     bs: usize,
     n: usize,
     corrupt_block: Option<usize>,
 ) -> Option<slopos_ostd::KBox<dyn BlockDevice + Send + Sync>> {
-    use crate::verity::crc32;
-    let total = n * bs + n * 4 + 32;
-    let dev = MemoryBlockDevice::allocate(total)?;
-    dev.with_buffer_mut(|img| {
-        for i in 0..n {
-            for j in 0..bs {
-                img[i * bs + j] = ((i.wrapping_mul(31).wrapping_add(j)) & 0xFF) as u8;
-            }
-        }
-        let arr_off = n * bs;
-        for i in 0..n {
-            let h = crc32(&img[i * bs..(i + 1) * bs]).to_le_bytes();
-            img[arr_off + i * 4..arr_off + i * 4 + 4].copy_from_slice(&h);
-        }
-        if let Some(c) = corrupt_block {
-            img[c * bs] ^= 0xFF;
-        }
-        let root = crc32(&img[arr_off..arr_off + n * 4]);
-        let h = n * bs + n * 4;
-        img[h..h + 4].copy_from_slice(&0x5356_5254u32.to_le_bytes());
-        img[h + 4..h + 8].copy_from_slice(&1u32.to_le_bytes());
-        img[h + 8..h + 12].copy_from_slice(&1u32.to_le_bytes());
-        img[h + 12..h + 16].copy_from_slice(&(bs as u32).to_le_bytes());
-        img[h + 16..h + 24].copy_from_slice(&(n as u64).to_le_bytes());
-        img[h + 24..h + 28].copy_from_slice(&root.to_le_bytes());
-        img[h + 28..h + 32].copy_from_slice(&0u32.to_le_bytes());
-    });
     let boxed: slopos_ostd::KBox<dyn BlockDevice + Send + Sync> =
-        slopos_ostd::KBox::try_new(dev).ok()?;
-    Some(crate::verity::build_verified(boxed))
+        build_verity_image(bs, n, corrupt_block)?;
+    match crate::verity::build_verified(boxed, verity_extent(bs, n)) {
+        Ok((dev, crate::verity::VerityStatus::Verified { .. })) => Some(dev),
+        _ => None,
+    }
 }
 
 /// CRC-32 must match the standard (zlib) algorithm `gen_verity.py` uses,
@@ -1296,22 +1363,189 @@ fn test_verity_corruption_detected() -> TestResult {
     }
 }
 
-/// A written block is re-blessed — the FS owns its mutable blocks — so a
-/// corrupted-but-written block no longer fails verification.
-fn test_verity_written_block_skips_verification() -> TestResult {
+/// A verified device refuses every write: the trailer describes the bytes the
+/// image was built with, and a write would leave a block no trailer describes.
+fn test_verity_device_is_write_protected() -> TestResult {
     let bs = 512usize;
-    let Some(dev) = build_verity_device(bs, 4, Some(2)) else {
+    let Some(dev) = build_verity_device(bs, 4, None) else {
         return TestResult::Fail;
     };
+    if !dev.write_protected() {
+        return slopos_testing::fail!("a verified device must report write_protected");
+    }
     let payload = [0xABu8; 512];
-    if dev.write_at(2 * bs as u64, &payload).is_err() {
-        return TestResult::Fail;
+    match dev.write_at(2 * bs as u64, &payload) {
+        Err(BlockDeviceError::WriteProtected) => {}
+        other => return slopos_testing::fail!("want WriteProtected, got {:?}", other),
     }
     let mut buf = [0u8; 512];
     if dev.read_at(2 * bs as u64, &mut buf).is_err() {
-        return TestResult::Fail;
+        return slopos_testing::fail!("a refused write must leave the block verifiable");
     }
     TestResult::Pass
+}
+
+/// The three outcomes of `build_verified` must stay distinguishable: no
+/// trailer mounts unverified, a valid trailer mounts verified, and a trailer
+/// that is present but corrupt refuses rather than failing open.
+fn test_verity_trailer_outcomes() -> TestResult {
+    use crate::verity::{VerityError, VerityStatus, build_verified};
+    let bs = 512usize;
+    let extent = verity_extent(bs, 4);
+
+    let Some(plain) = MemoryBlockDevice::allocate(4 * bs) else {
+        return TestResult::Fail;
+    };
+    let Ok(plain) = slopos_ostd::KBox::try_new(plain) else {
+        return TestResult::Fail;
+    };
+    let plain: slopos_ostd::KBox<dyn BlockDevice + Send + Sync> = plain;
+    match build_verified(plain, extent) {
+        Ok((dev, VerityStatus::Absent)) if !dev.write_protected() => {}
+        other => {
+            return slopos_testing::fail!(
+                "no trailer must mount unverified and writable, got {:?}",
+                other.map(|(_, s)| s)
+            );
+        }
+    }
+
+    let Some(good) = build_verity_image(bs, 4, None) else {
+        return TestResult::Fail;
+    };
+    match build_verified(good, extent) {
+        Ok((
+            dev,
+            VerityStatus::Verified {
+                blocks: 4,
+                block_size,
+            },
+        )) if block_size as usize == bs && dev.write_protected() => {}
+        other => {
+            return slopos_testing::fail!(
+                "a valid trailer must verify, got {:?}",
+                other.map(|(_, s)| s)
+            );
+        }
+    }
+
+    let Some(corrupt) = build_verity_image(bs, 4, None) else {
+        return TestResult::Fail;
+    };
+    corrupt.with_buffer_mut(|img| img[4 * bs] ^= 0x01);
+    match build_verified(corrupt, extent) {
+        Err(VerityError::CorruptTrailer) => {}
+        other => {
+            return slopos_testing::fail!(
+                "a corrupt hash array must refuse, got {:?}",
+                other.map(|(_, s)| s)
+            );
+        }
+    }
+
+    let Some(oversized) = build_verity_image(bs, 4, None) else {
+        return TestResult::Fail;
+    };
+    oversized.with_buffer_mut(|img| {
+        let h = 4 * bs + 4 * 4;
+        img[h + 16..h + 24].copy_from_slice(&(1u64 << 40).to_le_bytes());
+    });
+    match build_verified(oversized, extent) {
+        Err(VerityError::Geometry) => {}
+        other => {
+            return slopos_testing::fail!(
+                "a trailer that does not fit must refuse, got {:?}",
+                other.map(|(_, s)| s)
+            );
+        }
+    }
+
+    let Some(future) = build_verity_image(bs, 4, None) else {
+        return TestResult::Fail;
+    };
+    future.with_buffer_mut(|img| {
+        let h = 4 * bs + 4 * 4;
+        img[h + 4..h + 8].copy_from_slice(&2u32.to_le_bytes());
+    });
+    match build_verified(future, extent) {
+        Err(VerityError::UnsupportedTrailer) => TestResult::Pass,
+        other => slopos_testing::fail!(
+            "an unknown trailer version must refuse, got {:?}",
+            other.map(|(_, s)| s)
+        ),
+    }
+}
+
+/// The filesystem's own extent decides what the device's tail is. Trailer
+/// magic *inside* the extent is file data a user can write on any writable
+/// image — treating it as a trailer would let one file refuse every later
+/// mount. And a trailer that covers fewer blocks than the filesystem, or a
+/// different block size, verifies nothing it claims to, so it refuses.
+fn test_verity_trailer_must_lie_beyond_filesystem() -> TestResult {
+    use crate::verity::{FsExtent, VerityError, VerityStatus, build_verified};
+    let bs = 512usize;
+
+    let Some(inside) = build_verity_image(bs, 4, None) else {
+        return TestResult::Fail;
+    };
+    let whole_device = FsExtent {
+        block_size: bs as u32,
+        blocks: (inside.capacity() / bs as u64) + 1,
+    };
+    match build_verified(inside, whole_device) {
+        Ok((dev, VerityStatus::Absent)) if !dev.write_protected() => {}
+        other => {
+            return slopos_testing::fail!(
+                "magic inside the filesystem extent must not be a trailer, got {:?}",
+                other.map(|(_, s)| s)
+            );
+        }
+    }
+
+    // Trailer says 4 blocks but the filesystem is 5: a stale trailer from a
+    // smaller build would leave the fifth block unverified.
+    let Some(short) = MemoryBlockDevice::allocate(6 * bs + 32) else {
+        return TestResult::Fail;
+    };
+    short.with_buffer_mut(|img| {
+        let trailer_len = 4 * 4 + 32;
+        fill_verity_image(&mut img[..4 * bs + trailer_len], bs, 4, None);
+        let src = 4 * bs;
+        let dst = img.len() - trailer_len;
+        img.copy_within(src..src + trailer_len, dst);
+    });
+    let Ok(short) = slopos_ostd::KBox::try_new(short) else {
+        return TestResult::Fail;
+    };
+    let short: slopos_ostd::KBox<dyn BlockDevice + Send + Sync> = short;
+    let short_extent = FsExtent {
+        block_size: bs as u32,
+        blocks: 5,
+    };
+    match build_verified(short, short_extent) {
+        Err(VerityError::Geometry) => {}
+        other => {
+            return slopos_testing::fail!(
+                "a trailer covering fewer blocks than the filesystem must refuse, got {:?}",
+                other.map(|(_, s)| s)
+            );
+        }
+    }
+
+    let Some(wrong_bs) = build_verity_image(bs, 4, None) else {
+        return TestResult::Fail;
+    };
+    let wrong_extent = FsExtent {
+        block_size: 1024,
+        blocks: 2,
+    };
+    match build_verified(wrong_bs, wrong_extent) {
+        Err(VerityError::Geometry) => TestResult::Pass,
+        other => slopos_testing::fail!(
+            "a trailer block size unlike the filesystem's must refuse, got {:?}",
+            other.map(|(_, s)| s)
+        ),
+    }
 }
 
 /// Only blocks fully contained in a read are verified, which is the property
@@ -1469,7 +1703,9 @@ slopos_testing::stest!(name = test_fileio_file_ref_move);
 slopos_testing::stest!(name = test_verity_crc32_known_vectors);
 slopos_testing::stest!(name = test_verity_clean_read_passes);
 slopos_testing::stest!(name = test_verity_corruption_detected);
-slopos_testing::stest!(name = test_verity_written_block_skips_verification);
+slopos_testing::stest!(name = test_verity_device_is_write_protected);
+slopos_testing::stest!(name = test_verity_trailer_outcomes);
+slopos_testing::stest!(name = test_verity_trailer_must_lie_beyond_filesystem);
 slopos_testing::stest!(name = test_verity_partial_read_skips);
 slopos_testing::stest!(name = test_verity_multiblock_span_detects);
 
@@ -1487,6 +1723,7 @@ slopos_testing::stest!(name = test_ramfs_rename_into_descendant_refused);
 slopos_testing::stest!(name = test_vfs_storage_contention_stress_baseline);
 slopos_testing::stest!(name = test_ext2_unsupported_incompat_feature_refused);
 slopos_testing::stest!(name = test_ext2_unsupported_ro_compat_forces_readonly);
+slopos_testing::stest!(name = test_ext2_write_protected_device_forces_readonly);
 slopos_testing::stest!(name = test_ext2_inode_size_beyond_block_rejected);
 slopos_testing::stest!(name = test_ext2_invalid_superblock_magic);
 slopos_testing::stest!(name = test_ext2_unsupported_block_size);
@@ -2043,8 +2280,120 @@ pub fn test_set_sealed_defaults_closed() -> TestResult {
     }
 }
 
+/// A `MOUNT_RDONLY` mount refuses every mutation at the VFS with `ReadOnly`,
+/// before the filesystem sees the request, and reading through it is
+/// untouched. The fixture is a second RamFs — which would accept every write
+/// if asked — so the refusal can only be the mount flag.
+pub fn test_rdonly_mount_refuses_mutation() -> TestResult {
+    use crate::ramfs::RamFs;
+    use crate::vfs::{
+        MOUNT_RDONLY, VfsError, VfsOpenFlags, mount, unmount, vfs_open_flags, vfs_set_sealed,
+    };
+    use slopos_ostd::lock_class;
+    use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
+
+    static RDONLY_FS: RamFs =
+        RamFs::new_const(lock_class!("RAMFS_RDONLY_TEST", LOCK_LEVEL_RESOURCE));
+    const MP: &[u8] = b"/tmp/rdonly_mp";
+    const FILE: &[u8] = b"/tmp/rdonly_mp/file";
+
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
+    let _ = vfs_mkdir(MP);
+    if mount(MP, &RDONLY_FS, 0).is_err() {
+        return slopos_testing::fail!("could not mount the fixture writable");
+    }
+    let seeded = vfs_open_flags(FILE, VfsOpenFlags::create_only())
+        .and_then(|h| h.write(0, b"original").map(|_| ()))
+        .is_ok();
+    let _ = unmount(MP);
+    if !seeded {
+        return slopos_testing::fail!("could not seed the fixture");
+    }
+    if mount(MP, &RDONLY_FS, MOUNT_RDONLY).is_err() {
+        return slopos_testing::fail!("could not remount the fixture read-only");
+    }
+
+    let writable = || VfsOpenFlags {
+        create: false,
+        exclusive: false,
+        truncate: false,
+        writable: true,
+    };
+    let result = (|| {
+        if !matches!(vfs_open_flags(FILE, writable()), Err(VfsError::ReadOnly)) {
+            return Err("an existing file opened for write");
+        }
+        if !matches!(
+            vfs_open_flags(b"/tmp/rdonly_mp/new", VfsOpenFlags::create_only()),
+            Err(VfsError::ReadOnly)
+        ) {
+            return Err("a create succeeded");
+        }
+        if !matches!(vfs_mkdir(b"/tmp/rdonly_mp/dir"), Err(VfsError::ReadOnly)) {
+            return Err("a mkdir succeeded");
+        }
+        if !matches!(vfs_unlink(FILE), Err(VfsError::ReadOnly)) {
+            return Err("an unlink succeeded");
+        }
+        if !matches!(
+            vfs_rename(FILE, b"/tmp/rdonly_mp/moved"),
+            Err(VfsError::ReadOnly)
+        ) {
+            return Err("a rename succeeded");
+        }
+        if !matches!(vfs_set_mode(FILE, 0o755), Err(VfsError::ReadOnly)) {
+            return Err("a chmod succeeded");
+        }
+        if !matches!(vfs_set_sealed(FILE), Err(VfsError::ReadOnly)) {
+            return Err("a seal succeeded");
+        }
+        let _ = vfs_unlink(b"/tmp/rdonly_src");
+        if vfs_open_flags(b"/tmp/rdonly_src", VfsOpenFlags::create_only()).is_err() {
+            return Err("could not create the writable-side rename source");
+        }
+        let cross = vfs_rename(b"/tmp/rdonly_src", b"/tmp/rdonly_mp/into");
+        let _ = vfs_unlink(b"/tmp/rdonly_src");
+        // Two RamFs instances: the cross-device refusal fires first, which is
+        // also correct; what must not happen is success.
+        if cross.is_ok() {
+            return Err("a rename into the read-only mount succeeded");
+        }
+        let Ok(h) = vfs_open_flags(FILE, VfsOpenFlags::read_only()) else {
+            return Err("a read-only open failed");
+        };
+        let mut buf = [0u8; 8];
+        if h.read(0, &mut buf) != Ok(8) || &buf != b"original" {
+            return Err("reading through the read-only mount broke");
+        }
+        Ok(())
+    })();
+
+    let _ = unmount(MP);
+    let _ = vfs_unlink(MP);
+    match result {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!("{}", msg),
+    }
+}
+
+/// `ReadOnly` reaches userland as `EROFS`, which `std` maps to
+/// `ErrorKind::ReadOnlyFilesystem` — not `EACCES`, which would read as a
+/// permission problem the caller could fix.
+pub fn test_readonly_maps_to_erofs() -> TestResult {
+    use crate::vfs::VfsError;
+    if VfsError::ReadOnly.to_errno() == slopos_abi::Errno::EROFS {
+        TestResult::Pass
+    } else {
+        slopos_testing::fail!("ReadOnly must map to EROFS")
+    }
+}
+
 slopos_testing::stest!(name = test_sealed_inode_refuses_mutation);
 slopos_testing::stest!(name = test_set_sealed_defaults_closed);
+slopos_testing::stest!(name = test_rdonly_mount_refuses_mutation);
+slopos_testing::stest!(name = test_readonly_maps_to_erofs);
 
 /// A process at its `ObjectRow` ceiling is refused with `ENFILE`, and every row
 /// it held comes back on close. `ENFILE` deliberately, not `EMFILE`: what is

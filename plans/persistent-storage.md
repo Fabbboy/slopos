@@ -1,18 +1,13 @@
 # Persistent Storage
 
 Make a file written on one boot readable on the next, on the root filesystem
-and under failure. A file written under `/mnt` and `fsync`ed already survives a
-reboot — `just test-persist` boots one image twice and reads the payload back —
-but that is the narrow case, and it works partly by accident:
+and under failure. A file written under `/mnt` and `fsync`ed survives a reboot
+— `just test-persist` boots one image twice and reads the payload back, and CI
+runs it — but that is the narrow case:
 
 - **The root is still RAM.** Nothing written to `/` outlives the boot; the disk
   is a secondary mount at `/mnt`, and `root=virtio` is exercised by no recipe,
   test or CI job.
-- **Verity is not running.** The trailer header falls outside the block
-  device's reported capacity, so `build_verified` silently returns the device
-  unwrapped (G2, `CVSS.md` SLOPOS-2026-0053). The write-then-reboot round trip
-  passes because nothing is checking the blocks it rewrote — fix verity and G2's
-  contradiction becomes reachable.
 - **The write surface has holes.** No `truncate`, so an existing file cannot be
   overwritten; no `rename`, `rmdir`, `symlink` or working `chmod`; no seal on
   disk, which is what `/bin` write protection rests on.
@@ -21,6 +16,14 @@ but that is the narrow case, and it works partly by accident:
   `mtime = 0` because there is no wall clock.
 
 This plan closes those, in that order.
+
+Verity is settled and out of scope here: a trailer makes the device
+write-protected and the mount read-only (`MOUNT_RDONLY`, `EROFS`), the shipped
+`ext2.img` carries one and `just boot` asserts it with `verity=require`, and
+the image the suite writes to is built `VERITY=off`. The one open verity item
+is an *upgrade* — persisting the set of blocks a boot rewrote so an image can
+be both writable and mostly attested — and it lives in Phase 6 as 6.6, because
+nothing before it needs it.
 
 ## Why this matters beyond files
 
@@ -58,10 +61,16 @@ The shape, which the code states more precisely:
   with a dirty-count eager-wake threshold and exponential backoff, and the
   `FileSystem` impl.
 - `fs/src/vfs/` — mount table (16 entries, longest-prefix, per-component
-  re-resolution), lexical canonicalisation, path walk, `FileSystem` trait.
+  re-resolution, `MOUNT_RDONLY` consulted at every `vfs::ops` mutation),
+  lexical canonicalisation, path walk carrying the mount's flags, `FileSystem`
+  trait.
 - `fs/src/verity.rs` — a CRC-32-per-block trailer appended by
-  `scripts/gen_verity.py`, verified at read time for blocks not written since
-  mount.
+  `scripts/gen_verity.py`, sector-padded so a sector-granular capacity still
+  reaches it. A trailer is recognised only beyond the filesystem's own extent
+  (`build_verified` takes the superblock's block count), a verified device is
+  write-protected, and a trailer that is present but unusable refuses the
+  mount. `Ext2Fs::read_only_for` is the one rule for whether a handle may
+  mutate; a read-only mount writes no superblock state and starts no flusher.
 
 ## 2. The gaps
 
@@ -81,68 +90,27 @@ no CI job; it appears only in the cmdline parser
 So nothing in the *root* filesystem persists, and the code path that would is
 unexercised.
 
-The disk is not idle, though, and two details matter for Phase 1:
+Two facts about the disk shape Phase 5:
 
 - **ext2 is initialised on `disk0` unconditionally**, before and independent of
-  the `ROOTFS_IS_RAMFS` branch (`boot/src/boot_services.rs:101-121`). That
-  claims the exclusive `BlockWriteToken` and runs `mark_dirty_on_disk`, which
-  writes the superblock at mount (`fs/src/ext2_vfs.rs:269-276` →
-  `fs/src/ext2/mod.rs:151-153`). `mark_clean` writes it again on an orderly
-  shutdown. **The default boot writes to the disk twice.**
-- **`/mnt` is mounted writable** (`flags = 0`, `boot_services.rs:124`), and
-  nothing reads that field (G13). Anything userland writes under `/mnt` reaches
-  the disk through the flusher.
+  the `ROOTFS_IS_RAMFS` branch (`boot_step_fs_init`). On a writable image that
+  claims the exclusive `BlockWriteToken` and runs `mark_dirty_on_disk`, so the
+  default boot of the *tests* image writes the superblock twice (mount and
+  orderly shutdown). The shipped `ext2.img` is verified, so its default boot
+  writes nothing.
+- **Verity does not cover the superblock.** Superblock I/O is sub-block —
+  `read_at(1024, …)` direct to the device, bypassing the cache — and only a
+  block fully contained in a read is verified. On a verified device this is
+  moot, since the device refuses the write, but 6.6 has to say what it means
+  for block 0.
 
-A change that makes a verified device read-only therefore alters the *current
-default boot*, not just a hypothetical `root=virtio` one.
+### G2 — A verified image cannot be a writable one
 
-### G2 — Verity makes a written block unreadable on the next boot
-
-`ext2_vfs_init_with_device` wraps the device in `build_verified` before
-anything else (`fs/src/ext2_vfs.rs:279`). `VerifiedBlockDevice` holds the
-trailer's build-time CRC per block and a `written` bitset of blocks excused
-from checking. That bitset is in memory only, by construction, and `hashes` is
-never mutated. So:
-
-1. Boot 1 writes block *N*. The bit is set; reads pass.
-2. Reboot. The bitset is gone. The trailer still carries the *build-time* CRC
-   of block *N*.
-3. Boot 2 reads block *N*, computes a CRC that cannot match, and returns
-   `IntegrityFailure` → `VfsError::IoError`.
-
-The cache reads and writes exactly one aligned, block-sized region
-(`fs/src/ext2/cache.rs:114-122`, `:203`, `:225-226`), which is precisely the
-condition `read_at` verifies under. So every block the write path dirties
-through `BlockCache` fails on the next boot: block and inode bitmaps, group
-descriptors, inode-table blocks, indirect blocks, directory blocks and file
-data. Reproduced against the shipped image: flipping one byte in block 1 moves
-its CRC from `0x845b4943` to `0x01407b0d`, and the replayed verification loop
-rejects it.
-
-**Block 0 is the exception, and it is a hole rather than a mitigation.**
-Superblock I/O is sub-block — `read_at(1024, &mut [u8; 1024])` /
-`write_at(1024, …)` direct to the device, bypassing the cache
-(`fs/src/ext2/mod.rs:78-80`, `:147-153`, `:611-618`). Verity's
-`(b + 1) * bs <= end` never holds for it, and block 0 is unreachable through
-the cache anyway because `BlockNum::is_valid()` treats 0 as absent
-(`fs/src/ext2/types.rs:44-46`). So verity gives **zero coverage of the
-superblock**, and `mark_dirty_on_disk` rewrites it on every boot of the shipped
-verified image without tripping anything.
-
-**And on the shipped images none of it runs.** `gen_verity.py` makes the 32-byte
-header the last 32 bytes of the *file*; the kernel reads it at
-`capacity() - 32`, and `capacity()` is `capacity_sectors * 512`
-(`drivers/src/virtio_blk.rs:266`). `fs/assets/ext2-tests.img` is 16 793 632
-bytes — 32 800 sectors plus 32 — so the reported capacity rounds down by exactly
-the header, `parse_trailer` finds no magic, and `build_verified` returns the
-device **unwrapped** (`fs/src/verity.rs:157-159`). There is no klog line for
-that, so "verified" and "verification was never installed" are indistinguishable
-from a boot log. This is `CVSS.md` SLOPOS-2026-0053, and it is why
-`just test-persist` passes today rather than failing the way G2 predicts: a
-write survives a reboot because nothing is checking it. Fixing verity is what
-makes G2 bite, so Phase 1 must fix the reachability and the silent fail-open
-*first*, then decide what verity means on a writable device — otherwise the
-decision is made against a mechanism that is not running.
+Settled by construction rather than open: a verity trailer makes the device
+write-protected, so the "written on boot 1, unverifiable on boot 2" case
+cannot arise. The cost is that the persistent root gets no integrity checking
+at all, and the images that persist (`ext2-tests.img` today, the root in
+Phase 5) are built `VERITY=off`. Buying most of that coverage back is 6.6.
 
 
 ### G3 — The ext2 write surface has holes the VFS reports as "not supported"
@@ -294,9 +262,8 @@ preserves the image, and no test that boots twice.
 No partition-table parsing (GPT or MBR), so an image is always "the filesystem
 starts at byte 0". No block-device nodes in `/dev`, so `root=/dev/vda1` cannot
 be spelled and `root=` selects by driver name only. No `statfs`, so nothing can
-report free space. The mount table stores a `flags: u32` that no reader
-consults (`fs/src/vfs/mount.rs:13`, `:48`) — a read-only mount cannot be
-expressed. `MAX_MOUNTS` is 16.
+report free space. `MAX_MOUNTS` is 16, and `MOUNT_RDONLY` is the only mount
+flag with a reader.
 
 The name-length limits differ between the two roots that Phase 5 makes
 interchangeable: `fs::MAX_NAME_LEN = 32` is enforced by ramfs
@@ -319,98 +286,8 @@ coherent with the 128-entry ext2 `BlockCache`.
 ## 3. Plan
 
 Each phase ends green on `just test` plus the pre-commit gate sequence in
-`AGENTS.md`. Phases 1–3 and 5 are a dependency chain; 4 and 6 are
+`AGENTS.md`. Phases 2, 3 and 5 are a dependency chain; 4 and 6 are
 parallelisable once 3 lands.
-
-### Phase 1 — Decide what verity means on a writable device
-
-G2 is a design contradiction rather than a bug to patch. Four shapes, and the
-decision must be made before anything durable is written.
-
-**1.0 comes first: make verity actually run.** Until SLOPOS-2026-0053 is fixed
-the mechanism is off on every shipped image, and every option below would be
-chosen against something that never executes. Only once it runs does
-`just test-persist` exhibit the failure G2 describes, and only then is that
-failure evidence for one option over another.
-
-**Option A — verity implies read-only.** A trailer present ⇒ the mount is
-read-only; a writable mount refuses to attach a verified device. Smallest
-change, keeps the integrity guarantee exactly as strong as it is now, and makes
-the shipped read-only-root configuration honest. Costs: the persistent root
-gets no integrity checking at all.
-
-**Option B — maintain the hash array live.** Recompute a block's CRC on
-writeback and update the trailer, with the array itself journalled so a crash
-between the data write and the hash write does not leave the array describing
-neither the old nor the new contents. Keeps verification on a writable device
-and is what dm-verity deliberately does not do (dm-verity is read-only by
-design; the writable analogue is dm-integrity). Costs: the trailer becomes
-mutable metadata with its own crash-consistency problem, and the write path
-grows a second durability ordering constraint.
-
-**Option C — scope verity to an immutable set of blocks.** Attest only the
-`/bin`+`/sbin` content installed at build time; writes elsewhere are unverified
-and writes inside the set are refused. Marries verity to the seal (G4): the
-same boundary that says "these bytes are attested" says "these bytes may not
-change". Costs: it is a block *set*, not a byte range — file data, directory
-blocks and inode-table blocks are scattered across groups — so it needs a
-per-block attestation bitmap, a rule for mixed blocks (a 4 KiB inode-table
-block holds 32 inodes, so freezing one freezes the inodes of mutable files
-sharing it), and a build-time ext2 reader in `gen_verity.py`.
-
-**Option D — persist the `written` bitset.** It is already a `KVec<u64>`; write
-it into the trailer at `mark_clean` time and treat `EXT2_ERROR_FS` at mount as
-"verity off for this boot". Blocks never written stay attested across reboots,
-there is no live hash recomputation, and the crash case degrades to today's
-behaviour rather than to a false failure. Closer to a day than B's week, and it
-keeps integrity on the majority of the image — which A does not.
-
-**Recommendation: A now, D as the first upgrade, C only if restated as a
-bitmap.** A is the smallest change that makes the current guarantee true
-instead of accidentally false. D buys most of the coverage back cheaply. C as
-written is not coherent: `/bin` on ext2 is not a byte range but a scattered set
-of blocks, and a 4 KiB inode-table block holds 32 inodes, so freezing one
-freezes the inodes of mutable files sharing it — and the bitmaps are shared by
-construction. C needs a per-block attestation bitmap and a rule for mixed
-blocks, which is most of D plus a build-time ext2 reader.
-
-- [ ] **1.0** Make verity run, before choosing between the options above.
-  Two parts. **Reachability**: the trailer's 32-byte header is the last 32
-  bytes of the file, but the kernel reads it at `capacity() - 32` and
-  `capacity()` is `capacity_sectors * 512`, so an image that is not a whole
-  number of sectors hides its own header. Pad in `gen_verity.py`, or search the
-  last sector for the magic; padding is smaller and keeps the kernel side one
-  read. **Fail loudly**: `build_verified` returns the device unwrapped when
-  `parse_trailer` yields `None`, so "no trailer" and "trailer I could not read"
-  are the same silent outcome. Log which happened at mount, and give a boot a
-  way to assert verification is installed — a check that can switch itself off
-  without saying so is not a check. Closing this is what makes the rest of
-  Phase 1 a real decision; it is also `CVSS.md` SLOPOS-2026-0053.
-
-- [ ] **1.1** Implement the decision. Under A the behaviour must be stated
-  exactly, because it changes today's default boot (G1): a trailer-carrying
-  device mounts read-only, `Ext2Fs::read_only` is set so `mark_dirty_on_disk`
-  does not write the superblock at mount, the flusher is not started, and
-  `/mnt` becomes a read-only mount rather than disappearing. A refusal instead
-  of a read-only mount would drop `/mnt` from every shipped boot; do not do
-  that without saying so.
-- [ ] **1.2** Make the mount table's `flags` mean something: a `MOUNT_RDONLY`
-  bit that `vfs_open_flags` consults, returning `EROFS`. Today the field is
-  stored and never read, so "mounted read-only" is not a state the VFS can be
-  in.
-- [ ] **1.3** Give `scripts/build_fs_image.sh` a `VERITY=off` path, and use it
-  for the image the persistence tests boot. The read-only shipped image keeps
-  its trailer.
-- [ ] **1.4** Keep one recipe booting a verified read-only image. With A plus
-  1.3 plus Phase 5's disk root, no shipped configuration would exercise
-  `fs/src/verity.rs` at all, and untested code is code on death row.
-- [ ] **1.5** Wire `just test-persist` and `just check-fs-image` into CI. Both
-  recipes exist and both pass today; what is missing is the CI edge. Note that
-  `test-persist` passing is currently weak evidence — see 1.0 — and only becomes
-  a real persistence assertion once verity runs and the chosen option keeps it
-  green. `check_test_count.sh`, `check_lockdep_headroom.sh`,
-  `check_quota_headroom.sh` and `check_sched_spread.sh` all parse one shared
-  capture in CI; `test-persist` needs its own two boots and cannot reuse it.
 
 ### Phase 2 — Finish the durability contract
 
@@ -538,14 +415,18 @@ privilege-escalation surface, and without `truncate` (3.1) is a root that
 cannot overwrite a file.
 
 - [ ] **5.0** Decide what a writable root does to the test harness.
-  `scripts/qemu_run.sh:207-213` records why `disk1` exists: destructive tests
-  target the scratch device, never the live root image, so a buggy test cannot
+  `scripts/qemu_run.sh` records why `disk1` exists: destructive tests target
+  the scratch device, never the live root image, so a buggy test cannot
   corrupt an on-disk binary — the incident it names happened. A writable,
   persistent `/` makes every filesystem test a mutation of the image the next
   boot runs `/sbin/init` from, and CI becomes order-dependent (`AGENTS.md`
   already documents the `'*ext2_aaa*'` ordering coupling). Either regenerate the
   tests image per CI run, or give the persistence test a preserved copy of its
-  own.
+  own. The harness already attaches the shipped verified `ext2.img` as a
+  snapshot `disk2` for `test_verity_artifact_*`; a writable root is the
+  moment that image and the tests image stop being interchangeable, and the
+  `verity=require` default in `just boot` must keep meaning "the disk I run
+  `/sbin/init` from is attested".
 - [ ] **5.1** Stop clobbering the image: `_fs-image` rebuilds only when the
   binaries changed, and a `PRESERVE_FS_IMAGE=1` path that updates `/bin` in
   place via `debugfs` rather than `mkfs`. A developer iterating on the kernel
@@ -587,6 +468,19 @@ Independent of 2–5; do it when a second device or a real disk demands it.
   can mount.
 - [ ] **6.5** File-backed `mmap` (G14), with a stated answer for page-cache /
   `BlockCache` coherence.
+- [ ] **6.6** Verity on a writable image: persist the set of rewritten blocks.
+  The trailer is immutable and the device write-protected today, which is
+  what makes the guarantee simple to state; the upgrade is to record, at
+  `mark_clean`, which blocks this boot rewrote, and to treat `EXT2_ERROR_FS`
+  at the next mount as "verity off for this boot". Blocks never written stay
+  attested across reboots, there is no live hash recomputation, and the crash
+  case degrades to unverified rather than to a false integrity failure. It
+  needs a stated answer for block 0 (the superblock is written sub-block and
+  never verified — G1), a trailer version bump `read_header` refuses today,
+  and a rule for `gen_verity.py`'s padding, which sits inside the region a
+  bitset would describe. The alternative — recomputing a block's CRC on
+  writeback and journalling the array, as dm-integrity does — is a week to
+  this one's day and makes the trailer a second crash-consistency problem.
 
 ---
 
@@ -624,16 +518,14 @@ Independent of 2–5; do it when a second device or a real disk demands it.
   *prose* — a Linux or Asterinas comment block — is not, and neither is
   anything from a GPL-2.0-only tree. Cite the specification or the documented
   behaviour, never an implementation file. The sharpest exposure is any
-  build-time ext2 reader (Phase 1 Option C, `gen_verity.py`): superblock-parsing
-  code is exactly what gets pasted from a GPL-2.0-only tree. Layout constants
-  only.
+  build-time ext2 reader (`gen_verity.py` already reads the superblock's
+  block size; 6.6 would read more): superblock-parsing code is exactly what
+  gets pasted from a GPL-2.0-only tree. Layout constants only.
 
 ## 5. Effort and sequencing
 
-Phase 1's 1.0 is hours; the option that follows it is a day under A, another
-day for D, a week for B or C. Phase 3 is
-the bulk, and 3.8 (`u32` → `u64`) is an ext2-wide API change rather than the
-one-line edit it reads as. Phase 4 is a week, of which 4.4 is most: deferred
+Phase 3 is the bulk, and 3.8 (`u32` → `u64`) is an ext2-wide API change
+rather than the one-line edit it reads as. Phase 4 is a week, of which 4.4 is most: deferred
 inode free needs a VFS-level open count the tree does not have, so it touches
 fd lifetime rather than only ext2. Phase 5 is a week once 3 is green, not two
 days — the disk root by default moves four ratchets (`check_test_count.sh`,
@@ -641,7 +533,7 @@ days — the disk root by default moves four ratchets (`check_test_count.sh`,
 `check_authority_reachability.sh`), each needing a re-measure and a commit
 message explaining the delta. Phase 6 is unbounded and last.
 
-A file already survives a reboot on `/mnt` — `just test-persist` proves it —
-but only because verity is not running (1.0). The minimum that makes that
-trustworthy and moves it to `/`: 1 → 3.0 → 3.1 → 3.5 → 3.5a → 5. Everything
-else is what makes it durable under failure.
+A file already survives a reboot on `/mnt` — `just test-persist` proves it,
+on an image that is honestly unverified rather than one that only looked
+verified. The minimum that moves it to `/`: 3.0 → 3.1 → 3.5 → 3.5a → 5.
+Everything else is what makes it durable under failure.

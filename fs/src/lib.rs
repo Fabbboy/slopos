@@ -28,7 +28,8 @@ pub use cpio::{CpioError, unpack_cpio_into_root};
 pub use devfs::DevFs;
 pub use ext2::*;
 pub use ext2_vfs::{
-    ext2_vfs_init_with_device, ext2_vfs_is_initialized, ext2_vfs_shutdown_sync, ext2_vfs_sync,
+    Ext2MountInfo, ext2_vfs_init_with_device, ext2_vfs_is_initialized, ext2_vfs_is_read_only,
+    ext2_vfs_shutdown_sync, ext2_vfs_sync,
 };
 pub use fileio::*;
 pub use ramfs::RamFs;

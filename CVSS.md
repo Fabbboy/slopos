@@ -1,6 +1,6 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-**No findings are currently open.** Last swept 2026-08-24.
+**No findings are currently open.** Last swept 2026-09-03.
 
 This file is the living ledger of open security findings. It is empty of
 findings by design, not by neglect: every entry recorded since 2026-03-17 has
@@ -141,60 +141,21 @@ Analogs worth citing when they match a finding's shape:
 
 | ID | Title | Score | Severity |
 |---|---|---|---|
-| SLOPOS-2026-0053 | Verity trailer unreachable when the image is not a whole number of sectors | 4.6 | MEDIUM |
+| — | none open | — | — |
 
 ## Open SlopOS findings
 
-### SLOPOS-2026-0053
-- Title: the verity trailer header falls outside the block device's reported
-  capacity whenever the image is not a whole number of sectors, so integrity
-  verification silently does not run
-- Status: `open`
-- Confidence: 88 — evidence 40 (the offsets are read directly off the shipped
-  artifact and both code sides are one expression each), exploitability 18 (no
-  remote or unprivileged path; the loss is that a defence-in-depth integrity
-  check believed to be running is not, so tampering with the image is no longer
-  detected at read time), reproducibility 30 (deterministic, and reproducible
-  from the artifact alone with no boot).
-- CVSS vector/score: `CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N` — **4.6 MEDIUM**
-- Impact: `fs/src/verity.rs` is meant to detect accidental corruption or
-  tampering of the root image loudly, at read time. It does not run at all on
-  the shipped images. `build_verified` returns the device *unwrapped* when it
-  cannot parse a trailer, so the failure is silent by construction: there is no
-  klog line, no boot flag and no test that distinguishes "verified" from
-  "verification was never installed". Every block read is unchecked, and an
-  image modified outside the kernel reads back without complaint.
-- Evidence:
-  - `scripts/gen_verity.py:6-11` — the 32-byte header is the last 32 bytes of
-    the *file*.
-  - `fs/src/verity.rs:186` — the kernel reads it at `capacity() - 32`.
-  - `drivers/src/virtio_blk.rs:266` — `capacity()` is
-    `capacity_sectors * SECTOR_SIZE`, i.e. `floor(bytes / 512) * 512`.
-  - `fs/assets/ext2-tests.img` is 16 793 632 bytes = 32 800 sectors + 32, so
-    the reported capacity is 16 793 600 and the header's 32 bytes are the ones
-    truncated away.
-  - `fs/src/verity.rs:157-159` — `build_verified` returns `device` unchanged
-    when `parse_trailer` yields `None`.
-- Repro (no boot required; the arithmetic is the bug):
-  ```sh
-  SZ=$(stat -c%s fs/assets/ext2-tests.img)
-  xxd -s $((SZ-32))            -l 4 fs/assets/ext2-tests.img  # 5452 5653 — the magic
-  xxd -s $(( (SZ/512)*512-32 )) -l 4 fs/assets/ext2-tests.img  # CRC-array bytes
-  ```
-  The second offset is what the kernel reads; it does not carry the magic, so
-  `parse_trailer` returns `None`. Confirming it in a boot needs the diagnostic
-  the remediation adds, precisely because the current failure is silent.
-- Remediation: two parts, and the second is the load-bearing one.
-  1. Make the trailer locatable on a device whose capacity is rounded down —
-     either pad the image to a sector multiple in `gen_verity.py`, or have
-     `parse_trailer` search the last sector for the magic rather than assuming
-     the header ends exactly at `capacity()`. Padding is the smaller change and
-     keeps the kernel side a single read.
-  2. Stop failing open silently. A device that carries no trailer and a device
-     whose trailer could not be parsed are different situations, and the second
-     must be loud: log which one happened at mount, and give the boot a way to
-     assert that verification is installed. A check that can switch itself off
-     without saying so is not a check.
+None. SLOPOS-2026-0053 (verity trailer unreachable when the image is not a
+whole number of sectors) was closed on 2026-09-03: `gen_verity.py` pads the
+image to a sector multiple, `build_verified` refuses a trailer it cannot use
+instead of failing open, `verity=require` turns an unverified disk into a
+failed boot step, and `test_verity_artifact_*` mounts the shipped artifact
+through a real virtio capacity under `just test`. The same sweep looked at
+what the fix newly exposed — a trailer forged inside the filesystem's own
+data blocks, the `verity=require` arms that did not reach the trailer parse,
+a kernel-internal `VfsHandle` writing through a read-only mount, and `EROFS`
+collapsed to `ENOENT`/`EINVAL` on two syscall funnels — and closed each in
+the same change.
 
 ## Structural invariants the closed findings left behind
 
@@ -217,3 +178,11 @@ changes what a defect there would have to look like:
   and a new region kind is added in one place.
 - **The per-tier aging backstop bounds how long a runnable tier can be passed
   over**, so strict priority cannot starve a lower tier indefinitely.
+- **A verity trailer is recognised only beyond the filesystem's own extent,
+  and a verified device is write-protected.** `build_verified` takes the
+  superblock's block count, so bytes a user can write into a file are never a
+  trailer, and a trailer that is present but unusable refuses the mount rather
+  than mounting unverified. Read-only-ness is one rule
+  (`Ext2Fs::read_only_for`) and reaches userland as `EROFS` through
+  `MOUNT_RDONLY`, checked at every `vfs::ops` mutation before the filesystem
+  sees it.

@@ -36,6 +36,7 @@ pub fn decode_error_kind(code: i32) -> ErrorKind {
         22 => InvalidInput,        // EINVAL
         24 => Uncategorized,       // EMFILE
         28 => StorageFull,         // ENOSPC
+        30 => ReadOnlyFilesystem,  // EROFS
         32 => BrokenPipe,          // EPIPE
         34 => Uncategorized,       // ERANGE
         38 => Unsupported,         // ENOSYS

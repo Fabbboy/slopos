@@ -7,6 +7,9 @@ pub enum BlockDeviceError {
     /// A block read back with contents that do not match its trusted
     /// build-time integrity hash (see [`crate::verity`]).
     IntegrityFailure,
+    /// The device refuses every write: its contents are attested and a
+    /// write would make them unverifiable (see [`crate::verity`]).
+    WriteProtected,
 }
 
 /// Stable, enumeration-order identity for a block device, assigned at probe
@@ -19,6 +22,13 @@ pub trait BlockDevice {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError>;
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError>;
     fn capacity(&self) -> u64;
+
+    /// `true` when every `write_at` will fail with
+    /// [`BlockDeviceError::WriteProtected`]. A filesystem consults this at
+    /// mount so it never dirties a block it cannot persist.
+    fn write_protected(&self) -> bool {
+        false
+    }
 
     /// Force every previously-acknowledged write out of any volatile device
     /// cache onto non-volatile media: on a write-back device, `write_at`

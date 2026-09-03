@@ -48,7 +48,9 @@ qemu_gtk_zoom       := env("QEMU_GTK_ZOOM_TO_FIT", "off")
 gpu                 := env("GPU", "virtio-vga")
 
 boot_log_timeout := env("BOOT_LOG_TIMEOUT", "15")
-boot_cmdline     := env("BOOT_CMDLINE", "tests=off")
+# `verity=require`: the shipped image carries a trailer, so a `just boot` that
+# came up without verification is a broken artifact and must say so.
+boot_cmdline     := env("BOOT_CMDLINE", "tests=off verity=require")
 test_cmdline     := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on roulette=skip root=auto"
 # `TEST_CMDLINE=…` is how `builddir/run_tests` threads filter / verbosity flags
 # into the ISO at build time.
@@ -76,12 +78,14 @@ _build-userland-tests: _build-userland
     CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} USERLAND_TARGET={{userland_target}} \
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}" --test
 
+# `VERITY=off` for the tests image because the suite writes to it; the
+# shipped image keeps its trailer and `test_verity_artifact_*` mounts it.
 _fs-image: _build-userland
-    FS_IMAGE_SIZE={{fs_image_size}} \
+    FS_IMAGE_SIZE={{fs_image_size}} VERITY=on \
         scripts/build_fs_image.sh "{{fs_image}}" "{{build_dir}}" {{userland_bins}}
 
 _fs-image-tests: _build-userland-tests
-    FS_IMAGE_SIZE={{fs_image_size}} \
+    FS_IMAGE_SIZE={{fs_image_size}} VERITY=off \
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
 _initramfs: _build-userland
@@ -119,7 +123,8 @@ _iso-notests: build _initramfs
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso_notests}}" "{{build_dir}}" "{{boot_cmdline_effective}}"
 
-_iso-tests: _fs-image-tests _initramfs-tests
+# `_fs-image`: the harness attaches the shipped image as a snapshot disk.
+_iso-tests: _fs-image _fs-image-tests _initramfs-tests
     CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} RUST_TARGET={{rust_target}} \
     KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" \

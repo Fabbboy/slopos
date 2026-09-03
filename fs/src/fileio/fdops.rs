@@ -438,10 +438,11 @@ pub fn file_exists_path(path: &[u8]) -> c_int {
 }
 
 pub fn file_unlink_path(path: &[u8]) -> c_int {
-    if vfs_unlink(path).is_ok() {
-        0
-    } else {
-        Errno::ENOENT.raw() as _
+    match vfs_unlink(path) {
+        Ok(()) => 0,
+        Err(crate::vfs::VfsError::ReadOnly) => Errno::EROFS.raw() as _,
+        Err(crate::vfs::VfsError::PermissionDenied) => Errno::EACCES.raw() as _,
+        Err(_) => Errno::ENOENT.raw() as _,
     }
 }
 
@@ -453,7 +454,7 @@ pub fn file_mkdir_path(path: &[u8]) -> c_int {
         Err(crate::vfs::VfsError::NotDirectory) => Errno::ENOTDIR.raw() as _,
         Err(crate::vfs::VfsError::PermissionDenied) => Errno::EACCES.raw() as _,
         Err(crate::vfs::VfsError::NoSpace) => Errno::ENOSPC.raw() as _,
-        Err(crate::vfs::VfsError::ReadOnly) => Errno::EACCES.raw() as _,
+        Err(crate::vfs::VfsError::ReadOnly) => Errno::EROFS.raw() as _,
         Err(_) => Errno::EIO.raw() as _,
     }
 }
