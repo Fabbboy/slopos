@@ -1,4 +1,4 @@
-use crate::vfs::mount::with_mount_table;
+use crate::vfs::mount::{MAX_MOUNTS, with_mount_table};
 use crate::vfs::path::{resolve_parent, resolve_path};
 use crate::vfs::traits::{FileType, InodeId, VfsError, VfsResult};
 use slopos_abi::fs::{FS_TYPE_DIRECTORY, FS_TYPE_FILE, FS_TYPE_UNKNOWN, UserFsEntry};
@@ -166,6 +166,34 @@ pub fn vfs_rename(old_path: &[u8], new_path: &[u8]) -> VfsResult<()> {
     old_parent
         .fs
         .rename(old_parent.inode, old_name, new_parent.inode, new_name)
+}
+
+/// Commits every mount, returning the first error. Snapshots the table and
+/// drops its `IrqRwLock` before the first `sync`: ext2's takes a sleeping
+/// mutex, which must not be acquired under it.
+pub fn vfs_sync_all() -> VfsResult<()> {
+    let mut snapshot: [Option<&'static dyn crate::vfs::FileSystem>; MAX_MOUNTS] =
+        [None; MAX_MOUNTS];
+    let mut n = 0usize;
+    with_mount_table(|table| {
+        table.for_each_mount(&mut |fs| {
+            if n < snapshot.len() {
+                snapshot[n] = Some(fs);
+                n += 1;
+            }
+        });
+    });
+
+    let mut first_err = None;
+    for fs in snapshot.iter().take(n).flatten() {
+        if let Err(e) = fs.sync() {
+            first_err.get_or_insert(e);
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 pub fn vfs_list(path: &[u8], entries: &mut [UserFsEntry]) -> VfsResult<usize> {

@@ -71,6 +71,30 @@ pub unsafe extern "C" fn slopos_stat(path: *const u8, stat_buf: *mut SloposStat)
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_fsync(fd: i32) -> i32 {
+    match Sys::fsync(fd) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_fdatasync(fd: i32) -> i32 {
+    match Sys::fdatasync(fd) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_sync() -> i32 {
+    match Sys::sync() {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slopos_mkdir(path: *const u8, mode: u32) -> i32 {
     match Sys::mkdir(path, mode) {
         Ok(()) => 0,

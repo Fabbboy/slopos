@@ -327,6 +327,11 @@ impl FileOps for MemfdFileOps {
         Some(memfd_size(handle) as u64)
     }
 
+    /// No backing store: durable the moment it is written.
+    fn sync(&self, _handle: usize, _data_only: bool) -> i32 {
+        0
+    }
+
     fn seekable(&self) -> bool {
         false
     }

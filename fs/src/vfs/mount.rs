@@ -4,7 +4,7 @@ use slopos_ostd::sync::{IrqRwLock, LOCK_LEVEL_REGISTRY};
 
 use crate::MAX_PATH_LEN;
 
-const MAX_MOUNTS: usize = 16;
+pub const MAX_MOUNTS: usize = 16;
 
 pub struct MountPoint {
     path: [u8; MAX_PATH_LEN],
@@ -127,6 +127,15 @@ impl MountTable {
 
     pub fn mount_count(&self) -> usize {
         self.count
+    }
+
+    /// Once per mount point, so a filesystem mounted twice is visited twice.
+    pub fn for_each_mount(&self, callback: &mut dyn FnMut(&'static dyn FileSystem)) {
+        for mp in self.mounts.iter() {
+            if let Some(fs) = mp.fs {
+                callback(fs);
+            }
+        }
     }
 
     /// Iterate over mount points that are direct children of `parent_path`,

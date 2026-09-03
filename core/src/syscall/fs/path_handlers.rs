@@ -3,7 +3,7 @@ use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList, UserFsStat};
 
 use slopos_fs::fileio::{
     file_close_fd, file_list_path, file_mkdir_path, file_open_for_process, file_read_fd,
-    file_stat_path, file_unlink_path, file_write_fd,
+    file_stat_path, file_sync_fd, file_unlink_path, file_write_fd,
 };
 
 use slopos_mm::user_copy::{copy_bytes_to_user, copy_from_user, copy_to_user};
@@ -77,6 +77,38 @@ define_syscall!(syscall_fs_write
     } else {
         Ok(bytes as u64)
     }
+});
+
+// ext2 holds one global sleeping mutex across all its I/O, so syncing a
+// filesystem another task is writing stalls every path walk and `exec` until
+// the writeback finishes. Unbounded and uncharged.
+define_syscall!(syscall_fsync
+    (ctx, fd: Fd)
+    cap(NoneFd)
+    requires(let pid: process_id)
+    -> Result<(), Errno>
+{
+    let rc = file_sync_fd(pid, fd.raw(), false);
+    if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
+});
+
+define_syscall!(syscall_fdatasync
+    (ctx, fd: Fd)
+    cap(NoneFd)
+    requires(let pid: process_id)
+    -> Result<(), Errno>
+{
+    let rc = file_sync_fd(pid, fd.raw(), true);
+    if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
+});
+
+// That exposure at its worst: no fd, no capability, and every mount.
+define_syscall!(syscall_sync
+    (ctx)
+    cap(NoneSelf)
+    -> Result<(), Errno>
+{
+    slopos_fs::vfs::vfs_sync_all().map_err(|e| e.to_errno())
 });
 
 define_syscall!(syscall_fs_stat

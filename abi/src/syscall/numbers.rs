@@ -370,8 +370,18 @@ pub const SYSCALL_SCREEN_ACQUIRE: u64 = 175;
 /// input event stream that `input_poll_batch` drains.
 pub const SYSCALL_INPUT_SINK_ACQUIRE: u64 = 176;
 
+/// `fsync(fd)` — commits the fd's whole filesystem, not the inode; `EINVAL`
+/// on a descriptor with no backing store.
+pub const SYSCALL_FSYNC: u64 = 177;
+
+/// `fdatasync(fd)` — identical to [`SYSCALL_FSYNC`] until per-inode writeback
+/// exists; separate now so the split needs no userland rebuild.
+pub const SYSCALL_FDATASYNC: u64 = 178;
+
+pub const SYSCALL_SYNC: u64 = 179;
+
 /// Size of the dispatch table; every syscall number must be below this.
-pub const SYSCALL_TABLE_SIZE: usize = 177;
+pub const SYSCALL_TABLE_SIZE: usize = 180;
 
 const _: () = assert!((SYSCALL_PIDFD_OPEN as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SIGNALFD as usize) < SYSCALL_TABLE_SIZE);
@@ -389,6 +399,9 @@ const _: () = assert!((SYSCALL_NET_MONITOR as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_PRLIMIT64 as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SCREEN_ACQUIRE as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_INPUT_SINK_ACQUIRE as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_FSYNC as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_FDATASYNC as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_SYNC as usize) < SYSCALL_TABLE_SIZE);
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

@@ -150,6 +150,11 @@ pub trait Pal {
     fn memfd_create(flags: u32) -> Result<i32, Errno>;
     fn ftruncate(fd: i32, size: u64) -> Result<(), Errno>;
 
+    /// Whole-filesystem, so `fdatasync` is today identical to `fsync`.
+    fn fsync(fd: i32) -> Result<(), Errno>;
+    fn fdatasync(fd: i32) -> Result<(), Errno>;
+    fn sync() -> Result<(), Errno>;
+
     /// Report a single subtest result to the kernel-side userland-test
     /// runner. Best-effort: returning `Err` means the kernel has no test
     /// runner waiting for this task and the report was discarded.

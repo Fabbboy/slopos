@@ -133,6 +133,9 @@ define_syscall!(syscall_run_userland_tests (ctx) cap(TestHarness)
 
     if kernel_phase_summary::shutdown_requested() {
         klog_info!("TESTS: Auto shutdown enabled after harness");
+        // Not in `qemu_signal_exit`: its port write kills the VM before the
+        // `power::shutdown` tail that would flush. Last point with IRQs live.
+        slopos_fs::ext2_vfs_shutdown_sync();
         tests_request_shutdown(total_failed as i32);
     }
 

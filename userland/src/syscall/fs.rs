@@ -39,6 +39,22 @@ pub fn close_fd_raw(fd: RawFd) -> SyscallResult<()> {
     Sys::close(fd).map_err(Into::into)
 }
 
+/// Commits `fd`'s whole filesystem, not the inode.
+#[inline(always)]
+pub fn fsync(fd: RawFd) -> SyscallResult<()> {
+    Sys::fsync(fd).map_err(Into::into)
+}
+
+#[inline(always)]
+pub fn fdatasync(fd: RawFd) -> SyscallResult<()> {
+    Sys::fdatasync(fd).map_err(Into::into)
+}
+
+#[inline(always)]
+pub fn sync() -> SyscallResult<()> {
+    Sys::sync().map_err(Into::into)
+}
+
 /// Consumes the handle so `Drop` cannot double-close. On failure the fd is
 /// still consumed: the kernel either closed it or it was invalid.
 #[inline(always)]

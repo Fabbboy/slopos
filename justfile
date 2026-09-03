@@ -59,7 +59,7 @@ debug_flag    := if debug =~ '^(1|true|on|yes)$' { "boot.debug=on" } else { "" }
 boot_cmdline_effective := trim(boot_cmdline + " " + debug_flag)
 
 userland_bins      := "init shell terminal compositor roulette halt file_manager image_viewer sysmon nmap ip keymap ss nc curl ping oops_smoke"
-test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test spawn_privilege_test seat_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test"
+test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test spawn_privilege_test seat_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test"
 
 [doc("Install Rust + Go toolchains and verify workspace")]
 setup:
@@ -293,6 +293,29 @@ test-json PATH: _build-run-tests
 test-userland-only: _iso-tests-userland-only _build-run-tests
     {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
 
+# In the body, not a dependency: `_iso-tests` rebuilds the fs image, which must not happen between the boots.
+[doc("Two-boot persistence check: write+fsync, power down, boot the same image, read the payload back")]
+test-persist: _build-run-tests
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `*ext2_aaa*` is the ext2 root mount every file-creating filtered run needs.
+    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*persist*" just _iso-tests
+    echo "── boot 1: seed ──"
+    {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
+    scripts/check_fs_image.sh "{{fs_image_tests}}"
+    echo "── boot 2: verify (same image, no rebuild) ──"
+    # `set -e` must not abort: a failing boot 2 is what this recipe reports.
+    rc=0
+    {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}" \
+        --raw --no-color > {{build_dir}}/persist-boot2.log 2>&1 || rc=$?
+    tail -n 40 {{build_dir}}/persist-boot2.log
+    if [ "$rc" -eq 0 ] && grep -q "PERSIST: verified" {{build_dir}}/persist-boot2.log; then
+        echo "PASS: the payload survived the reboot"
+    else
+        echo "FAIL: the payload did not survive the reboot (boot 2 exit $rc) — full log in {{build_dir}}/persist-boot2.log" >&2
+        exit 1
+    fi
+
 [doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, net-core, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
     {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-net-core -p slopos-chrome-core -p slopos-ostd
@@ -304,6 +327,10 @@ check-tests-host:
 [doc("Count-regression guard: assert `just test` plans at least TEST_COUNT_BASELINE tests")]
 check-test-count: _build-run-tests
     scripts/check_test_count.sh
+
+[doc("Hold an image a boot wrote to e2fsck -fn plus a clean superblock state")]
+check-fs-image *ARGS:
+    scripts/check_fs_image.sh {{ARGS}}
 
 [doc("SMP gate: assert every online CPU is eligible for task placement")]
 check-sched-spread *ARGS:
@@ -375,6 +402,7 @@ check-framekernel-gates:
     scripts/check_charge_linearity.sh --self-test
     scripts/check_quota_headroom.sh --self-test
     scripts/check_sched_spread.sh --self-test
+    scripts/check_fs_image.sh --self-test
     scripts/check_vendor_pin.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh

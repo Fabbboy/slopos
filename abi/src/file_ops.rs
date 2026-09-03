@@ -180,6 +180,12 @@ pub trait FileOps: Send + Sync {
         -1
     }
 
+    /// Commit to stable storage. `EINVAL` by default: nothing to commit.
+    fn sync(&self, handle: usize, data_only: bool) -> i32 {
+        let _ = (handle, data_only);
+        crate::Errno::EINVAL.raw()
+    }
+
     fn seekable(&self) -> bool {
         false
     }

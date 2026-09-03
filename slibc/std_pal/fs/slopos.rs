@@ -48,6 +48,8 @@ unsafe extern "C" {
     fn write(fd: i32, buf: *const u8, count: usize) -> isize;
     fn slopos_lseek(fd: i32, offset: i64, whence: i32) -> i64;
     fn slopos_fstat(fd: i32, stat_buf: *mut SloposStat) -> i32;
+    fn slopos_fsync(fd: i32) -> i32;
+    fn slopos_fdatasync(fd: i32) -> i32;
     fn slopos_stat(path: *const u8, stat_buf: *mut SloposStat) -> i32;
     fn slopos_mkdir(path: *const u8, mode: u32) -> i32;
     fn slopos_unlink(path: *const u8) -> i32;
@@ -432,11 +434,13 @@ impl File {
     }
 
     pub fn fsync(&self) -> io::Result<()> {
-        unsupported()
+        cvt_i32(unsafe { slopos_fsync(self.fd()) })?;
+        Ok(())
     }
 
     pub fn datasync(&self) -> io::Result<()> {
-        unsupported()
+        cvt_i32(unsafe { slopos_fdatasync(self.fd()) })?;
+        Ok(())
     }
 
     pub fn lock(&self) -> io::Result<()> {

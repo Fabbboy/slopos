@@ -711,6 +711,24 @@ impl Pal for Sys {
         Ok(())
     }
 
+    fn fsync(fd: i32) -> Result<(), Errno> {
+        let ret = unsafe { syscall1(SYSCALL_FSYNC, fd as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn fdatasync(fd: i32) -> Result<(), Errno> {
+        let ret = unsafe { syscall1(SYSCALL_FDATASYNC, fd as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn sync() -> Result<(), Errno> {
+        let ret = unsafe { syscall0(SYSCALL_SYNC) };
+        to_result(ret)?;
+        Ok(())
+    }
+
     fn test_report(status: u32, name: &[u8], msg: &[u8]) -> Result<(), Errno> {
         let ret = unsafe {
             syscall5(

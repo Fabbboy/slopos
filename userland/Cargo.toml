@@ -209,6 +209,10 @@ name = "rlimit_test"
 path = "src/bin/tests/rlimit_test.rs"
 
 [[bin]]
+name = "persist_test"
+path = "src/bin/tests/persist_test.rs"
+
+[[bin]]
 name = "session_smoke_test"
 path = "src/bin/tests/session_smoke_test.rs"
 

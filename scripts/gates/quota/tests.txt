@@ -57,6 +57,13 @@
 # when the registry slot is given up, rather than at the final `Drop`, which
 # lags for as long as any designator still resolves.
 #
+# 2026-09-03, one more utest binary (`persist_test`):
+#   process    121 -> 122. Deterministic at 122; the cap stays exact. No other
+#     row moved above its cap — a fresh --emit-allowlist over this run measured
+#     pages 638 507, kernelmeta 6056 and task 5, all inside the spreads above,
+#     so only the deterministic row is re-recorded and the measured margins on
+#     the order-dependent rows are left alone.
+#
 # `task` moves with scheduling (measured 5-7 across runs), so its cap carries
 # the observed spread as margin rather than a single observation.
 #
@@ -94,7 +101,7 @@ post-userland-tests	kernelmeta	6933
 post-userland-tests	objectrow	257
 post-userland-tests	pages	735232
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	121
+post-userland-tests	process	122
 post-userland-tests	task	10
 
 # The charge path's cost. It runs on every syscall that allocates, so a

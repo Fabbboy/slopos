@@ -360,6 +360,22 @@ pub fn file_close_fd(table: FdTable, fd: c_int) -> c_int {
     }
 }
 
+/// Holds the open-file reference across the dispatch, as read and write do:
+/// `sync` reaches block I/O and may deschedule, so a concurrent `close` must
+/// not free the description the handle names.
+pub fn file_sync_fd(table: FdTable, fd: c_int, data_only: bool) -> c_int {
+    let open_file = {
+        let Some(inner) = lock_table_slot(table) else {
+            return Errno::EBADF.raw() as _;
+        };
+        match snapshot_fd(&inner, fd) {
+            Some(s) => s.open_file,
+            None => return Errno::EBADF.raw() as _,
+        }
+    };
+    open_file.ops.sync(open_file.handle, data_only) as _
+}
+
 pub fn file_seek_fd(table: FdTable, fd: c_int, offset: i64, whence: u32) -> i64 {
     let snap = {
         let Some(inner) = lock_table_slot(table) else {
