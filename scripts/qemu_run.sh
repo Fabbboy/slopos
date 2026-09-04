@@ -433,8 +433,11 @@ QEMU_ARGS=(
     -cpu "$QEMU_CPU"
     -smp "$QEMU_SMP"
     -m "$QEMU_MEM"
-    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE"
-    -drive "if=pflash,format=raw,file=$OVMF_VARS_RUNTIME"
+    # OVMF since 2026-07-23 faults before any console unless the varstore pflash
+    # is secure: no serial, no display, indistinguishable from a dead kernel.
+    -global "driver=cfi.pflash01,property=secure,value=on"
+    -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE"
+    -drive "if=pflash,format=raw,unit=1,file=$OVMF_VARS_RUNTIME"
     -device "ich9-ahci,id=ahci0,bus=pcie.0,addr=0x3"
     -drive "if=none,id=cdrom,media=cdrom,readonly=on,file=$ISO"
     -device "ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0"
