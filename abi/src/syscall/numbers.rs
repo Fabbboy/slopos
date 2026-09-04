@@ -370,12 +370,18 @@ pub const SYSCALL_SCREEN_ACQUIRE: u64 = 175;
 /// input event stream that `input_poll_batch` drains.
 pub const SYSCALL_INPUT_SINK_ACQUIRE: u64 = 176;
 
-/// `fsync(fd)` — commits the fd's whole filesystem, not the inode; `EINVAL`
-/// on a descriptor with no backing store.
+/// `fsync(fd)` — commits the fd's inode: its data blocks and its on-disk
+/// record. `EINVAL` on a descriptor with no backing store.
+///
+/// The directory entry naming the file is not covered, per POSIX; committing
+/// that needs an `fsync` on a descriptor for the parent directory, which this
+/// kernel cannot yet open.
 pub const SYSCALL_FSYNC: u64 = 177;
 
-/// `fdatasync(fd)` — identical to [`SYSCALL_FSYNC`] until per-inode writeback
-/// exists; separate now so the split needs no userland rebuild.
+/// `fdatasync(fd)` — as [`SYSCALL_FSYNC`], omitting metadata a later read does
+/// not need. ext2 keeps an inode's size, block pointers and timestamps in one
+/// 128-byte record, so today the two commit the same blocks; the distinction
+/// becomes real once a timestamp alone can dirty that record.
 pub const SYSCALL_FDATASYNC: u64 = 178;
 
 pub const SYSCALL_SYNC: u64 = 179;

@@ -1,5 +1,5 @@
 use super::Ext2Error;
-use super::cache::BlockCache;
+use super::cache::{BlockCache, BlockOwner};
 use super::geometry::Ext2Geometry;
 use super::ondisk::{GROUP_DESC_SIZE, GroupDesc, Superblock};
 use super::types::{BlockNum, GroupIdx, InodeNum};
@@ -87,7 +87,7 @@ pub fn free_block(
     let bitmap_block = desc.block_bitmap;
 
     {
-        let mut bmap = cache.get(bitmap_block, device)?;
+        let mut bmap = cache.get_owned(bitmap_block, device, BlockOwner::Alloc)?;
         let data = bmap.data_mut();
         bitmap_slice::clear_bit(data, bit as usize);
     }
@@ -112,7 +112,7 @@ pub fn free_inode(
     let bitmap_block = desc.inode_bitmap;
 
     {
-        let mut bmap = cache.get(bitmap_block, device)?;
+        let mut bmap = cache.get_owned(bitmap_block, device, BlockOwner::Alloc)?;
         let data = bmap.data_mut();
         bitmap_slice::clear_bit(data, bit as usize);
     }
@@ -140,7 +140,7 @@ fn try_alloc_block_in_group(
     let bits_in_group = geom.blocks_per_group();
 
     let bit = {
-        let bmap = cache.get(bitmap_block, device)?;
+        let bmap = cache.get_owned(bitmap_block, device, BlockOwner::Alloc)?;
         bitmap_slice::find_first_zero(bmap.data(), bits_in_group as usize, 0)
     };
 
@@ -149,7 +149,7 @@ fn try_alloc_block_in_group(
     };
 
     {
-        let mut bmap = cache.get(bitmap_block, device)?;
+        let mut bmap = cache.get_owned(bitmap_block, device, BlockOwner::Alloc)?;
         bitmap_slice::set_bit(bmap.data_mut(), bit);
     }
 
@@ -185,7 +185,7 @@ fn try_alloc_inode_in_group(
     };
 
     let bit = {
-        let bmap = cache.get(bitmap_block, device)?;
+        let bmap = cache.get_owned(bitmap_block, device, BlockOwner::Alloc)?;
         bitmap_slice::find_first_zero(bmap.data(), bits_in_group as usize, start_bit)
     };
 
@@ -194,7 +194,7 @@ fn try_alloc_inode_in_group(
     };
 
     {
-        let mut bmap = cache.get(bitmap_block, device)?;
+        let mut bmap = cache.get_owned(bitmap_block, device, BlockOwner::Alloc)?;
         bitmap_slice::set_bit(bmap.data_mut(), bit);
     }
 
@@ -216,7 +216,7 @@ pub(crate) fn read_group_desc(
     device: &dyn BlockDevice,
 ) -> Result<GroupDesc, Ext2Error> {
     let loc = geom.group_desc_loc(group);
-    let blk = cache.get(loc.block(), device)?;
+    let blk = cache.get_owned(loc.block(), device, BlockOwner::Alloc)?;
     let window = blk
         .window::<GROUP_DESC_SIZE>(loc.within())
         .ok_or(Ext2Error::InvalidBlock)?;
@@ -234,7 +234,7 @@ pub(crate) fn write_group_desc(
 ) -> Result<(), Ext2Error> {
     geom.validate_desc(group, desc)?;
     let loc = geom.group_desc_loc(group);
-    let mut blk = cache.get(loc.block(), device)?;
+    let mut blk = cache.get_owned(loc.block(), device, BlockOwner::Alloc)?;
     let window = blk
         .window_mut::<GROUP_DESC_SIZE>(loc.within())
         .ok_or(Ext2Error::InvalidBlock)?;

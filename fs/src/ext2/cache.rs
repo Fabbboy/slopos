@@ -17,6 +17,29 @@ pub enum BlockKind {
     Metadata,
 }
 
+/// What a block's contents refer to, which is what decides whether a
+/// *per-inode* writeback may publish it (see [`super::Ext2Fs::sync_inode`]).
+/// Whole-filesystem [`super::Ext2Fs::sync`] ignores it and writes everything.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BlockOwner {
+    /// Allocation state: block and inode bitmaps, group descriptors. Names no
+    /// file contents, so writing one ahead of the rest can only leak space an
+    /// `e2fsck` reclaims.
+    Alloc,
+    /// An inode-table block, carrying the block pointers of every inode in
+    /// `first..=last`. `last` may over-reach the group; a wider span only
+    /// makes the co-residency pre-flush write more than it must.
+    Inodes {
+        first: u32,
+        last: u32,
+    },
+    File(u32),
+    /// Everything else — directory blocks above all. A directory block names
+    /// inodes, so publishing one before every inode table is on disk can
+    /// resurrect a freed inode under a fresh name.
+    Other,
+}
+
 /// The `frame` is both the slot's storage and, through its typed metadata, the
 /// dirty bit and the owner-key backref.
 struct CacheEntry {
@@ -26,6 +49,7 @@ struct CacheEntry {
     lru: u64,
     valid: bool,
     kind: BlockKind,
+    owner: BlockOwner,
 }
 
 impl CacheEntry {
@@ -38,6 +62,7 @@ impl CacheEntry {
             lru: 0,
             valid: false,
             kind: BlockKind::Metadata,
+            owner: BlockOwner::Other,
         })
     }
 }
@@ -54,6 +79,13 @@ pub struct BlockCache {
     index: KBTreeMap<BlockNum, usize>,
     lru_clock: u64,
     block_size: u32,
+    /// Blocks handed to the device since the last [`Self::note_barrier`].
+    ///
+    /// A clean cache is not a durable one: eviction writes back without a
+    /// barrier by design, so `dirty_count() == 0` can hold over bytes still
+    /// sitting in a write-back device cache. This is what lets a sync tell
+    /// "nothing to do" from "nothing left to *write*".
+    unbarriered: usize,
 }
 
 impl BlockCache {
@@ -73,7 +105,17 @@ impl BlockCache {
             index: KBTreeMap::new(),
             lru_clock: 0,
             block_size,
+            unbarriered: 0,
         })
+    }
+
+    pub fn unbarriered_writes(&self) -> usize {
+        self.unbarriered
+    }
+
+    /// Call after issuing a [`BlockDevice::flush`].
+    pub fn note_barrier(&mut self) {
+        self.unbarriered = 0;
     }
 
     pub fn block_size(&self) -> u32 {
@@ -86,7 +128,16 @@ impl BlockCache {
         block: BlockNum,
         device: &dyn BlockDevice,
     ) -> Result<CachedBlock<'a>, Ext2Error> {
-        self.get_kind(block, device, BlockKind::Metadata)
+        self.get_kind(block, device, BlockKind::Metadata, BlockOwner::Other)
+    }
+
+    pub fn get_owned<'a>(
+        &'a mut self,
+        block: BlockNum,
+        device: &dyn BlockDevice,
+        owner: BlockOwner,
+    ) -> Result<CachedBlock<'a>, Ext2Error> {
+        self.get_kind(block, device, BlockKind::Metadata, owner)
     }
 
     /// Get a file-data block from the cache (see [`BlockKind`]).
@@ -94,8 +145,9 @@ impl BlockCache {
         &'a mut self,
         block: BlockNum,
         device: &dyn BlockDevice,
+        owner: BlockOwner,
     ) -> Result<CachedBlock<'a>, Ext2Error> {
-        self.get_kind(block, device, BlockKind::Data)
+        self.get_kind(block, device, BlockKind::Data, owner)
     }
 
     fn get_kind<'a>(
@@ -103,11 +155,13 @@ impl BlockCache {
         block: BlockNum,
         device: &dyn BlockDevice,
         kind: BlockKind,
+        owner: BlockOwner,
     ) -> Result<CachedBlock<'a>, Ext2Error> {
         if let Some(&slot) = self.index.get(&block) {
             self.lru_clock += 1;
             self.entries[slot].lru = self.lru_clock;
             self.entries[slot].pinned += 1;
+            self.entries[slot].owner = owner;
             return Ok(CachedBlock { cache: self, slot });
         }
 
@@ -125,6 +179,7 @@ impl BlockCache {
         let entry = &mut self.entries[slot];
         entry.block = block;
         entry.kind = kind;
+        entry.owner = owner;
         entry.frame.set_owner_key(block.raw() as u64);
         entry.frame.set_dirty(false);
         entry.pinned = 1;
@@ -142,7 +197,16 @@ impl BlockCache {
         block: BlockNum,
         device: &dyn BlockDevice,
     ) -> Result<CachedBlock<'_>, Ext2Error> {
-        self.get_zero_kind(block, device, BlockKind::Metadata)
+        self.get_zero_kind(block, device, BlockKind::Metadata, BlockOwner::Other)
+    }
+
+    pub fn get_zero_owned(
+        &mut self,
+        block: BlockNum,
+        device: &dyn BlockDevice,
+        owner: BlockOwner,
+    ) -> Result<CachedBlock<'_>, Ext2Error> {
+        self.get_zero_kind(block, device, BlockKind::Metadata, owner)
     }
 
     /// Get a file-data block and zero-fill it (newly allocated data block).
@@ -150,8 +214,9 @@ impl BlockCache {
         &mut self,
         block: BlockNum,
         device: &dyn BlockDevice,
+        owner: BlockOwner,
     ) -> Result<CachedBlock<'_>, Ext2Error> {
-        self.get_zero_kind(block, device, BlockKind::Data)
+        self.get_zero_kind(block, device, BlockKind::Data, owner)
     }
 
     fn get_zero_kind(
@@ -159,12 +224,14 @@ impl BlockCache {
         block: BlockNum,
         device: &dyn BlockDevice,
         kind: BlockKind,
+        owner: BlockOwner,
     ) -> Result<CachedBlock<'_>, Ext2Error> {
         if let Some(&slot) = self.index.get(&block) {
             let bs = self.block_size as usize;
             self.entries[slot].frame.as_bytes_mut()[..bs].fill(0);
             self.entries[slot].frame.set_dirty(true);
             self.entries[slot].kind = kind;
+            self.entries[slot].owner = owner;
             self.lru_clock += 1;
             self.entries[slot].lru = self.lru_clock;
             self.entries[slot].pinned += 1;
@@ -179,6 +246,7 @@ impl BlockCache {
         entry.frame.as_bytes_mut()[..bs].fill(0);
         entry.block = block;
         entry.kind = kind;
+        entry.owner = owner;
         entry.frame.set_owner_key(block.raw() as u64);
         entry.frame.set_dirty(true);
         entry.pinned = 1;
@@ -189,37 +257,42 @@ impl BlockCache {
         Ok(CachedBlock { cache: self, slot })
     }
 
+    /// Answers whether the block needed writing, so a caller can skip the
+    /// device barrier that would otherwise order nothing.
     pub fn flush_block(
         &mut self,
         block: BlockNum,
         device: &dyn BlockDevice,
-    ) -> Result<(), Ext2Error> {
-        if let Some(&slot) = self.index.get(&block) {
-            let entry = &mut self.entries[slot];
-            if entry.frame.dirty() {
-                let offset = entry.block.to_disk_offset(self.block_size);
-                let bs = self.block_size as usize;
-                device
-                    .write_at(offset.raw(), &entry.frame.as_bytes()[..bs])
-                    .map_err(|_| Ext2Error::DeviceError)?;
-                entry.frame.set_dirty(false);
-            }
+    ) -> Result<bool, Ext2Error> {
+        let Some(&slot) = self.index.get(&block) else {
+            return Ok(false);
+        };
+        let entry = &mut self.entries[slot];
+        if !entry.frame.dirty() {
+            return Ok(false);
         }
-        Ok(())
+        let offset = entry.block.to_disk_offset(self.block_size);
+        let bs = self.block_size as usize;
+        device
+            .write_at(offset.raw(), &entry.frame.as_bytes()[..bs])
+            .map_err(|_| Ext2Error::DeviceError)?;
+        entry.frame.set_dirty(false);
+        self.unbarriered += 1;
+        Ok(true)
     }
 
     /// Attempts every slot even after a write fails, returning the first error
     /// once the pass completes; failed blocks stay dirty for the next flush.
-    pub fn flush_kind(
+    pub fn flush_where(
         &mut self,
-        kind: BlockKind,
         device: &dyn BlockDevice,
+        mut select: impl FnMut(BlockKind, BlockOwner) -> bool,
     ) -> Result<usize, Ext2Error> {
         let bs = self.block_size as usize;
         let mut first_err: Option<Ext2Error> = None;
         let mut written = 0usize;
         for entry in &mut self.entries {
-            if !(entry.valid && entry.kind == kind && entry.frame.dirty()) {
+            if !(entry.valid && entry.frame.dirty() && select(entry.kind, entry.owner)) {
                 continue;
             }
             let offset = entry.block.to_disk_offset(self.block_size);
@@ -235,10 +308,19 @@ impl BlockCache {
                 }
             }
         }
+        self.unbarriered += written;
         match first_err {
             Some(e) => Err(e),
             None => Ok(written),
         }
+    }
+
+    pub fn flush_kind(
+        &mut self,
+        kind: BlockKind,
+        device: &dyn BlockDevice,
+    ) -> Result<usize, Ext2Error> {
+        self.flush_where(device, |entry_kind, _| entry_kind == kind)
     }
 
     /// Data first, then metadata, without device barriers: callers needing
@@ -351,6 +433,7 @@ impl BlockCache {
             device
                 .write_at(offset.raw(), &victim.frame.as_bytes()[..bs])
                 .map_err(|_| Ext2Error::DeviceError)?;
+            self.unbarriered += 1;
         }
 
         self.index.remove(&self.entries[slot].block);

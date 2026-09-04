@@ -11,7 +11,7 @@ pub mod symlink;
 pub mod time;
 pub mod types;
 
-use cache::BlockCache;
+use cache::{BlockCache, BlockOwner};
 use geometry::Ext2Geometry;
 use ondisk::{
     DIR_FT_DIR, DIR_FT_REG_FILE, DirEntry, EXT2_ERROR_FS, EXT2_VALID_FS, GroupDesc, Inode,
@@ -148,6 +148,11 @@ impl<'a> Ext2Fs<'a> {
         self.write_superblock_state()
     }
 
+    /// Barriered on the spot rather than left to a later `sync`: this is a
+    /// sub-block write straight to the device, so it dirties nothing and is
+    /// invisible to the cache's own accounting. The clean stamp in particular
+    /// is the last write before power-off, and one left in a volatile device
+    /// cache means an orderly shutdown still reads as a crash.
     fn write_superblock_state(&mut self) -> Result<(), Ext2Error> {
         let mut sb_buf = [0u8; 1024];
         self.device
@@ -157,7 +162,7 @@ impl<'a> Ext2Fs<'a> {
         self.device
             .write_at(1024, &sb_buf)
             .map_err(|_| Ext2Error::DeviceError)?;
-        Ok(())
+        self.device_barrier()
     }
 
     pub fn superblock(&self) -> Superblock {
@@ -182,12 +187,141 @@ impl<'a> Ext2Fs<'a> {
         self.cache.dirty_count()
     }
 
+    /// A caller deciding whether a sync has work must consult this as well as
+    /// [`Self::dirty_count`], or a clean cache reads as a durable one.
+    pub fn unbarriered_writes(&self) -> usize {
+        self.cache.unbarriered_writes()
+    }
+
+    /// Write dirty *data* blocks back with no barrier, as eviction does, while
+    /// leaving metadata dirty — the state a durability test must be able to
+    /// construct on purpose. Data only, because evicting the inode record too
+    /// would leave nothing for the ordering barrier to order.
+    #[cfg(feature = "tests")]
+    pub fn cache_evict_data_for_test(&mut self) -> Result<(), Ext2Error> {
+        self.cache
+            .flush_where(self.device, |kind, _| kind == cache::BlockKind::Data)
+            .map(|_| ())
+    }
+
+    /// Commit one inode: its data blocks, the allocation state that makes them
+    /// reachable, and its on-disk record.
+    ///
+    /// Two things are deliberately outside the scope. The directory entry
+    /// naming the inode is not committed: POSIX says an `fsync` on the parent
+    /// directory does that, and a crash before the entry lands leaves an
+    /// orphan inode, not a corrupt file. Nor is the superblock's free-count
+    /// drift, which `e2fsck` recomputes and which a crash already mandates a
+    /// check for (the mount stamped `EXT2_ERROR_FS`).
+    ///
+    /// Ordering follows `data=ordered` narrowed to one inode: data and
+    /// allocation blocks, a barrier, then the inode-table block. A crash
+    /// between the two leaves a record whose size predates the data, never one
+    /// whose blocks hold a previous file's contents. Allocation state goes in
+    /// the *first* phase because an inode published while the bitmap still
+    /// calls its blocks free is an invitation to hand them to a second file.
+    ///
+    /// `data_only` currently selects nothing: an ext2 record carries the block
+    /// pointers, the size and the timestamps in one 128-byte struct, so no
+    /// write commits the first two without the third. It divides only once a
+    /// timestamp alone can dirty a record, which needs the wall clock.
+    pub fn sync_inode(&mut self, ino: u32, data_only: bool) -> Result<(), Ext2Error> {
+        let _ = data_only;
+        let ino_num = InodeNum(ino);
+        // Proves the number lands inside a group's inode table before anything
+        // is written on its behalf.
+        let (table_block, _) = self.inode_disk_offset(ino_num)?;
+
+        let (first, last) = self.inode_table_span(ino_num, table_block)?;
+
+        // The record shares its block with its neighbours, so writing it
+        // publishes their cached state too. Their data goes out in the same
+        // phase as this inode's, or the barrier below would order a metadata
+        // write ahead of data it already names.
+        self.cache
+            .flush_where(self.device, |_, owner| match owner {
+                BlockOwner::File(owned) => owned >= first && owned <= last,
+                BlockOwner::Alloc => true,
+                BlockOwner::Inodes { .. } | BlockOwner::Other => false,
+            })?;
+
+        // Eviction may already have written this inode's data with no barrier
+        // behind it, so what must be ordered is the device's commits, not this
+        // function's writes.
+        if self.cache.unbarriered_writes() > 0 {
+            self.device_barrier()?;
+        }
+        self.cache.flush_block(table_block, self.device)?;
+        if self.cache.unbarriered_writes() == 0 {
+            return Ok(());
+        }
+        self.device_barrier()
+    }
+
+    /// Inclusive range of inode numbers whose records share `table_block`.
+    ///
+    /// Widened by one record on each side when `inode_size` does not divide
+    /// the block size, because then a record straddles the boundary. Erring
+    /// wide costs a few extra data blocks in the pre-flush; erring narrow
+    /// would publish a neighbour's record ahead of its data.
+    fn inode_table_span(
+        &mut self,
+        ino: InodeNum,
+        table_block: BlockNum,
+    ) -> Result<(u32, u32), Ext2Error> {
+        let (group, _) = self.geom.locate_inode(ino).ok_or(Ext2Error::InvalidInode)?;
+        let table_start = self
+            .read_group_desc(group)?
+            .inode_table
+            .to_disk_offset(self.block_size)
+            .raw();
+        let block_start = table_block.to_disk_offset(self.block_size).raw();
+        let into_table = block_start
+            .checked_sub(table_start)
+            .ok_or(Ext2Error::InvalidInode)?;
+
+        let inode_size = self.inode_size.max(1) as u64;
+        let per_block = (self.block_size as u64).div_ceil(inode_size);
+        let first_local = (into_table / inode_size) as u32;
+        let aligned = self.block_size as u64 % inode_size == 0;
+        let slack = u32::from(!aligned);
+
+        // Saturating throughout: the inputs are superblock-derived, so a
+        // hostile image must widen the span (which only costs a larger
+        // pre-flush) rather than overflow.
+        let per_group = self.geom.inodes_per_group();
+        let base = group
+            .raw()
+            .saturating_mul(per_group)
+            .saturating_add(1)
+            .min(self.geom.inodes_count());
+        let group_last = base
+            .saturating_add(per_group.saturating_sub(1))
+            .min(self.geom.inodes_count());
+        let first_in_block = base.saturating_add(first_local);
+        let first = first_in_block.saturating_sub(slack).max(base);
+        let last = first_in_block
+            .saturating_add(per_block as u32)
+            .saturating_sub(1)
+            .saturating_add(slack)
+            .min(group_last);
+        Ok((first, last.max(first)))
+    }
+
     /// Ordered durability, following the ext2 `data=ordered` discipline (minus a
     /// metadata journal): data blocks, barrier, metadata blocks, barrier,
     /// superblock free-counts, barrier. A crash between phases can leave
     /// recoverable free-count drift but never a directory entry or inode
     /// pointing at uninitialised on-disk data.
     pub fn sync(&mut self) -> Result<(), Ext2Error> {
+        // A barrier over nothing orders nothing, and this runs on the flusher's
+        // five-second tick and on every unprivileged `sync(2)`.
+        if self.cache.dirty_count() == 0
+            && self.cache.unbarriered_writes() == 0
+            && !self.superblock_dirty
+        {
+            return Ok(());
+        }
         self.cache.flush_kind(cache::BlockKind::Data, self.device)?;
         self.device_barrier()?;
         self.cache
@@ -205,8 +339,10 @@ impl<'a> Ext2Fs<'a> {
         self.sync()
     }
 
-    fn device_barrier(&self) -> Result<(), Ext2Error> {
-        self.device.flush().map_err(|_| Ext2Error::DeviceError)
+    fn device_barrier(&mut self) -> Result<(), Ext2Error> {
+        self.device.flush().map_err(|_| Ext2Error::DeviceError)?;
+        self.cache.note_barrier();
+        Ok(())
     }
 
     pub fn read_inode(&mut self, ino: u32) -> Result<Inode, Ext2Error> {
@@ -239,7 +375,8 @@ impl<'a> Ext2Fs<'a> {
     fn read_inode_num(&mut self, ino: InodeNum) -> Result<Inode, Ext2Error> {
         let (blk_num, within) = self.inode_disk_offset(ino)?;
         let size = self.inode_size as usize;
-        let block = self.cache.get(blk_num, self.device)?;
+        let owner = self.inode_block_owner(ino, blk_num)?;
+        let block = self.cache.get_owned(blk_num, self.device, owner)?;
         let data = block.data();
         if within + size > data.len() {
             return Err(Ext2Error::InvalidInode);
@@ -247,10 +384,24 @@ impl<'a> Ext2Fs<'a> {
         Ok(Inode::parse(&data[within..within + size]))
     }
 
+    /// Classify an inode-table block by the records it carries, so a per-inode
+    /// sync can tell it apart from a directory block. A span that fails to
+    /// close degrades to [`BlockOwner::Other`], which is the conservative
+    /// answer: `sync_inode` then declines to publish it early.
+    fn inode_block_owner(
+        &mut self,
+        ino: InodeNum,
+        table_block: BlockNum,
+    ) -> Result<BlockOwner, Ext2Error> {
+        let (first, last) = self.inode_table_span(ino, table_block)?;
+        Ok(BlockOwner::Inodes { first, last })
+    }
+
     fn write_inode_num(&mut self, ino: InodeNum, inode: &Inode) -> Result<(), Ext2Error> {
         let (blk_num, within) = self.inode_disk_offset(ino)?;
         let size = self.inode_size as usize;
-        let mut block = self.cache.get(blk_num, self.device)?;
+        let owner = self.inode_block_owner(ino, blk_num)?;
+        let mut block = self.cache.get_owned(blk_num, self.device, owner)?;
         let data = block.data_mut();
         if within + size > data.len() {
             return Err(Ext2Error::InvalidInode);
@@ -274,6 +425,7 @@ impl<'a> Ext2Fs<'a> {
             self.device,
             self.ptrs_per_block,
             self.block_size,
+            BlockOwner::File(ino),
         )
     }
 
@@ -292,6 +444,7 @@ impl<'a> Ext2Fs<'a> {
             self.block_size,
             &mut self.superblock,
             &self.geom,
+            BlockOwner::File(ino),
         );
         self.write_inode_num(ino_num, &inode)?;
         if self.superblock.free_blocks_count != free_before {
@@ -311,6 +464,7 @@ impl<'a> Ext2Fs<'a> {
             self.device,
             self.ptrs_per_block,
             self.block_size,
+            BlockOwner::File(ino),
             &mut f,
         )
     }
@@ -336,6 +490,7 @@ impl<'a> Ext2Fs<'a> {
                     self.device,
                     self.ptrs_per_block,
                     self.block_size,
+                    BlockOwner::File(current.raw()),
                     &mut |e| {
                         if e.name == b".." {
                             parent = Some(e.inode);
@@ -354,6 +509,7 @@ impl<'a> Ext2Fs<'a> {
                     self.device,
                     self.ptrs_per_block,
                     self.block_size,
+                    BlockOwner::File(current.raw()),
                 )?;
             }
         }
@@ -396,6 +552,7 @@ impl<'a> Ext2Fs<'a> {
             self.device,
             self.ptrs_per_block,
             self.block_size,
+            BlockOwner::File(parent_num.raw()),
         )
         .is_ok()
         {
@@ -442,7 +599,11 @@ impl<'a> Ext2Fs<'a> {
                 self.device,
             )?;
             {
-                let mut blk = self.cache.get_zero(first_block, self.device)?;
+                let mut blk = self.cache.get_zero_data(
+                    first_block,
+                    self.device,
+                    BlockOwner::File(new_ino.raw()),
+                )?;
                 let data = blk.data_mut();
                 let bs = self.block_size as usize;
                 let dot_rec = 12;
@@ -475,6 +636,7 @@ impl<'a> Ext2Fs<'a> {
             self.block_size,
             &mut self.superblock,
             &self.geom,
+            BlockOwner::File(parent_num.raw()),
         )?;
 
         if is_dir {
@@ -501,6 +663,7 @@ impl<'a> Ext2Fs<'a> {
             self.device,
             self.ptrs_per_block,
             self.block_size,
+            BlockOwner::File(parent),
         )?;
         let target = self.read_inode_num(target_num)?;
 
@@ -515,9 +678,10 @@ impl<'a> Ext2Fs<'a> {
             self.device,
             self.ptrs_per_block,
             self.block_size,
+            BlockOwner::File(parent),
         )?;
 
-        self.release_file_blocks(&target)?;
+        self.release_file_blocks(&target, BlockOwner::File(target_num.raw()))?;
         ext2_alloc::free_inode(
             target_num,
             &self.geom,
@@ -564,7 +728,7 @@ impl<'a> Ext2Fs<'a> {
     /// indirect trees. Missing depths 2 and 3 leaks every block past the
     /// single-indirect reach on each delete, with no way to recover the space
     /// short of reformatting.
-    fn release_file_blocks(&mut self, inode: &Inode) -> Result<(), Ext2Error> {
+    fn release_file_blocks(&mut self, inode: &Inode, owner: BlockOwner) -> Result<(), Ext2Error> {
         for blk in inode.block.iter().take(12) {
             if blk.is_valid() {
                 ext2_alloc::free_block(
@@ -592,6 +756,7 @@ impl<'a> Ext2Fs<'a> {
                 &mut self.cache,
                 self.device,
                 self.ptrs_per_block,
+                owner,
                 &mut |b| {
                     freed.push(b).map_err(|_| Ext2Error::OutOfMemory)?;
                     Ok(())

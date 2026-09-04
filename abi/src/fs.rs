@@ -18,6 +18,11 @@ pub const O_CREAT: u32 = 0x40;
 pub const O_EXCL: u32 = 0x80;
 pub const O_TRUNC: u32 = 0x200;
 pub const O_APPEND: u32 = 0x400;
+/// Every write commits the file's data before returning. The values are the
+/// Linux x86-64 ones so a port needs no translation table; note that there
+/// `O_SYNC` subsumes `O_DSYNC`, which is why the two are not disjoint bits.
+pub const O_DSYNC: u32 = 0x1000;
+pub const O_SYNC: u32 = 0x101000;
 
 /// Directory entry returned by the fs_list syscall.
 #[repr(C)]

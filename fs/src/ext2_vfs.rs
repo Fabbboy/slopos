@@ -47,6 +47,7 @@ static EXT2_READ_ONLY: AtomicBool = AtomicBool::new(false);
 /// Best-effort dirty-block count: the flusher's wait predicate reads only this
 /// and the stop flag, so it takes no lock.
 static DIRTY_PENDING: AtomicUsize = AtomicUsize::new(0);
+
 static FLUSH_STOP: KernelIoStop = KernelIoStop::new(
     "ext2-flush",
     lock_class!("EXT2_FLUSH_STOP.waiters", LOCK_LEVEL_RESOURCE),
@@ -115,6 +116,37 @@ fn note_dirty(dirty: usize) {
 
 trait Ext2VfsBackend {
     fn with_ext2<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R>;
+}
+
+/// Commit one inode. Takes the same lock every other ext2 operation does, but
+/// writes only that inode's blocks — so a descriptor-granular `fsync` no
+/// longer drags every other file's dirty state to the device with it.
+fn ext2_vfs_sync_inode(inode: InodeId, data_only: bool) -> VfsResult<()> {
+    if !EXT2_VFS_INIT.is_set() {
+        return Ok(());
+    }
+    let ino = u32::try_from(inode).map_err(|_| VfsError::InvalidArgument)?;
+    let mut guard = CACHED_EXT2.lock().map_err(|_| VfsError::Interrupted)?;
+    let Some(cached) = guard.as_mut() else {
+        return Ok(());
+    };
+    let (superblock, block_size, inode_size) =
+        (cached.superblock, cached.block_size, cached.inode_size);
+    let mut fs = Ext2Fs::new(
+        &*cached.device,
+        &mut cached.cache,
+        superblock,
+        block_size,
+        inode_size,
+    )
+    .map_err(ext2_error_to_vfs)?;
+    let result = fs.sync_inode(ino, data_only).map_err(ext2_error_to_vfs);
+    let dirty = fs.dirty_count();
+    drop(fs);
+    // Not a `CLEAN_THROUGH` publication: this committed one inode, so a later
+    // whole-filesystem `sync` still owes the device everything else.
+    DIRTY_PENDING.store(dirty, Ordering::Relaxed);
+    result
 }
 
 impl Ext2VfsBackend for StaticExt2Vfs {
@@ -230,6 +262,10 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
 
     fn sync(&self) -> VfsResult<()> {
         ext2_vfs_sync()
+    }
+
+    fn sync_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()> {
+        ext2_vfs_sync_inode(inode, data_only)
     }
 }
 
@@ -351,6 +387,13 @@ fn verity_error_to_vfs(e: VerityError) -> VfsError {
 
 /// Takes the FS lock, so the caller must hold none. A no-op if no ext2
 /// filesystem is mounted.
+///
+/// A `sync(2)` storm costs the device one pass rather than one per caller:
+/// the second caller in finds nothing dirty and nothing unbarriered, and
+/// returns without touching it. What is *not* bounded is the wait — the first
+/// caller holds a sleeping mutex across every path walk and `exec` on the
+/// mount for the length of its pass. Narrowing that needs a lock finer than
+/// one per mount, which is a page-cache change rather than a sync change.
 pub fn ext2_vfs_sync() -> VfsResult<()> {
     if !EXT2_VFS_INIT.is_set() {
         return Ok(());
@@ -362,7 +405,13 @@ pub fn ext2_vfs_sync() -> VfsResult<()> {
         return Ok(());
     };
     // Skip the device barriers rather than issue no-op flushes every tick.
-    if cached.cache.dirty_count() == 0 && !cached.superblock_dirty {
+    // Read state, not a completion epoch: an op that *failed* leaves its
+    // dirtied blocks cached (see the TODO in `with_fs`), so "a sync already
+    // ran" is not evidence that there is nothing left to write.
+    if cached.cache.dirty_count() == 0
+        && cached.cache.unbarriered_writes() == 0
+        && !cached.superblock_dirty
+    {
         DIRTY_PENDING.store(0, Ordering::Relaxed);
         return Ok(());
     }
@@ -407,7 +456,10 @@ fn mark_filesystem_clean() {
     let Some(cached) = guard.as_mut() else {
         return;
     };
-    if cached.cache.dirty_count() > 0 || cached.superblock_dirty {
+    if cached.cache.dirty_count() > 0
+        || cached.cache.unbarriered_writes() > 0
+        || cached.superblock_dirty
+    {
         return;
     }
     let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);

@@ -5,8 +5,8 @@ use slopos_ostd::lock_class;
 use slopos_abi::KernelErrno;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::{
-    FS_TYPE_CHARDEV, FS_TYPE_FILE, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_WRONLY,
-    UserFsStat,
+    FS_TYPE_CHARDEV, FS_TYPE_FILE, O_ACCMODE, O_APPEND, O_CREAT, O_DSYNC, O_RDONLY, O_RDWR, O_SYNC,
+    O_WRONLY, UserFsStat,
 };
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
@@ -14,7 +14,8 @@ use slopos_ostd::KArc;
 use slopos_ostd::KVec;
 use slopos_ostd::process::quota::FileBacking;
 use slopos_ostd::sync::{
-    InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, LockClassKey, SpinLock, SpinLockGuard,
+    InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, LockClassKey, Mutex, SpinLock,
+    SpinLockGuard,
 };
 
 use slopos_abi::quota::FdSlot;
@@ -108,6 +109,20 @@ pub(crate) fn posix_to_open_mode(posix: u32) -> OpenMode {
     m.with_raw(posix & !(O_ACCMODE | O_CREAT | O_APPEND))
 }
 
+/// The durability a descriptor was opened with, if any. `O_SYNC` carries
+/// `O_DSYNC`'s bit on Linux and so is tested first — the other order would
+/// downgrade every `O_SYNC` descriptor to data-only.
+pub(crate) fn open_sync_policy(flags: OpenMode) -> Option<bool> {
+    let bits = flags.bits();
+    if bits & O_SYNC == O_SYNC {
+        Some(false)
+    } else if bits & O_DSYNC != 0 {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn openmode_to_posix_bits(mode: OpenMode) -> u32 {
     let mut posix = match (
         mode.contains(OpenMode::READ),
@@ -120,7 +135,10 @@ pub(crate) fn openmode_to_posix_bits(mode: OpenMode) -> u32 {
     if mode.contains(OpenMode::APPEND) {
         posix |= O_APPEND;
     }
-    posix |= mode.bits() & (O_NONBLOCK as u32 | O_NOCTTY as u32);
+    // `O_SYNC`/`O_DSYNC` are reported but not settable through `F_SETFL`, as
+    // on Linux: a descriptor's durability is fixed at open, so a shared
+    // description cannot have it withdrawn under another holder.
+    posix |= mode.bits() & (O_NONBLOCK as u32 | O_NOCTTY as u32 | O_SYNC | O_DSYNC);
     posix
 }
 
@@ -158,7 +176,7 @@ pub(super) struct OpenFile {
     pub(super) position: AtomicU64,
     /// Held across the offset read, the I/O and the offset advance, so two
     /// writers sharing this description cannot resolve the same offset.
-    pub(super) position_lock: SpinLock<()>,
+    pub(super) position_lock: Mutex<()>,
     pub(super) status_flags: AtomicU32,
     /// Owned lifetime token for the subsystem object behind `handle`.
     /// `None` only for backings with no teardown (e.g. pidfd).
@@ -504,6 +522,10 @@ pub(super) static PROCESS_TABLES: [FileTableSlot; MAX_PROCESSES] = [const {
 /// Ranked above the filesystem locks it is held across, and `LO_DUPOK`
 /// because distinct open descriptions are distinct instances of one class:
 /// a caller only ever holds one at a time.
+///
+/// A *sleeping* mutex, because "held across the filesystem locks" means held
+/// across block I/O: a disk write that has to allocate parks on the virtio
+/// completion, and a spinning lock would carry preemption-off into that wait.
 pub(super) const OPEN_FILE_POSITION_CLASS: &LockClassKey = lock_class!(
     "OPEN_FILE_POSITION",
     LOCK_LEVEL_REGISTRY,
@@ -725,7 +747,7 @@ pub(super) fn new_open_file(
         ops,
         handle,
         position: AtomicU64::new(position),
-        position_lock: SpinLock::new((), OPEN_FILE_POSITION_CLASS),
+        position_lock: Mutex::new((), OPEN_FILE_POSITION_CLASS),
         status_flags: AtomicU32::new(status_flags.bits()),
         backing,
     })

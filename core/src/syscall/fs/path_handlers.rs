@@ -79,9 +79,9 @@ define_syscall!(syscall_fs_write
     }
 });
 
-// ext2 holds one global sleeping mutex across all its I/O, so syncing a
-// filesystem another task is writing stalls every path walk and `exec` until
-// the writeback finishes. Unbounded and uncharged.
+// Commits one inode, so the lock is held for that inode's blocks rather than
+// every dirty block on the mount. It is still ext2's one global sleeping
+// mutex, so a path walk on the same filesystem waits behind it.
 define_syscall!(syscall_fsync
     (ctx, fd: Fd)
     cap(NoneFd)
@@ -102,7 +102,10 @@ define_syscall!(syscall_fdatasync
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
-// That exposure at its worst: no fd, no capability, and every mount.
+// No fd and no capability, and it commits every mount — so this is the one
+// that can still stall the machine. `ext2_vfs_sync` coalesces callers so a
+// loop of them costs one writeback pass rather than one per call; what stays
+// unbounded is the wait behind the pass in flight.
 define_syscall!(syscall_sync
     (ctx)
     cap(NoneSelf)

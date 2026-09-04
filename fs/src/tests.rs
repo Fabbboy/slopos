@@ -455,6 +455,60 @@ impl BlockDevice for WriteFailingDevice {
     }
 }
 
+/// Counts what reached the device, so a test can assert on the *shape* of a
+/// commit — which blocks, and whether a barrier followed — rather than only on
+/// the bytes that ended up there.
+struct CountingBlockDevice {
+    inner: MemoryBlockDevice,
+    writes: core::sync::atomic::AtomicUsize,
+    flushes: core::sync::atomic::AtomicUsize,
+}
+
+impl CountingBlockDevice {
+    fn new(inner: MemoryBlockDevice) -> Self {
+        Self {
+            inner,
+            writes: core::sync::atomic::AtomicUsize::new(0),
+            flushes: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn writes(&self) -> usize {
+        self.writes.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn flushes(&self) -> usize {
+        self.flushes.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn reset(&self) {
+        self.writes.store(0, core::sync::atomic::Ordering::Relaxed);
+        self.flushes.store(0, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl BlockDevice for CountingBlockDevice {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
+        self.inner.read_at(offset, buffer)
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        self.writes
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        self.inner.write_at(offset, buffer)
+    }
+
+    fn capacity(&self) -> u64 {
+        self.inner.capacity()
+    }
+
+    fn flush(&self) -> Result<(), BlockDeviceError> {
+        self.flushes
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 struct Ext2ImageSpec<'a> {
     blocks: u32,
     inodes: u32,
@@ -1222,6 +1276,258 @@ pub fn test_ext2_cache_reuse_within_handle() -> TestResult {
     TestResult::Pass
 }
 
+// `sync` is what makes a write durable, so it must leave nothing behind: no
+// dirty block, and no write the device has not been asked to commit.
+pub fn test_ext2_sync_leaves_nothing_uncommitted() -> TestResult {
+    let spec = Ext2ImageSpec {
+        blocks: 64,
+        inodes: 32,
+        file_name: Some(b"sync.txt"),
+        file_data: Some(b"old"),
+        file_block: 7,
+    };
+    let Some(image) = build_ext2_image(spec) else {
+        return TestResult::Pass;
+    };
+    let device = CountingBlockDevice::new(image);
+    mount_ext2!(device, _cache, fs);
+
+    let Ok(ino) = fs.resolve_path(b"/sync.txt") else {
+        return TestResult::Fail;
+    };
+    if fs.write_file(ino, 0, b"committed").is_err() {
+        return TestResult::Fail;
+    }
+    if fs.dirty_count() == 0 {
+        return TestResult::Fail;
+    }
+
+    device.reset();
+    if fs.sync().is_err() {
+        return TestResult::Fail;
+    }
+    if fs.dirty_count() != 0 || fs.unbarriered_writes() != 0 {
+        return TestResult::Fail;
+    }
+    // A commit the device was never told to make is not a commit.
+    if device.writes() == 0 || device.flushes() == 0 {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// A second `sync` over an unchanged filesystem must reach the device for
+// neither a write nor a barrier: the flusher runs this path every five
+// seconds, and `sync(2)` is unprivileged.
+pub fn test_ext2_sync_of_clean_fs_touches_no_device() -> TestResult {
+    let spec = Ext2ImageSpec {
+        blocks: 64,
+        inodes: 32,
+        file_name: Some(b"idle.txt"),
+        file_data: Some(b"old"),
+        file_block: 7,
+    };
+    let Some(image) = build_ext2_image(spec) else {
+        return TestResult::Pass;
+    };
+    let device = CountingBlockDevice::new(image);
+    mount_ext2!(device, _cache, fs);
+
+    let Ok(ino) = fs.resolve_path(b"/idle.txt") else {
+        return TestResult::Fail;
+    };
+    if fs.write_file(ino, 0, b"once").is_err() || fs.sync().is_err() {
+        return TestResult::Fail;
+    }
+
+    device.reset();
+    if fs.sync().is_err() {
+        return TestResult::Fail;
+    }
+    if device.writes() != 0 || device.flushes() != 0 {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// `fsync` commits the inode's data and record, and nothing that belongs to an
+// inode outside its table block. That difference is the whole point of the
+// per-inode path — without it the syscall holds the filesystem lock across
+// every dirty block on the mount.
+//
+// The bystander shares this inode's table block, so its data is flushed
+// deliberately — publishing the shared record publishes its pointers too. What
+// the assertion turns on is the superblock free-count drift, which is the
+// mount's state and which a per-inode commit must leave behind.
+pub fn test_ext2_sync_inode_commits_the_inode_not_the_mount() -> TestResult {
+    let spec = Ext2ImageSpec {
+        blocks: 64,
+        inodes: 32,
+        file_name: Some(b"target.txt"),
+        file_data: Some(b"old"),
+        file_block: 7,
+    };
+    let Some(image) = build_ext2_image(spec) else {
+        return TestResult::Pass;
+    };
+    let device = CountingBlockDevice::new(image);
+    mount_ext2!(device, _cache, fs);
+
+    let Ok(ino) = fs.resolve_path(b"/target.txt") else {
+        return TestResult::Fail;
+    };
+    // Dirties the root's directory block, which no `sync_inode` may publish.
+    if fs.create_file(2, b"bystander.txt").is_err() {
+        return TestResult::Fail;
+    }
+    let payload = b"durable-bytes";
+    if fs.write_file(ino, 0, payload).is_err() {
+        return TestResult::Fail;
+    }
+
+    device.reset();
+    if fs.sync_inode(ino, false).is_err() {
+        return TestResult::Fail;
+    }
+    if device.writes() == 0 || device.flushes() == 0 {
+        return TestResult::Fail;
+    }
+    if !fs.superblock_dirty() {
+        return TestResult::Fail;
+    }
+    let after_inode = device.writes();
+    if fs.sync().is_err() || fs.dirty_count() != 0 {
+        return TestResult::Fail;
+    }
+    if device.writes() <= after_inode {
+        return TestResult::Fail;
+    }
+    expect_block_prefix(&device.inner, 7, payload)
+}
+
+// An eviction writes a block back and clears its dirty bit with no barrier, so
+// a later `fsync` finds nothing dirty over bytes that are still only in the
+// device's volatile cache. It must issue the barrier anyway rather than report
+// a durability it never obtained.
+pub fn test_ext2_sync_inode_commits_evicted_writes() -> TestResult {
+    let Some(image) = narrow_image() else {
+        return TestResult::Pass;
+    };
+    let device = CountingBlockDevice::new(image);
+    mount_ext2!(device, _cache, fs);
+
+    let Ok(ino) = fs.resolve_path(b"/narrow.txt") else {
+        return TestResult::Fail;
+    };
+    if fs.write_file(ino, 0, b"evicted").is_err() {
+        return TestResult::Fail;
+    }
+    // Stand in for the eviction: the file's bytes have reached the device and
+    // nothing has asked it to commit them, while the inode record is still
+    // dirty and so still has to be published behind a barrier.
+    if fs.cache_evict_data_for_test().is_err() {
+        return TestResult::Fail;
+    }
+    if fs.unbarriered_writes() == 0 {
+        return TestResult::Fail;
+    }
+
+    device.reset();
+    if fs.sync_inode(ino, false).is_err() {
+        return TestResult::Fail;
+    }
+    // Two barriers, not one. The data is already on the device with nothing
+    // ordering it, so the inode record needs a barrier *before* it as well as
+    // the closing one — otherwise the device may commit the pointers first and
+    // `data=ordered` is violated even though the call reported durability.
+    if device.flushes() < 2 || fs.unbarriered_writes() != 0 {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// A commit's cost must not grow with the machine's unrelated dirt. Nine files
+// in the directory rather than four dirty five more directory records and a
+// second inode-table block, and none of that may enlarge this commit.
+//
+// The comparison is between two crowded filesystems rather than against an
+// idle one, because a commit is *not* free of the others' allocation state:
+// bitmaps and group descriptors always go, since publishing an inode whose
+// blocks the bitmap still calls free invites the next allocation to hand them
+// out twice. That is a constant — two bitmaps and a descriptor block — and a
+// constant is what this measures the absence of growth on top of.
+pub fn test_ext2_sync_inode_cost_ignores_unrelated_metadata() -> TestResult {
+    let few = match sync_inode_write_count(4) {
+        Some(n) => n,
+        None => return TestResult::Pass,
+    };
+    let Some(many) = sync_inode_write_count(9) else {
+        return TestResult::Pass;
+    };
+    if few == 0 || many != few {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+#[inline(never)]
+fn sync_inode_write_count(bystanders: u32) -> Option<usize> {
+    let device = CountingBlockDevice::new(narrow_image()?);
+    count_sync_inode(&device, bystanders)
+}
+
+/// The image builder holds a whole `Ext2ImageSpec` plus the block-writing
+/// temporaries; keeping it out of the mount's frame is what puts both under
+/// the 2 KiB stack gate.
+#[inline(never)]
+fn narrow_image() -> Option<MemoryBlockDevice> {
+    build_ext2_image(Ext2ImageSpec {
+        blocks: 64,
+        inodes: 32,
+        file_name: Some(b"narrow.txt"),
+        file_data: Some(b"old"),
+        file_block: 7,
+    })
+}
+
+#[inline(never)]
+fn count_sync_inode(device: &CountingBlockDevice, bystanders: u32) -> Option<usize> {
+    let (sb, bs, is) = Ext2Fs::mount_params(device).ok()?;
+    let mut cache = BlockCache::new(bs).ok()?;
+    let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is).ok()?;
+
+    let ino = fs.resolve_path(b"/narrow.txt").ok()?;
+    create_bystanders(&mut fs, bystanders)?;
+    fs.write_file(ino, 0, b"narrow").ok()?;
+
+    device.reset();
+    fs.sync_inode(ino, false).ok()?;
+    Some(device.writes())
+}
+
+#[inline(never)]
+fn create_bystanders(fs: &mut Ext2Fs<'_>, count: u32) -> Option<()> {
+    for i in 0..count {
+        let mut name = *b"filler0.txt";
+        name[6] = b'0' + i as u8;
+        fs.create_file(2, &name).ok()?;
+    }
+    Some(())
+}
+
+#[inline(never)]
+fn expect_block_prefix(device: &MemoryBlockDevice, block: u32, want: &[u8]) -> TestResult {
+    let mut buf = [0u8; 32];
+    let n = want.len().min(buf.len());
+    if device.read_at(block as u64 * 1024, &mut buf[..n]).is_err() {
+        return TestResult::Fail;
+    }
+    if &buf[..n] != &want[..n] {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 pub fn test_ext2_path_resolution_not_found() -> TestResult {
     let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
@@ -1745,6 +2051,11 @@ slopos_testing::stest!(name = test_ext2_read_file_data_roundtrip);
 slopos_testing::stest!(name = test_ext2_write_persists_across_handles);
 slopos_testing::stest!(name = test_ext2_writeback_is_deferred_until_sync);
 slopos_testing::stest!(name = test_ext2_cache_reuse_within_handle);
+slopos_testing::stest!(name = test_ext2_sync_leaves_nothing_uncommitted);
+slopos_testing::stest!(name = test_ext2_sync_of_clean_fs_touches_no_device);
+slopos_testing::stest!(name = test_ext2_sync_inode_commits_the_inode_not_the_mount);
+slopos_testing::stest!(name = test_ext2_sync_inode_commits_evicted_writes);
+slopos_testing::stest!(name = test_ext2_sync_inode_cost_ignores_unrelated_metadata);
 slopos_testing::stest!(name = test_ext2_path_resolution_not_found);
 slopos_testing::stest!(name = test_ext2_remove_path_not_file);
 

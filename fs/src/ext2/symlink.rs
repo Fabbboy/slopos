@@ -1,6 +1,6 @@
 use super::Ext2Error;
 use super::blockmap;
-use super::cache::BlockCache;
+use super::cache::{BlockCache, BlockOwner};
 use super::ondisk::{FAST_SYMLINK_MAX, Inode, MODE_SYMLINK};
 use super::types::{BlockNum, FileBlock};
 use crate::blockdev::BlockDevice;
@@ -13,6 +13,7 @@ pub fn create_symlink_inode(
     alloc_block: &mut dyn FnMut() -> Result<BlockNum, Ext2Error>,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
+    owner: BlockOwner,
 ) -> Result<Inode, Ext2Error> {
     if target.is_empty() {
         return Err(Ext2Error::PathNotFound);
@@ -41,7 +42,7 @@ pub fn create_symlink_inode(
         // blocks stays 0 for fast symlinks
     } else {
         let data_block = alloc_block()?;
-        let mut blk = cache.get_zero(data_block, device)?;
+        let mut blk = cache.get_zero_data(data_block, device, owner)?;
         let data = blk.data_mut();
         data[..target.len()].copy_from_slice(target);
         inode.block[0] = data_block;
@@ -58,6 +59,7 @@ pub fn read_symlink(
     device: &dyn BlockDevice,
     ptrs_per_block: u32,
     _block_size: u32,
+    owner: BlockOwner,
 ) -> Result<usize, Ext2Error> {
     if !inode.is_symlink() {
         return Err(Ext2Error::NotFile);
@@ -70,11 +72,11 @@ pub fn read_symlink(
         let block_bytes = slopos_ostd::util::byte_view::pod_slice_as_bytes(&inode.block[..]);
         buf[..copy_len].copy_from_slice(&block_bytes[..copy_len]);
     } else {
-        let phys = blockmap::map_block(inode, FileBlock(0), ptrs_per_block, cache, device)?;
+        let phys = blockmap::map_block(inode, FileBlock(0), ptrs_per_block, cache, device, owner)?;
         if !phys.is_valid() {
             return Err(Ext2Error::DeviceError);
         }
-        let blk = cache.get(phys, device)?;
+        let blk = cache.get_data(phys, device, owner)?;
         buf[..copy_len].copy_from_slice(&blk.data()[..copy_len]);
     }
 

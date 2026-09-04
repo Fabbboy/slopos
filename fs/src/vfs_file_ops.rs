@@ -258,12 +258,11 @@ impl FileOps for VfsFileOps {
         }
     }
 
-    /// Filesystem-wide: no finer writeback exists, so `data_only` is ignored.
-    fn sync(&self, handle: usize, _data_only: bool) -> i32 {
-        let Some((fs, _inode)) = resolve(handle) else {
+    fn sync(&self, handle: usize, data_only: bool) -> i32 {
+        let Some((fs, inode)) = resolve(handle) else {
             return Errno::EBADF.raw();
         };
-        match fs.sync() {
+        match fs.sync_inode(inode, data_only) {
             Ok(()) => 0,
             Err(e) => e.to_errno().raw(),
         }

@@ -77,9 +77,17 @@ fn set_layout(name: &str) -> i32 {
         return 1;
     }
 
-    // Best-effort: fails on a read-only root; init re-applies it on next boot.
-    let _ = fs::write(PERSIST_PATH, name.as_bytes());
+    // Durable rather than `fs::write`: the choice is applied by `init` on the
+    // *next* boot, so a copy that only reached the flusher's queue is lost by
+    // exactly the reboot it was meant to survive. Best-effort still — a
+    // read-only root refuses it and init re-applies whatever is on disk.
+    let _ = persist_choice(name);
 
     println!("keymap: switched to {name}");
     0
+}
+
+fn persist_choice(name: &str) -> Result<(), ()> {
+    let path = std::ffi::CString::new(PERSIST_PATH).map_err(|_| ())?;
+    crate::syscall::fs::write_durable(&path, name.as_bytes()).map_err(|_| ())
 }

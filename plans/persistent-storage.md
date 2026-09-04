@@ -1,9 +1,10 @@
 # Persistent Storage
 
 Make a file written on one boot readable on the next, on the root filesystem
-and under failure. A file written under `/mnt` and `fsync`ed survives a reboot
-— `just test-persist` boots one image twice and reads the payload back, and CI
-runs it — but that is the narrow case:
+and under failure. A file written under `/mnt` and committed — with `fsync`, or
+by opening it `O_SYNC` — survives a reboot, and `just test-persist` boots one
+image twice and reads the payload back with CI running it. That is the narrow
+case:
 
 - **The root is still RAM.** Nothing written to `/` outlives the boot; the disk
   is a secondary mount at `/mnt`, and `root=virtio` is exercised by no recipe,
@@ -71,6 +72,18 @@ The shape, which the code states more precisely:
   write-protected, and a trailer that is present but unusable refuses the
   mount. `Ext2Fs::read_only_for` is the one rule for whether a handle may
   mutate; a read-only mount writes no superblock state and starts no flusher.
+- **Durability is invocable and inode-granular.** `fsync(2)`, `fdatasync(2)`
+  and `sync(2)` are syscalls 177–179, `std::fs::File::sync_all`/`sync_data`
+  reach them, and `O_SYNC`/`O_DSYNC` are honoured per descriptor in
+  `fileio::write_open_file`. `FileSystem::sync_inode` commits one inode — its
+  data, the allocation state reaching it, a barrier, then its on-disk record —
+  and defaults to whole-filesystem `sync` for filesystems with no finer
+  writeback. Two invariants hold it together: a `BlockCache` entry records
+  whose data it is (`BlockOwner`), with directory and symlink contents owned by
+  their inode so a shared inode-table block is never published ahead of the
+  blocks it names; and every barrier decision reads `unbarriered_writes` rather
+  than what the caller wrote, because eviction writes back and clears the dirty
+  bit without a barrier, so a clean cache is not a durable one.
 
 ## 2. The gaps
 
@@ -156,24 +169,25 @@ This is a security finding. It needs a `CVSS.md` triage entry
 once `root=virtio` is a reachable configuration — and it must be closed in the
 same change that makes that path the default, not after.
 
-### G5 — Durability is invocable, but only at filesystem granularity
+### G5 — A sync stalls every user of its mount
 
-`fsync(2)`, `fdatasync(2)` and `sync(2)` exist (177–179; `SYSCALL_TABLE_SIZE`
-is 180) and `std::fs::File::sync_all`/`sync_data` are wired to them. What is
-still missing is granularity and a per-file knob:
+`CACHED_EXT2` is one global sleeping mutex held across all of ext2's block I/O,
+so the caller that wins it holds it for a whole writeback pass while every path
+walk and `exec` on that mount waits. `sync(2)` is unprivileged and takes no
+fd, which makes that stall userland-reachable. Concurrent callers do not
+multiply the cost — the second one in finds nothing dirty and nothing
+unbarriered and returns without touching the device — but nothing bounds the
+wait behind the pass in flight. A lock finer than one per mount is the fix,
+which makes this the page-cache work in 6.5 rather than a sync change.
 
-- All three drive `FileSystem::sync`, which is **whole-filesystem**. There is
-  no per-inode writeback below the VFS, so `fsync` on one file commits every
-  dirty block on its filesystem and `fdatasync` is identical to `fsync`. The
-  syscall numbers are separate so splitting them later needs no userland
-  rebuild.
-- `ext2` holds one global sleeping mutex (`CACHED_EXT2`) across all of its
-  block I/O, so these syscalls make an unbounded, uncharged, system-wide
-  filesystem stall userland-reachable. The clean-filesystem fast path
-  (`dirty_count() == 0 && !superblock_dirty`) makes a spin loop cheap, but it
-  does not bound a sync issued while another task is writing.
-- There is no `O_SYNC`/`O_DSYNC`, so "I do not trust the flusher" is a
-  per-call decision rather than a per-descriptor one.
+Two narrower limits sit alongside it:
+
+- **`fdatasync` commits exactly what `fsync` does.** An ext2 record carries the
+  block pointers, the size and the timestamps in one 128-byte struct, so no
+  write commits the first two without the third. The split becomes real when a
+  timestamp alone can dirty a record, which needs the wall clock (3.9).
+- **`fsync` does not commit the directory entry**, per POSIX. Doing so needs a
+  descriptor on a directory, which `open` cannot return.
 
 ### G6 — A failed operation leaves partial metadata in the cache
 
@@ -286,44 +300,29 @@ coherent with the 128-entry ext2 `BlockCache`.
 ## 3. Plan
 
 Each phase ends green on `just test` plus the pre-commit gate sequence in
-`AGENTS.md`. Phases 2, 3 and 5 are a dependency chain; 4 and 6 are
-parallelisable once 3 lands.
-
-### Phase 2 — Finish the durability contract
-
-The syscalls, the `slibc` bindings and the table/`CAP_COUNTS` wiring landed with
-the harness, which could not be built without them. What is left is granularity
-and the exposure they opened.
-
-- [ ] **2.1** Per-inode sync. `fsync` currently drives `FileSystem::sync`, which
-  commits the whole filesystem; the trait has no per-inode entry point and ext2
-  has no per-inode writeback. Adding one makes `fdatasync` genuinely cheaper
-  than `fsync` and removes most of 2.2a's exposure by shrinking what a single
-  `fsync` has to hold the lock for.
-- [ ] **2.2** Bound the exposure. `CACHED_EXT2` is one global sleeping mutex
-  held across all block I/O (`fs/src/ext2_vfs.rs:31`, `:62`), so `fsync` and
-  `sync` make an unbounded, uncharged, system-wide filesystem stall directly
-  userland-reachable: a loop of `fsync` against a filesystem another task is
-  writing blocks every other process's path walk and `exec`. The clean-FS fast
-  path is what makes the *idle* case cheap and is not a bound. Either rate-limit
-  it, charge it, or narrow the lock.
-- [ ] **2.3** `O_SYNC` / `O_DSYNC` in `abi/src/fs.rs`, honoured in
-  `vfs_file_ops::write` — the per-file "I do not trust the flusher" knob, and
-  what `/etc/keymap` should be written with.
-- [ ] **2.4** Tests beyond the persistence round-trip: a utest that writes,
-  `fsync`s, and asserts the block device saw a flush; a stest that asserts
-  `sync` leaves `dirty_count() == 0`.
+`AGENTS.md`. Phases 3 and 5 are a dependency chain; 4 and 6 are parallelisable
+once 3 lands. Numbering starts at 3 because the earlier phases are done and
+their results are §1; the numbers are kept so commit messages and issue
+references to them still resolve.
 
 ### Phase 3 — Close the write surface
 
 Everything here is implementing `FileSystem` methods on ext2 that the ext2
 layer below either already supports or nearly does.
 
-- [ ] **3.0** Allocation rollback first, not in Phase 4. Every operation below
-  has several writes before its commit point, and `just check-fs-image`'s
-  `e2fsck` grades each
-  one. Landing them before the rollback guard means the oracle reports real
-  inconsistencies whose fix is deferred to the next phase.
+- [ ] **3.0** Allocation rollback, before the operations below and not with the
+  rest of crash consistency. An RAII guard that rolls back every allocation an
+  operation made if it does not reach its commit point, and invalidates the
+  cache entries a failed operation dirtied so the flusher cannot publish them:
+  it kills the `with_fs` TODO, and covers both `create_inode_entry` (G6) and
+  the mid-write block leak (G11). Its `Drop` must be panic-free —
+  `check_drop_panic_free.sh` scans `fs/`. Asterinas solved the same defect the
+  same way (the *concept*, not their code).
+
+  First because every operation below has several writes before its commit
+  point and `just check-fs-image`'s `e2fsck` grades each one: landing them
+  ahead of the guard means the oracle reports real inconsistencies whose fix is
+  deferred to the next phase.
 
 - [ ] **3.1** `truncate` — wire `Ext2Fs` to the existing `ext2::file::truncate`,
   including the free-block accounting and the superblock dirty flag. Unblocks
@@ -366,6 +365,14 @@ layer below either already supports or nearly does.
   file stays stamped zero.
 - [ ] **3.10** A `readdir` cursor and an ABI that can page (G9), so a directory
   with more than 64 entries is listable. A stable cookie, not a linear index.
+- [ ] **3.11a** Fix the ext2 test fixture first. `build_ext2_image` declares a
+  four-block inode table (blocks 5–8) but writes records only into block 5 and
+  puts file data at block 7, inside that table; with `s_first_ino = 11`, every
+  created inode lands in a block the fixture never initialised, so writing to a
+  file the tests themselves created fails `NotFile`. Blocks every test below
+  that creates a file and then writes to it, and the one durability case
+  currently untested: that a directory's own data block is committed before an
+  inode-table block naming it (see `BlockOwner` in §1).
 - [ ] **3.11** Per-operation tests against a `MemoryBlockDevice` image in the
   existing `fs/src/tests.rs` style, plus at least one `e2fsck`-validated
   round-trip through `just check-fs-image`. Watch the 2 KiB stack gate: 3.1, 3.2
@@ -376,13 +383,6 @@ layer below either already supports or nearly does.
 
 ### Phase 4 — Crash consistency
 
-- [ ] **4.1** *(moved to 3.0)* Kill the `with_fs` TODO with an RAII guard that
-  rolls back every allocation an operation made if it does not reach its commit
-  point, and invalidate the cache entries a failed operation dirtied so the
-  flusher cannot publish them. Covers `create_inode_entry` and the G11
-  mid-write leak. The guard's `Drop` must be panic-free —
-  `check_drop_panic_free.sh` scans `fs/`. Asterinas landed the same shape for
-  the same defect (the *concept*, not their code).
 - [ ] **4.2** Refuse to mount an image whose `s_state` says `EXT2_ERROR_FS`
   read-write. Options are read-only mount, or mount and repair. There is no
   in-kernel fsck and there should not be one yet: read-only plus a loud klog
@@ -500,6 +500,12 @@ Independent of 2–5; do it when a second device or a real disk demands it.
   `Ext2CacheReclaim` uses `try_lock` only, for the reason its comment gives.
   Any new lock is a new lockdep class and moves `check_lockdep_headroom.sh` —
   re-measure with `--emit-allowlist`, never hand-edit the gate file.
+- **No spinning lock may span a filesystem call.** A `SpinLock` holds
+  preemption off, and any write that has to allocate parks on the virtio
+  completion, so the scheduler's `assert_not_blocking_while_atomic` fires. A
+  lock held across `FileOps::read`/`write`/`sync` must be a sleeping `Mutex`
+  (`OpenFile.position_lock` is one for exactly this reason), and its acquire is
+  fallible — a killed task returns `EINTR` rather than proceeding unserialised.
 - **Syscall classification.** Every new syscall needs a `cap(...)` clause and
   a re-recorded `CAP_COUNTS` (a compile-time assert, so it fails loudly). A
   filesystem syscall that can reach a power primitive also moves
@@ -524,11 +530,11 @@ Independent of 2–5; do it when a second device or a real disk demands it.
 
 ## 5. Effort and sequencing
 
-Phase 3 is the bulk, and 3.8 (`u32` → `u64`) is an ext2-wide API change
-rather than the one-line edit it reads as. Phase 4 is a week, of which 4.4 is most: deferred
-inode free needs a VFS-level open count the tree does not have, so it touches
-fd lifetime rather than only ext2. Phase 5 is a week once 3 is green, not two
-days — the disk root by default moves four ratchets (`check_test_count.sh`,
+Phase 3 is the bulk, and 3.8 (`u32` → `u64`) is an ext2-wide API change rather
+than the one-line edit it reads as. Phase 4 is a week, of which 4.4 is most:
+deferred inode free needs a VFS-level open count the tree does not have, so it
+touches fd lifetime rather than only ext2. Phase 5 is a week once 3 is green,
+not two days — the disk root by default moves four ratchets (`check_test_count.sh`,
 `check_lockdep_headroom.sh`, `check_sched_spread.sh`,
 `check_authority_reachability.sh`), each needing a re-measure and a commit
 message explaining the delta. Phase 6 is unbounded and last.

@@ -241,4 +241,16 @@ pub trait FileSystem: Send + Sync {
     fn sync(&self) -> VfsResult<()> {
         Ok(())
     }
+
+    /// Commit one inode rather than the whole filesystem — `fsync(2)`'s scope,
+    /// and `fdatasync(2)`'s when `data_only`.
+    ///
+    /// Defaults to [`Self::sync`], which is correct but coarse: a filesystem
+    /// with no per-inode writeback still owes the caller durability, and
+    /// committing more than was asked never breaks the guarantee. What it
+    /// costs is the stall, which is the whole reason to override this.
+    fn sync_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()> {
+        let _ = (inode, data_only);
+        self.sync()
+    }
 }

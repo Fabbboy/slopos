@@ -55,6 +55,23 @@ pub fn sync() -> SyscallResult<()> {
     Sys::sync().map_err(Into::into)
 }
 
+/// Replace `path`'s contents, committing before returning — for the settings
+/// a reboot must not lose. `O_SYNC` rather than a trailing `fsync` so a short
+/// write is still durable up to where it got, and so the durability cannot be
+/// skipped by an early return between the two calls.
+pub fn write_durable(path: &CStr, data: &[u8]) -> SyscallResult<()> {
+    use slopos_abi::fs::{O_CREAT, O_SYNC, O_TRUNC, O_WRONLY};
+    let fd = open_cstr(path, O_WRONLY | O_CREAT | O_TRUNC | O_SYNC)?;
+    let mut written = 0usize;
+    while written < data.len() {
+        match write_slice(fd.raw(), &data[written..])? {
+            0 => return Err(super::error::SyscallError::from(slopos_slibc::errno::EIO)),
+            n => written += n,
+        }
+    }
+    Ok(())
+}
+
 /// Consumes the handle so `Drop` cannot double-close. On failure the fd is
 /// still consumed: the kernel either closed it or it was invalid.
 #[inline(always)]

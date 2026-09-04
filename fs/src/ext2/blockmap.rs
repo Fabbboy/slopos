@@ -1,5 +1,5 @@
 use super::Ext2Error;
-use super::cache::BlockCache;
+use super::cache::{BlockCache, BlockOwner};
 use super::ext2_alloc;
 use super::geometry::Ext2Geometry;
 use super::ondisk::{Inode, Superblock};
@@ -80,6 +80,7 @@ pub fn map_block(
     ptrs_per_block: u32,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
+    owner: BlockOwner,
 ) -> Result<BlockNum, Ext2Error> {
     let path = block_to_path(file_block, ptrs_per_block)?;
 
@@ -89,7 +90,7 @@ pub fn map_block(
     }
 
     for level in 1..path.depth as usize {
-        let block = cache.get(current, device)?;
+        let block = cache.get_owned(current, device, owner)?;
         current = read_ptr(block.data(), path.offsets[level]);
         if !current.is_valid() {
             return Ok(BlockNum::ZERO);
@@ -107,6 +108,7 @@ pub fn ensure_data_block(
     device: &dyn BlockDevice,
     superblock: &mut Superblock,
     geom: &Ext2Geometry,
+    owner: BlockOwner,
 ) -> Result<(BlockNum, bool), Ext2Error> {
     let path = block_to_path(file_block, ptrs_per_block)?;
 
@@ -116,7 +118,7 @@ pub fn ensure_data_block(
             return Ok((inode.block[idx], false));
         }
         let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
-        drop(cache.get_zero_data(new_block, device)?);
+        drop(cache.get_zero_data(new_block, device, owner)?);
         inode.block[idx] = new_block;
         return Ok((new_block, true));
     }
@@ -124,22 +126,22 @@ pub fn ensure_data_block(
     let top_idx = path.offsets[0] as usize;
     if !inode.block[top_idx].is_valid() {
         let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
-        drop(cache.get_zero(new_block, device)?);
+        drop(cache.get_zero_owned(new_block, device, owner)?);
         inode.block[top_idx] = new_block;
     }
 
     let mut current_indirect = inode.block[top_idx];
     for level in 1..path.depth as usize - 1 {
         let child = {
-            let block = cache.get(current_indirect, device)?;
+            let block = cache.get_owned(current_indirect, device, owner)?;
             read_ptr(block.data(), path.offsets[level])
         };
         if child.is_valid() {
             current_indirect = child;
         } else {
             let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
-            drop(cache.get_zero(new_block, device)?);
-            let mut parent = cache.get(current_indirect, device)?;
+            drop(cache.get_zero_owned(new_block, device, owner)?);
+            let mut parent = cache.get_owned(current_indirect, device, owner)?;
             write_ptr(parent.data_mut(), path.offsets[level], new_block);
             current_indirect = new_block;
         }
@@ -147,7 +149,7 @@ pub fn ensure_data_block(
 
     let data_idx = path.offsets[path.depth as usize - 1];
     let existing = {
-        let block = cache.get(current_indirect, device)?;
+        let block = cache.get_owned(current_indirect, device, owner)?;
         read_ptr(block.data(), data_idx)
     };
 
@@ -156,8 +158,8 @@ pub fn ensure_data_block(
     }
 
     let new_data = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
-    drop(cache.get_zero_data(new_data, device)?);
-    let mut parent = cache.get(current_indirect, device)?;
+    drop(cache.get_zero_data(new_data, device, owner)?);
+    let mut parent = cache.get_owned(current_indirect, device, owner)?;
     write_ptr(parent.data_mut(), data_idx, new_data);
 
     Ok((new_data, true))

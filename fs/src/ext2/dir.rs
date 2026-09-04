@@ -1,6 +1,6 @@
 use super::Ext2Error;
 use super::blockmap;
-use super::cache::BlockCache;
+use super::cache::{BlockCache, BlockOwner};
 use super::geometry::Ext2Geometry;
 use super::ondisk::{
     DIR_ENTRY_HEADER_SIZE, DirEntry, Inode, Superblock, dir_entry_size, write_dir_entry,
@@ -79,6 +79,7 @@ pub fn for_each_entry(
     device: &dyn BlockDevice,
     ptrs_per_block: u32,
     block_size: u32,
+    owner: BlockOwner,
     f: &mut dyn FnMut(DirEntry<'_>) -> bool,
 ) -> Result<(), Ext2Error> {
     if !inode.is_directory() {
@@ -87,11 +88,11 @@ pub fn for_each_entry(
     let mut offset = 0u32;
     while offset < inode.size {
         let file_block = FileBlock(offset / block_size);
-        let phys = blockmap::map_block(inode, file_block, ptrs_per_block, cache, device)?;
+        let phys = blockmap::map_block(inode, file_block, ptrs_per_block, cache, device, owner)?;
         if !phys.is_valid() {
             break;
         }
-        let block = cache.get(phys, device)?;
+        let block = cache.get_owned(phys, device, owner)?;
         let data = block.data();
         let mut cursor = 0usize;
         while cursor + DIR_ENTRY_HEADER_SIZE <= block_size as usize {
@@ -122,6 +123,7 @@ pub fn lookup_child(
     device: &dyn BlockDevice,
     ptrs_per_block: u32,
     block_size: u32,
+    owner: BlockOwner,
 ) -> Result<InodeNum, Ext2Error> {
     let mut found = None;
     for_each_entry(
@@ -130,6 +132,7 @@ pub fn lookup_child(
         device,
         ptrs_per_block,
         block_size,
+        owner,
         &mut |entry| {
             if entry.name == name {
                 found = Some(entry.inode);
@@ -152,6 +155,7 @@ pub fn remove_dir_entry(
     device: &dyn BlockDevice,
     ptrs_per_block: u32,
     block_size: u32,
+    owner: BlockOwner,
 ) -> Result<(), Ext2Error> {
     if !parent.is_directory() {
         return Err(Ext2Error::NotDirectory);
@@ -160,11 +164,11 @@ pub fn remove_dir_entry(
     let mut offset = 0u32;
     while offset < parent.size {
         let file_block = FileBlock(offset / block_size);
-        let phys = blockmap::map_block(parent, file_block, ptrs_per_block, cache, device)?;
+        let phys = blockmap::map_block(parent, file_block, ptrs_per_block, cache, device, owner)?;
         if !phys.is_valid() {
             break;
         }
-        let mut block = cache.get(phys, device)?;
+        let mut block = cache.get_owned(phys, device, owner)?;
         let data = block.data_mut();
 
         let mut cursor = 0usize;
@@ -212,6 +216,7 @@ pub fn is_dir_empty(
     device: &dyn BlockDevice,
     ptrs_per_block: u32,
     block_size: u32,
+    owner: BlockOwner,
 ) -> Result<bool, Ext2Error> {
     let mut count = 0u32;
     for_each_entry(
@@ -220,6 +225,7 @@ pub fn is_dir_empty(
         device,
         ptrs_per_block,
         block_size,
+        owner,
         &mut |entry| {
             if entry.name == b"." || entry.name == b".." {
                 count += 1;
@@ -244,6 +250,7 @@ pub fn append_dir_entry(
     block_size: u32,
     superblock: &mut Superblock,
     geom: &Ext2Geometry,
+    owner: BlockOwner,
 ) -> Result<(), Ext2Error> {
     let needed = dir_entry_size(name.len());
     let bs = block_size as usize;
@@ -251,11 +258,18 @@ pub fn append_dir_entry(
     let mut offset = 0u32;
     while offset < parent_inode.size {
         let file_block = FileBlock(offset / block_size);
-        let phys = blockmap::map_block(parent_inode, file_block, ptrs_per_block, cache, device)?;
+        let phys = blockmap::map_block(
+            parent_inode,
+            file_block,
+            ptrs_per_block,
+            cache,
+            device,
+            owner,
+        )?;
         if !phys.is_valid() {
             break;
         }
-        let mut block = cache.get(phys, device)?;
+        let mut block = cache.get_owned(phys, device, owner)?;
         let data = block.data_mut();
         let mut cursor = 0usize;
 
@@ -304,10 +318,18 @@ pub fn append_dir_entry(
         device,
         superblock,
         geom,
+        owner,
     )?;
-    let new_block = blockmap::map_block(parent_inode, file_block, ptrs_per_block, cache, device)?;
+    let new_block = blockmap::map_block(
+        parent_inode,
+        file_block,
+        ptrs_per_block,
+        cache,
+        device,
+        owner,
+    )?;
 
-    let mut block = cache.get_zero(new_block, device)?;
+    let mut block = cache.get_zero_owned(new_block, device, owner)?;
     let data = block.data_mut();
     write_dir_entry(&mut data[..bs], child, name, file_type, bs);
 
@@ -324,15 +346,23 @@ pub fn update_dotdot(
     device: &dyn BlockDevice,
     ptrs_per_block: u32,
     block_size: u32,
+    owner: BlockOwner,
 ) -> Result<(), Ext2Error> {
     if !dir_inode.is_directory() {
         return Err(Ext2Error::NotDirectory);
     }
-    let phys = blockmap::map_block(dir_inode, FileBlock(0), ptrs_per_block, cache, device)?;
+    let phys = blockmap::map_block(
+        dir_inode,
+        FileBlock(0),
+        ptrs_per_block,
+        cache,
+        device,
+        owner,
+    )?;
     if !phys.is_valid() {
         return Err(Ext2Error::DirectoryFormat);
     }
-    let mut block = cache.get(phys, device)?;
+    let mut block = cache.get_owned(phys, device, owner)?;
     let data = block.data_mut();
     let bs = block_size as usize;
 

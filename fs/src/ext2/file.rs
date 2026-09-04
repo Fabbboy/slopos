@@ -1,6 +1,6 @@
 use super::Ext2Error;
 use super::blockmap;
-use super::cache::BlockCache;
+use super::cache::{BlockCache, BlockOwner};
 use super::geometry::Ext2Geometry;
 use super::ondisk::{Inode, Superblock};
 use super::types::{BlockNum, FileBlock};
@@ -15,6 +15,7 @@ pub fn read_file(
     device: &dyn BlockDevice,
     ptrs_per_block: u32,
     block_size: u32,
+    owner: BlockOwner,
 ) -> Result<usize, Ext2Error> {
     if !inode.is_regular_file() {
         return Err(Ext2Error::NotFile);
@@ -32,9 +33,9 @@ pub fn read_file(
         let block_off = (file_offset % block_size as u64) as usize;
         let to_copy = cmp::min(max_len - read_total, block_size as usize - block_off);
 
-        let phys = blockmap::map_block(inode, fb, ptrs_per_block, cache, device)?;
+        let phys = blockmap::map_block(inode, fb, ptrs_per_block, cache, device, owner)?;
         if phys.is_valid() {
-            let blk = cache.get_data(phys, device)?;
+            let blk = cache.get_data(phys, device, owner)?;
             buffer[read_total..read_total + to_copy]
                 .copy_from_slice(&blk.data()[block_off..block_off + to_copy]);
         } else {
@@ -57,6 +58,7 @@ pub fn write_file(
     block_size: u32,
     superblock: &mut Superblock,
     geom: &Ext2Geometry,
+    owner: BlockOwner,
 ) -> Result<usize, Ext2Error> {
     if !inode.is_regular_file() {
         return Err(Ext2Error::NotFile);
@@ -80,9 +82,10 @@ pub fn write_file(
             device,
             superblock,
             geom,
+            owner,
         )?;
 
-        let mut blk = cache.get_data(phys, device)?;
+        let mut blk = cache.get_data(phys, device, owner)?;
         blk.data_mut()[block_off..block_off + to_copy]
             .copy_from_slice(&buffer[written..written + to_copy]);
 
@@ -108,6 +111,7 @@ pub fn truncate(
     device: &dyn BlockDevice,
     ptrs_per_block: u32,
     block_size: u32,
+    owner: BlockOwner,
     free_fn: &mut dyn FnMut(BlockNum) -> Result<(), Ext2Error>,
 ) -> Result<(), Ext2Error> {
     let old_size = inode.size as u64;
@@ -133,14 +137,30 @@ pub fn truncate(
     }
 
     if first_keep <= 12 && inode.block[12].is_valid() {
-        free_indirect(inode.block[12], 1, cache, device, ptrs_per_block, free_fn)?;
+        free_indirect(
+            inode.block[12],
+            1,
+            cache,
+            device,
+            ptrs_per_block,
+            owner,
+            free_fn,
+        )?;
         free_fn(inode.block[12])?;
         cache.invalidate(inode.block[12]);
         inode.block[12] = BlockNum::ZERO;
     }
 
     if first_keep <= 12 + ptrs_per_block && inode.block[13].is_valid() {
-        free_indirect(inode.block[13], 2, cache, device, ptrs_per_block, free_fn)?;
+        free_indirect(
+            inode.block[13],
+            2,
+            cache,
+            device,
+            ptrs_per_block,
+            owner,
+            free_fn,
+        )?;
         free_fn(inode.block[13])?;
         cache.invalidate(inode.block[13]);
         inode.block[13] = BlockNum::ZERO;
@@ -148,7 +168,15 @@ pub fn truncate(
 
     let ti_start = 12 + ptrs_per_block + ptrs_per_block * ptrs_per_block;
     if first_keep <= ti_start && inode.block[14].is_valid() {
-        free_indirect(inode.block[14], 3, cache, device, ptrs_per_block, free_fn)?;
+        free_indirect(
+            inode.block[14],
+            3,
+            cache,
+            device,
+            ptrs_per_block,
+            owner,
+            free_fn,
+        )?;
         free_fn(inode.block[14])?;
         cache.invalidate(inode.block[14]);
         inode.block[14] = BlockNum::ZERO;
@@ -179,6 +207,7 @@ pub(crate) fn free_indirect(
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
     ptrs_per_block: u32,
+    owner: BlockOwner,
     free_fn: &mut dyn FnMut(BlockNum) -> Result<(), Ext2Error>,
 ) -> Result<(), Ext2Error> {
     if depth == 0 || !block.is_valid() {
@@ -189,7 +218,7 @@ pub(crate) fn free_indirect(
     let mut ptrs =
         slopos_ostd::KVec::<BlockNum>::zeroed(count).map_err(|_| Ext2Error::OutOfMemory)?;
     {
-        let blk = cache.get(block, device)?;
+        let blk = cache.get_owned(block, device, owner)?;
         let data = blk.data();
         for i in 0..count {
             let off = i * 4;
@@ -205,7 +234,15 @@ pub(crate) fn free_indirect(
     for i in 0..count {
         if ptrs[i].is_valid() {
             if depth > 1 {
-                free_indirect(ptrs[i], depth - 1, cache, device, ptrs_per_block, free_fn)?;
+                free_indirect(
+                    ptrs[i],
+                    depth - 1,
+                    cache,
+                    device,
+                    ptrs_per_block,
+                    owner,
+                    free_fn,
+                )?;
             }
             free_fn(ptrs[i])?;
             cache.invalidate(ptrs[i]);

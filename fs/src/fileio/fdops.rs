@@ -288,22 +288,51 @@ fn write_open_file(
     }
 
     let seekable = ops.seekable();
-    // Serialises the offset read, the write and the offset advance against
-    // another writer sharing this description; an unlocked read-modify-write
-    // on `position` lets two writers land on the same offset.
-    let _pos_guard = seekable.then(|| open_file.position_lock.lock());
-    let used_offset = if seekable { open_file.position() } else { 0 };
-    let mut flag_bits = open_file.status_flags().bits();
-    let mut socket_guard = None;
-    if force_nonblock {
-        flag_bits |= slopos_abi::syscall::O_NONBLOCK as u32;
-        socket_guard =
-            ForcedNonblockGuard::engage(ops, open_file.handle, open_file.status_flags().bits());
-    }
-    let rc = ops.write(open_file.handle, buf, used_offset, flag_bits);
-    drop(socket_guard);
-    if rc > 0 && seekable {
-        open_file.position.fetch_add(rc as u64, Ordering::AcqRel);
+    let rc = {
+        // Serialises the offset read, the write and the offset advance against
+        // another writer sharing this description; an unlocked
+        // read-modify-write on `position` lets two writers land on the same
+        // offset. A killed task fails the acquire rather than proceeding
+        // unserialised.
+        let _pos_guard = if seekable {
+            match open_file.position_lock.lock() {
+                Ok(guard) => Some(guard),
+                Err(_) => return Errno::EINTR.raw() as _,
+            }
+        } else {
+            None
+        };
+        let used_offset = if seekable { open_file.position() } else { 0 };
+        let mut flag_bits = open_file.status_flags().bits();
+        let mut socket_guard = None;
+        if force_nonblock {
+            flag_bits |= slopos_abi::syscall::O_NONBLOCK as u32;
+            socket_guard =
+                ForcedNonblockGuard::engage(ops, open_file.handle, open_file.status_flags().bits());
+        }
+        let rc = ops.write(open_file.handle, buf, used_offset, flag_bits);
+        drop(socket_guard);
+        if rc > 0 && seekable {
+            open_file.position.fetch_add(rc as u64, Ordering::AcqRel);
+        }
+        rc
+    };
+
+    // A failed commit is reported as this write's error even though the offset
+    // already advanced: `O_SYNC` promises durability, not transactionality, and
+    // rewinding would misreport bytes the filesystem does hold.
+    //
+    // `EINVAL` is the exception, because it is `FileOps::sync`'s default: a tty,
+    // pipe or socket has no backing store to commit and every write to one is
+    // already as durable as it will get. Failing the write there would make
+    // `O_SYNC` unusable on a descriptor Linux accepts it on.
+    if rc > 0
+        && let Some(data_only) = open_sync_policy(open_file.status_flags())
+    {
+        let sync_rc = ops.sync(open_file.handle, data_only);
+        if sync_rc != 0 && sync_rc != Errno::EINVAL.raw() {
+            return sync_rc as ssize_t;
+        }
     }
     rc
 }
