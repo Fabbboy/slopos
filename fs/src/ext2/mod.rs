@@ -14,8 +14,9 @@ pub mod types;
 use cache::{BlockCache, BlockOwner};
 use geometry::Ext2Geometry;
 use ondisk::{
-    DIR_FT_DIR, DIR_FT_REG_FILE, DirEntry, EXT2_ERROR_FS, EXT2_VALID_FS, GroupDesc, Inode,
-    MODE_DIRECTORY, MODE_FILE, Superblock,
+    DIR_FT_DIR, DIR_FT_REG_FILE, DIR_FT_SYMLINK, DirEntry, EXT2_ERROR_FS, EXT2_IMMUTABLE_FL,
+    EXT2_VALID_FS, GroupDesc, Inode, MODE_DIRECTORY, MODE_FILE, MODE_PERM_MASK,
+    RO_COMPAT_LARGE_FILE, Superblock,
 };
 use types::{BlockNum, GroupIdx, InodeNum};
 
@@ -48,11 +49,128 @@ pub enum Ext2Error {
     IsDirectory,
     TooManyLinks,
     OutOfMemory,
+    /// The inode carries `EXT2_IMMUTABLE_FL` and refuses every mutation.
+    Immutable,
+    /// A rename would splice a directory into its own subtree, detaching it
+    /// and everything under it from the root.
+    InvalidPath,
 }
 
 pub type Ext2Superblock = Superblock;
 pub type Ext2Inode = Inode;
 
+/// What `create_inode_entry` is being asked to build.
+#[derive(Copy, Clone)]
+enum NewInode<'a> {
+    File,
+    Directory,
+    Symlink(&'a [u8]),
+}
+
+/// Which of `unlink(2)` and `rmdir(2)` a removal is, so the wrong one on a
+/// directory reports `EISDIR`/`ENOTDIR` instead of silently doing the other.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum RemoveKind {
+    NonDirectory,
+    Directory,
+}
+
+/// A validated rename, carrying only what the mutation stages need — not the
+/// `Inode`s the validation read, which is what keeps each stage's frame small.
+struct RenamePlan {
+    source: InodeNum,
+    source_is_dir: bool,
+    file_type: u8,
+    /// Set when the destination name exists and must be removed first.
+    displaced: Option<RemoveKind>,
+    /// The two ends name different directories, so a moved directory shifts a
+    /// `..` link between them.
+    reparenting: bool,
+}
+
+/// The directory-entry type byte matching an inode's mode. The `filetype`
+/// incompat feature is negotiated, so an entry carrying the wrong byte is a
+/// lookup that answers with the wrong `d_type` for every other reader.
+fn dir_file_type(inode: &Inode) -> u8 {
+    use ondisk::{
+        DIR_FT_BLKDEV, DIR_FT_CHRDEV, DIR_FT_FIFO, DIR_FT_SOCK, DIR_FT_UNKNOWN, MODE_BLOCKDEV,
+        MODE_CHARDEV, MODE_FIFO, MODE_SOCKET,
+    };
+    match inode.file_type_mode() {
+        MODE_DIRECTORY => DIR_FT_DIR,
+        MODE_FILE => DIR_FT_REG_FILE,
+        ondisk::MODE_SYMLINK => DIR_FT_SYMLINK,
+        MODE_CHARDEV => DIR_FT_CHRDEV,
+        MODE_BLOCKDEV => DIR_FT_BLKDEV,
+        MODE_FIFO => DIR_FT_FIFO,
+        MODE_SOCKET => DIR_FT_SOCK,
+        _ => DIR_FT_UNKNOWN,
+    }
+}
+
+/// RAII scope for one all-or-nothing ext2 operation.
+///
+/// Rolls back on drop unless [`Self::commit`] ran, which covers the `?` exits
+/// that make up most of the failure paths below as well as an explicit
+/// `return Err`. The `Drop` is panic-free by construction: every step it takes
+/// is a field assignment or a `BlockCache` method that cannot fail.
+struct Ext2Txn<'t, 'a> {
+    fs: &'t mut Ext2Fs<'a>,
+    superblock: Superblock,
+    superblock_dirty: bool,
+    /// This scope opened the transaction, so its snapshot is the committed
+    /// state and its rollback is the one that runs.
+    outermost: bool,
+    committed: bool,
+}
+
+impl<'t, 'a> Ext2Txn<'t, 'a> {
+    fn begin(fs: &'t mut Ext2Fs<'a>) -> Self {
+        // Only the outermost scope owns the superblock snapshot, matching
+        // `BlockCache::begin_op`'s own depth rule. An inner scope that
+        // restored its own snapshot while the outer one went on to commit
+        // would leave the free counts disagreeing with the bitmaps the cache
+        // still holds.
+        let outermost = !fs.in_transaction;
+        let superblock = fs.superblock;
+        let superblock_dirty = fs.superblock_dirty;
+        fs.in_transaction = true;
+        fs.cache.begin_op();
+        Self {
+            fs,
+            superblock,
+            superblock_dirty,
+            outermost,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+        self.fs.cache.commit_op();
+    }
+}
+
+impl Drop for Ext2Txn<'_, '_> {
+    fn drop(&mut self) {
+        if self.committed {
+            if self.outermost {
+                self.fs.in_transaction = false;
+            }
+            return;
+        }
+        self.fs.cache.rollback_op();
+        if self.outermost {
+            self.fs.superblock = self.superblock;
+            self.fs.superblock_dirty = self.superblock_dirty;
+            self.fs.in_transaction = false;
+        }
+    }
+}
+
+/// Mutating entry points below carry `#[inline(never)]`. Each holds one or
+/// two `Inode`s live along with a directory helper's own frame, and inlining
+/// several into one caller sums past the 2 KiB stack gate.
 pub struct Ext2Fs<'a> {
     device: &'a dyn BlockDevice,
     superblock: Superblock,
@@ -68,12 +186,20 @@ pub struct Ext2Fs<'a> {
     /// read-only-compatible feature this implementation does not write, or
     /// when the device itself refuses writes (a verity-attested image).
     read_only: bool,
+    /// A [`Ext2Txn`] scope is open, so a nested one must not take a second
+    /// superblock snapshot.
+    in_transaction: bool,
 }
 
 impl<'a> Ext2Fs<'a> {
     /// Reads the superblock *without* a cache: mount needs `block_size` to size
     /// the [`BlockCache`] before it exists. Returns
     /// `(superblock, block_size, inode_size)`.
+    ///
+    /// `#[inline(never)]`, as with the other two superblock-I/O helpers: each
+    /// stages the full 1024-byte block on its own frame, and three of those
+    /// inlined into one caller is 3 KiB of the 2 KiB budget.
+    #[inline(never)]
     pub fn mount_params(device: &dyn BlockDevice) -> Result<(Superblock, u32, u16), Ext2Error> {
         let mut sb_buf = [0u8; 1024];
         device
@@ -106,6 +232,7 @@ impl<'a> Ext2Fs<'a> {
             ptrs_per_block: block_size / 4,
             superblock_dirty: false,
             read_only,
+            in_transaction: false,
         })
     }
 
@@ -128,6 +255,34 @@ impl<'a> Ext2Fs<'a> {
             return Err(Ext2Error::ReadOnly);
         }
         Ok(())
+    }
+
+    /// Run `f` as one all-or-nothing operation: an error rolls back every
+    /// block it dirtied and every free-count it moved, so a later flush cannot
+    /// publish half of it.
+    ///
+    /// Every mutating entry point below is wrapped in one. What the rollback
+    /// does *not* cover is a block the cache had to evict mid-operation, which
+    /// reached the device before the failure; [`BlockCache::find_or_evict`]
+    /// makes that the victim of last resort, and closing the residual needs a
+    /// journal rather than a wider guard.
+    fn transaction<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<R, Ext2Error>,
+    ) -> Result<R, Ext2Error> {
+        let mut txn = Ext2Txn::begin(self);
+        let result = f(txn.fs);
+        // A scope whose undo record overflowed can no longer be undone, so
+        // committing it would publish work the guard can no longer stand
+        // behind. Failing here rolls back what is still recorded, which is a
+        // consistent prefix, and the caller sees `NoSpace`.
+        if result.is_ok() && txn.fs.cache.op_undo_overflowed() {
+            return Err(Ext2Error::NoSpace);
+        }
+        if result.is_ok() {
+            txn.commit();
+        }
+        result
     }
 
     /// Mark the image as not cleanly unmounted, so a later fsck knows it must
@@ -153,6 +308,7 @@ impl<'a> Ext2Fs<'a> {
     /// invisible to the cache's own accounting. The clean stamp in particular
     /// is the last write before power-off, and one left in a volatile device
     /// cache means an orderly shutdown still reads as a crash.
+    #[inline(never)]
     fn write_superblock_state(&mut self) -> Result<(), Ext2Error> {
         let mut sb_buf = [0u8; 1024];
         self.device
@@ -413,13 +569,13 @@ impl<'a> Ext2Fs<'a> {
     pub fn read_file(
         &mut self,
         ino: u32,
-        offset: u32,
+        offset: u64,
         buffer: &mut [u8],
     ) -> Result<usize, Ext2Error> {
         let inode = self.read_inode_num(InodeNum(ino))?;
         file::read_file(
             &inode,
-            offset as u64,
+            offset,
             buffer,
             &mut *self.cache,
             self.device,
@@ -429,28 +585,169 @@ impl<'a> Ext2Fs<'a> {
         )
     }
 
-    pub fn write_file(&mut self, ino: u32, offset: u32, buffer: &[u8]) -> Result<usize, Ext2Error> {
+    #[inline(never)]
+    pub fn write_file(&mut self, ino: u32, offset: u64, buffer: &[u8]) -> Result<usize, Ext2Error> {
         self.check_writable()?;
-        let ino_num = InodeNum(ino);
-        let mut inode = self.read_inode_num(ino_num)?;
-        let free_before = self.superblock.free_blocks_count;
-        let result = file::write_file(
-            &mut inode,
-            offset as u64,
+        self.transaction(|fs| {
+            let ino_num = InodeNum(ino);
+            let mut inode = fs.read_inode_num(ino_num)?;
+            if inode.is_immutable() {
+                return Err(Ext2Error::Immutable);
+            }
+            let free_before = fs.superblock.free_blocks_count;
+            // A short write still updated the size and kept its blocks, so the
+            // inode record must be written whichever way this went; only a
+            // zero-byte failure propagates as an error.
+            let result = file::write_file(
+                &mut inode,
+                offset,
+                buffer,
+                &mut *fs.cache,
+                fs.device,
+                fs.ptrs_per_block,
+                fs.block_size,
+                &mut fs.superblock,
+                &fs.geom,
+                BlockOwner::File(ino),
+            );
+            let written = result?;
+            time::stamp(&mut inode.mtime);
+            time::stamp(&mut inode.ctime);
+            fs.note_large_file(&inode);
+            fs.write_inode_num(ino_num, &inode)?;
+            if fs.superblock.free_blocks_count != free_before {
+                fs.superblock_dirty = true;
+            }
+            Ok(written)
+        })
+    }
+
+    /// Shrink or extend a regular file. Extension is sparse, following ext2:
+    /// the hole reads as zeros and costs no blocks until it is written.
+    #[inline(never)]
+    pub fn truncate_file(&mut self, ino: u32, new_size: u64) -> Result<(), Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| {
+            let ino_num = InodeNum(ino);
+            let mut inode = fs.read_inode_num(ino_num)?;
+            if inode.is_immutable() {
+                return Err(Ext2Error::Immutable);
+            }
+            if inode.is_directory() {
+                return Err(Ext2Error::IsDirectory);
+            }
+            if !inode.is_regular_file() {
+                return Err(Ext2Error::NotFile);
+            }
+            let free_before = fs.superblock.free_blocks_count;
+            fs.release_blocks_past(&mut inode, new_size, BlockOwner::File(ino))?;
+            time::stamp(&mut inode.mtime);
+            time::stamp(&mut inode.ctime);
+            fs.note_large_file(&inode);
+            fs.write_inode_num(ino_num, &inode)?;
+            if fs.superblock.free_blocks_count != free_before {
+                fs.superblock_dirty = true;
+            }
+            fs.superblock_dirty = true;
+            Ok(())
+        })
+    }
+
+    /// A file above 4 GiB is only correctly read by an implementation that
+    /// knows to consult `i_size_high`, and ext2 spells that as a
+    /// read-only-compatible feature bit. Writing one without setting the bit
+    /// hands every other reader a truncated size.
+    fn note_large_file(&mut self, inode: &Inode) {
+        if inode.needs_large_file_feature()
+            && self.superblock.feature_ro_compat & RO_COMPAT_LARGE_FILE == 0
+        {
+            self.superblock.feature_ro_compat |= RO_COMPAT_LARGE_FILE;
+            self.superblock_dirty = true;
+        }
+    }
+
+    /// Free every block past `new_size` and update the inode's size and block
+    /// count. Shared by `truncate_file` and directory removal.
+    fn release_blocks_past(
+        &mut self,
+        inode: &mut Inode,
+        new_size: u64,
+        owner: BlockOwner,
+    ) -> Result<(), Ext2Error> {
+        let geom = self.geom;
+        let superblock = &mut self.superblock;
+        let cache = &mut *self.cache;
+        let device = self.device;
+        // `free_block` needs the same cache and superblock the walk borrows,
+        // so the frees are collected and applied after it.
+        let mut freed: slopos_ostd::KVec<BlockNum> = slopos_ostd::KVec::new();
+        file::truncate(
+            inode,
+            new_size,
+            cache,
+            device,
+            self.ptrs_per_block,
+            self.block_size,
+            owner,
+            &mut |b| freed.push(b).map_err(|_| Ext2Error::OutOfMemory),
+        )?;
+        for blk in freed.iter() {
+            ext2_alloc::free_block(*blk, &geom, superblock, cache, device)?;
+        }
+        Ok(())
+    }
+
+    /// Read a symlink's target into `buffer`, answering the byte count.
+    #[inline(never)]
+    pub fn read_symlink(&mut self, ino: u32, buffer: &mut [u8]) -> Result<usize, Ext2Error> {
+        let inode = self.read_inode_num(InodeNum(ino))?;
+        symlink::read_symlink(
+            &inode,
             buffer,
             &mut *self.cache,
             self.device,
             self.ptrs_per_block,
             self.block_size,
-            &mut self.superblock,
-            &self.geom,
             BlockOwner::File(ino),
-        );
-        self.write_inode_num(ino_num, &inode)?;
-        if self.superblock.free_blocks_count != free_before {
-            self.superblock_dirty = true;
-        }
-        result
+        )
+    }
+
+    /// Write `mode`'s permission bits through to `i_mode`, leaving the type
+    /// nibble — a caller must not turn a file into a directory.
+    #[inline(never)]
+    pub fn set_mode(&mut self, ino: u32, mode: u16) -> Result<(), Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| {
+            let ino_num = InodeNum(ino);
+            let mut inode = fs.read_inode_num(ino_num)?;
+            if inode.is_immutable() {
+                return Err(Ext2Error::Immutable);
+            }
+            inode.mode = (inode.mode & !MODE_PERM_MASK) | (mode & MODE_PERM_MASK);
+            time::stamp(&mut inode.ctime);
+            fs.write_inode_num(ino_num, &inode)
+        })
+    }
+
+    /// Seal an inode with `EXT2_IMMUTABLE_FL`. One-way, as the VFS trait
+    /// requires: nothing in this implementation clears the bit.
+    #[inline(never)]
+    pub fn set_sealed(&mut self, ino: u32) -> Result<(), Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| {
+            let ino_num = InodeNum(ino);
+            let mut inode = fs.read_inode_num(ino_num)?;
+            if inode.is_immutable() {
+                return Ok(());
+            }
+            inode.flags |= EXT2_IMMUTABLE_FL;
+            time::stamp(&mut inode.ctime);
+            fs.write_inode_num(ino_num, &inode)
+        })
+    }
+
+    pub fn is_sealed(&mut self, ino: u32) -> Result<bool, Ext2Error> {
+        Ok(self.read_inode_num(InodeNum(ino))?.is_immutable())
     }
 
     pub fn for_each_dir_entry<F>(&mut self, ino: u32, mut f: F) -> Result<(), Ext2Error>
@@ -460,6 +757,31 @@ impl<'a> Ext2Fs<'a> {
         let inode = self.read_inode_num(InodeNum(ino))?;
         dir::for_each_entry(
             &inode,
+            &mut *self.cache,
+            self.device,
+            self.ptrs_per_block,
+            self.block_size,
+            BlockOwner::File(ino),
+            &mut f,
+        )
+    }
+
+    /// Walk a directory from a byte-offset cookie, handing the callback the
+    /// cookie that resumes *after* each entry. Answers the cookie the walk
+    /// reached, which equals the directory's size once it is exhausted.
+    pub fn for_each_dir_entry_from<F>(
+        &mut self,
+        ino: u32,
+        start: u64,
+        mut f: F,
+    ) -> Result<u64, Ext2Error>
+    where
+        F: FnMut(u64, DirEntry<'_>) -> bool,
+    {
+        let inode = self.read_inode_num(InodeNum(ino))?;
+        dir::for_each_entry_from(
+            &inode,
+            start,
             &mut *self.cache,
             self.device,
             self.ptrs_per_block,
@@ -516,29 +838,59 @@ impl<'a> Ext2Fs<'a> {
         Ok(current.raw())
     }
 
+    #[inline(never)]
     pub fn create_file(&mut self, parent: u32, name: &[u8]) -> Result<u32, Ext2Error> {
-        self.create_inode_entry(InodeNum(parent), name, false)
+        self.check_writable()?;
+        self.transaction(|fs| fs.create_inode_entry(InodeNum(parent), name, NewInode::File))
             .map(|n| n.raw())
     }
 
+    #[inline(never)]
     pub fn create_directory(&mut self, parent: u32, name: &[u8]) -> Result<u32, Ext2Error> {
-        self.create_inode_entry(InodeNum(parent), name, true)
+        self.check_writable()?;
+        self.transaction(|fs| fs.create_inode_entry(InodeNum(parent), name, NewInode::Directory))
             .map(|n| n.raw())
     }
 
+    /// Create a symlink under `parent` pointing at `target`. Targets of 60
+    /// bytes or fewer are fast symlinks, stored inline in `i_block`.
+    pub fn create_symlink(
+        &mut self,
+        parent: u32,
+        name: &[u8],
+        target: &[u8],
+    ) -> Result<u32, Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| {
+            fs.create_inode_entry(InodeNum(parent), name, NewInode::Symlink(target))
+        })
+        .map(|n| n.raw())
+    }
+
+    #[inline(never)]
     fn create_inode_entry(
         &mut self,
         parent_num: InodeNum,
         name: &[u8],
-        is_dir: bool,
+        kind: NewInode<'_>,
     ) -> Result<InodeNum, Ext2Error> {
-        self.check_writable()?;
         if name.is_empty() || name.len() > 255 {
             return Err(Ext2Error::NameTooLong);
+        }
+        if name == b"." || name == b".." {
+            return Err(Ext2Error::AlreadyExists);
         }
         let mut parent = self.read_inode_num(parent_num)?;
         if !parent.is_directory() {
             return Err(Ext2Error::NotDirectory);
+        }
+        if parent.is_immutable() {
+            return Err(Ext2Error::Immutable);
+        }
+        let is_dir = matches!(kind, NewInode::Directory);
+        // A directory's parent gains a `..` link, and `links_count` is a u16.
+        if is_dir && parent.links_count == u16::MAX {
+            return Err(Ext2Error::TooManyLinks);
         }
 
         // Without this a second create writes a second record under the same
@@ -572,7 +924,76 @@ impl<'a> Ext2Fs<'a> {
             self.device,
         )?;
 
-        let mut new_inode = Inode {
+        let mut new_inode = self.build_new_inode(new_ino, parent_num, kind)?;
+        let now = time::now_unix();
+        new_inode.atime = now;
+        new_inode.ctime = now;
+        new_inode.mtime = now;
+        self.write_inode_num(new_ino, &new_inode)?;
+
+        let ft = match kind {
+            NewInode::Directory => DIR_FT_DIR,
+            NewInode::File => DIR_FT_REG_FILE,
+            NewInode::Symlink(_) => DIR_FT_SYMLINK,
+        };
+        dir::append_dir_entry(
+            &mut parent,
+            new_ino,
+            name,
+            ft,
+            &mut *self.cache,
+            self.device,
+            self.ptrs_per_block,
+            self.block_size,
+            &mut self.superblock,
+            &self.geom,
+            BlockOwner::File(parent_num.raw()),
+        )?;
+
+        if is_dir {
+            parent.links_count += 1;
+            self.adjust_used_dirs(new_ino, 1)?;
+        }
+        time::stamp(&mut parent.mtime);
+        time::stamp(&mut parent.ctime);
+        self.write_inode_num(parent_num, &parent)?;
+        self.superblock_dirty = true;
+
+        Ok(new_ino)
+    }
+
+    /// The in-memory record for a newly allocated inode, with the data blocks
+    /// a directory or a slow symlink needs already written.
+    #[inline(never)]
+    fn build_new_inode(
+        &mut self,
+        new_ino: InodeNum,
+        parent_num: InodeNum,
+        kind: NewInode<'_>,
+    ) -> Result<Inode, Ext2Error> {
+        if let NewInode::Symlink(target) = kind {
+            let data_block = if symlink::symlink_needs_block(target) {
+                Some(ext2_alloc::allocate_block(
+                    &self.geom,
+                    &mut self.superblock,
+                    &mut *self.cache,
+                    self.device,
+                )?)
+            } else {
+                None
+            };
+            return symlink::create_symlink_inode(
+                target,
+                self.block_size,
+                data_block,
+                &mut *self.cache,
+                self.device,
+                BlockOwner::File(new_ino.raw()),
+            );
+        }
+
+        let is_dir = matches!(kind, NewInode::Directory);
+        let mut inode = Inode {
             mode: if is_dir {
                 MODE_DIRECTORY | 0o755
             } else {
@@ -590,70 +1011,85 @@ impl<'a> Ext2Fs<'a> {
             flags: 0,
             block: [BlockNum::ZERO; 15],
         };
-
-        if is_dir {
-            let first_block = ext2_alloc::allocate_block(
-                &self.geom,
-                &mut self.superblock,
-                &mut *self.cache,
-                self.device,
-            )?;
-            {
-                let mut blk = self.cache.get_zero_data(
-                    first_block,
-                    self.device,
-                    BlockOwner::File(new_ino.raw()),
-                )?;
-                let data = blk.data_mut();
-                let bs = self.block_size as usize;
-                let dot_rec = 12;
-                ondisk::write_dir_entry(&mut data[..dot_rec], new_ino, b".", DIR_FT_DIR, dot_rec);
-                let dotdot_rec = bs - dot_rec;
-                ondisk::write_dir_entry(
-                    &mut data[dot_rec..dot_rec + dotdot_rec],
-                    parent_num,
-                    b"..",
-                    DIR_FT_DIR,
-                    dotdot_rec,
-                );
-            }
-            new_inode.block[0] = first_block;
-            new_inode.size = self.block_size;
-            new_inode.blocks = self.block_size / 512;
+        if !is_dir {
+            return Ok(inode);
         }
 
-        self.write_inode_num(new_ino, &new_inode)?;
-
-        let ft = if is_dir { DIR_FT_DIR } else { DIR_FT_REG_FILE };
-        dir::append_dir_entry(
-            &mut parent,
-            new_ino,
-            name,
-            ft,
+        let first_block = ext2_alloc::allocate_block(
+            &self.geom,
+            &mut self.superblock,
             &mut *self.cache,
             self.device,
-            self.ptrs_per_block,
-            self.block_size,
-            &mut self.superblock,
-            &self.geom,
-            BlockOwner::File(parent_num.raw()),
         )?;
-
-        if is_dir {
-            parent.links_count += 1;
+        {
+            let mut blk = self.cache.get_zero_data(
+                first_block,
+                self.device,
+                BlockOwner::File(new_ino.raw()),
+            )?;
+            let data = blk.data_mut();
+            let bs = self.block_size as usize;
+            let dot_rec = 12;
+            ondisk::write_dir_entry(&mut data[..dot_rec], new_ino, b".", DIR_FT_DIR, dot_rec);
+            let dotdot_rec = bs - dot_rec;
+            ondisk::write_dir_entry(
+                &mut data[dot_rec..dot_rec + dotdot_rec],
+                parent_num,
+                b"..",
+                DIR_FT_DIR,
+                dotdot_rec,
+            );
         }
-        self.write_inode_num(parent_num, &parent)?;
-        self.superblock_dirty = true;
-
-        Ok(new_ino)
+        inode.block[0] = first_block;
+        inode.size = self.block_size as u64;
+        inode.blocks = self.block_size / 512;
+        Ok(inode)
     }
 
+    /// Move the `used_dirs_count` of the group holding `ino` by `delta`.
+    /// `e2fsck` reports a stale one, and the allocator's directory-spreading
+    /// heuristic is what the field exists for.
+    fn adjust_used_dirs(&mut self, ino: InodeNum, delta: i32) -> Result<(), Ext2Error> {
+        let (group, _) = self.geom.locate_inode(ino).ok_or(Ext2Error::InvalidInode)?;
+        let mut desc = self.read_group_desc(group)?;
+        desc.used_dirs_count = if delta >= 0 {
+            desc.used_dirs_count.saturating_add(delta as u16)
+        } else {
+            desc.used_dirs_count.saturating_sub((-delta) as u16)
+        };
+        ext2_alloc::write_group_desc(group, &desc, &self.geom, &mut *self.cache, self.device)
+    }
+
+    #[inline(never)]
     pub fn unlink_entry(&mut self, parent: u32, name: &[u8]) -> Result<(), Ext2Error> {
         self.check_writable()?;
-        let parent_num = InodeNum(parent);
+        self.transaction(|fs| fs.remove_entry(InodeNum(parent), name, RemoveKind::NonDirectory))
+    }
+
+    /// Remove an empty directory: `rmdir(2)`'s semantics, including the
+    /// parent's `links_count` decrement for the vanished `..`.
+    #[inline(never)]
+    pub fn remove_directory(&mut self, parent: u32, name: &[u8]) -> Result<(), Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| fs.remove_entry(InodeNum(parent), name, RemoveKind::Directory))
+    }
+
+    #[inline(never)]
+    fn remove_entry(
+        &mut self,
+        parent_num: InodeNum,
+        name: &[u8],
+        kind: RemoveKind,
+    ) -> Result<(), Ext2Error> {
+        if name == b"." || name == b".." {
+            return Err(Ext2Error::NotEmpty);
+        }
         let mut parent_inode = self.read_inode_num(parent_num)?;
         if !parent_inode.is_directory() {
             return Err(Ext2Error::NotDirectory);
+        }
+        if parent_inode.is_immutable() {
+            return Err(Ext2Error::Immutable);
         }
 
         let target_num = dir::lookup_child(
@@ -663,12 +1099,30 @@ impl<'a> Ext2Fs<'a> {
             self.device,
             self.ptrs_per_block,
             self.block_size,
-            BlockOwner::File(parent),
+            BlockOwner::File(parent_num.raw()),
         )?;
-        let target = self.read_inode_num(target_num)?;
+        let mut target = self.read_inode_num(target_num)?;
+        if target.is_immutable() {
+            return Err(Ext2Error::Immutable);
+        }
 
-        if target.is_directory() {
-            return Err(Ext2Error::IsDirectory);
+        let is_dir = target.is_directory();
+        match kind {
+            RemoveKind::NonDirectory if is_dir => return Err(Ext2Error::IsDirectory),
+            RemoveKind::Directory if !is_dir => return Err(Ext2Error::NotDirectory),
+            _ => {}
+        }
+        if is_dir
+            && !dir::is_dir_empty(
+                &target,
+                &mut *self.cache,
+                self.device,
+                self.ptrs_per_block,
+                self.block_size,
+                BlockOwner::File(target_num.raw()),
+            )?
+        {
+            return Err(Ext2Error::NotEmpty);
         }
 
         dir::remove_dir_entry(
@@ -678,40 +1132,332 @@ impl<'a> Ext2Fs<'a> {
             self.device,
             self.ptrs_per_block,
             self.block_size,
-            BlockOwner::File(parent),
+            BlockOwner::File(parent_num.raw()),
         )?;
 
-        self.release_file_blocks(&target, BlockOwner::File(target_num.raw()))?;
-        ext2_alloc::free_inode(
-            target_num,
-            &self.geom,
-            &mut self.superblock,
-            &mut *self.cache,
-            self.device,
-        )?;
+        // A name is not the inode. An image `mkfs` or any other kernel wrote
+        // may carry several names for one inode, and freeing its blocks while
+        // another name still points at them hands a live file's contents to
+        // the next allocation. A directory is exempt: its two links are `.`
+        // and its parent's entry, both of which this removal takes with it.
+        let last_link = is_dir || target.links_count <= 1;
+        if !last_link {
+            target.links_count -= 1;
+            time::stamp(&mut target.ctime);
+            self.write_inode_num(target_num, &target)?;
+        } else {
+            // A fast symlink's target lives in `i_block`, which the block walk
+            // would otherwise read as fifteen block numbers and free.
+            if !target.is_fast_symlink() {
+                self.release_file_blocks(&target, BlockOwner::File(target_num.raw()))?;
+            }
+            ext2_alloc::free_inode(
+                target_num,
+                &self.geom,
+                &mut self.superblock,
+                &mut *self.cache,
+                self.device,
+            )?;
+            if is_dir {
+                self.adjust_used_dirs(target_num, -1)?;
+            }
 
-        let zeroed = Inode {
-            mode: 0,
-            uid: 0,
-            size: 0,
-            atime: 0,
-            ctime: 0,
-            mtime: 0,
-            dtime: 0,
-            gid: 0,
-            links_count: 0,
-            blocks: 0,
-            flags: 0,
-            block: [BlockNum::ZERO; 15],
-        };
-        self.write_inode_num(target_num, &zeroed)?;
+            // `i_dtime` is what every other ext2 implementation stamps on a
+            // free, and what `e2fsck` reads to tell a freed inode from a
+            // corrupt one.
+            target.mode = 0;
+            target.links_count = 0;
+            target.blocks = 0;
+            target.size = 0;
+            target.flags = 0;
+            target.block = [BlockNum::ZERO; 15];
+            target.dtime = time::now_unix();
+            self.write_inode_num(target_num, &target)?;
+        }
 
-        // Re-read parent in case dir ops mutated the cached block.
+        // Re-read the parent: `remove_dir_entry` mutated its cached data
+        // block, and `append_dir_entry` in an earlier op may have grown it.
         parent_inode = self.read_inode_num(parent_num)?;
+        if is_dir {
+            parent_inode.links_count = parent_inode.links_count.saturating_sub(1);
+        }
+        time::stamp(&mut parent_inode.mtime);
+        time::stamp(&mut parent_inode.ctime);
         self.write_inode_num(parent_num, &parent_inode)?;
         self.superblock_dirty = true;
 
         Ok(())
+    }
+
+    /// Move `old_name` under `old_parent` to `new_name` under `new_parent`.
+    ///
+    /// The new entry is written before the old is removed, so a crash between
+    /// the two leaves two names for one inode — recoverable by `e2fsck` —
+    /// rather than none. That is the whole of the atomicity ext2 without a
+    /// journal can offer.
+    pub fn rename_entry(
+        &mut self,
+        old_parent: u32,
+        old_name: &[u8],
+        new_parent: u32,
+        new_name: &[u8],
+    ) -> Result<(), Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| {
+            fs.rename_within(
+                InodeNum(old_parent),
+                old_name,
+                InodeNum(new_parent),
+                new_name,
+            )
+        })
+    }
+
+    /// Split into `#[inline(never)]` stages: each holds an `Inode` or two
+    /// live, and one frame carrying all of them plus the inlined bodies of
+    /// `remove_entry` and the directory helpers exceeds the 2 KiB stack cap.
+    fn rename_within(
+        &mut self,
+        old_parent: InodeNum,
+        old_name: &[u8],
+        new_parent: InodeNum,
+        new_name: &[u8],
+    ) -> Result<(), Ext2Error> {
+        if new_name.is_empty() || new_name.len() > 255 {
+            return Err(Ext2Error::NameTooLong);
+        }
+        for name in [old_name, new_name] {
+            if name == b"." || name == b".." {
+                return Err(Ext2Error::InvalidPath);
+            }
+        }
+        if old_parent == new_parent && old_name == new_name {
+            return Ok(());
+        }
+
+        let Some(plan) = self.rename_plan(old_parent, old_name, new_parent, new_name)? else {
+            return Ok(());
+        };
+
+        if let Some(kind) = plan.displaced {
+            // POSIX: a directory may only be renamed over an *empty* one, and
+            // that check lives in `remove_entry`, ahead of the removal.
+            self.remove_entry(new_parent, new_name, kind)?;
+        }
+
+        self.rename_link_new(new_parent, new_name, &plan)?;
+        self.rename_unlink_old(old_parent, old_name, &plan)?;
+
+        if plan.source_is_dir && old_parent != new_parent {
+            self.rename_fix_dotdot(plan.source, new_parent)?;
+        }
+
+        let mut moved = self.read_inode_num(plan.source)?;
+        time::stamp(&mut moved.ctime);
+        self.write_inode_num(plan.source, &moved)?;
+        self.superblock_dirty = true;
+
+        Ok(())
+    }
+
+    /// Validate a rename and describe what it will do. `Ok(None)` means the
+    /// rename is a no-op because both names already denote one inode.
+    #[inline(never)]
+    fn rename_plan(
+        &mut self,
+        old_parent: InodeNum,
+        old_name: &[u8],
+        new_parent: InodeNum,
+        new_name: &[u8],
+    ) -> Result<Option<RenamePlan>, Ext2Error> {
+        let source = self
+            .lookup_in_dir(old_parent, old_name)?
+            .ok_or(Ext2Error::PathNotFound)?;
+
+        let (source_is_dir, file_type) = {
+            let source_inode = self.read_inode_num(source)?;
+            if source_inode.is_immutable() {
+                return Err(Ext2Error::Immutable);
+            }
+            (source_inode.is_directory(), dir_file_type(&source_inode))
+        };
+
+        // Splicing a directory into its own subtree detaches it and everything
+        // under it: unreachable from the root, and unremovable because the
+        // walk that would find it starts there.
+        if source_is_dir && (source == new_parent || self.is_ancestor(source, new_parent)?) {
+            return Err(Ext2Error::InvalidPath);
+        }
+
+        let existing = self.lookup_in_dir(new_parent, new_name)?;
+
+        let mut displaced = None;
+        if let Some(existing) = existing {
+            if existing == source {
+                return Ok(None);
+            }
+            let existing_is_dir = self.read_inode_num(existing)?.is_directory();
+            match (source_is_dir, existing_is_dir) {
+                (true, false) => return Err(Ext2Error::NotDirectory),
+                (false, true) => return Err(Ext2Error::IsDirectory),
+                _ => {}
+            }
+            displaced = Some(if existing_is_dir {
+                RemoveKind::Directory
+            } else {
+                RemoveKind::NonDirectory
+            });
+        }
+
+        Ok(Some(RenamePlan {
+            source,
+            source_is_dir,
+            file_type,
+            displaced,
+            reparenting: old_parent != new_parent,
+        }))
+    }
+
+    /// Look a name up in a directory that must be one, and must not be sealed
+    /// — the two checks every mutation through a parent needs, kept in one
+    /// frame so the caller does not hold the parent `Inode` live across the
+    /// rest of its work.
+    #[inline(never)]
+    fn lookup_in_dir(
+        &mut self,
+        parent: InodeNum,
+        name: &[u8],
+    ) -> Result<Option<InodeNum>, Ext2Error> {
+        let parent_inode = self.read_inode_num(parent)?;
+        if !parent_inode.is_directory() {
+            return Err(Ext2Error::NotDirectory);
+        }
+        if parent_inode.is_immutable() {
+            return Err(Ext2Error::Immutable);
+        }
+        Ok(dir::lookup_child(
+            &parent_inode,
+            name,
+            &mut *self.cache,
+            self.device,
+            self.ptrs_per_block,
+            self.block_size,
+            BlockOwner::File(parent.raw()),
+        )
+        .ok())
+    }
+
+    /// Write the new entry. Deliberately before the old one is removed: a
+    /// crash here leaves two names for one inode, which `e2fsck` reconciles,
+    /// where the other order would leave none and lose the file.
+    #[inline(never)]
+    fn rename_link_new(
+        &mut self,
+        new_parent: InodeNum,
+        new_name: &[u8],
+        plan: &RenamePlan,
+    ) -> Result<(), Ext2Error> {
+        let mut target_parent = self.read_inode_num(new_parent)?;
+        if plan.source_is_dir && plan.reparenting && target_parent.links_count == u16::MAX {
+            return Err(Ext2Error::TooManyLinks);
+        }
+        dir::append_dir_entry(
+            &mut target_parent,
+            plan.source,
+            new_name,
+            plan.file_type,
+            &mut *self.cache,
+            self.device,
+            self.ptrs_per_block,
+            self.block_size,
+            &mut self.superblock,
+            &self.geom,
+            BlockOwner::File(new_parent.raw()),
+        )?;
+        if plan.source_is_dir && plan.reparenting {
+            target_parent.links_count += 1;
+        }
+        time::stamp(&mut target_parent.mtime);
+        time::stamp(&mut target_parent.ctime);
+        self.write_inode_num(new_parent, &target_parent)
+    }
+
+    #[inline(never)]
+    fn rename_unlink_old(
+        &mut self,
+        old_parent: InodeNum,
+        old_name: &[u8],
+        plan: &RenamePlan,
+    ) -> Result<(), Ext2Error> {
+        // Re-read: `append_dir_entry` may have grown the shared parent when
+        // both ends name one directory.
+        let source_parent = self.read_inode_num(old_parent)?;
+        dir::remove_dir_entry(
+            &source_parent,
+            old_name,
+            &mut *self.cache,
+            self.device,
+            self.ptrs_per_block,
+            self.block_size,
+            BlockOwner::File(old_parent.raw()),
+        )?;
+        let mut source_parent = self.read_inode_num(old_parent)?;
+        if plan.source_is_dir && plan.reparenting {
+            source_parent.links_count = source_parent.links_count.saturating_sub(1);
+        }
+        time::stamp(&mut source_parent.mtime);
+        time::stamp(&mut source_parent.ctime);
+        self.write_inode_num(old_parent, &source_parent)
+    }
+
+    #[inline(never)]
+    fn rename_fix_dotdot(
+        &mut self,
+        moved: InodeNum,
+        new_parent: InodeNum,
+    ) -> Result<(), Ext2Error> {
+        let inode = self.read_inode_num(moved)?;
+        dir::update_dotdot(
+            &inode,
+            new_parent,
+            &mut *self.cache,
+            self.device,
+            self.ptrs_per_block,
+            self.block_size,
+            BlockOwner::File(moved.raw()),
+        )
+    }
+
+    /// Whether `ancestor` is on the `..` chain above `descendant`. Bounded by
+    /// the inode count, so a `..` cycle in a damaged image terminates.
+    fn is_ancestor(&mut self, ancestor: InodeNum, descendant: InodeNum) -> Result<bool, Ext2Error> {
+        let mut current = descendant;
+        let mut steps = 0u32;
+        let limit = self.geom.inodes_count();
+        while current != InodeNum::ROOT {
+            if current == ancestor {
+                return Ok(true);
+            }
+            steps += 1;
+            if steps > limit {
+                return Err(Ext2Error::DirectoryFormat);
+            }
+            let inode = self.read_inode_num(current)?;
+            let parent = dir::lookup_child(
+                &inode,
+                b"..",
+                &mut *self.cache,
+                self.device,
+                self.ptrs_per_block,
+                self.block_size,
+                BlockOwner::File(current.raw()),
+            )?;
+            if parent == current {
+                break;
+            }
+            current = parent;
+        }
+        Ok(current == ancestor)
     }
 
     pub fn remove_path(&mut self, path: &[u8]) -> Result<(), Ext2Error> {
@@ -722,6 +1468,21 @@ impl<'a> Ext2Fs<'a> {
 
     fn read_group_desc(&mut self, group: GroupIdx) -> Result<GroupDesc, Ext2Error> {
         ext2_alloc::read_group_desc(group, &self.geom, self.cache, self.device)
+    }
+
+    /// Write an inode record verbatim, so a test can construct on-disk states
+    /// this implementation has no operation for — a second hard link, above
+    /// all, which every other ext2 writer produces and `unlink` must honour.
+    #[cfg(feature = "tests")]
+    pub fn write_inode_for_test(&mut self, ino: u32, inode: &Inode) -> Result<(), Ext2Error> {
+        self.write_inode_num(InodeNum(ino), inode)
+    }
+
+    /// A group's directory count, which `e2fsck` cross-checks against the
+    /// inodes it finds.
+    pub fn group_used_dirs(&mut self, group: u32) -> Result<u16, Ext2Error> {
+        let group = self.geom.group(group).ok_or(Ext2Error::InvalidBlock)?;
+        Ok(self.read_group_desc(group)?.used_dirs_count)
     }
 
     /// Free every block an inode owns: the twelve direct ones and all three
@@ -778,12 +1539,13 @@ impl<'a> Ext2Fs<'a> {
         Ok(())
     }
 
+    #[inline(never)]
     fn write_superblock(&mut self) -> Result<(), Ext2Error> {
         let mut sb_buf = [0u8; 1024];
         self.device
             .read_at(1024, &mut sb_buf)
             .map_err(|_| Ext2Error::DeviceError)?;
-        self.superblock.encode_free_counts(&mut sb_buf);
+        self.superblock.encode_mutable_fields(&mut sb_buf);
         self.device
             .write_at(1024, &sb_buf)
             .map_err(|_| Ext2Error::DeviceError)?;

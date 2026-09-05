@@ -8,9 +8,9 @@ use core::{
 use limine::{
     BaseRevision, RequestsEndMarker, RequestsStartMarker, memmap,
     request::{
-        BootloaderInfoRequest, EfiMemmapRequest, EfiRequest, ExecutableAddressRequest,
-        ExecutableFileRequest, FramebufferRequest, HhdmRequest, MemmapRequest, ModulesRequest,
-        MpRequest, MpResponse, RsdpRequest,
+        BootloaderInfoRequest, DateAtBootRequest, EfiMemmapRequest, EfiRequest,
+        ExecutableAddressRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest,
+        MemmapRequest, ModulesRequest, MpRequest, MpResponse, RsdpRequest,
     },
 };
 
@@ -74,6 +74,10 @@ slopos_ostd::limine_request! {
 slopos_ostd::limine_request! {
     request,
     static EFI_MEMMAP_REQUEST: EfiMemmapRequest = EfiMemmapRequest::new();
+}
+slopos_ostd::limine_request! {
+    request,
+    static DATE_AT_BOOT_REQUEST: DateAtBootRequest = DateAtBootRequest::new();
 }
 slopos_ostd::limine_request! {
     end_marker,
@@ -191,6 +195,15 @@ pub fn ensure_base_revision() {
 
 pub fn mp_response() -> Option<&'static MpResponse> {
     MP_REQUEST.response()
+}
+
+/// Seconds since the Unix epoch at the moment the bootloader handed off, from
+/// the firmware's real-time clock. `None` when the bootloader answered nothing
+/// or answered a pre-epoch value — a machine whose RTC is unset stamps no
+/// timestamp rather than a negative one.
+pub fn date_at_boot_unix() -> Option<u64> {
+    let stamp = DATE_AT_BOOT_REQUEST.response()?.timestamp;
+    u64::try_from(stamp).ok().filter(|&s| s != 0)
 }
 
 fn build_system_info() -> SystemInfo {

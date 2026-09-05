@@ -27,6 +27,15 @@ pub const DIR_FT_SYMLINK: u8 = 7;
 /// Maximum bytes storable inline in a fast symlink (i_block[0..14] = 60 bytes).
 pub const FAST_SYMLINK_MAX: usize = 60;
 
+/// `i_flags`: the inode refuses every mutation. This is the carrier for the
+/// VFS seal — `lsattr`/`chattr` display it and `e2fsck` accepts it, so a
+/// sealed binary reads as sealed to every other ext2 implementation.
+pub const EXT2_IMMUTABLE_FL: u32 = 0x0000_0010;
+
+/// Permission and set-id bits of `i_mode`; the type nibble above them is not
+/// a caller's to change.
+pub const MODE_PERM_MASK: u16 = 0o7777;
+
 /// `s_state`: the filesystem was unmounted cleanly.
 pub const EXT2_VALID_FS: u16 = 1;
 /// `s_state`: errors were detected, or the image is currently mounted.
@@ -120,9 +129,13 @@ impl Superblock {
         self.rev_level >= 1 && (self.feature_ro_compat & !SUPPORTED_RO_COMPAT) != 0
     }
 
-    pub fn encode_free_counts(&self, data: &mut [u8]) {
+    /// The superblock fields an operation may legitimately move. Everything
+    /// else in the 1024-byte block is left as read, so a field this
+    /// implementation does not model survives a write-back untouched.
+    pub fn encode_mutable_fields(&self, data: &mut [u8]) {
         put_le32(data, 12, self.free_blocks_count);
         put_le32(data, 16, self.free_inodes_count);
+        put_le32(data, 100, self.feature_ro_compat);
     }
 
     pub fn block_size(&self) -> Result<u32, Ext2Error> {
@@ -179,11 +192,18 @@ impl GroupDesc {
     }
 }
 
+/// Byte offset of `i_size_high` inside an inode record. Named `i_dir_acl` for
+/// every other file type, which is why only a regular file's is read.
+const I_SIZE_HIGH_OFF: usize = 108;
+
 #[derive(Debug, Copy, Clone)]
 pub struct Inode {
     pub mode: u16,
     pub uid: u16,
-    pub size: u32,
+    /// Held as 64 bits because a regular file's is 64 bits on disk
+    /// (`i_size` plus `i_size_high`); every other type's high half is
+    /// `i_dir_acl` and is neither read nor written.
+    pub size: u64,
     pub atime: u32,
     pub ctime: u32,
     pub mtime: u32,
@@ -203,10 +223,17 @@ impl Inode {
             *slot = BlockNum(le32(data, offset));
             offset += 4;
         }
+        let mode = le16(data, 0);
+        let size_low = le32(data, 4) as u64;
+        let size = if mode & MODE_TYPE_MASK == MODE_FILE && data.len() > I_SIZE_HIGH_OFF + 4 {
+            size_low | ((le32(data, I_SIZE_HIGH_OFF) as u64) << 32)
+        } else {
+            size_low
+        };
         Self {
-            mode: le16(data, 0),
+            mode,
             uid: le16(data, 2),
-            size: le32(data, 4),
+            size,
             atime: le32(data, 8),
             ctime: le32(data, 12),
             mtime: le32(data, 16),
@@ -225,7 +252,7 @@ impl Inode {
         }
         put_le16(data, 0, self.mode);
         put_le16(data, 2, self.uid);
-        put_le32(data, 4, self.size);
+        put_le32(data, 4, self.size as u32);
         put_le32(data, 8, self.atime);
         put_le32(data, 12, self.ctime);
         put_le32(data, 16, self.mtime);
@@ -239,6 +266,21 @@ impl Inode {
             put_le32(data, offset, blk.raw());
             offset += 4;
         }
+        if self.is_regular_file() && data.len() > I_SIZE_HIGH_OFF + 4 {
+            put_le32(data, I_SIZE_HIGH_OFF, (self.size >> 32) as u32);
+        }
+    }
+
+    /// Whether the record needs `RO_COMPAT_LARGE_FILE` set in the superblock:
+    /// an implementation without it reads a 4 GiB-plus file as truncated, so
+    /// ext2 makes the flag the price of writing one.
+    pub fn needs_large_file_feature(&self) -> bool {
+        self.is_regular_file() && self.size > u32::MAX as u64
+    }
+
+    /// The inode refuses every mutation (`EXT2_IMMUTABLE_FL`).
+    pub fn is_immutable(&self) -> bool {
+        self.flags & EXT2_IMMUTABLE_FL != 0
     }
 
     pub fn file_type_mode(&self) -> u16 {

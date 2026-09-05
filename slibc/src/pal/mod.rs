@@ -16,7 +16,13 @@ pub trait Pal {
     fn stat(path: *const u8, stat_buf: *mut u8) -> Result<(), Errno>;
     fn mkdir(path: *const u8, mode: u32) -> Result<(), Errno>;
     fn unlink(path: *const u8) -> Result<(), Errno>;
+    fn rmdir(path: *const u8) -> Result<(), Errno>;
     fn rename(old: *const u8, new: *const u8) -> Result<(), Errno>;
+    fn symlink(target: *const u8, link_path: *const u8) -> Result<(), Errno>;
+    /// Answers the byte count; never NUL-terminates, per POSIX.
+    fn readlink(path: *const u8, buf: *mut u8, buf_len: usize) -> Result<usize, Errno>;
+    fn truncate(path: *const u8, length: u64) -> Result<(), Errno>;
+    fn chmod(path: *const u8, mode: u32) -> Result<(), Errno>;
     fn dup(fd: i32) -> Result<i32, Errno>;
     fn dup2(old: i32, new: i32) -> Result<i32, Errno>;
     fn fcntl(fd: i32, cmd: i32, arg: u64) -> Result<i32, Errno>;

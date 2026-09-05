@@ -7,8 +7,9 @@ pub use fd_handlers::{
     syscall_pipe, syscall_pipe2,
 };
 pub use path_handlers::{
-    syscall_fdatasync, syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open,
-    syscall_fs_read, syscall_fs_stat, syscall_fs_unlink, syscall_fs_write, syscall_fsync,
-    syscall_rename, syscall_sync,
+    syscall_chmod, syscall_fdatasync, syscall_fs_close, syscall_fs_list, syscall_fs_mkdir,
+    syscall_fs_open, syscall_fs_read, syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
+    syscall_fsync, syscall_readlink, syscall_rename, syscall_rmdir, syscall_symlink, syscall_sync,
+    syscall_truncate,
 };
 pub use poll_ioctl_handlers::{syscall_ioctl, syscall_poll, syscall_select};

@@ -9,12 +9,9 @@ case:
 - **The root is still RAM.** Nothing written to `/` outlives the boot; the disk
   is a secondary mount at `/mnt`, and `root=virtio` is exercised by no recipe,
   test or CI job.
-- **The write surface has holes.** No `truncate`, so an existing file cannot be
-  overwritten; no `rename`, `rmdir`, `symlink` or working `chmod`; no seal on
-  disk, which is what `/bin` write protection rests on.
-- **A crash is not survivable.** A failed operation leaves partial metadata in
-  the cache, nothing repairs a dirty image, and every persisted file is stamped
-  `mtime = 0` because there is no wall clock.
+- **A crash is not survivable.** Nothing repairs a dirty image, an image whose
+  `s_state` says `EXT2_ERROR_FS` still mounts read-write, and `unlink` frees an
+  inode's blocks while a descriptor still holds it.
 
 This plan closes those, in that order.
 
@@ -58,6 +55,33 @@ The shape, which the code states more precisely:
   block mapping, directory record walk/append/remove, and `sync()` implementing
   ext2 `data=ordered`: data → barrier → metadata → barrier → superblock free
   counts → barrier.
+- **The write surface is closed and every operation is all-or-nothing.**
+  `truncate` (partial indirect-tree free, sparse extension, tail zeroing),
+  `rename` (new entry written before the old is removed, `..` fixup,
+  self-splice refused), `symlink`/`readlink` (fast and slow forms), `set_mode`,
+  `rmdir`, and `set_sealed` carried by `EXT2_IMMUTABLE_FL` so the seal survives
+  a reboot and reads as one to `lsattr` and `e2fsck`. `links_count`,
+  `used_dirs_count`, `i_blocks` (indirect blocks included) and `i_dtime` are
+  maintained; `unlink` on a multiply-linked inode drops a link rather than
+  freeing it. Offsets and sizes are 64-bit, `i_size_high` round-trips, and a
+  file past 4 GiB sets `RO_COMPAT_LARGE_FILE`.
+- **A failed operation leaves nothing behind.** `Ext2Fs::transaction` opens an
+  RAII scope over the cache: a block found clean rolls back by being dropped, a
+  block already dirty by a snapshot taken before the first mutation, and the
+  superblock's free counts are restored with them. Eviction prefers untouched
+  victims, so the residual is a block the cache had to write back mid-operation
+  — which is what a journal, not a wider guard, would close. Snapshots are
+  capped (`MAX_UNDO`); a scope that outgrows its undo record fails rather than
+  committing a part of itself.
+- **There is a wall clock.** Limine's `DateAtBootRequest` anchors
+  `CLOCK_REALTIME` against the monotonic counter at boot
+  (`kernel_services::clock::realtime_ns`), and the inode write paths stamp
+  `atime`/`ctime`/`mtime` from it. A boot whose bootloader reports no date
+  leaves the clock unset and stamps nothing, rather than claiming 1970.
+- **A directory of any size is listable.** `FileSystem::readdir_cookie` pages
+  over an opaque per-filesystem cookie — a byte offset into the directory's
+  data on ext2, which an unrelated create or unlink does not shift — carried
+  through `UserFsList.cursor` so `fs_list` resumes across calls.
 - `fs/src/ext2_vfs.rs` — the mount singleton, a 5 s background flusher kthread
   with a dirty-count eager-wake threshold and exponential backoff, and the
   `FileSystem` impl.
@@ -126,49 +150,6 @@ at all, and the images that persist (`ext2-tests.img` today, the root in
 Phase 5) are built `VERITY=off`. Buying most of that coverage back is 6.6.
 
 
-### G3 — The ext2 write surface has holes the VFS reports as "not supported"
-
-`impl FileSystem for T where T: Ext2VfsBackend` (`fs/src/ext2_vfs.rs`) defines
-`name`, `root_inode`, `lookup`, `stat`, `read`, `write`, `create`, `unlink`,
-`readdir`, `truncate` (an explicit refusal) and `sync`. Everything else takes
-the trait's default:
-
-| Operation | On ext2 today | Consequence on a persistent root |
-|---|---|---|
-| `truncate` | `NotSupported` | `open(O_TRUNC)` fails, so `std::fs::write` to an **existing** file fails. Overwriting a file is impossible. |
-| `rename` | `NotSupported` | `SYSCALL_RENAME` works only on ramfs. Write-to-temp-then-rename, the one atomic-update idiom, does not exist. |
-| `symlink` / `readlink` | `NotSupported` | `fs/src/ext2/symlink.rs` is complete and has **no callers**. |
-| `set_mode` | default `Ok(())` — a silent no-op | `chmod` reports success and changes nothing. |
-| `set_sealed` | `NotSupported`; `stat` hardcodes `sealed: false` (`ext2_vfs.rs:161`) | **The seal does not exist on disk.** See G4. |
-| directory removal | `unlink_entry` refuses with `IsDirectory` (`ext2/mod.rs:501`) | No `rmdir` at all — on ext2 or as a syscall. `slibc`'s `rmdir` is `unlink` (`slibc/std_pal/fs/slopos.rs:679`). `dir::is_dir_empty` has no callers. |
-
-Beyond the table: `links_count` is incremented on `mkdir` and never decremented
-(`ext2/mod.rs:475`); `used_dirs_count` in the group descriptor is parsed,
-encoded and never maintained (`ext2/ondisk.rs:154,168,178` are its only three
-occurrences); `i_dtime` is left zero on unlink (`ext2/mod.rs:530`) where every
-other ext2 implementation stamps it; `i_size_high` is never read although
-`RO_COMPAT_LARGE_FILE` is in `SUPPORTED_RO_COMPAT`, so since `Inode::size` is a
-`u32`, a file above 4 GiB reports the wrong size; and
-`Ext2Fs::read_file`/`write_file` take `offset: u32` (`ext2/mod.rs:256-259`,
-`:274`) with `ext2_vfs` casting `offset as u32` (`ext2_vfs.rs:165`, `:169`), so
-an offset past 4 GiB wraps silently. The inner `ext2::file` functions already
-take `u64`, so the truncation is exactly at the `Ext2Fs` boundary.
-
-### G4 — A persistent root has no seal, and the privilege model rests on one
-
-`FileStat::sealed` is the mechanism that stops a task overwriting
-`/bin/compositor` and spawning the replacement into that path's grant —
-`core/src/exec/grants.rs` says outright that program-identity privilege "is
-only as strong as write protection on `/bin`". The seal is set when the
-initramfs cpio is unpacked (`fs/src/cpio.rs` → `vfs_set_sealed`), which
-happens only on the RamFs path. On `root=virtio` there is no cpio unpack, ext2
-cannot store the bit, and `stat` reports `sealed: false` unconditionally. Every
-binary under `/bin` is writable by any task that can open it.
-
-This is a security finding. It needs a `CVSS.md` triage entry
-once `root=virtio` is a reachable configuration — and it must be closed in the
-same change that makes that path the default, not after.
-
 ### G5 — A sync stalls every user of its mount
 
 `CACHED_EXT2` is one global sleeping mutex held across all of ext2's block I/O,
@@ -185,24 +166,24 @@ Two narrower limits sit alongside it:
 - **`fdatasync` commits exactly what `fsync` does.** An ext2 record carries the
   block pointers, the size and the timestamps in one 128-byte struct, so no
   write commits the first two without the third. The split becomes real when a
-  timestamp alone can dirty a record, which needs the wall clock (3.9).
+  timestamp alone can dirty a record, which the wall clock now makes possible;
+  nothing yet asks for it.
 - **`fsync` does not commit the directory entry**, per POSIX. Doing so needs a
   descriptor on a directory, which `open` cannot return.
 
-### G6 — A failed operation leaves partial metadata in the cache
+### G6 — A rollback cannot retract a block the cache already evicted
 
-`StaticExt2Vfs::with_fs` carries the admission:
+`Ext2Fs::transaction` undoes an operation's cache state, so the bitmaps, the
+inode records and the superblock's free counts move together or not at all.
+What it cannot undo is a block eviction wrote back *before* the failure:
+`find_or_evict` makes a touched block the victim of last resort, so reaching
+this needs an operation whose working set exceeds the 128-entry cache, but
+nothing bounds it.
 
-> `TODO(tech-debt)`: a failed op leaves its dirtied blocks cached, so a later
-> sync can persist partial metadata — fix is a write-ahead journal.
-
-`create_inode_entry` is the sharp case: it allocates an inode, allocates a
-directory data block, writes the new inode, then appends the parent's directory
-entry. A failure at the last step leaves an allocated, written, unreferenced
-inode in the cache, and the next flush — the flusher's, not the caller's —
-writes it to disk. The superblock free counts are correctly rolled back (they
-are published only on success), which makes the on-disk bitmaps and the
-on-disk counts disagree.
+The same is true of a scope that outgrows its snapshot budget: it fails rather
+than committing part of itself, which is correct but leaves a large operation
+un-performable rather than merely slow. Both want a write-ahead journal, which
+is what makes them Phase 4's rather than a wider guard's.
 
 ### G7 — Nothing repairs a dirty image, and nothing notices it is dirty
 
@@ -219,33 +200,31 @@ neither the list nor the situations it covers — because `unlink` frees the
 blocks immediately regardless of open descriptors, which is itself a POSIX
 violation and a use-after-free of the inode number for any fd still holding it.
 
-### G8 — There is no wall clock, so every persisted file is stamped zero
+### G8 — `CLOCK_REALTIME` still aliases monotonic at the syscall
 
-`fs/src/ext2/time.rs::now_unix()` returns 0, and has no callers at all — the
-inode construction sites write literal zeros (`ext2/mod.rs:420-423`, `:527-530`,
-`ext2/symlink.rs:25-28`), and `write_file` never stamps `mtime`. This is not a
-lazy stub: there is no wall-clock source to read. `CLOCK_REALTIME` aliases
-monotonic uptime (`core/src/syscall/core_handlers.rs:46-50` returns
-`monotonic_ns()` for both clock ids), no `DateAtBootRequest` appears in
-`boot/src/limine_protocol.rs` although the pinned crate provides one, and there
-is no CMOS/RTC driver.
+The kernel has a wall clock: Limine's `DateAtBootRequest` anchored against the
+monotonic counter, read through `kernel_services::clock::realtime_ns`, and the
+ext2 inode paths stamp from it. Two consumers are not wired to it.
 
-On a RAM root this is invisible. On a persistent one every file carries
-`mtime = ctime = atime = 0`, so any "newer than" comparison — a build tool, a
-cache, a sync — is meaningless, and the superblock bookkeeping `e2fsck` reads
-(`s_wtime`, `s_mtime`, `s_lastcheck`) cannot be written at all.
+`syscall_clock_gettime` still answers `monotonic_ns()` for `CLOCK_REALTIME`
+(`core/src/syscall/core_handlers.rs`), so userland's wall clock is still
+uptime. And the superblock fields `e2fsck` reads — `s_wtime`, `s_mtime`,
+`s_lastcheck` — are now writable but unwritten. Both belong to 4.5, which
+needs the clock anyway; neither has a consumer before then.
 
-### G9 — Directory listings are capped at 64 entries with no cursor
+### G9 — A paged listing's mount-point pass is keyed on an ordinal
 
-`vfs_list` reads into a fixed `[0u64; 64]` and stops at 64
-(`fs/src/vfs/ops.rs:181`, `:187`), always calling `readdir(inode, 0, …)`, and
-`syscall_fs_list` has no continuation cookie (`abi/src/fs.rs:5`
-`USER_FS_MAX_ENTRIES = 64`). `FileSystem::readdir` takes an offset, so the cap
-is purely the VFS/ABI layer. Persistence is exactly what makes a directory
-exceed 64 entries; today the 65th file is invisible to `ls` and unlistable by
-any means. The ext2 `readdir` offset is a linear entry *index*
-(`ext2_vfs.rs:196-210`), so paging over it is O(n²) and unstable across a
-concurrent unlink — a real directory cookie is the fix, not a bigger array.
+A directory of any size is listable: `readdir_cookie` pages over a
+per-filesystem cookie — a byte offset on ext2, which an unrelated create or
+unlink does not shift — carried across syscalls in `UserFsList.cursor`.
+
+The synthesised mount-point entries the VFS appends are the weak half. They are
+resumed by *ordinal* (`ListCursor::mounts_done`), so a mount or unmount between
+two pages shifts the sequence and can drop or repeat one; and a real directory
+entry shadowed by a mount is only de-duplicated within a page, so a name listed
+early can appear again as a synthesised mount later. Both need the mount table
+keyed by identity rather than position, which is 6.4's territory — that is when
+userland can mount, and therefore when the race becomes reachable on purpose.
 
 ### G10 — Disk space is not a charged resource
 
@@ -254,14 +233,6 @@ disk blocks or on-disk inodes. With a writable root, any unprivileged process
 can write until `Ext2Error::NoSpace` and deny the disk to every other process
 and to the kernel's own writes. `statfs` (Phase 6.3) reports free space; it
 does not limit it.
-
-### G11 — A partial multi-block write leaks blocks
-
-`ext2::file::write_file` returns early when `ensure_data_block` fails partway
-through (`fs/src/ext2/file.rs:70-101`), skipping the `inode.size` update while
-the blocks allocated on earlier iterations stay allocated and `inode.blocks`
-stays incremented. ENOSPC mid-write therefore leaks blocks and reports no short
-count. Same shape as G6, different call path.
 
 ### G12 — The build wipes the disk on every kernel build
 
@@ -300,86 +271,9 @@ coherent with the 128-entry ext2 `BlockCache`.
 ## 3. Plan
 
 Each phase ends green on `just test` plus the pre-commit gate sequence in
-`AGENTS.md`. Phases 3 and 5 are a dependency chain; 4 and 6 are parallelisable
-once 3 lands. Numbering starts at 3 because the earlier phases are done and
-their results are §1; the numbers are kept so commit messages and issue
-references to them still resolve.
-
-### Phase 3 — Close the write surface
-
-Everything here is implementing `FileSystem` methods on ext2 that the ext2
-layer below either already supports or nearly does.
-
-- [ ] **3.0** Allocation rollback, before the operations below and not with the
-  rest of crash consistency. An RAII guard that rolls back every allocation an
-  operation made if it does not reach its commit point, and invalidates the
-  cache entries a failed operation dirtied so the flusher cannot publish them:
-  it kills the `with_fs` TODO, and covers both `create_inode_entry` (G6) and
-  the mid-write block leak (G11). Its `Drop` must be panic-free —
-  `check_drop_panic_free.sh` scans `fs/`. Asterinas solved the same defect the
-  same way (the *concept*, not their code).
-
-  First because every operation below has several writes before its commit
-  point and `just check-fs-image`'s `e2fsck` grades each one: landing them
-  ahead of the guard means the oracle reports real inconsistencies whose fix is
-  deferred to the next phase.
-
-- [ ] **3.1** `truncate` — wire `Ext2Fs` to the existing `ext2::file::truncate`,
-  including the free-block accounting and the superblock dirty flag. Unblocks
-  `O_TRUNC`, and therefore overwriting any existing file.
-- [ ] **3.2** `rename` — `dir::append_dir_entry` + `dir::remove_dir_entry` +
-  `dir::update_dotdot` (all present, the last unused) plus the parent
-  `links_count` adjustment when a directory moves. Same-filesystem only; the VFS
-  already refuses cross-device. Rename-over-existing must be atomic in the sense
-  ext2 gives it: the new entry is written before the old is removed, so a crash
-  leaves two names for one inode rather than none.
-- [ ] **3.3** `symlink` / `readlink` — call the complete-and-unused
-  `ext2/symlink.rs`. Fast symlinks (≤ 60 bytes, stored in `i_block`) are already
-  handled there.
-- [ ] **3.4** `set_mode` — write `i_mode`'s permission bits through instead of
-  returning `Ok(())`.
-- [ ] **3.5** `set_sealed` + `stat().sealed` on ext2, using an inode flag.
-  `EXT2_IMMUTABLE_FL` (0x10) is the carrier: it is what the bit means,
-  `lsattr`/`chattr` show it, and `e2fsck` accepts it. One-way, as the trait
-  requires. `Inode` parses and encodes `i_flags` at offset 32 already; nothing
-  sets it.
-- [ ] **3.5a** Stamp the flag at build time. The kernel half is useless alone:
-  `build_fs_image.sh` writes each binary and sets `mode 0100755` via `debugfs
-  set_inode_field` (`:59-60`) with no `flags` stamp, so after 3.5 every shipped
-  binary still reports `sealed: false`. Add the `flags 0x10` stamp for `/bin`
-  and `/sbin`. **3.5 + 3.5a together close G4**, and both must land before the
-  disk becomes the default root.
-- [ ] **3.6** `rmdir` — an ext2 directory removal using `dir::is_dir_empty`
-  (present, unused), decrementing the parent's `links_count` and the group's
-  `used_dirs_count`. A `rmdir(2)` syscall, or `unlink` on a directory
-  dispatching to it, per what `slibc` expects.
-- [ ] **3.7** Maintain `used_dirs_count` on create and remove; stamp `i_dtime`
-  on unlink.
-- [ ] **3.8** 64-bit offsets: `Ext2Fs::read_file`/`write_file` take `u64`, and
-  `i_size_high` is read and written for regular files. Not a signature edit —
-  it ripples through `ext2::file`, the block-mapping layer, `i_size_high`
-  round-tripping, the `ext2_vfs` casts, and whatever in `fileio` passes offsets.
-- [ ] **3.9** A wall clock, and `now_unix()` wired into the inode write paths
-  (G8). Limine's `DateAtBootRequest` plus the monotonic offset gives a real
-  `CLOCK_REALTIME`; without it 4.5 cannot be implemented and every persisted
-  file stays stamped zero.
-- [ ] **3.10** A `readdir` cursor and an ABI that can page (G9), so a directory
-  with more than 64 entries is listable. A stable cookie, not a linear index.
-- [ ] **3.11a** Fix the ext2 test fixture first. `build_ext2_image` declares a
-  four-block inode table (blocks 5–8) but writes records only into block 5 and
-  puts file data at block 7, inside that table; with `s_first_ino = 11`, every
-  created inode lands in a block the fixture never initialised, so writing to a
-  file the tests themselves created fails `NotFile`. Blocks every test below
-  that creates a file and then writes to it, and the one durability case
-  currently untested: that a directory's own data block is committed before an
-  inode-table block naming it (see `BlockOwner` in §1).
-- [ ] **3.11** Per-operation tests against a `MemoryBlockDevice` image in the
-  existing `fs/src/tests.rs` style, plus at least one `e2fsck`-validated
-  round-trip through `just check-fs-image`. Watch the 2 KiB stack gate: 3.1, 3.2
-  and 3.6 each hold a parent inode, a child inode, a cache and an `Ext2Fs` live
-  at once, and `rename` needs two resolved paths — `CanonPath` alone is 256
-  bytes plus a 256-byte component array (`fs/src/vfs/canon.rs:15,39,46`). Expect
-  this to shape the signatures, not just the tests.
+`AGENTS.md`. Phases 4, 5 and 6 are independent of each other. Numbering starts
+at 4 because the earlier phases are done and their results are §1; the numbers
+are kept so commit messages and issue references to them still resolve.
 
 ### Phase 4 — Crash consistency
 
@@ -398,8 +292,9 @@ layer below either already supports or nearly does.
   in-memory refcount first; the on-disk list is only meaningful once the window
   it protects exists.
 - [ ] **4.5** Superblock bookkeeping: `s_mnt_count`, `s_lastcheck`, `s_wtime`,
-  `s_mtime` — the fields `e2fsck` reads and reports on. Blocked on the wall
-  clock (3.9); three of the four are timestamps.
+  `s_mtime` — the fields `e2fsck` reads and reports on; three of the four are
+  timestamps the wall clock can now supply. Point `CLOCK_REALTIME` at that
+  clock here too, which is the other half of G8.
 - [ ] **4.6** Crash-injection testing. A `FaultyBlockDevice` wrapper that fails
   or drops writes after *N* operations, in the `MemoryBlockDevice` style, driven
   from stests: perform an operation, cut the device at each write boundary,
@@ -410,9 +305,9 @@ layer below either already supports or nearly does.
 
 ### Phase 5 — Make the persistent root the real one
 
-Ordered after Phase 3 because `root=virtio` without the seal (3.5) is a
-privilege-escalation surface, and without `truncate` (3.1) is a root that
-cannot overwrite a file.
+The write surface and the on-disk seal are in place, so `root=virtio` is no
+longer a privilege-escalation surface nor a root that cannot overwrite a
+file. What remains is making it the default and paying for that.
 
 - [ ] **5.0** Decide what a writable root does to the test harness.
   `scripts/qemu_run.sh` records why `disk1` exists: destructive tests target
@@ -512,9 +407,10 @@ Independent of 2–5; do it when a second device or a real disk demands it.
   `check_authority_reachability.sh`.
 - **Test count.** New stests/utests move `check_test_count.sh`; measure the
   new baseline with `TEST_COUNT_BASELINE=0 scripts/check_test_count.sh`.
-- **Gates beyond the obvious ones.** `check_drop_panic_free.sh` (3.0's rollback
-  guard is a new `Drop` in `fs/`, which that gate scans and for which it already
-  carries a named exception), `check_process_designator.sh` (any new entry
+- **Gates beyond the obvious ones.** `check_drop_panic_free.sh` (the rollback
+  guard's `Drop` in `fs/` is one that gate scans; it passes because every step
+  the destructor takes is a field assignment or an infallible `BlockCache`
+  method), `check_process_designator.sh` (any new entry
   point under `fs/src/fileio/`), `check_quota_headroom.sh` (5.5's new
   `ResourceKind`; also moves on every added utest, because each is one more
   charged process), `check_sched_spread.sh` (Phase 5 changes when the flusher
@@ -530,10 +426,9 @@ Independent of 2–5; do it when a second device or a real disk demands it.
 
 ## 5. Effort and sequencing
 
-Phase 3 is the bulk, and 3.8 (`u32` → `u64`) is an ext2-wide API change rather
-than the one-line edit it reads as. Phase 4 is a week, of which 4.4 is most:
+Phase 4 is a week, of which 4.4 is most:
 deferred inode free needs a VFS-level open count the tree does not have, so it
-touches fd lifetime rather than only ext2. Phase 5 is a week once 3 is green,
+touches fd lifetime rather than only ext2. Phase 5 is a week,
 not two days — the disk root by default moves four ratchets (`check_test_count.sh`,
 `check_lockdep_headroom.sh`, `check_sched_spread.sh`,
 `check_authority_reachability.sh`), each needing a re-measure and a commit
@@ -541,5 +436,5 @@ message explaining the delta. Phase 6 is unbounded and last.
 
 A file already survives a reboot on `/mnt` — `just test-persist` proves it,
 on an image that is honestly unverified rather than one that only looked
-verified. The minimum that moves it to `/`: 3.0 → 3.1 → 3.5 → 3.5a → 5.
-Everything else is what makes it durable under failure.
+verified. Phase 5 alone is what moves it to `/`. Everything else is what makes
+it durable under failure.

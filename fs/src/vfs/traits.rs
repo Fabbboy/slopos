@@ -172,8 +172,17 @@ pub trait FileSystem: Send + Sync {
     /// Create an entry under `parent`. `file_type` is `Regular` or `Directory`.
     fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId>;
 
-    /// Remove an entry from a directory; a directory must be empty.
+    /// Remove a non-directory entry. A directory is `EISDIR`; use
+    /// [`Self::rmdir`].
     fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()>;
+
+    /// Remove an empty directory entry, `rmdir(2)`'s semantics.
+    ///
+    /// Defaults to [`Self::unlink`] for filesystems that make no distinction;
+    /// they already refuse a non-empty directory there.
+    fn rmdir(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
+        self.unlink(parent, name)
+    }
 
     /// Iterate directory entries from `offset`, stopping when the callback
     /// returns false; answers the number of entries visited.
@@ -183,6 +192,36 @@ pub trait FileSystem: Send + Sync {
         offset: usize,
         callback: &mut dyn FnMut(&[u8], InodeId, FileType) -> bool,
     ) -> VfsResult<usize>;
+
+    /// Iterate from an opaque cookie, handing the callback the cookie that
+    /// resumes *after* each entry, and answering the cookie the walk reached.
+    /// A cookie of 0 starts at the beginning.
+    ///
+    /// This is what a directory larger than one listing buffer is paged over.
+    /// The value is the filesystem's own — ext2 uses a byte offset into the
+    /// directory's data, which an unrelated create or unlink does not shift,
+    /// where an ordinal would.
+    ///
+    /// The default counts ordinals through [`Self::readdir`], which is correct
+    /// only for a filesystem whose entries do not move *and* whose `readdir`
+    /// invokes the callback for every index it advances past. One that skips
+    /// an entry silently leaves this cookie lagging its own index, so the next
+    /// page repeats a name; such a filesystem must override this. It is also
+    /// O(n²) over a paged walk, which is the other reason ext2 overrides it.
+    fn readdir_cookie(
+        &self,
+        inode: InodeId,
+        cookie: u64,
+        callback: &mut dyn FnMut(u64, &[u8], InodeId, FileType) -> bool,
+    ) -> VfsResult<u64> {
+        let start = usize::try_from(cookie).map_err(|_| VfsError::InvalidArgument)?;
+        let mut next = cookie;
+        self.readdir(inode, start, &mut |name, ino, ft| {
+            next += 1;
+            callback(next, name, ino, ft)
+        })?;
+        Ok(next)
+    }
 
     /// Truncate or extend a file; an extension zero-fills on the filesystems
     /// that support one.
@@ -229,11 +268,15 @@ pub trait FileSystem: Send + Sync {
     }
 
     /// The initramfs loader uses this to restore the executable bit `create`
-    /// dropped (it defaults regular files to `0o644`). Defaults to a no-op for
-    /// filesystems that carry no mutable mode bits.
+    /// dropped (it defaults regular files to `0o644`).
+    ///
+    /// Defaults to a refusal rather than a no-op, for the reason
+    /// [`Self::set_sealed`] gives: `chmod` is now a syscall, and a filesystem
+    /// with no mutable mode bits reporting success would tell userland it had
+    /// tightened permissions it never touched.
     fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {
         let _ = (inode, mode);
-        Ok(())
+        Err(VfsError::NotSupported)
     }
 
     /// Sync metadata and data to backing store; a no-op for in-memory

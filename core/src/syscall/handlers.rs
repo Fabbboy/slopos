@@ -12,11 +12,11 @@ pub use crate::syscall::core_handlers::{
 };
 use crate::syscall::font_handlers::syscall_font_set;
 use crate::syscall::fs::{
-    syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fdatasync, syscall_fs_close,
-    syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read, syscall_fs_stat,
-    syscall_fs_unlink, syscall_fs_write, syscall_fstat, syscall_fsync, syscall_ioctl,
-    syscall_lseek, syscall_pipe, syscall_pipe2, syscall_poll, syscall_rename, syscall_select,
-    syscall_sync,
+    syscall_chmod, syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fdatasync,
+    syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
+    syscall_fs_stat, syscall_fs_unlink, syscall_fs_write, syscall_fstat, syscall_fsync,
+    syscall_ioctl, syscall_lseek, syscall_pipe, syscall_pipe2, syscall_poll, syscall_readlink,
+    syscall_rename, syscall_rmdir, syscall_select, syscall_symlink, syscall_sync, syscall_truncate,
 };
 use crate::syscall::keymap_handlers::{syscall_keymap_get_name, syscall_keymap_load};
 pub use crate::syscall::memory_handlers::{
@@ -131,6 +131,11 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_FSYNC]     => syscall_fsync,     "fsync";
     [SYSCALL_FDATASYNC] => syscall_fdatasync, "fdatasync";
     [SYSCALL_SYNC]      => syscall_sync,      "sync";
+    [SYSCALL_RMDIR]     => syscall_rmdir,     "rmdir";
+    [SYSCALL_SYMLINK]   => syscall_symlink,   "symlink";
+    [SYSCALL_READLINK]  => syscall_readlink,  "readlink";
+    [SYSCALL_TRUNCATE]  => syscall_truncate,  "truncate";
+    [SYSCALL_CHMOD]     => syscall_chmod,     "chmod";
 
     [SYSCALL_SOCKET]  => syscall_socket,  "socket";
     [SYSCALL_BIND]    => syscall_bind,    "bind";
@@ -270,7 +275,7 @@ const fn count_of(cap: Capability) -> usize {
 const CAP_COUNTS: [(Capability, usize); 15] = [
     (Capability::Unimplemented, 59),
     (Capability::NoneSelf, 44),
-    (Capability::NoneFd, 44),
+    (Capability::NoneFd, 49),
     (Capability::NoneRelation, 14),
     (Capability::Power, 2),
     (Capability::Launch, 0),

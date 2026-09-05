@@ -86,6 +86,10 @@ impl StaticExt2Vfs {
         .map_err(ext2_error_to_vfs)?;
         fs.set_superblock_dirty(cached.superblock_dirty);
         let result = f(&mut fs).map_err(ext2_error_to_vfs);
+        // Every mutating `Ext2Fs` entry point rolls its own dirtied blocks and
+        // free counts back on failure, so the post-state is the committed one
+        // either way and is published unconditionally. Reading it back only on
+        // success would strand a rollback the guard had already performed.
         let new_superblock = fs.superblock();
         let new_superblock_dirty = fs.superblock_dirty();
         let dirty = fs.dirty_count();
@@ -93,15 +97,9 @@ impl StaticExt2Vfs {
 
         // Deliberately no per-op flush: dirty blocks stay in the persistent
         // cache until eviction, the background flusher, `sync`, or shutdown.
-        if result.is_ok() {
-            // Publish superblock changes only on success: a failed op must not
-            // leak free-count drift into the live superblock.
-            cached.superblock = new_superblock;
-            cached.superblock_dirty = new_superblock_dirty;
-            note_dirty(dirty);
-        }
-        // TODO(tech-debt): a failed op leaves its dirtied blocks cached, so a
-        // later sync can persist partial metadata — fix is a write-ahead journal.
+        cached.superblock = new_superblock;
+        cached.superblock_dirty = new_superblock_dirty;
+        note_dirty(dirty);
         result
     }
 }
@@ -199,18 +197,19 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
                 ctime: ext2_inode.ctime as u64,
                 dev_major: 0,
                 dev_minor: 0,
-                // No inode-attribute mutator, so nothing can ever set it.
-                sealed: false,
+                // `EXT2_IMMUTABLE_FL` is the carrier, so the seal survives a
+                // reboot and reads as one to `lsattr` and `e2fsck`.
+                sealed: ext2_inode.is_immutable(),
             })
         })
     }
 
     fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
-        self.with_ext2(|fs| fs.read_file(inode as u32, offset as u32, buf))
+        self.with_ext2(|fs| fs.read_file(inode as u32, offset, buf))
     }
 
     fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
-        self.with_ext2(|fs| fs.write_file(inode as u32, offset as u32, buf))
+        self.with_ext2(|fs| fs.write_file(inode as u32, offset, buf))
     }
 
     fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
@@ -228,36 +227,75 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
         self.with_ext2(|fs| fs.unlink_entry(parent as u32, name))
     }
 
+    fn rmdir(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
+        self.with_ext2(|fs| fs.remove_directory(parent as u32, name))
+    }
+
     fn readdir(
         &self,
         inode: InodeId,
         offset: usize,
         callback: &mut dyn FnMut(&[u8], InodeId, FileType) -> bool,
     ) -> VfsResult<usize> {
+        let mut count = 0usize;
+        self.readdir_cookie(inode, offset as u64, &mut |_, name, ino, ft| {
+            count += 1;
+            callback(name, ino, ft)
+        })?;
+        Ok(count)
+    }
+
+    fn readdir_cookie(
+        &self,
+        inode: InodeId,
+        cookie: u64,
+        callback: &mut dyn FnMut(u64, &[u8], InodeId, FileType) -> bool,
+    ) -> VfsResult<u64> {
         self.with_ext2(|fs| {
             let ext2_inode = fs.read_inode(inode as u32)?;
             if !ext2_inode.is_directory() {
                 return Err(Ext2Error::NotDirectory);
             }
-            let mut count = 0usize;
-            let mut current = 0usize;
-            fs.for_each_dir_entry(inode as u32, |entry| {
-                if current < offset {
-                    current += 1;
-                    return true;
-                }
+            fs.for_each_dir_entry_from(inode as u32, cookie, |next, entry| {
                 let ft = ext2_file_type_to_vfs(entry.file_type);
-                let cont = callback(entry.name, entry.inode.raw() as InodeId, ft);
-                count += 1;
-                current += 1;
-                cont
-            })?;
-            Ok(count)
+                callback(next, entry.name, entry.inode.raw() as InodeId, ft)
+            })
         })
     }
 
-    fn truncate(&self, _inode: InodeId, _size: u64) -> VfsResult<()> {
-        Err(VfsError::NotSupported)
+    fn truncate(&self, inode: InodeId, size: u64) -> VfsResult<()> {
+        self.with_ext2(|fs| fs.truncate_file(inode as u32, size))
+    }
+
+    fn rename(
+        &self,
+        old_parent: InodeId,
+        old_name: &[u8],
+        new_parent: InodeId,
+        new_name: &[u8],
+    ) -> VfsResult<()> {
+        self.with_ext2(|fs| {
+            fs.rename_entry(old_parent as u32, old_name, new_parent as u32, new_name)
+        })
+    }
+
+    fn readlink(&self, inode: InodeId, buf: &mut [u8]) -> VfsResult<usize> {
+        self.with_ext2(|fs| fs.read_symlink(inode as u32, buf))
+    }
+
+    fn symlink(&self, parent: InodeId, name: &[u8], target: &[u8]) -> VfsResult<InodeId> {
+        self.with_ext2(|fs| {
+            fs.create_symlink(parent as u32, name, target)
+                .map(|i| i as InodeId)
+        })
+    }
+
+    fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {
+        self.with_ext2(|fs| fs.set_mode(inode as u32, mode))
+    }
+
+    fn set_sealed(&self, inode: InodeId) -> VfsResult<()> {
+        self.with_ext2(|fs| fs.set_sealed(inode as u32))
     }
 
     fn sync(&self) -> VfsResult<()> {
@@ -540,6 +578,8 @@ fn ext2_error_to_vfs(e: Ext2Error) -> VfsError {
         Ext2Error::IsDirectory => VfsError::IsDirectory,
         Ext2Error::TooManyLinks => VfsError::TooManyLinks,
         Ext2Error::OutOfMemory => VfsError::IoError,
+        Ext2Error::Immutable => VfsError::PermissionDenied,
+        Ext2Error::InvalidPath => VfsError::InvalidPath,
     }
 }
 

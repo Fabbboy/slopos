@@ -2,11 +2,15 @@
 
 pub const USER_PATH_MAX: usize = 256;
 
+/// Entries one `fs_list` call may return. Not a bound on a directory: the
+/// call carries a cursor, so a larger directory is read in successive calls
+/// rather than truncated at this number.
 pub const USER_FS_MAX_ENTRIES: u32 = 64;
 
 pub const FS_TYPE_FILE: u8 = 0;
 pub const FS_TYPE_DIRECTORY: u8 = 1;
 pub const FS_TYPE_CHARDEV: u8 = 2;
+pub const FS_TYPE_SYMLINK: u8 = 3;
 pub const FS_TYPE_UNKNOWN: u8 = 0xFF;
 
 /// POSIX file open flags (access mode in low 2 bits, modifiers above).
@@ -97,6 +101,11 @@ impl UserFsStat {
 }
 
 /// Caller-provided entry buffer for the fs_list syscall.
+///
+/// `cursor` makes the call resumable: zero it to start, pass it back
+/// unmodified to continue, and stop when [`FS_LIST_CURSOR_END`] comes back.
+/// A directory larger than `max_entries` is therefore listed in full rather
+/// than silently cut off at the buffer.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct UserFsList {
@@ -104,7 +113,13 @@ pub struct UserFsList {
     pub max_entries: u32,
     /// Actual number of entries returned
     pub count: u32,
+    /// Opaque resumption point, updated by the kernel on return. Its meaning
+    /// belongs to the filesystem; userland must only carry it back verbatim.
+    pub cursor: u64,
 }
+
+/// `cursor` value meaning the directory has been listed to its end.
+pub const FS_LIST_CURSOR_END: u64 = u64::MAX;
 
 impl Default for UserFsList {
     fn default() -> Self {
@@ -112,6 +127,7 @@ impl Default for UserFsList {
             entries: core::ptr::null_mut(),
             max_entries: 0,
             count: 0,
+            cursor: 0,
         }
     }
 }

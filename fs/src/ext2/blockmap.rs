@@ -100,6 +100,13 @@ pub fn map_block(
     Ok(current)
 }
 
+/// Answers the block plus how many blocks the call allocated, **including the
+/// indirect blocks it had to create**.
+///
+/// `i_blocks` counts every 512-byte sector the inode owns, indirect blocks
+/// among them: `e2fsck` recomputes the field from the whole tree and reports
+/// one that counts only the data. Returning a count rather than a bool is what
+/// lets the caller keep it right.
 pub fn ensure_data_block(
     inode: &mut Inode,
     file_block: FileBlock,
@@ -109,18 +116,19 @@ pub fn ensure_data_block(
     superblock: &mut Superblock,
     geom: &Ext2Geometry,
     owner: BlockOwner,
-) -> Result<(BlockNum, bool), Ext2Error> {
+) -> Result<(BlockNum, u32), Ext2Error> {
     let path = block_to_path(file_block, ptrs_per_block)?;
+    let mut allocated = 0u32;
 
     if path.depth == 1 {
         let idx = path.offsets[0] as usize;
         if inode.block[idx].is_valid() {
-            return Ok((inode.block[idx], false));
+            return Ok((inode.block[idx], 0));
         }
         let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
         drop(cache.get_zero_data(new_block, device, owner)?);
         inode.block[idx] = new_block;
-        return Ok((new_block, true));
+        return Ok((new_block, 1));
     }
 
     let top_idx = path.offsets[0] as usize;
@@ -128,6 +136,7 @@ pub fn ensure_data_block(
         let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
         drop(cache.get_zero_owned(new_block, device, owner)?);
         inode.block[top_idx] = new_block;
+        allocated += 1;
     }
 
     let mut current_indirect = inode.block[top_idx];
@@ -144,6 +153,7 @@ pub fn ensure_data_block(
             let mut parent = cache.get_owned(current_indirect, device, owner)?;
             write_ptr(parent.data_mut(), path.offsets[level], new_block);
             current_indirect = new_block;
+            allocated += 1;
         }
     }
 
@@ -154,7 +164,7 @@ pub fn ensure_data_block(
     };
 
     if existing.is_valid() {
-        return Ok((existing, false));
+        return Ok((existing, allocated));
     }
 
     let new_data = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
@@ -162,5 +172,5 @@ pub fn ensure_data_block(
     let mut parent = cache.get_owned(current_indirect, device, owner)?;
     write_ptr(parent.data_mut(), data_idx, new_data);
 
-    Ok((new_data, true))
+    Ok((new_data, allocated + 1))
 }

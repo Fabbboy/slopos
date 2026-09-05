@@ -162,52 +162,98 @@ impl Pal for Sys {
         Ok(val as i32)
     }
 
+    /// Newline-joined names of every entry, paging the syscall's fixed-size
+    /// entry buffer until the cursor reports the end — so a directory larger
+    /// than `USER_FS_MAX_ENTRIES` lists in full rather than being cut off at
+    /// the 64th name.
     fn list(path: *const u8, buf: *mut u8, buf_len: usize) -> Result<usize, Errno> {
+        use slopos_abi::fs::FS_LIST_CURSOR_END;
         use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList};
 
         let mut entries = [UserFsEntry::new(); USER_FS_MAX_ENTRIES as usize];
-        let mut hdr = UserFsList {
-            entries: entries.as_mut_ptr(),
-            max_entries: USER_FS_MAX_ENTRIES,
-            count: 0,
-        };
-
-        let ret = unsafe {
-            syscall2(
-                SYSCALL_FS_LIST,
-                path as u64,
-                &mut hdr as *mut UserFsList as u64,
-            )
-        };
-        to_result(ret)?;
-
-        let count = hdr.count as usize;
         let mut pos = 0usize;
-        for i in 0..count {
-            let entry = &entries[i];
-            let name_len = entry
-                .name
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(entry.name.len());
-            if name_len == 0 {
-                continue;
+        let mut cursor = 0u64;
+
+        loop {
+            let mut hdr = UserFsList {
+                entries: entries.as_mut_ptr(),
+                max_entries: USER_FS_MAX_ENTRIES,
+                count: 0,
+                cursor,
+            };
+
+            let ret = unsafe {
+                syscall2(
+                    SYSCALL_FS_LIST,
+                    path as u64,
+                    &mut hdr as *mut UserFsList as u64,
+                )
+            };
+            to_result(ret)?;
+
+            let count = hdr.count as usize;
+            for entry in entries.iter().take(count) {
+                let name_len = entry
+                    .name
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(entry.name.len());
+                if name_len == 0 {
+                    continue;
+                }
+                let needed = if pos == 0 { name_len } else { name_len + 1 };
+                if pos + needed > buf_len {
+                    return Err(Errno::from(crate::error::SyscallError::from_errno(34)));
+                }
+                if pos > 0 {
+                    unsafe { *buf.add(pos) = b'\n' };
+                    pos += 1;
+                }
+                unsafe {
+                    core::ptr::copy_nonoverlapping(entry.name.as_ptr(), buf.add(pos), name_len);
+                }
+                pos += name_len;
             }
-            let needed = if pos == 0 { name_len } else { name_len + 1 };
-            if pos + needed > buf_len {
-                return Err(Errno::from(crate::error::SyscallError::from_errno(34)));
+
+            // A cursor the kernel did not advance would loop forever; treat
+            // it as the end rather than spin.
+            if hdr.cursor == FS_LIST_CURSOR_END || hdr.cursor == cursor || count == 0 {
+                break;
             }
-            if pos > 0 {
-                unsafe { *buf.add(pos) = b'\n' };
-                pos += 1;
-            }
-            unsafe {
-                core::ptr::copy_nonoverlapping(entry.name.as_ptr(), buf.add(pos), name_len);
-            }
-            pos += name_len;
+            cursor = hdr.cursor;
         }
 
         Ok(pos)
+    }
+
+    fn rmdir(path: *const u8) -> Result<(), Errno> {
+        let ret = unsafe { syscall1(SYSCALL_RMDIR, path as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn symlink(target: *const u8, link_path: *const u8) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_SYMLINK, target as u64, link_path as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn readlink(path: *const u8, buf: *mut u8, buf_len: usize) -> Result<usize, Errno> {
+        let ret = unsafe { syscall3(SYSCALL_READLINK, path as u64, buf as u64, buf_len as u64) };
+        let val = to_result(ret)?;
+        Ok(val as usize)
+    }
+
+    fn truncate(path: *const u8, length: u64) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_TRUNCATE, path as u64, length) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn chmod(path: *const u8, mode: u32) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_CHMOD, path as u64, mode as u64) };
+        to_result(ret)?;
+        Ok(())
     }
 
     fn brk(addr: *mut u8) -> Result<*mut u8, Errno> {

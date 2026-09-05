@@ -386,8 +386,28 @@ pub const SYSCALL_FDATASYNC: u64 = 178;
 
 pub const SYSCALL_SYNC: u64 = 179;
 
+/// `rmdir(path)` — remove an empty directory. `ENOTDIR` on a non-directory,
+/// `ENOTEMPTY` on one with entries, `EBUSY` on a mount point.
+pub const SYSCALL_RMDIR: u64 = 180;
+
+/// `symlink(target: *const u8, link_path: *const u8)`. `target` is stored
+/// verbatim and is not resolved; a dangling one is legal.
+pub const SYSCALL_SYMLINK: u64 = 181;
+
+/// `readlink(path: *const u8, buf: *mut u8, len) -> bytes written`. Never
+/// NUL-terminates, per POSIX; a target longer than `len` is truncated.
+pub const SYSCALL_READLINK: u64 = 182;
+
+/// `truncate(path: *const u8, length)` — set a regular file's size, freeing
+/// blocks past it or extending sparsely.
+pub const SYSCALL_TRUNCATE: u64 = 183;
+
+/// `chmod(path: *const u8, mode)` — permission bits only; the type nibble of
+/// `st_mode` is not a caller's to change.
+pub const SYSCALL_CHMOD: u64 = 184;
+
 /// Size of the dispatch table; every syscall number must be below this.
-pub const SYSCALL_TABLE_SIZE: usize = 180;
+pub const SYSCALL_TABLE_SIZE: usize = 185;
 
 const _: () = assert!((SYSCALL_PIDFD_OPEN as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SIGNALFD as usize) < SYSCALL_TABLE_SIZE);
@@ -408,6 +428,11 @@ const _: () = assert!((SYSCALL_INPUT_SINK_ACQUIRE as usize) < SYSCALL_TABLE_SIZE
 const _: () = assert!((SYSCALL_FSYNC as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_FDATASYNC as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SYNC as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_RMDIR as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_SYMLINK as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_READLINK as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_TRUNCATE as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_CHMOD as usize) < SYSCALL_TABLE_SIZE);
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

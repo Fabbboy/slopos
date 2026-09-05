@@ -485,6 +485,39 @@ impl FileSystem for RamFs {
         })
     }
 
+    /// Overridden because [`Self::readdir`] skips an entry whose inode fails
+    /// to resolve without invoking the callback: the trait's default counts
+    /// callbacks, so after one such skip its cookie would lag the index it
+    /// feeds back and the next page would repeat a name. Here the cookie *is*
+    /// the index, so a skip costs nothing.
+    fn readdir_cookie(
+        &self,
+        inode: InodeId,
+        cookie: u64,
+        callback: &mut dyn FnMut(u64, &[u8], InodeId, FileType) -> bool,
+    ) -> VfsResult<u64> {
+        let start = usize::try_from(cookie).map_err(|_| VfsError::InvalidArgument)?;
+        self.with_inner(|inner| {
+            let ram_inode = inner.get_inode(inode)?;
+            if ram_inode.file_type != FileType::Directory {
+                return Err(VfsError::NotDirectory);
+            }
+            let mut index = start;
+            while index < ram_inode.dir_entries.len() {
+                let entry = &ram_inode.dir_entries[index];
+                index += 1;
+                let Ok(entry_inode) = inner.get_inode(entry.inode) else {
+                    continue;
+                };
+                let name = &entry.name[..entry.name_len];
+                if !callback(index as u64, name, entry.inode, entry_inode.file_type) {
+                    break;
+                }
+            }
+            Ok(index as u64)
+        })
+    }
+
     fn truncate(&self, inode: InodeId, size: u64) -> VfsResult<()> {
         self.with_inner_mut(|inner| {
             let ram_inode = inner.get_inode_mut(inode)?;

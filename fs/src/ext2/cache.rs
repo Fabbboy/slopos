@@ -8,6 +8,15 @@ use crate::blockdev::BlockDevice;
 
 const CACHE_ENTRIES: usize = 128;
 
+/// Snapshots one operation may hold. Each owns a block-sized copy, so this is
+/// the ceiling on the rollback guard's memory: at a 4 KiB block size, 2 MiB.
+///
+/// Only a block that was *already dirty* when the operation first touched it
+/// costs a record. A clean acquire — which is every block of a directory
+/// scan, and every block a growing file allocates — costs one bit, so neither
+/// directory size nor write size is bounded by this number.
+const MAX_UNDO: usize = 512;
+
 /// Drives ordered writeback (ext2 `data=ordered`): data blocks must reach
 /// stable storage *before* the metadata that references them, so a crash cannot
 /// expose a fresh inode or dir-entry pointing at stale contents.
@@ -50,6 +59,20 @@ struct CacheEntry {
     valid: bool,
     kind: BlockKind,
     owner: BlockOwner,
+    /// The open operation has touched this block, so it is both a rollback
+    /// candidate and a victim of last resort (see [`BlockCache::find_or_evict`]).
+    op_touched: bool,
+    /// The open operation asked for this block to be dropped. Deferred to the
+    /// commit — see [`BlockCache::invalidate`].
+    op_invalidated: bool,
+    /// The open operation found this block clean, so its rollback is to drop
+    /// the entry and let the device's copy stand. A flag rather than an undo
+    /// record: a clean block needs no snapshot, and recording one would put a
+    /// block-sized allocation on every directory scan.
+    op_discard: bool,
+    /// Transient, set while [`BlockCache::rollback_op`] runs: this block's
+    /// snapshot has been put back, so the discard pass must leave it alone.
+    op_restored: bool,
 }
 
 impl CacheEntry {
@@ -63,8 +86,25 @@ impl CacheEntry {
             valid: false,
             kind: BlockKind::Metadata,
             owner: BlockOwner::Other,
+            op_touched: false,
+            op_invalidated: false,
+            op_discard: false,
+            op_restored: false,
         })
     }
+}
+
+/// A block that was already dirty when the open operation first reached it.
+///
+/// The device holds *some earlier* state, so only this snapshot — taken
+/// before the first mutation — is the committed one. The other case, a block
+/// found clean, needs no record: the device already holds its committed
+/// contents, so dropping the cache entry is the whole of the rollback, and
+/// [`CacheEntry::op_discard`] says so in one bit instead of a block-sized
+/// copy.
+struct UndoEntry {
+    block: BlockNum,
+    snapshot: KVec<u8>,
 }
 
 /// LRU-ordered, fixed-capacity, **write-back** block cache. One cache lives for
@@ -86,6 +126,15 @@ pub struct BlockCache {
     /// sitting in a write-back device cache. This is what lets a sync tell
     /// "nothing to do" from "nothing left to *write*".
     unbarriered: usize,
+    /// Undo record of the open operation, empty when none is open.
+    undo: KVec<UndoEntry>,
+    /// Set when the open operation touched more blocks than [`MAX_UNDO`]
+    /// permits. The scope can no longer be rolled back, so it must fail rather
+    /// than commit half of itself.
+    undo_overflow: bool,
+    /// Nesting depth of [`Self::begin_op`]; only the outermost level records
+    /// and only it rolls back.
+    op_depth: u32,
 }
 
 impl BlockCache {
@@ -106,7 +155,170 @@ impl BlockCache {
             lru_clock: 0,
             block_size,
             unbarriered: 0,
+            undo: KVec::new(),
+            undo_overflow: false,
+            op_depth: 0,
         })
+    }
+
+    /// Whether the open scope has outgrown its undo record. A `true` here is
+    /// what turns an operation too large to undo into a refusal rather than a
+    /// partial commit.
+    pub fn op_undo_overflowed(&self) -> bool {
+        self.undo_overflow
+    }
+
+    /// Open a rollback scope. Nested calls only count: an inner failure
+    /// propagates outwards and the outermost scope is what rolls back, so a
+    /// composite operation is undone as one.
+    pub fn begin_op(&mut self) {
+        self.op_depth += 1;
+        if self.op_depth > 1 {
+            return;
+        }
+        self.undo.clear();
+        self.undo_overflow = false;
+        for entry in &mut self.entries {
+            entry.op_touched = false;
+            entry.op_invalidated = false;
+            entry.op_discard = false;
+            entry.op_restored = false;
+        }
+    }
+
+    /// Accept every mutation the scope made; the blocks stay dirty for the
+    /// flusher, `sync`, or eviction to publish. Deferred invalidations are
+    /// applied here, which is the point at which the freed blocks really are
+    /// freed.
+    pub fn commit_op(&mut self) {
+        self.op_depth = self.op_depth.saturating_sub(1);
+        if self.op_depth > 0 {
+            return;
+        }
+        self.undo.clear();
+        self.undo_overflow = false;
+        for i in 0..self.entries.len() {
+            self.entries[i].op_touched = false;
+            self.entries[i].op_discard = false;
+            self.entries[i].op_restored = false;
+            if !self.entries[i].op_invalidated {
+                continue;
+            }
+            self.entries[i].op_invalidated = false;
+            self.drop_entry(i);
+        }
+    }
+
+    /// Put every block the scope touched back the way it was, so nothing the
+    /// failed operation wrote can reach the device.
+    ///
+    /// Cache-scope only: a block evicted mid-operation was written back on its
+    /// way out and is already on the device. Retracting *that* needs a journal,
+    /// which is why [`Self::find_or_evict`] treats a touched block as the
+    /// victim of last resort.
+    pub fn rollback_op(&mut self) {
+        self.op_depth = self.op_depth.saturating_sub(1);
+        if self.op_depth > 0 {
+            return;
+        }
+        let bs = self.block_size as usize;
+        // Snapshots first. A block that was dirty on first touch has its
+        // committed contents only here, so restoring must win over the
+        // discard pass below, which a later eviction-and-re-acquire of the
+        // same block would otherwise have flagged.
+        while let Some(record) = self.undo.pop() {
+            let Some(&slot) = self.index.get(&record.block) else {
+                continue;
+            };
+            let entry = &mut self.entries[slot];
+            let n = bs.min(record.snapshot.len());
+            entry.frame.as_bytes_mut()[..n].copy_from_slice(&record.snapshot.as_slice()[..n]);
+            entry.frame.set_dirty(true);
+            entry.op_restored = true;
+        }
+        for i in 0..self.entries.len() {
+            if self.entries[i].op_discard && !self.entries[i].op_restored {
+                self.drop_entry(i);
+            }
+        }
+        self.undo_overflow = false;
+        for entry in &mut self.entries {
+            entry.op_touched = false;
+            entry.op_discard = false;
+            entry.op_restored = false;
+            // The invalidations the operation asked for are undone with it:
+            // the blocks it was freeing are still the inode's.
+            entry.op_invalidated = false;
+        }
+    }
+
+    /// Forget a slot's contents without writing them back.
+    fn drop_entry(&mut self, slot: usize) {
+        let block = self.entries[slot].block;
+        let entry = &mut self.entries[slot];
+        entry.valid = false;
+        entry.pinned = 0;
+        entry.frame.set_dirty(false);
+        entry.frame.set_owner_key(0);
+        self.index.remove(&block);
+    }
+
+    /// Record how `slot` is put back, before the caller can mutate it.
+    ///
+    /// Taken on *acquire* rather than on the first `data_mut`, because that
+    /// accessor cannot fail and a snapshot allocates. Reads therefore record
+    /// too, which costs one copy per distinct dirty metadata block an
+    /// operation reaches — the alternative is a fallible mutable accessor at
+    /// every call site and the same bound.
+    ///
+    /// Every fallible step happens before the entry is mutated, so a failure
+    /// leaves the slot exactly as it was found. An entry that has been mutated
+    /// with no undo record behind it is a block the rollback cannot see, which
+    /// a later flush would publish over live data.
+    fn note_op_touch(&mut self, slot: usize) -> Result<(), Ext2Error> {
+        if self.op_depth == 0 || self.entries[slot].op_touched {
+            return Ok(());
+        }
+        if !self.entries[slot].frame.dirty() {
+            // Clean: the device holds the committed contents, so the rollback
+            // is a drop and needs no snapshot.
+            self.entries[slot].op_touched = true;
+            self.entries[slot].op_discard = true;
+            return Ok(());
+        }
+        if self.undo.len() >= MAX_UNDO {
+            // An eviction clears `op_touched`, so a long operation can
+            // re-acquire the same dirty bitmap and indirect blocks and record
+            // each afresh. Refusing bounds the snapshot memory and turns the
+            // excess into a failed operation the guard rolls back, rather than
+            // an allocation storm that fails somewhere less recoverable.
+            self.undo_overflow = true;
+            return Err(Ext2Error::NoSpace);
+        }
+        let block = self.entries[slot].block;
+        let bs = self.block_size as usize;
+        let mut snapshot = KVec::<u8>::zeroed(bs).map_err(|_| Ext2Error::OutOfMemory)?;
+        snapshot
+            .as_mut_slice()
+            .copy_from_slice(&self.entries[slot].frame.as_bytes()[..bs]);
+        self.undo
+            .push(UndoEntry { block, snapshot })
+            .map_err(|_| Ext2Error::OutOfMemory)?;
+        self.entries[slot].op_touched = true;
+        Ok(())
+    }
+
+    /// Mark a freshly acquired block for discard on rollback.
+    ///
+    /// Infallible, which is what lets the acquire paths set it *after* the
+    /// entry is installed: a block that was just read or zeroed has no
+    /// committed cache state to preserve, so one bit is the whole record.
+    fn note_op_fresh(&mut self, slot: usize) {
+        if self.op_depth == 0 {
+            return;
+        }
+        self.entries[slot].op_touched = true;
+        self.entries[slot].op_discard = true;
     }
 
     pub fn unbarriered_writes(&self) -> usize {
@@ -158,10 +370,14 @@ impl BlockCache {
         owner: BlockOwner,
     ) -> Result<CachedBlock<'a>, Ext2Error> {
         if let Some(&slot) = self.index.get(&block) {
+            self.note_op_touch(slot)?;
             self.lru_clock += 1;
             self.entries[slot].lru = self.lru_clock;
             self.entries[slot].pinned += 1;
             self.entries[slot].owner = owner;
+            // Re-reached after a deferred invalidation: this operation is
+            // using the block again, so the commit must not drop it.
+            self.entries[slot].op_invalidated = false;
             return Ok(CachedBlock { cache: self, slot });
         }
 
@@ -185,7 +401,13 @@ impl BlockCache {
         entry.pinned = 1;
         entry.lru = self.lru_clock;
         entry.valid = true;
+        entry.op_touched = false;
+        entry.op_invalidated = false;
+        entry.op_discard = false;
+        entry.op_restored = false;
         self.index.insert(block, slot);
+        // Read clean, so the rollback is a discard and needs no snapshot.
+        self.note_op_fresh(slot);
 
         Ok(CachedBlock { cache: self, slot })
     }
@@ -227,11 +449,16 @@ impl BlockCache {
         owner: BlockOwner,
     ) -> Result<CachedBlock<'_>, Ext2Error> {
         if let Some(&slot) = self.index.get(&block) {
+            self.note_op_touch(slot)?;
             let bs = self.block_size as usize;
             self.entries[slot].frame.as_bytes_mut()[..bs].fill(0);
             self.entries[slot].frame.set_dirty(true);
             self.entries[slot].kind = kind;
             self.entries[slot].owner = owner;
+            // A block re-reached after a deferred invalidation is being reused
+            // by this same operation; dropping it at commit would throw the
+            // reuse away.
+            self.entries[slot].op_invalidated = false;
             self.lru_clock += 1;
             self.entries[slot].lru = self.lru_clock;
             self.entries[slot].pinned += 1;
@@ -252,7 +479,14 @@ impl BlockCache {
         entry.pinned = 1;
         entry.lru = self.lru_clock;
         entry.valid = true;
+        entry.op_touched = false;
+        entry.op_invalidated = false;
+        entry.op_discard = false;
+        entry.op_restored = false;
         self.index.insert(block, slot);
+        // A freshly zeroed block has no committed contents to snapshot, so the
+        // rollback is a discard whether or not the slot's predecessor was dirty.
+        self.note_op_fresh(slot);
 
         Ok(CachedBlock { cache: self, slot })
     }
@@ -339,14 +573,23 @@ impl BlockCache {
     }
 
     /// Invalidate a cached block (evict without writing).
+    ///
+    /// Inside an open operation this is *deferred* to the commit rather than
+    /// applied at once. Dropping the slot immediately would throw away the
+    /// undo snapshot that the block's own record names, so a later rollback
+    /// would silently revert it to whatever the device last held instead of to
+    /// its pre-operation contents. Deferring costs nothing: the callers
+    /// invalidate blocks they are *freeing*, and a reallocation reaches them
+    /// through `get_zero_*`, which overwrites regardless.
     pub fn invalidate(&mut self, block: BlockNum) {
-        if let Some(slot) = self.index.remove(&block) {
-            let entry = &mut self.entries[slot];
-            entry.valid = false;
-            entry.pinned = 0;
-            entry.frame.set_dirty(false);
-            entry.frame.set_owner_key(0);
+        let Some(&slot) = self.index.get(&block) else {
+            return;
+        };
+        if self.op_depth > 0 {
+            self.entries[slot].op_invalidated = true;
+            return;
         }
+        self.drop_entry(slot);
     }
 
     /// Frames holding a clean, unpinned block — what [`Self::shrink_clean`]
@@ -413,16 +656,30 @@ impl BlockCache {
             return Ok(self.entries.len() - 1);
         }
 
-        let mut best_slot = None;
-        let mut best_lru = u64::MAX;
-        for (i, entry) in self.entries.iter().enumerate() {
-            if entry.pinned == 0 && entry.lru < best_lru {
-                best_lru = entry.lru;
-                best_slot = Some(i);
+        // Evicting a block the open operation dirtied writes it back, putting
+        // half a failed operation on the device where no rollback can reach it.
+        // Preferring untouched victims keeps the guard's scope honest as long
+        // as the operation's working set fits the cache; a pass that finds only
+        // touched slots falls through to the second, which is the admission
+        // that a journal is what covers the rest.
+        let mut slot = None;
+        for touched_ok in [false, true] {
+            let mut best_lru = u64::MAX;
+            for (i, entry) in self.entries.iter().enumerate() {
+                if entry.pinned != 0 || (entry.op_touched && !touched_ok) {
+                    continue;
+                }
+                if entry.lru < best_lru {
+                    best_lru = entry.lru;
+                    slot = Some(i);
+                }
+            }
+            if slot.is_some() {
+                break;
             }
         }
 
-        let slot = best_slot.ok_or(Ext2Error::DeviceError)?;
+        let slot = slot.ok_or(Ext2Error::DeviceError)?;
 
         // Eviction is a cache-replacement event, not a durability point, so no
         // device barrier is issued here; FS-level `sync` provides the ordering.
@@ -441,6 +698,10 @@ impl BlockCache {
         entry.valid = false;
         entry.frame.set_dirty(false);
         entry.frame.set_owner_key(0);
+        entry.op_touched = false;
+        entry.op_invalidated = false;
+        entry.op_discard = false;
+        entry.op_restored = false;
 
         Ok(slot)
     }

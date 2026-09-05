@@ -185,6 +185,26 @@ fn boot_step_hpet_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("HPET: Initialization complete, main counter running.");
 }
 
+/// Anchor `CLOCK_REALTIME` to the firmware RTC value Limine read at hand-off.
+///
+/// After HPET, because the anchor pairs the epoch with a monotonic reading and
+/// a stopped counter would pair every timestamp with zero. A bootloader that
+/// answers nothing leaves the wall clock unset, which every consumer must
+/// treat as "stamp nothing" — an unset RTC that reported 1970 would put a
+/// plausible-looking lie in every inode.
+fn boot_step_wallclock_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+    match crate::limine_protocol::date_at_boot_unix() {
+        Some(secs) => {
+            slopos_kernel_services::clock::set_realtime_epoch(secs);
+            klog_info!(
+                "CLOCK: wall clock set from firmware RTC ({} unix seconds)",
+                secs
+            );
+        }
+        None => klog_info!("CLOCK: no boot timestamp from the bootloader — CLOCK_REALTIME unset"),
+    }
+}
+
 fn boot_step_lapic_calibration_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Calibrating LAPIC timer...");
     let freq = apic::timer::calibrate();
@@ -428,6 +448,13 @@ crate::boot_init!(
     b"hpet\0",
     boot_step_hpet_setup_fn,
     flags = boot_init_priority(55)
+);
+crate::boot_init!(
+    BOOT_STEP_WALLCLOCK,
+    drivers,
+    b"wall clock\0",
+    boot_step_wallclock_fn,
+    flags = boot_init_priority(56)
 );
 fn boot_step_csprng_seed_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     use slopos_arch::cpu::rdrand;

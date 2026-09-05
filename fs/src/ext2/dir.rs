@@ -82,12 +82,59 @@ pub fn for_each_entry(
     owner: BlockOwner,
     f: &mut dyn FnMut(DirEntry<'_>) -> bool,
 ) -> Result<(), Ext2Error> {
+    for_each_entry_from(
+        inode,
+        0,
+        cache,
+        device,
+        ptrs_per_block,
+        block_size,
+        owner,
+        &mut |_, e| f(e),
+    )
+    .map(|_| ())
+}
+
+/// Walk from a byte offset into the directory's data, handing each callback
+/// the offset of the record *after* the one it is given.
+///
+/// The offset is what ext2 directories are indexed by — an entry's position is
+/// stable under an unrelated create or unlink, whereas its ordinal is not — so
+/// this is what a resumable `readdir` pages over. Answers the offset the walk
+/// reached, which is the directory's size once it ends.
+#[allow(clippy::too_many_arguments)]
+pub fn for_each_entry_from(
+    inode: &Inode,
+    start: u64,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    ptrs_per_block: u32,
+    block_size: u32,
+    owner: BlockOwner,
+    f: &mut dyn FnMut(u64, DirEntry<'_>) -> bool,
+) -> Result<u64, Ext2Error> {
     if !inode.is_directory() {
         return Err(Ext2Error::NotDirectory);
     }
-    let mut offset = 0u32;
+    // The cookie reaches here from userland through `fs_list`. A value past
+    // the directory's own extent would start the walk on a block the inode
+    // does not map; the record parser bounds everything it reads within a
+    // block, so this is a refusal rather than a safety fix, but a caller
+    // resuming from a cookie this directory never issued is a bug worth
+    // reporting instead of silently answering an empty listing.
+    if start > inode.size {
+        return Err(Ext2Error::InvalidBlock);
+    }
+    let bs = block_size as u64;
+    // Resume at the *block* holding the cookie and re-walk it from its start,
+    // skipping the records that end at or before it. A record's own start is
+    // not a seekable position — ext2 chains records by `rec_len`, so a
+    // boundary is only reachable by walking from the block's beginning — but
+    // the re-walk is bounded by one block whatever the directory's size.
+    let mut offset = (start / bs) * bs;
     while offset < inode.size {
-        let file_block = FileBlock(offset / block_size);
+        let file_block =
+            FileBlock(u32::try_from(offset / bs).map_err(|_| Ext2Error::InvalidBlock)?);
         let phys = blockmap::map_block(inode, file_block, ptrs_per_block, cache, device, owner)?;
         if !phys.is_valid() {
             break;
@@ -97,7 +144,8 @@ pub fn for_each_entry(
         let mut cursor = 0usize;
         while cursor + DIR_ENTRY_HEADER_SIZE <= block_size as usize {
             let record = parse_record(data, cursor, block_size as usize)?;
-            if record.inode != 0 {
+            let next = offset + (cursor + record.rec_len) as u64;
+            if record.inode != 0 && next > start {
                 let name_start = cursor + DIR_ENTRY_HEADER_SIZE;
                 let name_end = name_start + record.name_len;
                 let entry = DirEntry {
@@ -105,15 +153,15 @@ pub fn for_each_entry(
                     file_type: record.file_type,
                     name: &data[name_start..name_end],
                 };
-                if !f(entry) {
-                    return Ok(());
+                if !f(next, entry) {
+                    return Ok(next);
                 }
             }
             cursor += record.rec_len;
         }
-        offset += block_size;
+        offset += bs;
     }
-    Ok(())
+    Ok(offset)
 }
 
 pub fn lookup_child(
@@ -161,9 +209,11 @@ pub fn remove_dir_entry(
         return Err(Ext2Error::NotDirectory);
     }
     let bs = block_size as usize;
-    let mut offset = 0u32;
+    let mut offset = 0u64;
     while offset < parent.size {
-        let file_block = FileBlock(offset / block_size);
+        let file_block = FileBlock(
+            u32::try_from(offset / block_size as u64).map_err(|_| Ext2Error::InvalidBlock)?,
+        );
         let phys = blockmap::map_block(parent, file_block, ptrs_per_block, cache, device, owner)?;
         if !phys.is_valid() {
             break;
@@ -204,7 +254,7 @@ pub fn remove_dir_entry(
             }
             cursor += rec_len;
         }
-        offset += block_size;
+        offset += block_size as u64;
     }
     Err(Ext2Error::PathNotFound)
 }
@@ -255,9 +305,11 @@ pub fn append_dir_entry(
     let needed = dir_entry_size(name.len());
     let bs = block_size as usize;
 
-    let mut offset = 0u32;
+    let mut offset = 0u64;
     while offset < parent_inode.size {
-        let file_block = FileBlock(offset / block_size);
+        let file_block = FileBlock(
+            u32::try_from(offset / block_size as u64).map_err(|_| Ext2Error::InvalidBlock)?,
+        );
         let phys = blockmap::map_block(
             parent_inode,
             file_block,
@@ -306,11 +358,14 @@ pub fn append_dir_entry(
             }
             cursor += rec_len;
         }
-        offset += block_size;
+        offset += block_size as u64;
     }
 
-    let file_block = FileBlock(parent_inode.size / block_size);
-    blockmap::ensure_data_block(
+    let file_block = FileBlock(
+        u32::try_from(parent_inode.size / block_size as u64)
+            .map_err(|_| Ext2Error::InvalidBlock)?,
+    );
+    let (new_block, allocated) = blockmap::ensure_data_block(
         parent_inode,
         file_block,
         ptrs_per_block,
@@ -320,21 +375,15 @@ pub fn append_dir_entry(
         geom,
         owner,
     )?;
-    let new_block = blockmap::map_block(
-        parent_inode,
-        file_block,
-        ptrs_per_block,
-        cache,
-        device,
-        owner,
-    )?;
 
     let mut block = cache.get_zero_owned(new_block, device, owner)?;
     let data = block.data_mut();
     write_dir_entry(&mut data[..bs], child, name, file_type, bs);
 
-    parent_inode.size += block_size;
-    parent_inode.blocks += block_size / 512;
+    parent_inode.size += block_size as u64;
+    // `allocated` covers the indirect blocks a growing directory needs too,
+    // which counting one data block would leave out of `i_blocks`.
+    parent_inode.blocks += allocated * (block_size / 512);
 
     Ok(())
 }

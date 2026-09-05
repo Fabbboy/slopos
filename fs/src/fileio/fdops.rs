@@ -475,6 +475,53 @@ pub fn file_unlink_path(path: &[u8]) -> c_int {
     }
 }
 
+pub fn file_rmdir_path(path: &[u8]) -> c_int {
+    errno_of(crate::vfs::vfs_rmdir(path))
+}
+
+pub fn file_symlink_path(target: &[u8], link_path: &[u8]) -> c_int {
+    errno_of(crate::vfs::vfs_symlink(target, link_path))
+}
+
+pub fn file_readlink_path(path: &[u8], buf: &mut [u8]) -> isize {
+    match crate::vfs::vfs_readlink(path, buf) {
+        Ok(n) => n as isize,
+        Err(e) => e.to_errno().raw() as isize,
+    }
+}
+
+pub fn file_truncate_path(path: &[u8], length: u64) -> c_int {
+    let resolved = match crate::vfs::resolve_path(path) {
+        Ok(r) => r,
+        Err(e) => return e.to_errno().raw() as _,
+    };
+    let stat = match resolved.fs.stat(resolved.inode) {
+        Ok(s) => s,
+        Err(e) => return e.to_errno().raw() as _,
+    };
+    if stat.file_type == crate::vfs::FileType::Directory {
+        return Errno::EISDIR.raw() as _;
+    }
+    if stat.sealed {
+        return Errno::EACCES.raw() as _;
+    }
+    if let Err(e) = resolved.check_writable() {
+        return e.to_errno().raw() as _;
+    }
+    errno_of(resolved.fs.truncate(resolved.inode, length))
+}
+
+pub fn file_chmod_path(path: &[u8], mode: u16) -> c_int {
+    errno_of(crate::vfs::vfs_set_mode(path, mode))
+}
+
+fn errno_of(result: crate::vfs::VfsResult<()>) -> c_int {
+    match result {
+        Ok(()) => 0,
+        Err(e) => e.to_errno().raw() as _,
+    }
+}
+
 pub fn file_mkdir_path(path: &[u8]) -> c_int {
     match vfs_mkdir(path) {
         Ok(()) => 0,
@@ -507,6 +554,29 @@ pub fn file_list_path(path: &[u8], entries: &mut [UserFsEntry], out_count: &mut 
             0
         }
         Err(_) => Errno::ENOENT.raw() as _,
+    }
+}
+
+/// Paged listing: `cursor` is the ABI-packed resumption point, read and
+/// written in place. A caller loops until it comes back
+/// [`slopos_abi::fs::FS_LIST_CURSOR_END`].
+pub fn file_list_path_from(
+    path: &[u8],
+    entries: &mut [UserFsEntry],
+    cursor: &mut u64,
+    out_count: &mut u32,
+) -> c_int {
+    if entries.is_empty() {
+        return Errno::EINVAL.raw() as _;
+    }
+    let mut state = crate::vfs::ListCursor::from_abi(*cursor);
+    match crate::vfs::vfs_list_from(path, entries, &mut state) {
+        Ok(count) => {
+            *out_count = count as u32;
+            *cursor = state.to_abi();
+            0
+        }
+        Err(e) => e.to_errno().raw() as _,
     }
 }
 

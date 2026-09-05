@@ -65,6 +65,11 @@ for bin in "${BINS[@]}"; do
 
     debugfs -w -R "write $src $dst" "$IMAGE_PATH" >/dev/null
     debugfs -w -R "set_inode_field $dst mode 0100755" "$IMAGE_PATH" >/dev/null
+    # EXT2_IMMUTABLE_FL: the on-disk carrier of the VFS seal. Program-identity
+    # privilege is keyed on a binary's path, so a shipped binary that is not
+    # sealed is one any task holding a write descriptor can replace and then
+    # spawn into the grant. `lsattr` shows this as `i`.
+    debugfs -w -R "set_inode_field $dst flags 0x10" "$IMAGE_PATH" >/dev/null
 done
 
 # Install font files into /usr/share/fonts/ if assets/fonts/ exists

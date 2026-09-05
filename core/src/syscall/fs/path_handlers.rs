@@ -2,8 +2,9 @@ use slopos_abi::Errno;
 use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList, UserFsStat};
 
 use slopos_fs::fileio::{
-    file_close_fd, file_list_path, file_mkdir_path, file_open_for_process, file_read_fd,
-    file_stat_path, file_sync_fd, file_unlink_path, file_write_fd,
+    file_chmod_path, file_close_fd, file_list_path_from, file_mkdir_path, file_open_for_process,
+    file_read_fd, file_readlink_path, file_rmdir_path, file_stat_path, file_symlink_path,
+    file_sync_fd, file_truncate_path, file_unlink_path, file_write_fd,
 };
 
 use slopos_mm::user_copy::{copy_bytes_to_user, copy_from_user, copy_to_user};
@@ -147,6 +148,59 @@ define_syscall!(syscall_fs_unlink
     if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
 });
 
+define_syscall!(syscall_rmdir
+    (ctx, path: UserCStr<USER_PATH_MAX>) cap(NoneFd)
+    -> Result<(), Errno>
+{
+    let rc = file_rmdir_path(path.as_bytes());
+    if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
+});
+
+define_syscall!(syscall_symlink
+    (ctx, target: UserCStr<USER_PATH_MAX>, link_path: UserCStr<USER_PATH_MAX>) cap(NoneFd)
+    -> Result<(), Errno>
+{
+    let rc = file_symlink_path(target.as_bytes(), link_path.as_bytes());
+    if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
+});
+
+// Never NUL-terminates, per POSIX: the count is the answer, and a target
+// longer than the buffer is truncated rather than an error.
+define_syscall!(syscall_readlink
+    (ctx, path: UserCStr<USER_PATH_MAX>, buf: UserBytes) cap(NoneFd)
+    -> Result<u64, Errno>
+{
+    if buf.base_u64() == 0 {
+        return Err(Errno::EFAULT);
+    }
+    let len = buf.len().min(USER_PATH_MAX);
+    let mut staging = [0u8; USER_PATH_MAX];
+    let rc = file_readlink_path(path.as_bytes(), &mut staging[..len]);
+    if rc < 0 {
+        return Err(errno_from_neg(rc as i32));
+    }
+    let n = rc as usize;
+    let user = MmUserBytes::try_new(buf.base_u64(), n).map_err(|_| Errno::EFAULT)?;
+    copy_bytes_to_user(user, &staging[..n]).map_err(|_| Errno::EFAULT)?;
+    Ok(n as u64)
+});
+
+define_syscall!(syscall_truncate
+    (ctx, path: UserCStr<USER_PATH_MAX>, length: u64) cap(NoneFd)
+    -> Result<(), Errno>
+{
+    let rc = file_truncate_path(path.as_bytes(), length);
+    if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
+});
+
+define_syscall!(syscall_chmod
+    (ctx, path: UserCStr<USER_PATH_MAX>, mode: u32) cap(NoneFd)
+    -> Result<(), Errno>
+{
+    let rc = file_chmod_path(path.as_bytes(), (mode & 0o7777) as u16);
+    if rc != 0 { Err(errno_from_neg(rc)) } else { Ok(()) }
+});
+
 define_syscall!(syscall_fs_list
     (ctx, path: UserCStr<USER_PATH_MAX>, list: UserPtr<UserFsList>) cap(NoneFd)
     -> Result<(), Errno>
@@ -167,12 +221,14 @@ define_syscall!(syscall_fs_list
     }
 
     let mut count: u32 = 0;
-    let rc = file_list_path(path.as_bytes(), tmp.as_mut_slice(), &mut count);
+    let mut cursor = list_hdr.cursor;
+    let rc = file_list_path_from(path.as_bytes(), tmp.as_mut_slice(), &mut cursor, &mut count);
     if rc != 0 {
         return Err(errno_from_neg(rc));
     }
 
     list_hdr.count = count;
+    list_hdr.cursor = cursor;
 
     let entries_bytes =
         slopos_ostd::util::byte_view::pod_slice_as_bytes(&tmp[..count as usize]);

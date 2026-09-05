@@ -50,6 +50,45 @@ pub fn ticks_to_microseconds(ticks: u64) -> u64 {
     ((ticks as u128 * 1_000_000u128) / (freq_hz as u128)) as u64
 }
 
+/// Wall-clock epoch: `CLOCK_REALTIME` at the instant `monotonic_ns()` read
+/// [`REALTIME_BASE_MONO_NS`]. Zero until a boot step supplies one, which is
+/// what [`realtime_ns`] reports as "no wall clock".
+static REALTIME_EPOCH_NS: AtomicU64 = AtomicU64::new(0);
+static REALTIME_BASE_MONO_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Anchor `CLOCK_REALTIME` to `unix_seconds`, read from the firmware RTC at
+/// hand-off. Advances thereafter on the monotonic counter: the RTC is read
+/// once and never again, so the two cannot drift apart mid-boot and no
+/// timestamp this kernel writes can go backwards.
+pub fn set_realtime_epoch(unix_seconds: u64) {
+    let mono = monotonic_ns();
+    let Some(epoch) = unix_seconds.checked_mul(1_000_000_000) else {
+        return;
+    };
+    REALTIME_BASE_MONO_NS.store(mono, Ordering::Relaxed);
+    REALTIME_EPOCH_NS.store(epoch, Ordering::Release);
+}
+
+/// Nanoseconds since the Unix epoch, or `None` when no wall clock was
+/// established. A caller stamping a timestamp must treat `None` as "leave the
+/// field alone" rather than as zero — an epoch-zero timestamp on disk is
+/// indistinguishable from a file written in 1970.
+pub fn realtime_ns() -> Option<u64> {
+    let epoch = REALTIME_EPOCH_NS.load(Ordering::Acquire);
+    if epoch == 0 {
+        return None;
+    }
+    let base = REALTIME_BASE_MONO_NS.load(Ordering::Relaxed);
+    Some(epoch.saturating_add(monotonic_ns().saturating_sub(base)))
+}
+
+/// Seconds since the Unix epoch, in the width every on-disk filesystem
+/// timestamp this kernel writes uses. Saturates in 2106 rather than wrapping
+/// to 1970.
+pub fn realtime_unix_secs() -> Option<u32> {
+    realtime_ns().map(|ns| u32::try_from(ns / 1_000_000_000).unwrap_or(u32::MAX))
+}
+
 // Coarse tick counter, incremented from the LAPIC timer arm in `boot/src/idt.rs`.
 // Lives here so `slopos-core` and `slopos-sched` can both touch it without
 // depending on each other.
