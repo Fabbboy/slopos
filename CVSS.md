@@ -1,6 +1,23 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-**No findings are currently open.** Last swept 2026-09-03.
+**No findings are currently open.** Last swept 2026-09-05 (Phase 4 crash
+consistency: ext2 mount state, `errors=remount-ro`, orphan inodes, the VFS
+open-inode reference table).
+
+That sweep found two unprivileged denial-of-service defects
+(`CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H`, 5.5 MEDIUM each) and one
+cross-file disclosure race, all three introduced *and* fixed inside the same
+unreleased change, so none is a ledger entry under the open-findings-only
+policy below. They are recorded here as method rather than as findings, because
+what produced them generalises: a new error classification that decides a
+mount-wide policy must be checked against **every** producer of the errors it
+names, in the direction of "can an unprivileged caller induce this on demand".
+Both DoS defects were one overloaded error variant — `Ext2Error::InvalidBlock`
+meaning both "the image is damaged" and "your offset is out of range" — and the
+fix was to split the caller-argument case into `InvalidRange`, which
+`is_corruption` deliberately excludes. `fs/src/tests.rs`'s
+`test_ext2_corruption_latches_but_caller_errors_do_not` pins both directions
+and was confirmed to fail against the vulnerable code.
 
 This file is the living ledger of open security findings. It is empty of
 findings by design, not by neglect: every entry recorded since 2026-03-17 has

@@ -282,6 +282,61 @@ impl RamFs {
         inner.ensure_initialized();
         f(&mut *inner)
     }
+
+    /// Remove a name, reclaiming the inode's slot now or leaving it for a
+    /// later [`FileSystem::release_detached`].
+    ///
+    /// Answers the inode whose reclaim was deferred. A deferred slot keeps
+    /// `in_use` and its generation, so a descriptor holding the id still
+    /// resolves — which is the whole of POSIX's unlinked-but-open rule on a
+    /// filesystem whose inode is a slot. `nlink` going to zero is what says
+    /// the slot is unreachable by name.
+    fn remove_name(
+        &self,
+        parent: InodeId,
+        name: &[u8],
+        reclaim: Reclaim,
+    ) -> VfsResult<Option<InodeId>> {
+        self.with_inner_mut(|inner| {
+            let target_id = {
+                let parent_inode = inner.get_inode(parent)?;
+                if parent_inode.file_type != FileType::Directory {
+                    return Err(VfsError::NotDirectory);
+                }
+                parent_inode.lookup(name)?
+            };
+
+            let is_dir = {
+                let target = inner.get_inode(target_id)?;
+                if target.file_type == FileType::Directory && target.dir_entry_count() > 2 {
+                    return Err(VfsError::NotEmpty);
+                }
+                target.file_type == FileType::Directory
+            };
+
+            inner.get_inode_mut(parent)?.remove_dir_entry(name)?;
+
+            if is_dir {
+                inner.get_inode_mut(parent)?.nlink -= 1;
+            }
+
+            // A directory is never deferred: `open` refuses one, so nothing
+            // can be holding it.
+            if is_dir || reclaim == Reclaim::Now {
+                inner.inodes[inode_slot(target_id)].reset();
+                return Ok(None);
+            }
+            inner.get_inode_mut(target_id)?.nlink = 0;
+            Ok(Some(target_id))
+        })
+    }
+}
+
+/// When [`RamFs::remove_name`] gives an inode's slot back.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reclaim {
+    Now,
+    Deferred,
 }
 
 impl FileSystem for RamFs {
@@ -425,33 +480,40 @@ impl FileSystem for RamFs {
     }
 
     fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
+        self.remove_name(parent, name, Reclaim::Now).map(|_| ())
+    }
+
+    fn detach(&self, parent: InodeId, name: &[u8]) -> VfsResult<Option<InodeId>> {
+        self.remove_name(parent, name, Reclaim::Deferred)
+    }
+
+    /// The deferred half of [`Self::detach`]: the slot is reset now that
+    /// nothing holds it. Idempotent, and refuses a slot that has been reused
+    /// — the generation in the id is what makes that check possible.
+    fn release_detached(&self, inode: InodeId) -> VfsResult<()> {
         self.with_inner_mut(|inner| {
-            let target_id = {
-                let parent_inode = inner.get_inode(parent)?;
-                if parent_inode.file_type != FileType::Directory {
-                    return Err(VfsError::NotDirectory);
-                }
-                parent_inode.lookup(name)?
-            };
-
-            let is_dir = {
-                let target = inner.get_inode(target_id)?;
-                if target.file_type == FileType::Directory && target.dir_entry_count() > 2 {
-                    return Err(VfsError::NotEmpty);
-                }
-                target.file_type == FileType::Directory
-            };
-
-            inner.get_inode_mut(parent)?.remove_dir_entry(name)?;
-
-            if is_dir {
-                inner.get_inode_mut(parent)?.nlink -= 1;
+            let slot = inode_slot(inode);
+            if slot >= inner.inodes.len() || slot == ROOT_SLOT {
+                return Ok(());
             }
-
-            inner.inodes[inode_slot(target_id)].reset();
-
+            let target = &mut inner.inodes[slot];
+            // A live nlink means a name came back, and a moved generation
+            // means the slot is somebody else's now. Either way this is not
+            // the inode the deferral was for.
+            if !target.in_use || target.generation != inode_generation(inode) || target.nlink > 0 {
+                return Ok(());
+            }
+            target.reset();
             Ok(())
         })
+    }
+
+    /// A slot reset is a `KVec::clear` under a lock this filesystem already
+    /// holds for every other operation, so the last close reclaims inline.
+    /// Deferring it would need a writeback thread ramfs does not have, and the
+    /// space would never come back.
+    fn release_detached_blocks(&self) -> bool {
+        false
     }
 
     fn readdir(

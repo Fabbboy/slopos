@@ -123,7 +123,7 @@ pub fn for_each_entry_from(
     // resuming from a cookie this directory never issued is a bug worth
     // reporting instead of silently answering an empty listing.
     if start > inode.size {
-        return Err(Ext2Error::InvalidBlock);
+        return Err(Ext2Error::InvalidRange);
     }
     let bs = block_size as u64;
     // Resume at the *block* holding the cookie and re-walk it from its start,
@@ -134,7 +134,7 @@ pub fn for_each_entry_from(
     let mut offset = (start / bs) * bs;
     while offset < inode.size {
         let file_block =
-            FileBlock(u32::try_from(offset / bs).map_err(|_| Ext2Error::InvalidBlock)?);
+            FileBlock(u32::try_from(offset / bs).map_err(|_| Ext2Error::InvalidRange)?);
         let phys = blockmap::map_block(inode, file_block, ptrs_per_block, cache, device, owner)?;
         if !phys.is_valid() {
             break;

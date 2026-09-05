@@ -41,6 +41,96 @@ pub const EXT2_VALID_FS: u16 = 1;
 /// `s_state`: errors were detected, or the image is currently mounted.
 pub const EXT2_ERROR_FS: u16 = 2;
 
+/// `s_errors`: what a driver should do when it detects an inconsistency.
+/// SlopOS behaves as this value whatever the field says — a filesystem already
+/// known to be damaged must not be written into further — so the constant is
+/// what a fixture writes and what `dumpe2fs` reports, never a selector.
+pub const EXT2_ERRORS_RO: u16 = 2;
+
+/// `s_last_orphan` byte offset: head of the singly-linked list of inodes whose
+/// last name is gone while a descriptor still holds them. Each member carries
+/// the next member's number in `i_dtime`, terminated by 0.
+pub const S_LAST_ORPHAN_OFF: usize = 232;
+
+/// The bookkeeping fields `e2fsck` reads and reports on.
+///
+/// Deliberately **not** part of [`Superblock`]. Every one of them is touched
+/// only at mount or in the sub-block superblock write, whereas a `Superblock`
+/// is copied onto the stack of every operation and again into every
+/// transaction snapshot — the stack gate is what says so. `s_last_orphan` is
+/// the one new field that stayed, because an operation genuinely moves it.
+#[derive(Debug, Copy, Clone, Default)]
+pub struct SuperblockBookkeeping {
+    /// Unix time of the last mount.
+    pub mtime: u32,
+    /// Unix time of the last write.
+    pub wtime: u32,
+    /// Mounts since the last full check.
+    pub mnt_count: u16,
+    /// Mounts `e2fsck` allows between checks; 0 disables the rule.
+    pub max_mnt_count: u16,
+    /// What a driver should do on an inconsistency. Read and reported; this
+    /// implementation behaves as `EXT2_ERRORS_RO` whatever it says, because a
+    /// filesystem already known to be damaged must not be written into.
+    pub errors: u16,
+    /// Unix time of the last full check.
+    pub lastcheck: u32,
+    /// Seconds `e2fsck` allows between checks; 0 disables the rule.
+    pub checkinterval: u32,
+}
+
+impl SuperblockBookkeeping {
+    pub fn parse(data: &[u8; 1024]) -> Self {
+        Self {
+            mtime: le32(data, 44),
+            wtime: le32(data, 48),
+            mnt_count: le16(data, 52),
+            max_mnt_count: le16(data, 54),
+            errors: le16(data, 60),
+            lastcheck: le32(data, 64),
+            checkinterval: le32(data, 68),
+        }
+    }
+
+    /// Whether the image is due a full check, by either of the two rules
+    /// `e2fsck` itself applies. `false` when the image disables a rule (`0`),
+    /// when no check has ever been recorded, or when `now` is `None` because
+    /// the boot established no wall clock.
+    pub fn check_overdue(&self, now: Option<u32>) -> bool {
+        if self.max_mnt_count > 0 && self.mnt_count >= self.max_mnt_count {
+            return true;
+        }
+        let Some(now) = now else {
+            return false;
+        };
+        self.lastcheck != 0
+            && self.checkinterval != 0
+            && now.saturating_sub(self.lastcheck) >= self.checkinterval
+    }
+
+    /// Record a mount into a raw superblock block.
+    ///
+    /// `s_lastcheck` is deliberately not written: it says when a *full check*
+    /// last ran, and this kernel runs none. Stamping it would tell the next
+    /// `e2fsck` that a check it never performed had happened.
+    pub fn stamp_mount(data: &mut [u8; 1024], now: Option<u32>) {
+        let mnt_count = le16(data, 52).saturating_add(1);
+        put_le16(data, 52, mnt_count);
+        if let Some(now) = now {
+            put_le32(data, 44, now);
+            put_le32(data, 48, now);
+        }
+    }
+
+    /// Record a write into a raw superblock block. A clockless boot leaves the
+    /// field as an earlier boot wrote it rather than resetting it to 1970.
+    pub fn stamp_write(data: &mut [u8; 1024], now: Option<u32>) {
+        if let Some(now) = now {
+            put_le32(data, 48, now);
+        }
+    }
+}
+
 /// `s_feature_incompat` bits this implementation understands. An image
 /// carrying any other incompat bit has a layout we cannot represent, so
 /// mounting it read-write would corrupt it.
@@ -72,6 +162,8 @@ pub struct Superblock {
     pub feature_compat: u32,
     pub feature_incompat: u32,
     pub feature_ro_compat: u32,
+    /// Head of the orphan list, or 0 when empty.
+    pub last_orphan: u32,
 }
 
 impl Superblock {
@@ -96,6 +188,7 @@ impl Superblock {
             feature_compat: le32(data, 92),
             feature_incompat: le32(data, 96),
             feature_ro_compat: le32(data, 100),
+            last_orphan: le32(data, S_LAST_ORPHAN_OFF),
         };
         if sb.magic != EXT2_MAGIC {
             return Err(Ext2Error::InvalidSuperblock);
@@ -132,10 +225,15 @@ impl Superblock {
     /// The superblock fields an operation may legitimately move. Everything
     /// else in the 1024-byte block is left as read, so a field this
     /// implementation does not model survives a write-back untouched.
+    ///
+    /// `s_state` is deliberately absent: the dirty stamp and the clean stamp
+    /// are barriered sub-block writes of their own, so a whole-superblock
+    /// write-back must not carry a stale copy of the field back over one.
     pub fn encode_mutable_fields(&self, data: &mut [u8]) {
         put_le32(data, 12, self.free_blocks_count);
         put_le32(data, 16, self.free_inodes_count);
         put_le32(data, 100, self.feature_ro_compat);
+        put_le32(data, S_LAST_ORPHAN_OFF, self.last_orphan);
     }
 
     pub fn block_size(&self) -> Result<u32, Ext2Error> {

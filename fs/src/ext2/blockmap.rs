@@ -18,6 +18,25 @@ pub struct BlockPath {
     pub offsets: [u32; 4],
 }
 
+/// Bytes addressable by twelve direct blocks plus three levels of indirection.
+///
+/// Saturating rather than checked: `ptrs_per_block` is `block_size / 4`, so
+/// the product cannot overflow `u64` for any block size this implementation
+/// accepts, and a saturating answer is a cap rather than a panic if one ever
+/// could.
+pub fn max_file_size(ptrs_per_block: u32, block_size: u32) -> u64 {
+    let n = ptrs_per_block as u64;
+    let blocks = (DIRECT_BLOCKS as u64)
+        .saturating_add(n)
+        .saturating_add(n.saturating_mul(n))
+        .saturating_add(n.saturating_mul(n).saturating_mul(n));
+    // An ext2 file block number is 32 bits, which binds first on a large block
+    // size: 1024³ already exceeds `u32::MAX`.
+    blocks
+        .min(u32::MAX as u64)
+        .saturating_mul(block_size as u64)
+}
+
 pub fn block_to_path(file_block: FileBlock, ptrs_per_block: u32) -> Result<BlockPath, Ext2Error> {
     let fb = file_block.raw();
     let n = ptrs_per_block;
@@ -55,7 +74,14 @@ pub fn block_to_path(file_block: FileBlock, ptrs_per_block: u32) -> Result<Block
         });
     }
 
-    Err(Ext2Error::InvalidBlock)
+    // Past what three levels of indirection can address. This is a *caller's*
+    // offset, not a number the image supplied: `file_block_index` only refuses
+    // above 16 TiB, so every offset between the triple-indirect reach and that
+    // ceiling arrives here. `InvalidRange` rather than `InvalidBlock` is
+    // therefore load-bearing — the latter is classified as image damage, and a
+    // one-byte `pwrite` past the reach would latch the whole mount read-only
+    // for every process on it.
+    Err(Ext2Error::InvalidRange)
 }
 
 fn read_ptr(data: &[u8], idx: u32) -> BlockNum {

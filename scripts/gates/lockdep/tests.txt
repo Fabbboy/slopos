@@ -178,9 +178,19 @@ require-phase post-userland-tests
 #               installs the config, so every later phase inherits it. Uniform
 #               +1 with no edge movement is the signature of one new
 #               declaration site, which is what this is.
+#   2026-09-05  kernel 187 -> 188, userland 197 -> 198: `VFS_OPEN_INODES`
+#               (fs/src/vfs/orphan.rs), the open-inode reference table that
+#               `unlink` consults to decide whether an inode is still held
+#               open — POSIX's unlinked-but-open rule, which needs a count the
+#               VFS did not previously keep. Boot is unchanged at 72: nothing
+#               on the boot path opens a descriptor. Re-measured over three
+#               runs of one pinned ISO, 188/198 on every one; the two banded
+#               pools moved within their existing bands (kernel edges 159-162,
+#               chains 359-361; userland edges 196-200, chains 409-410), so
+#               they are left as recorded.
 boot	classes	72
-post-kernel-tests	classes	187
-post-userland-tests	classes	197
+post-kernel-tests	classes	188
+post-userland-tests	classes	198
 
 # Boot edges and chains — exact, because boot has no test scheduling in it and
 # measures 43 edges and 110 chains on every run recorded here.

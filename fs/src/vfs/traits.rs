@@ -176,6 +176,63 @@ pub trait FileSystem: Send + Sync {
     /// [`Self::rmdir`].
     fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()>;
 
+    /// Remove a non-directory entry, keeping the inode's contents alive when
+    /// the name removed was its last — POSIX's rule for a file still held by
+    /// an open descriptor.
+    ///
+    /// Answers the inode that must later be handed to [`Self::release_detached`],
+    /// or `None` when nothing was deferred (the inode had other links, or the
+    /// filesystem freed it outright).
+    ///
+    /// Defaults to [`Self::unlink`] answering `None`, which is correct for a
+    /// filesystem whose inodes are reference-counted by their own handles —
+    /// ramfs recycles a slot behind a generation, so a descriptor outliving
+    /// its file fails rather than aliasing a stranger's. A filesystem whose
+    /// inode numbers name on-disk records must override this, or an `unlink`
+    /// hands a live descriptor's blocks to the next allocation.
+    fn detach(&self, parent: InodeId, name: &[u8]) -> VfsResult<Option<InodeId>> {
+        self.unlink(parent, name).map(|()| None)
+    }
+
+    /// Complete the deferred free [`Self::detach`] promised.
+    ///
+    /// Must be idempotent and must refuse an inode that has regained a link:
+    /// the record naming it is in-memory state that a crash loses, so this can
+    /// be reached for an inode a previous boot's `e2fsck` already reclaimed.
+    fn release_detached(&self, inode: InodeId) -> VfsResult<()> {
+        let _ = inode;
+        Ok(())
+    }
+
+    /// Whether [`Self::release_detached`] can block.
+    ///
+    /// This decides *where* the deferred free runs. A filesystem that answers
+    /// `false` has its frees run inline at the last close, under whatever the
+    /// closing context is — which for an in-memory filesystem is the only
+    /// thing that reclaims the space at all, since nothing else drains it. One
+    /// that answers `true` has them deferred to its own writeback thread,
+    /// because the last close can be a descriptor dropping on the task-exit
+    /// path, under a preempt guard, where a sleeping mutex and a park on block
+    /// I/O are not available.
+    ///
+    /// The default is `true`: a filesystem that has not thought about it must
+    /// not get its frees run somewhere they can deadlock.
+    fn release_detached_blocks(&self) -> bool {
+        true
+    }
+
+    /// Wake whatever thread runs this filesystem's deferred frees, answering
+    /// whether there is one.
+    ///
+    /// Only consulted when [`Self::release_detached_blocks`] is `true`, and
+    /// then it must be: a filesystem that defers a free with nothing to run it
+    /// leaks the record. The default `false` is what makes that a reported
+    /// wiring mistake instead of a silent leak — overriding `detach` alone,
+    /// which the doc above invites, must not be able to produce one.
+    fn wake_for_detached(&self) -> bool {
+        false
+    }
+
     /// Remove an empty directory entry, `rmdir(2)`'s semantics.
     ///
     /// Defaults to [`Self::unlink`] for filesystems that make no distinction;
@@ -246,6 +303,22 @@ pub trait FileSystem: Send + Sync {
     ) -> VfsResult<()> {
         let _ = (old_parent, old_name, new_parent, new_name);
         Err(VfsError::NotSupported)
+    }
+
+    /// [`Self::rename`] where the inode the destination name displaced keeps
+    /// its contents when that name was its last link — the same POSIX rule
+    /// [`Self::detach`] implements for `unlink`.
+    ///
+    /// Answers the displaced inode when its free was deferred.
+    fn rename_detaching(
+        &self,
+        old_parent: InodeId,
+        old_name: &[u8],
+        new_parent: InodeId,
+        new_name: &[u8],
+    ) -> VfsResult<Option<InodeId>> {
+        self.rename(old_parent, old_name, new_parent, new_name)
+            .map(|()| None)
     }
 
     fn readlink(&self, inode: InodeId, buf: &mut [u8]) -> VfsResult<usize> {

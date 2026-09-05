@@ -573,6 +573,11 @@ fn write_superblock(sb: &mut [u8], inodes: u32, blocks: u32, inode_size: u16) {
     sb[32..36].copy_from_slice(&blocks.to_le_bytes());
     sb[40..44].copy_from_slice(&inodes.to_le_bytes());
     sb[56..58].copy_from_slice(&0xEF53u16.to_le_bytes());
+    // `s_state`/`s_errors` as `mkfs.ext2` writes them. A zeroed `s_state` is
+    // not "clean" to any reader, so a fixture that left it out would make
+    // every mount of one read as a crashed boot.
+    sb[58..60].copy_from_slice(&crate::ext2::ondisk::EXT2_VALID_FS.to_le_bytes());
+    sb[60..62].copy_from_slice(&crate::ext2::ondisk::EXT2_ERRORS_RO.to_le_bytes());
     sb[76..80].copy_from_slice(&1u32.to_le_bytes());
     sb[84..88].copy_from_slice(&FIX_FIRST_INO.to_le_bytes());
     sb[88..90].copy_from_slice(&inode_size.to_le_bytes());
@@ -3758,3 +3763,626 @@ slopos_testing::stest!(
     name = test_ext2_rollback_restores_an_invalidated_block,
     suite = fs
 );
+
+/// A device that stops accepting writes after `n` of them, in the `dm-flakey`
+/// style: `write_at` reports success and drops the bytes, so the cache and the
+/// filesystem see a durable write the medium never took.
+///
+/// Dropping rather than failing is the harder half of the two. A failing write
+/// propagates `DeviceError` and the caller unwinds; a *dropped* one is exactly
+/// what a power cut looks like from inside the kernel, and nothing in the
+/// filesystem is told. That is the state a remount has to survive.
+struct FaultyBlockDevice {
+    inner: MemoryBlockDevice,
+    /// Writes still honoured before the cut.
+    budget: core::sync::atomic::AtomicUsize,
+    /// Once true, a write is acknowledged and discarded.
+    cut: core::sync::atomic::AtomicBool,
+    writes: core::sync::atomic::AtomicUsize,
+}
+
+impl FaultyBlockDevice {
+    fn new(inner: MemoryBlockDevice, budget: usize) -> Self {
+        Self {
+            inner,
+            budget: core::sync::atomic::AtomicUsize::new(budget),
+            cut: core::sync::atomic::AtomicBool::new(false),
+            writes: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Writes the device honoured, which is what a search over cut points
+    /// enumerates.
+    fn honoured(&self) -> usize {
+        self.writes.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn is_cut(&self) -> bool {
+        self.cut.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Hand the surviving image back, so a remount reads exactly the bytes the
+    /// medium holds.
+    fn into_inner(self) -> MemoryBlockDevice {
+        self.inner
+    }
+}
+
+impl BlockDevice for FaultyBlockDevice {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
+        self.inner.read_at(offset, buffer)
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        use core::sync::atomic::Ordering::Relaxed;
+        let remaining = self.budget.load(Relaxed);
+        if remaining == 0 {
+            self.cut.store(true, Relaxed);
+            return Ok(());
+        }
+        self.budget.store(remaining - 1, Relaxed);
+        self.writes.fetch_add(1, Relaxed);
+        self.inner.write_at(offset, buffer)
+    }
+
+    fn capacity(&self) -> u64 {
+        self.inner.capacity()
+    }
+}
+
+/// A crash mid-write must leave an image the next mount refuses to write
+/// rather than one it silently trusts.
+///
+/// Bounded black-box crash testing, after CrashMonkey/B³ (OSDI '18): the
+/// workload is short and every write boundary in it is a cut point, so the
+/// search is exhaustive over this operation rather than a sample of it. What
+/// each cut asserts is the same at every point — the image is structurally one
+/// of the two legal states, and it says so.
+pub fn test_ext2_crash_at_every_write_leaves_a_legal_image() -> TestResult {
+    // Find the write count of an uncut run first, so the search covers every
+    // boundary rather than a guessed prefix.
+    let Some(total) = crash_workload_write_count() else {
+        return TestResult::Skipped;
+    };
+    if total == 0 {
+        return slopos_testing::fail!("the crash workload issued no writes to cut");
+    }
+
+    for cut in 0..total {
+        if let Err(msg) = crash_cut_at(cut) {
+            klog_info!("CRASH_TEST: cut after {} of {} writes", cut, total);
+            return slopos_testing::fail!("{}", msg);
+        }
+    }
+    TestResult::Pass
+}
+
+/// Writes the workload issues when nothing cuts it.
+#[inline(never)]
+fn crash_workload_write_count() -> Option<usize> {
+    let inner = phase3_image(b"c.txt", b"seed")?;
+    let device = FaultyBlockDevice::new(inner, usize::MAX);
+    let _ = crash_workload(&device);
+    Some(device.honoured())
+}
+
+/// Create, write and sync a file, which is the shortest workload that touches
+/// every structure a crash can tear: the inode bitmap, the block bitmap, a
+/// group descriptor, an inode-table block, a directory block and a data block.
+#[inline(never)]
+fn crash_workload(device: &FaultyBlockDevice) -> Result<(), Ext2Error> {
+    let (sb, bs, is) = Ext2Fs::mount_params(device)?;
+    let mut cache = BlockCache::new(bs)?;
+    let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is)?;
+    fs.mark_dirty_on_disk()?;
+    let ino = fs.create_file(2, b"crash.txt")?;
+    fs.write_file(ino, 0, b"payload-that-spans-a-block")?;
+    fs.sync()?;
+    fs.mark_clean()
+}
+
+/// Run the workload with the device cut after `cut` writes, then assert what
+/// the surviving image is.
+#[inline(never)]
+fn crash_cut_at(cut: usize) -> Result<(), &'static str> {
+    let inner = phase3_image(b"c.txt", b"seed").ok_or("fixture")?;
+    let device = FaultyBlockDevice::new(inner, cut);
+    let _ = crash_workload(&device);
+    let cut_happened = device.is_cut();
+    let survivor = device.into_inner();
+    crash_assert_legal(&survivor, cut_happened)
+}
+
+/// The two legal states, and the rule that tells them apart.
+///
+/// A run whose writes all landed is `EXT2_VALID_FS` and must mount read-write.
+/// A run that was cut is whatever the medium happens to hold, and the only
+/// thing that makes it safe is `s_state`: the mount stamp went down before any
+/// mutation, so a cut anywhere after it leaves the image marked dirty and the
+/// next mount refuses to write. A cut so early that even the stamp was lost
+/// leaves the image byte-identical to the fixture, which is the other legal
+/// state.
+#[inline(never)]
+fn crash_assert_legal(device: &MemoryBlockDevice, was_cut: bool) -> Result<(), &'static str> {
+    let reason = crash_mount_reason(device)?;
+
+    if !was_cut {
+        if reason.is_some() {
+            return Err("an uncut run left an image the next mount refuses to write");
+        }
+        return Ok(());
+    }
+
+    // Marked dirty: the honest outcome, and the one the next mount refuses.
+    if matches!(
+        reason,
+        Some(crate::ext2::ReadOnlyReason::NotCleanlyUnmounted)
+    ) {
+        return Ok(());
+    }
+    if reason.is_some() {
+        return Err("a cut run left an image read-only for the wrong reason");
+    }
+
+    // Clean: only legal if the cut landed before the mount stamp, in which
+    // case nothing this workload did reached the medium. Proving that from the
+    // outside is what the fixture's own file is for.
+    with_mounted(device, crash_assert_untouched)
+}
+
+/// Its own frame so the 1 KiB superblock buffer `mount_params` stages does not
+/// share one with the mount the caller goes on to perform.
+#[inline(never)]
+fn crash_mount_reason(
+    device: &MemoryBlockDevice,
+) -> Result<Option<crate::ext2::ReadOnlyReason>, &'static str> {
+    let (sb, _, _) = Ext2Fs::mount_params(device).map_err(|_| "the image no longer mounts")?;
+    Ok(Ext2Fs::mount_read_only_reason(&sb, device))
+}
+
+#[inline(never)]
+fn crash_assert_untouched(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    if fs.resolve_path(b"/crash.txt").is_ok() {
+        return Err("a cut run left a clean image that carries the interrupted file");
+    }
+    fs.resolve_path(b"/c.txt")
+        .map(|_| ())
+        .map_err(|_| "a cut run left a clean image whose original file is gone")
+}
+
+/// The `errors=remount-ro` rule, at the layer that enforces it: an image whose
+/// `s_state` says it was never marked clean mounts read-only, and every
+/// mutation through it is `EROFS`.
+pub fn test_ext2_dirty_image_mounts_read_only() -> TestResult {
+    let Some(device) = phase3_image(b"d.txt", b"seed") else {
+        return TestResult::Skipped;
+    };
+    // What a crashed boot leaves behind: the mount stamp, unretracted.
+    device.with_buffer_mut(|buf| {
+        buf[1024 + 58..1024 + 60].copy_from_slice(&2u16.to_le_bytes());
+    });
+
+    let Ok((sb, _, _)) = Ext2Fs::mount_params(&device) else {
+        return slopos_testing::fail!("a dirty image must still mount");
+    };
+    match Ext2Fs::mount_read_only_reason(&sb, &device) {
+        Some(crate::ext2::ReadOnlyReason::NotCleanlyUnmounted) => {}
+        other => return slopos_testing::fail!("want NotCleanlyUnmounted, got {:?}", other),
+    }
+
+    // The reason is the mount's to apply; a handle told to hold it must then
+    // refuse every mutation, and must still read.
+    mount_ext2!(device, _cache, fs);
+    fs.force_read_only();
+    if !matches!(fs.create_file(2, b"nope"), Err(Ext2Error::ReadOnly)) {
+        return slopos_testing::fail!("a dirty-mounted image accepted a create");
+    }
+    if !matches!(fs.unlink_entry(2, b"d.txt"), Err(Ext2Error::ReadOnly)) {
+        return slopos_testing::fail!("a dirty-mounted image accepted an unlink");
+    }
+    if fs.resolve_path(b"/d.txt").is_err() {
+        return slopos_testing::fail!("a dirty-mounted image is unreadable");
+    }
+    // A clean image is the control: without it this test passes on a rule that
+    // refuses everything.
+    let Some(clean) = phase3_image(b"d.txt", b"seed") else {
+        return TestResult::Skipped;
+    };
+    let Ok((clean_sb, _, _)) = Ext2Fs::mount_params(&clean) else {
+        return TestResult::Fail;
+    };
+    match Ext2Fs::mount_read_only_reason(&clean_sb, &clean) {
+        None => TestResult::Pass,
+        other => slopos_testing::fail!("a clean image must mount read-write, got {:?}", other),
+    }
+}
+
+/// A mount records itself in the fields `e2fsck` reads, and `s_state` tracks
+/// the mount/unmount pair.
+pub fn test_ext2_superblock_mount_bookkeeping() -> TestResult {
+    let Some(device) = phase3_image(b"b.txt", b"seed") else {
+        return TestResult::Skipped;
+    };
+    match with_mounted(&device, bookkeeping_inner) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!("{}", msg),
+    }
+}
+
+#[inline(never)]
+fn bookkeeping_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let before = fs.read_bookkeeping().map_err(|_| "read")?.mnt_count;
+    fs.mark_dirty_on_disk().map_err(|_| "mark_dirty_on_disk")?;
+    let after_first = fs.read_bookkeeping().map_err(|_| "read")?.mnt_count;
+    if after_first != before.saturating_add(1) {
+        return Err("a mount did not increment s_mnt_count");
+    }
+    if fs.superblock().state != 2 {
+        return Err("a mount did not stamp EXT2_ERROR_FS");
+    }
+
+    // Idempotent: a second stamp on an already-dirty image must not bill a
+    // second mount.
+    fs.mark_dirty_on_disk().map_err(|_| "repeat stamp")?;
+    if fs.read_bookkeeping().map_err(|_| "read")?.mnt_count != after_first {
+        return Err("a repeat stamp counted a second mount");
+    }
+
+    fs.mark_clean().map_err(|_| "mark_clean")?;
+    if fs.superblock().state != 1 {
+        return Err("an unmount did not stamp EXT2_VALID_FS");
+    }
+    // `s_lastcheck` must stay untouched: this kernel runs no fsck, and
+    // stamping it would claim a check that never happened.
+    if fs.read_bookkeeping().map_err(|_| "read")?.lastcheck != 0 {
+        return Err("a mount stamped s_lastcheck without running a check");
+    }
+    Ok(())
+}
+
+/// The two rules `e2fsck` applies, read off a real superblock so the offsets
+/// are exercised rather than assumed.
+pub fn test_ext2_check_overdue_rules() -> TestResult {
+    use crate::ext2::ondisk::SuperblockBookkeeping;
+
+    let Some(device) = phase3_image(b"k.txt", b"seed") else {
+        return TestResult::Skipped;
+    };
+    device.with_buffer_mut(|buf| {
+        let sb = &mut buf[1024..2048];
+        sb[52..54].copy_from_slice(&30u16.to_le_bytes()); // s_mnt_count
+        sb[54..56].copy_from_slice(&20u16.to_le_bytes()); // s_max_mnt_count
+        sb[64..68].copy_from_slice(&1_000u32.to_le_bytes()); // s_lastcheck
+        sb[68..72].copy_from_slice(&100u32.to_le_bytes()); // s_checkinterval
+    });
+    mount_ext2!(device, _cache, fs);
+    let Ok(book) = fs.read_bookkeeping() else {
+        return slopos_testing::fail!("read_bookkeeping failed");
+    };
+    if book.mnt_count != 30 || book.max_mnt_count != 20 || book.checkinterval != 100 {
+        return slopos_testing::fail!("bookkeeping fields did not round-trip off the disk");
+    }
+    if !book.check_overdue(None) {
+        return slopos_testing::fail!("the mount-count rule needs no clock and did not fire");
+    }
+
+    let interval_only = SuperblockBookkeeping {
+        mnt_count: 1,
+        max_mnt_count: 20,
+        ..book
+    };
+    if !interval_only.check_overdue(Some(2_000)) {
+        return slopos_testing::fail!("the check-interval rule did not fire");
+    }
+    if interval_only.check_overdue(Some(1_050)) {
+        return slopos_testing::fail!("the check-interval rule fired early");
+    }
+    // A clockless boot cannot answer the interval rule, and must not guess.
+    if interval_only.check_overdue(None) {
+        return slopos_testing::fail!("the interval rule fired with no wall clock");
+    }
+    // Both rules disabled, which is what `mkfs` writes by default.
+    let disabled = SuperblockBookkeeping {
+        mnt_count: 9_000,
+        max_mnt_count: 0,
+        checkinterval: 0,
+        ..book
+    };
+    if disabled.check_overdue(Some(u32::MAX)) {
+        return slopos_testing::fail!("a disabled rule reported a check as due");
+    }
+    TestResult::Pass
+}
+
+/// The orphan list is ext2's own mechanism, so the on-disk shape has to be
+/// exactly what another implementation reads: a head in `s_last_orphan`, each
+/// member's `i_dtime` naming the next, `links_count == 0` with a live `i_mode`.
+pub fn test_ext2_orphan_list_roundtrips_on_disk() -> TestResult {
+    let Some(device) = phase3_image(b"o.txt", b"payload") else {
+        return TestResult::Skipped;
+    };
+    match with_mounted(&device, orphan_roundtrip_inner) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!("{}", msg),
+    }
+}
+
+#[inline(never)]
+fn orphan_roundtrip_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let ino = fs.resolve_path(b"/o.txt").map_err(|_| "resolve")?;
+    let free_blocks = fs.superblock().free_blocks_count;
+    let free_inodes = fs.superblock().free_inodes_count;
+
+    let orphaned = fs.detach_entry(2, b"o.txt").map_err(|_| "detach")?;
+    if orphaned != Some(ino) {
+        return Err("detach did not report the orphaned inode");
+    }
+    if fs.resolve_path(b"/o.txt").is_ok() {
+        return Err("the name survived the detach");
+    }
+    // Neither the blocks nor the inode may come back yet: a descriptor still
+    // holds them, which is the whole point.
+    if fs.superblock().free_blocks_count != free_blocks {
+        return Err("detach freed the blocks of a still-open file");
+    }
+    if fs.superblock().free_inodes_count != free_inodes {
+        return Err("detach freed the inode of a still-open file");
+    }
+    if fs.orphan_head() != ino {
+        return Err("the orphan list head does not name the detached inode");
+    }
+    // The contents must still be readable through the inode a descriptor holds.
+    let mut buf = [0u8; 16];
+    match fs.read_file(ino, 0, &mut buf) {
+        Ok(n) if &buf[..n] == b"payload" => {}
+        _ => return Err("a detached inode's contents were lost"),
+    }
+    let inode = fs.read_inode(ino).map_err(|_| "read_inode")?;
+    if inode.links_count != 0 || inode.mode == 0 {
+        return Err("a detached inode does not read as an orphan");
+    }
+
+    fs.release_orphan(ino).map_err(|_| "release")?;
+    if fs.orphan_head() != 0 {
+        return Err("releasing the only orphan left the list non-empty");
+    }
+    if fs.superblock().free_blocks_count != free_blocks + 1 {
+        return Err("releasing an orphan did not free its block");
+    }
+    if fs.superblock().free_inodes_count != free_inodes + 1 {
+        return Err("releasing an orphan did not free its inode");
+    }
+    // Idempotent: a second release, or one for an inode `e2fsck` already
+    // drained, must not free whatever now occupies the number.
+    let reused = fs.create_file(2, b"reused.txt").map_err(|_| "create")?;
+    let after = fs.superblock().free_inodes_count;
+    fs.release_orphan(reused).map_err(|_| "second release")?;
+    if fs.superblock().free_inodes_count != after {
+        return Err("release_orphan freed a live inode");
+    }
+    Ok(())
+}
+
+/// Several orphans thread into one list, and draining it at mount reclaims
+/// every one — the crash-recovery half.
+pub fn test_ext2_orphan_drain_reclaims_a_crashed_boot() -> TestResult {
+    let Some(device) = phase3_image(b"x.txt", b"seed") else {
+        return TestResult::Skipped;
+    };
+    match with_mounted(&device, orphan_drain_inner) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!("{}", msg),
+    }
+}
+
+#[inline(never)]
+fn orphan_drain_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let baseline_blocks = fs.superblock().free_blocks_count;
+    let baseline_inodes = fs.superblock().free_inodes_count;
+
+    // Three files, each with a block, all detached: what a boot that died
+    // holding three unlinked-but-open files leaves behind.
+    for name in [b"a1".as_slice(), b"a2".as_slice(), b"a3".as_slice()] {
+        let ino = fs.create_file(2, name).map_err(|_| "create")?;
+        fs.write_file(ino, 0, b"x").map_err(|_| "write")?;
+        if fs.detach_entry(2, name).map_err(|_| "detach")?.is_none() {
+            return Err("detach of a fresh file reported no orphan");
+        }
+    }
+    if fs.orphan_head() == 0 {
+        return Err("three detaches left an empty orphan list");
+    }
+    if fs.superblock().free_inodes_count != baseline_inodes - 3 {
+        return Err("detached inodes were freed early");
+    }
+
+    match fs.drain_orphans() {
+        Ok(3) => {}
+        other => {
+            return Err(match other {
+                Ok(_) => "the drain reclaimed the wrong number of inodes",
+                Err(_) => "the drain failed",
+            });
+        }
+    }
+    if fs.orphan_head() != 0 {
+        return Err("the drain left the list non-empty");
+    }
+    if fs.superblock().free_inodes_count != baseline_inodes {
+        return Err("the drain did not return every inode");
+    }
+    if fs.superblock().free_blocks_count != baseline_blocks {
+        return Err("the drain did not return every block");
+    }
+    // A drain over an empty list is a mount-time no-op, not an error.
+    match fs.drain_orphans() {
+        Ok(0) => Ok(()),
+        _ => Err("a drain of an empty list was not a no-op"),
+    }
+}
+
+/// The corruption classification is what `errors=remount-ro` keys on, so its
+/// two directions both matter: a damaged structure latches the mount, and an
+/// error a caller can produce on demand does not.
+pub fn test_ext2_corruption_latches_but_caller_errors_do_not() -> TestResult {
+    let Some(device) = phase3_image(b"e.txt", b"seed") else {
+        return TestResult::Skipped;
+    };
+    if let Err(msg) = with_mounted(&device, corruption_caller_errors_inner) {
+        return slopos_testing::fail!("{}", msg);
+    }
+
+    // A group descriptor pointing outside the volume is damage no caller can
+    // ask for, and `validate_desc` is what turns it into `InvalidBlock`.
+    device.with_buffer_mut(|buf| {
+        let desc = 2 * FIX_BLOCK_SIZE as usize;
+        buf[desc..desc + 4].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+    });
+    match with_mounted(&device, corruption_latches_inner) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!("{}", msg),
+    }
+}
+
+/// Every error an unprivileged caller can ask for on demand. If any of these
+/// latched, one `stat` of a nonexistent path would take the whole mount
+/// read-only.
+#[inline(never)]
+fn corruption_caller_errors_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let mut scratch = [0u8; 4];
+    let _ = fs.create_file(2, b"e.txt");
+    let _ = fs.unlink_entry(2, b"absent");
+    let _ = fs.create_file(2, b"");
+    let _ = fs.read_file(9999, 0, &mut scratch);
+    let _ = fs.truncate_file(9999, 0);
+
+    // The sharpest one, and the reason `InvalidRange` exists as a variant of
+    // its own: this cursor comes straight from userland through `fs_list`, so
+    // an argument error classified as damage would let any process take the
+    // whole mount read-only for everybody with one bad `u64`.
+    let bogus = fs.for_each_dir_entry_from(2, u64::MAX, |_, _| true);
+    if !matches!(bogus, Err(Ext2Error::InvalidRange)) {
+        return Err("an out-of-range readdir cookie is not reported as a caller error");
+    }
+    // Past the end but not absurd, and the whole 64-bit range in between: the
+    // check must be on the value, not on how large it looks.
+    for cookie in [u64::MAX / 2, 1 << 32, 4096, u64::from(u32::MAX)] {
+        let _ = fs.for_each_dir_entry_from(2, cookie, |_, _| true);
+    }
+    let _ = fs.read_file(2, u64::MAX, &mut scratch);
+    let _ = fs.write_file(2, u64::MAX, b"x");
+
+    // An offset past what three levels of indirection can address, which is
+    // the other end of the same hazard: `file_block_index` only refuses above
+    // 16 TiB, so every offset between the triple-indirect reach and that
+    // ceiling reaches the block map's fall-through. One `pwrite` there used to
+    // latch the whole mount read-only for every process on it.
+    let ino = fs.create_file(2, b"deep.txt").map_err(|_| "create")?;
+    let past_reach =
+        crate::ext2::blockmap::max_file_size(256, FIX_BLOCK_SIZE) + FIX_BLOCK_SIZE as u64;
+    let _ = fs.write_file(ino, past_reach, b"x");
+    let _ = fs.read_file(ino, past_reach, &mut scratch);
+    // And the size that would let a later read reach it: refused where the
+    // size is set, so `i_size` never names a block no read can address.
+    if !matches!(
+        fs.truncate_file(ino, past_reach),
+        Err(Ext2Error::InvalidRange)
+    ) {
+        return Err("a truncate past the block map's reach was accepted");
+    }
+
+    if fs.corruption_seen() {
+        return Err("an ordinary caller error latched the mount read-only");
+    }
+    Ok(())
+}
+
+#[inline(never)]
+fn corruption_latches_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let _ = fs.create_file(2, b"anything");
+    if !fs.corruption_seen() {
+        return Err("a group descriptor outside the volume did not latch");
+    }
+    Ok(())
+}
+
+slopos_testing::stest!(
+    name = test_ext2_crash_at_every_write_leaves_a_legal_image,
+    suite = fs
+);
+slopos_testing::stest!(name = test_ext2_dirty_image_mounts_read_only, suite = fs);
+slopos_testing::stest!(name = test_ext2_superblock_mount_bookkeeping, suite = fs);
+slopos_testing::stest!(name = test_ext2_check_overdue_rules, suite = fs);
+slopos_testing::stest!(name = test_ext2_orphan_list_roundtrips_on_disk, suite = fs);
+slopos_testing::stest!(
+    name = test_ext2_orphan_drain_reclaims_a_crashed_boot,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_ext2_corruption_latches_but_caller_errors_do_not,
+    suite = fs
+);
+
+/// POSIX: a file unlinked while a descriptor holds it keeps its contents until
+/// the last close.
+///
+/// Exercised through the VFS rather than through ext2 directly, because the
+/// rule is a two-layer one: the open-reference count decides *which* removal
+/// runs, and the filesystem decides what that removal does on disk. A test
+/// against either half alone would pass with the other missing.
+pub fn test_vfs_unlink_defers_while_open() -> TestResult {
+    use crate::vfs::orphan;
+    use crate::vfs::{VfsOpenFlags, vfs_open_flags};
+    use crate::vfs_file_ops::vfs_open_handle_flags;
+
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
+    let _ = vfs_mkdir(b"/tmp/unlink_open");
+    const PATH: &[u8] = b"/tmp/unlink_open/held";
+    let _ = vfs_unlink(PATH);
+
+    let Ok(seed) = vfs_open_flags(PATH, VfsOpenFlags::create_only()) else {
+        return slopos_testing::fail!("could not create the fixture");
+    };
+    if seed.write(0, b"held-open").is_err() {
+        return slopos_testing::fail!("could not seed the fixture");
+    }
+    drop(seed);
+
+    // A descriptor-level handle, which is what takes the open reference; the
+    // `VfsHandle` above deliberately does not.
+    let Ok(handle) = vfs_open_handle_flags(PATH, VfsOpenFlags::read_only()) else {
+        return slopos_testing::fail!("could not open the fixture");
+    };
+    let tracked_before = orphan::tracked_count();
+
+    if vfs_unlink(PATH).is_err() {
+        return slopos_testing::fail!("unlink of a held-open file failed");
+    }
+    // The name is gone.
+    if vfs_stat(PATH).is_ok() {
+        return slopos_testing::fail!("the name survived the unlink");
+    }
+    // The contents are not: reading through the descriptor still works.
+    let mut buf = [0u8; 16];
+    let read = {
+        let mut sink = slopos_abi::io::KernelIoBuf::new(&mut buf[..9]);
+        slopos_abi::file_ops::FileOps::read(
+            &crate::vfs_file_ops::VFS_FILE_OPS,
+            handle,
+            &mut sink,
+            0,
+            0,
+        )
+    };
+    if read != 9 || &buf[..9] != b"held-open" {
+        return slopos_testing::fail!("a held-open unlinked file became unreadable ({})", read);
+    }
+    if orphan::tracked_count() < tracked_before {
+        return slopos_testing::fail!("the unlink dropped the open reference");
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_vfs_unlink_defers_while_open, suite = fs);

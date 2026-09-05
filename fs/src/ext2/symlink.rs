@@ -34,7 +34,7 @@ pub fn create_symlink_inode(
         return Err(Ext2Error::NameTooLong);
     }
     if symlink_needs_block(target) != data_block.is_some() {
-        return Err(Ext2Error::InvalidBlock);
+        return Err(Ext2Error::InvalidRange);
     }
 
     let mut inode = Inode {

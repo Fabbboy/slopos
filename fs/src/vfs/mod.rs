@@ -2,6 +2,7 @@ pub mod canon;
 pub mod init;
 pub mod mount;
 pub mod ops;
+pub mod orphan;
 pub mod path;
 pub mod traits;
 

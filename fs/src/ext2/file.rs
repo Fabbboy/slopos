@@ -135,7 +135,7 @@ pub fn write_file(
 /// A file offset's block index, refused rather than truncated past the 32-bit
 /// block number ext2 addresses with.
 fn file_block_index(offset: u64, block_size: u32) -> Result<u32, Ext2Error> {
-    u32::try_from(offset / block_size as u64).map_err(|_| Ext2Error::InvalidBlock)
+    u32::try_from(offset / block_size as u64).map_err(|_| Ext2Error::InvalidRange)
 }
 
 /// Shrink or extend a file to `new_size`.

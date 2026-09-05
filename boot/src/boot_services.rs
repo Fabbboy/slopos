@@ -174,6 +174,18 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
                 VerityStatus::Verified { .. } => "enabled",
             },
         );
+        if info.orphans_drained > 0 {
+            klog_info!(
+                "FS: reclaimed {} inode(s) the previous boot left unlinked-but-open",
+                info.orphans_drained
+            );
+        }
+        if info.check_overdue {
+            klog_info!(
+                "FS: the image is due a full check by its own mount-count or check-interval \
+                 rule — run `e2fsck -f` on the host"
+            );
+        }
     }
     // Absence is not an error: on real hardware the root came from the
     // initramfs. A disk that is there, though, must come up verified when the

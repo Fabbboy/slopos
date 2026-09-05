@@ -9,11 +9,13 @@ case:
 - **The root is still RAM.** Nothing written to `/` outlives the boot; the disk
   is a secondary mount at `/mnt`, and `root=virtio` is exercised by no recipe,
   test or CI job.
-- **A crash is not survivable.** Nothing repairs a dirty image, an image whose
-  `s_state` says `EXT2_ERROR_FS` still mounts read-write, and `unlink` frees an
-  inode's blocks while a descriptor still holds it.
 
-This plan closes those, in that order.
+Crash consistency is closed: an image that was never marked clean mounts
+read-only rather than being silently trusted, a filesystem found damaged stops
+being written to, an unlinked-but-open file keeps its contents until the last
+close on both sides of the disk, and the whole of it is held down by a
+crash-injection test that cuts the device at every write boundary. What remains
+is making the persistent root the real one.
 
 Verity is settled and out of scope here: a trailer makes the device
 write-protected and the mount read-only (`MOUNT_RDONLY`, `EROFS`), the shipped
@@ -73,11 +75,38 @@ The shape, which the code states more precisely:
   — which is what a journal, not a wider guard, would close. Snapshots are
   capped (`MAX_UNDO`); a scope that outgrows its undo record fails rather than
   committing a part of itself.
-- **There is a wall clock.** Limine's `DateAtBootRequest` anchors
-  `CLOCK_REALTIME` against the monotonic counter at boot
-  (`kernel_services::clock::realtime_ns`), and the inode write paths stamp
-  `atime`/`ctime`/`mtime` from it. A boot whose bootloader reports no date
-  leaves the clock unset and stamps nothing, rather than claiming 1970.
+- **There is a wall clock, and userland can read it.** Limine's
+  `DateAtBootRequest` anchors `CLOCK_REALTIME` against the monotonic counter at
+  boot (`kernel_services::clock::realtime_ns`); the inode write paths stamp
+  `atime`/`ctime`/`mtime` from it, and `syscall_clock_gettime` answers it for
+  `CLOCK_REALTIME`, falling back to monotonic only on a boot that established
+  no clock. A boot whose bootloader reports no date stamps nothing, rather than
+  claiming 1970.
+- **A dirty image is not silently trusted.** `s_state` is read once at mount,
+  against the superblock as it came off the disk, and an image that was never
+  marked clean mounts **read-only** with a loud klog line naming `e2fsck` as
+  the repair (`Ext2Fs::mount_read_only_reason` → `ReadOnlyReason`). There is no
+  in-kernel fsck and there should not be one. `s_mnt_count`, `s_mtime` and
+  `s_wtime` are maintained; `s_lastcheck` deliberately is *not*, because this
+  kernel runs no check and stamping it would claim one that never happened.
+  `check_overdue` reports `e2fsck`'s own two rules without acting on them.
+- **A damaged filesystem stops being written to.** `errors=remount-ro`: an
+  operation that finds the image or the device damaged latches the whole mount
+  read-only. What counts as damage is a classification
+  (`Ext2Error::is_corruption`) that deliberately excludes every error an
+  unprivileged caller can induce on demand — `InvalidRange` exists as a
+  separate variant precisely so a bad `readdir` cookie or an offset past the
+  block map's reach is `EINVAL` to that caller rather than `EROFS` for
+  everybody.
+- **An unlinked file that is still open keeps its contents.** POSIX's rule, in
+  two halves. The in-memory half is an open-inode reference table
+  (`fs/src/vfs/orphan.rs`) that decides, under the lock the count is taken
+  under, whether `unlink` frees now or defers; the on-disk half is ext2's own
+  orphan list, threaded through `s_last_orphan` and each member's `i_dtime`,
+  so a crash leaves a list the next mount drains rather than leaked blocks.
+  The deferred free runs on the flusher, not at the last close, because a
+  descriptor drops from a `Drop` the task-exit path reaches under a preempt
+  guard. `rename` over an open file takes the same path.
 - **A directory of any size is listable.** `FileSystem::readdir_cookie` pages
   over an opaque per-filesystem cookie — a byte offset into the directory's
   data on ext2, which an unrelated create or unlink does not shift — carried
@@ -89,6 +118,13 @@ The shape, which the code states more precisely:
   re-resolution, `MOUNT_RDONLY` consulted at every `vfs::ops` mutation),
   lexical canonicalisation, path walk carrying the mount's flags, `FileSystem`
   trait.
+- **A crash is testable.** `FaultyBlockDevice` (`fs/src/tests.rs`) acknowledges
+  writes and drops them after *N* operations, in the `dm-flakey` style — the
+  harder half of the two, because a dropped write is what a power cut looks
+  like from inside the kernel and nothing is told. The crash test cuts the
+  device at *every* write boundary of a create+write+sync workload and asserts
+  the survivor is one of the two legal states, bounded black-box crash testing
+  after CrashMonkey/B³ (OSDI '18).
 - `fs/src/verity.rs` — a CRC-32-per-block trailer appended by
   `scripts/gen_verity.py`, sector-padded so a sector-granular capacity still
   reaches it. A trailer is recognised only beyond the filesystem's own extent
@@ -182,35 +218,31 @@ nothing bounds it.
 
 The same is true of a scope that outgrows its snapshot budget: it fails rather
 than committing part of itself, which is correct but leaves a large operation
-un-performable rather than merely slow. Both want a write-ahead journal, which
-is what makes them Phase 4's rather than a wider guard's.
+un-performable rather than merely slow. Both want a write-ahead journal, and
+neither is closed: Phase 4 bounded the *consequences* of a crash rather than
+this residual, and a journal remains the only thing that retracts a block
+eviction already put on the device.
 
-### G7 — Nothing repairs a dirty image, and nothing notices it is dirty
+### G7 — Closed: a dirty image is refused, and an orphan is recoverable
 
-`mark_dirty_on_disk` sets `EXT2_ERROR_FS` at mount and `mark_clean` clears it
-on an orderly shutdown, which is exactly right. But the next mount **reads that
-state and ignores it**: there is no fsck, no orphan-inode list, no
-`errors=remount-ro`, no mount-count or last-check bookkeeping. A crash mid-write
-produces an image that mounts and is silently trusted.
+Was: nothing repaired a dirty image and nothing noticed it was dirty. Now §1
+records the mount-time `s_state` rule, `errors=remount-ro`, the superblock
+bookkeeping, and the orphan list on both sides. What is deliberately *not*
+here is an in-kernel fsck: read-only plus a klog line is the honest behaviour,
+and `e2fsck` on the host is the repair tool.
 
-ext2 upstream's answer to the two cases a crash can leave behind is the orphan
-inode list (`s_last_orphan`, threaded through `i_dtime` on each orphan): an
-unlinked-but-still-open inode and a partially-completed truncate. SlopOS has
-neither the list nor the situations it covers — because `unlink` frees the
-blocks immediately regardless of open descriptors, which is itself a POSIX
-violation and a use-after-free of the inode number for any fd still holding it.
+One residual, narrower than the gap it replaces. The window between a path
+walk resolving an inode and `open` installing its reference is closed by
+re-resolving the path once the reference is held, which catches the name being
+gone or now denoting something else; an inode reallocated *and* re-bound to the
+same path in between still passes. Closing that needs an inode cache keyed by
+`(filesystem, inode)` and a parent lock held across the walk, which is 6.5's
+territory.
 
-### G8 — `CLOCK_REALTIME` still aliases monotonic at the syscall
+### G8 — Closed: `CLOCK_REALTIME` answers the wall clock
 
-The kernel has a wall clock: Limine's `DateAtBootRequest` anchored against the
-monotonic counter, read through `kernel_services::clock::realtime_ns`, and the
-ext2 inode paths stamp from it. Two consumers are not wired to it.
-
-`syscall_clock_gettime` still answers `monotonic_ns()` for `CLOCK_REALTIME`
-(`core/src/syscall/core_handlers.rs`), so userland's wall clock is still
-uptime. And the superblock fields `e2fsck` reads — `s_wtime`, `s_mtime`,
-`s_lastcheck` — are now writable but unwritten. Both belong to 4.5, which
-needs the clock anyway; neither has a consumer before then.
+`syscall_clock_gettime` reads `realtime_ns()`, and the superblock timestamps
+`e2fsck` reports are written. See §1.
 
 ### G9 — A paged listing's mount-point pass is keyed on an ordinal
 
@@ -271,37 +303,9 @@ coherent with the 128-entry ext2 `BlockCache`.
 ## 3. Plan
 
 Each phase ends green on `just test` plus the pre-commit gate sequence in
-`AGENTS.md`. Phases 4, 5 and 6 are independent of each other. Numbering starts
-at 4 because the earlier phases are done and their results are §1; the numbers
-are kept so commit messages and issue references to them still resolve.
-
-### Phase 4 — Crash consistency
-
-- [ ] **4.2** Refuse to mount an image whose `s_state` says `EXT2_ERROR_FS`
-  read-write. Options are read-only mount, or mount and repair. There is no
-  in-kernel fsck and there should not be one yet: read-only plus a loud klog
-  line is the honest behaviour, and `e2fsck` on the host is the repair tool.
-- [ ] **4.3** `errors=remount-ro`: a device error or a metadata inconsistency
-  during operation flips the mount read-only rather than continuing to write
-  into a filesystem already known to be damaged.
-- [ ] **4.4** Orphan inodes. `unlink` on an inode with open descriptors must
-  detach the name and defer the free until the last close (POSIX), which needs a
-  refcount the VFS does not currently keep. The on-disk half is ext2's own
-  mechanism: thread the inode onto `s_last_orphan` via `i_dtime`, so a crash
-  leaves a list the next `e2fsck` drains rather than leaked blocks. Do the
-  in-memory refcount first; the on-disk list is only meaningful once the window
-  it protects exists.
-- [ ] **4.5** Superblock bookkeeping: `s_mnt_count`, `s_lastcheck`, `s_wtime`,
-  `s_mtime` — the fields `e2fsck` reads and reports on; three of the four are
-  timestamps the wall clock can now supply. Point `CLOCK_REALTIME` at that
-  clock here too, which is the other half of G8.
-- [ ] **4.6** Crash-injection testing. A `FaultyBlockDevice` wrapper that fails
-  or drops writes after *N* operations, in the `MemoryBlockDevice` style, driven
-  from stests: perform an operation, cut the device at each write boundary,
-  remount, assert the image is one of the two legal states. Bounded black-box
-  crash testing after CrashMonkey/B³ (OSDI '18): a bounded search over short
-  workloads finds real crash-consistency bugs at a scale a kernel test harness
-  can host. `dm-flakey` is the mechanism-level model for `FaultyBlockDevice`.
+`AGENTS.md`. Phases 5 and 6 are independent of each other. Numbering starts at
+5 because the earlier phases are done and their results are §1; the numbers are
+kept so commit messages and issue references to them still resolve.
 
 ### Phase 5 — Make the persistent root the real one
 
@@ -408,13 +412,13 @@ Independent of 2–5; do it when a second device or a real disk demands it.
 - **Test count.** New stests/utests move `check_test_count.sh`; measure the
   new baseline with `TEST_COUNT_BASELINE=0 scripts/check_test_count.sh`.
 - **Gates beyond the obvious ones.** `check_drop_panic_free.sh` (the rollback
-  guard's `Drop` in `fs/` is one that gate scans; it passes because every step
-  the destructor takes is a field assignment or an infallible `BlockCache`
-  method), `check_process_designator.sh` (any new entry
-  point under `fs/src/fileio/`), `check_quota_headroom.sh` (5.5's new
-  `ResourceKind`; also moves on every added utest, because each is one more
-  charged process), `check_sched_spread.sh` (Phase 5 changes when the flusher
-  kthread is placed).
+  guard's `Drop` in `fs/` is one that gate scans; every step it takes is a
+  field assignment, an infallible `BlockCache` method, or a device write whose
+  result is deliberately discarded — a destructor has nowhere to report one),
+  `check_process_designator.sh` (any new entry point under `fs/src/fileio/`),
+  `check_quota_headroom.sh` (5.5's new `ResourceKind`; also moves on every
+  added utest, because each is one more charged process),
+  `check_sched_spread.sh` (Phase 5 changes when the flusher kthread is placed).
 - **Licensing.** ext2's on-disk layout, feature bits, `errno` values and
   `s_last_orphan` semantics are interface facts and free to use. Upstream
   *prose* — a Linux or Asterinas comment block — is not, and neither is
@@ -426,15 +430,12 @@ Independent of 2–5; do it when a second device or a real disk demands it.
 
 ## 5. Effort and sequencing
 
-Phase 4 is a week, of which 4.4 is most:
-deferred inode free needs a VFS-level open count the tree does not have, so it
-touches fd lifetime rather than only ext2. Phase 5 is a week,
-not two days — the disk root by default moves four ratchets (`check_test_count.sh`,
-`check_lockdep_headroom.sh`, `check_sched_spread.sh`,
+Phase 5 is a week, not two days — the disk root by default moves four ratchets
+(`check_test_count.sh`, `check_lockdep_headroom.sh`, `check_sched_spread.sh`,
 `check_authority_reachability.sh`), each needing a re-measure and a commit
 message explaining the delta. Phase 6 is unbounded and last.
 
-A file already survives a reboot on `/mnt` — `just test-persist` proves it,
-on an image that is honestly unverified rather than one that only looked
-verified. Phase 5 alone is what moves it to `/`. Everything else is what makes
-it durable under failure.
+A file already survives a reboot on `/mnt` — `just test-persist` proves it, on
+an image that is honestly unverified rather than one that only looked verified,
+and it now survives a *crash* as well as an orderly shutdown. Phase 5 alone is
+what moves it to `/`.

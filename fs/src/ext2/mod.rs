@@ -16,7 +16,7 @@ use geometry::Ext2Geometry;
 use ondisk::{
     DIR_FT_DIR, DIR_FT_REG_FILE, DIR_FT_SYMLINK, DirEntry, EXT2_ERROR_FS, EXT2_IMMUTABLE_FL,
     EXT2_VALID_FS, GroupDesc, Inode, MODE_DIRECTORY, MODE_FILE, MODE_PERM_MASK,
-    RO_COMPAT_LARGE_FILE, Superblock,
+    RO_COMPAT_LARGE_FILE, S_LAST_ORPHAN_OFF, Superblock,
 };
 use types::{BlockNum, GroupIdx, InodeNum};
 
@@ -35,7 +35,19 @@ pub enum Ext2Error {
     /// an unsupported read-only-compatible feature.
     ReadOnly,
     InvalidInode,
+    /// A block number the *image* names is outside the volume, or a structure
+    /// the image owns failed its own validity check. Evidence of damage, so
+    /// [`Ext2Error::is_corruption`] latches the mount on it.
     InvalidBlock,
+    /// A *caller-supplied* offset, cursor or argument does not address
+    /// anything valid.
+    ///
+    /// Split from [`Self::InvalidBlock`] precisely because that variant is
+    /// evidence of a damaged image and this one is not: `readdir_cookie`'s
+    /// cursor comes from userland through `fs_list`, so an argument error that
+    /// latched the mount would let any process take the filesystem read-only
+    /// for everybody with one bad `u64`.
+    InvalidRange,
     UnsupportedIndirection,
     DeviceError,
     DirectoryFormat,
@@ -56,6 +68,48 @@ pub enum Ext2Error {
     InvalidPath,
 }
 
+impl Ext2Error {
+    /// Whether this error means the *image or the device* is wrong, rather
+    /// than the caller.
+    ///
+    /// This is what `errors=remount-ro` keys on, so the classification has to
+    /// be conservative in one specific direction: an error a caller can
+    /// produce on demand must never appear here, or an unprivileged
+    /// `stat`/`unlink` of a nonexistent thing would flip the whole mount
+    /// read-only. `InvalidInode` is the sharp case — it covers both "that
+    /// inode number is out of range", which any caller can ask for, and a
+    /// genuinely damaged group descriptor — so it stays out. The four below
+    /// are only ever produced by a structure that failed its own validity
+    /// check, or by the device refusing I/O.
+    pub fn is_corruption(self) -> bool {
+        matches!(
+            self,
+            Self::DeviceError
+                | Self::InvalidBlock
+                | Self::DirectoryFormat
+                | Self::InvalidSuperblock
+        )
+    }
+}
+
+/// Why a mount refuses every mutation. Carried to the boot log and to the
+/// mount flags, so `EROFS` at the VFS has a stated cause rather than being an
+/// unexplained property of the disk.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ReadOnlyReason {
+    /// A verity trailer makes the device refuse writes.
+    DeviceWriteProtected,
+    /// The image declares a read-only-compatible feature this implementation
+    /// does not write.
+    UnsupportedFeature,
+    /// `s_state` is not `EXT2_VALID_FS`: the last mount never marked it
+    /// clean. Repair with `e2fsck` on the host.
+    NotCleanlyUnmounted,
+    /// An operation found the image or the device damaged after mount
+    /// (`errors=remount-ro`).
+    ErrorsRemountRo,
+}
+
 pub type Ext2Superblock = Superblock;
 pub type Ext2Inode = Inode;
 
@@ -73,6 +127,17 @@ enum NewInode<'a> {
 enum RemoveKind {
     NonDirectory,
     Directory,
+}
+
+/// What removing the *last* name of an inode does with the inode itself.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LastLink {
+    /// Free the blocks and the inode now.
+    Free,
+    /// Keep both, and thread the inode onto the on-disk orphan list: a
+    /// descriptor still holds it, and POSIX says its contents survive until
+    /// the last close.
+    Orphan,
 }
 
 /// A validated rename, carrying only what the mutation stages need — not the
@@ -161,6 +226,23 @@ impl Drop for Ext2Txn<'_, '_> {
         }
         self.fs.cache.rollback_op();
         if self.outermost {
+            // The orphan-list head is the one field an operation publishes
+            // straight to the device, so the cache rollback above cannot
+            // retract it. Put the committed value back before the in-memory
+            // superblock is restored, or the two disagree: on disk the head
+            // names an inode whose zeroing has just been rolled back, and a
+            // crash before the next `sync` gives the next mount's drain a head
+            // it refuses — which then discards the genuine chain behind it.
+            //
+            // Best-effort by necessity: this is a destructor, so a device
+            // error has nowhere to go. Failing leaves exactly the state that
+            // not trying would have, and `e2fsck` reclaims it.
+            if self.fs.superblock.last_orphan != self.superblock.last_orphan {
+                let published = self.fs.superblock.last_orphan;
+                self.fs.superblock.last_orphan = self.superblock.last_orphan;
+                let _ = self.fs.write_orphan_head();
+                self.fs.superblock.last_orphan = published;
+            }
             self.fs.superblock = self.superblock;
             self.fs.superblock_dirty = self.superblock_dirty;
             self.fs.in_transaction = false;
@@ -186,6 +268,10 @@ pub struct Ext2Fs<'a> {
     /// read-only-compatible feature this implementation does not write, or
     /// when the device itself refuses writes (a verity-attested image).
     read_only: bool,
+    /// An operation on this handle hit an error that means the image or the
+    /// device is damaged. The owner of the mount reads this back and latches
+    /// the mount read-only — `errors=remount-ro`.
+    corruption_seen: bool,
     /// A [`Ext2Txn`] scope is open, so a nested one must not take a second
     /// superblock snapshot.
     in_transaction: bool,
@@ -232,6 +318,7 @@ impl<'a> Ext2Fs<'a> {
             ptrs_per_block: block_size / 4,
             superblock_dirty: false,
             read_only,
+            corruption_seen: false,
             in_transaction: false,
         })
     }
@@ -245,8 +332,69 @@ impl<'a> Ext2Fs<'a> {
     }
 
     /// The one rule for whether a handle over `device` may mutate.
+    ///
+    /// Deliberately does **not** consult `s_state`: a mounted image carries
+    /// `EXT2_ERROR_FS` by design, so a per-call handle built after
+    /// [`Self::mark_dirty_on_disk`] would read its own mount stamp as damage
+    /// and refuse every write. The not-cleanly-unmounted question is asked
+    /// once, at mount, against the superblock as it came off the disk — see
+    /// [`Self::mount_read_only_reason`].
     pub fn read_only_for(superblock: &Superblock, device: &dyn BlockDevice) -> bool {
         superblock.requires_readonly() || device.write_protected()
+    }
+
+    /// Why a mount of `superblock` over `device` must refuse writes, if it
+    /// must. `superblock` has to be the one read at mount, before this
+    /// implementation stamped anything into it.
+    pub fn mount_read_only_reason(
+        superblock: &Superblock,
+        device: &dyn BlockDevice,
+    ) -> Option<ReadOnlyReason> {
+        if device.write_protected() {
+            return Some(ReadOnlyReason::DeviceWriteProtected);
+        }
+        if superblock.requires_readonly() {
+            return Some(ReadOnlyReason::UnsupportedFeature);
+        }
+        // The image was never marked clean, so a previous mount either is
+        // still running or died mid-write. Either way the free counts, the
+        // bitmaps and the inode table may disagree with each other, and
+        // writing into that turns a repairable image into a lost one. There
+        // is no in-kernel fsck and there should not be one: read-only plus a
+        // loud log line is the honest behaviour, and `e2fsck` is the repair.
+        if superblock.state != EXT2_VALID_FS {
+            return Some(ReadOnlyReason::NotCleanlyUnmounted);
+        }
+        None
+    }
+
+    /// Latch this handle read-only for a reason its constructor could not see
+    /// — a mount refused for [`ReadOnlyReason::NotCleanlyUnmounted`], or a
+    /// mount already flipped by `errors=remount-ro`.
+    pub fn force_read_only(&mut self) {
+        self.read_only = true;
+    }
+
+    /// Whether an operation on this handle saw evidence that the image or the
+    /// device is damaged. The mount owner latches on this.
+    pub fn corruption_seen(&self) -> bool {
+        self.corruption_seen
+    }
+
+    /// Record a corruption verdict on the way out of an operation.
+    ///
+    /// Called once, by whoever owns the mount, around the whole operation —
+    /// rather than at each entry point, which is a list that the next entry
+    /// point added can be left off. `transaction` classifies too, because a
+    /// rollback needs the verdict before the error leaves the scope, and
+    /// setting the same flag twice is idempotent.
+    pub fn note_result<R>(&mut self, result: Result<R, Ext2Error>) -> Result<R, Ext2Error> {
+        if let Err(e) = &result
+            && e.is_corruption()
+        {
+            self.corruption_seen = true;
+        }
+        result
     }
 
     /// Gate for every mutating entry point.
@@ -272,6 +420,11 @@ impl<'a> Ext2Fs<'a> {
     ) -> Result<R, Ext2Error> {
         let mut txn = Ext2Txn::begin(self);
         let result = f(txn.fs);
+        if let Err(e) = &result
+            && e.is_corruption()
+        {
+            txn.fs.corruption_seen = true;
+        }
         // A scope whose undo record overflowed can no longer be undone, so
         // committing it would publish work the guard can no longer stand
         // behind. Failing here rolls back what is still recorded, which is a
@@ -286,13 +439,13 @@ impl<'a> Ext2Fs<'a> {
     }
 
     /// Mark the image as not cleanly unmounted, so a later fsck knows it must
-    /// run. Cleared again by [`Self::mark_clean`] on a clean unmount.
+    /// run, and record the mount in the fields `e2fsck` reports.
     pub fn mark_dirty_on_disk(&mut self) -> Result<(), Ext2Error> {
         if self.read_only || self.superblock.state == EXT2_ERROR_FS {
             return Ok(());
         }
         self.superblock.state = EXT2_ERROR_FS;
-        self.write_superblock_state()
+        self.write_superblock_state(true)
     }
 
     pub fn mark_clean(&mut self) -> Result<(), Ext2Error> {
@@ -300,7 +453,21 @@ impl<'a> Ext2Fs<'a> {
             return Ok(());
         }
         self.superblock.state = EXT2_VALID_FS;
-        self.write_superblock_state()
+        self.write_superblock_state(false)
+    }
+
+    /// The bookkeeping fields as they stand on the device.
+    ///
+    /// Read back rather than held: they move only at mount and in the
+    /// superblock write, and carrying them on this handle would put them in
+    /// every operation's frame and every transaction snapshot.
+    #[inline(never)]
+    pub fn read_bookkeeping(&self) -> Result<ondisk::SuperblockBookkeeping, Ext2Error> {
+        let mut sb_buf = [0u8; 1024];
+        self.device
+            .read_at(1024, &mut sb_buf)
+            .map_err(|_| Ext2Error::DeviceError)?;
+        Ok(ondisk::SuperblockBookkeeping::parse(&sb_buf))
     }
 
     /// Barriered on the spot rather than left to a later `sync`: this is a
@@ -309,15 +476,23 @@ impl<'a> Ext2Fs<'a> {
     /// is the last write before power-off, and one left in a volatile device
     /// cache means an orderly shutdown still reads as a crash.
     #[inline(never)]
-    fn write_superblock_state(&mut self) -> Result<(), Ext2Error> {
+    fn write_superblock_state(&mut self, mounting: bool) -> Result<(), Ext2Error> {
         let mut sb_buf = [0u8; 1024];
         self.device
             .read_at(1024, &mut sb_buf)
             .map_err(|_| Ext2Error::DeviceError)?;
+        self.superblock.encode_mutable_fields(&mut sb_buf);
         sb_buf[58..60].copy_from_slice(&self.superblock.state.to_le_bytes());
+        let now = time::now_unix_opt();
+        if mounting {
+            ondisk::SuperblockBookkeeping::stamp_mount(&mut sb_buf, now);
+        } else {
+            ondisk::SuperblockBookkeeping::stamp_write(&mut sb_buf, now);
+        }
         self.device
             .write_at(1024, &sb_buf)
             .map_err(|_| Ext2Error::DeviceError)?;
+        self.superblock_dirty = false;
         self.device_barrier()
     }
 
@@ -638,6 +813,13 @@ impl<'a> Ext2Fs<'a> {
             }
             if !inode.is_regular_file() {
                 return Err(Ext2Error::NotFile);
+            }
+            // A size past what the block map can address would leave `i_size`
+            // naming a block no read could ever reach, and every later read of
+            // the hole would fail. Refused here rather than at that read: the
+            // size is the caller's, and this is the only place it is set.
+            if new_size > blockmap::max_file_size(fs.ptrs_per_block, fs.block_size) {
+                return Err(Ext2Error::InvalidRange);
             }
             let free_before = fs.superblock.free_blocks_count;
             fs.release_blocks_past(&mut inode, new_size, BlockOwner::File(ino))?;
@@ -1060,27 +1242,66 @@ impl<'a> Ext2Fs<'a> {
         ext2_alloc::write_group_desc(group, &desc, &self.geom, &mut *self.cache, self.device)
     }
 
+    /// Remove a name, freeing the inode when it was the last one.
     #[inline(never)]
     pub fn unlink_entry(&mut self, parent: u32, name: &[u8]) -> Result<(), Ext2Error> {
         self.check_writable()?;
-        self.transaction(|fs| fs.remove_entry(InodeNum(parent), name, RemoveKind::NonDirectory))
+        self.transaction(|fs| {
+            fs.remove_entry(
+                InodeNum(parent),
+                name,
+                RemoveKind::NonDirectory,
+                LastLink::Free,
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Remove a name, orphaning the inode rather than freeing it when it was
+    /// the last one. Answers the orphaned inode, which the caller owes a
+    /// [`Self::release_orphan`] once nothing holds it open.
+    #[inline(never)]
+    pub fn detach_entry(&mut self, parent: u32, name: &[u8]) -> Result<Option<u32>, Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| {
+            fs.remove_entry(
+                InodeNum(parent),
+                name,
+                RemoveKind::NonDirectory,
+                LastLink::Orphan,
+            )
+            .map(|o| o.map(|n| n.raw()))
+        })
     }
 
     /// Remove an empty directory: `rmdir(2)`'s semantics, including the
     /// parent's `links_count` decrement for the vanished `..`.
+    ///
+    /// Never orphans: `open` refuses a directory, so no descriptor can be
+    /// holding one when its last link goes.
     #[inline(never)]
     pub fn remove_directory(&mut self, parent: u32, name: &[u8]) -> Result<(), Ext2Error> {
         self.check_writable()?;
-        self.transaction(|fs| fs.remove_entry(InodeNum(parent), name, RemoveKind::Directory))
+        self.transaction(|fs| {
+            fs.remove_entry(
+                InodeNum(parent),
+                name,
+                RemoveKind::Directory,
+                LastLink::Free,
+            )
+            .map(|_| ())
+        })
     }
 
+    /// Answers the inode that was orphaned rather than freed, if any.
     #[inline(never)]
     fn remove_entry(
         &mut self,
         parent_num: InodeNum,
         name: &[u8],
         kind: RemoveKind,
-    ) -> Result<(), Ext2Error> {
+        last_link: LastLink,
+    ) -> Result<Option<InodeNum>, Ext2Error> {
         if name == b"." || name == b".." {
             return Err(Ext2Error::NotEmpty);
         }
@@ -1140,39 +1361,25 @@ impl<'a> Ext2Fs<'a> {
         // another name still points at them hands a live file's contents to
         // the next allocation. A directory is exempt: its two links are `.`
         // and its parent's entry, both of which this removal takes with it.
-        let last_link = is_dir || target.links_count <= 1;
-        if !last_link {
+        let was_last = is_dir || target.links_count <= 1;
+        let mut orphaned = None;
+        if !was_last {
             target.links_count -= 1;
             time::stamp(&mut target.ctime);
             self.write_inode_num(target_num, &target)?;
-        } else {
-            // A fast symlink's target lives in `i_block`, which the block walk
-            // would otherwise read as fifteen block numbers and free.
-            if !target.is_fast_symlink() {
-                self.release_file_blocks(&target, BlockOwner::File(target_num.raw()))?;
-            }
-            ext2_alloc::free_inode(
-                target_num,
-                &self.geom,
-                &mut self.superblock,
-                &mut *self.cache,
-                self.device,
-            )?;
-            if is_dir {
-                self.adjust_used_dirs(target_num, -1)?;
-            }
-
-            // `i_dtime` is what every other ext2 implementation stamps on a
-            // free, and what `e2fsck` reads to tell a freed inode from a
-            // corrupt one.
-            target.mode = 0;
+        } else if last_link == LastLink::Orphan {
+            // POSIX: the name is gone but the file is not, because a
+            // descriptor still refers to it. `links_count` drops to zero so no
+            // other reader treats the inode as reachable, and the orphan list
+            // is what tells the next `e2fsck` to finish the free if this boot
+            // never gets to.
             target.links_count = 0;
-            target.blocks = 0;
-            target.size = 0;
-            target.flags = 0;
-            target.block = [BlockNum::ZERO; 15];
-            target.dtime = time::now_unix();
+            time::stamp(&mut target.ctime);
             self.write_inode_num(target_num, &target)?;
+            self.orphan_push(target_num)?;
+            orphaned = Some(target_num);
+        } else {
+            self.free_detached_inode(target_num, &mut target, is_dir)?;
         }
 
         // Re-read the parent: `remove_dir_entry` mutated its cached data
@@ -1186,7 +1393,209 @@ impl<'a> Ext2Fs<'a> {
         self.write_inode_num(parent_num, &parent_inode)?;
         self.superblock_dirty = true;
 
+        Ok(orphaned)
+    }
+
+    /// Free the blocks and the inode of a record that no name reaches.
+    #[inline(never)]
+    fn free_detached_inode(
+        &mut self,
+        target_num: InodeNum,
+        target: &mut Inode,
+        is_dir: bool,
+    ) -> Result<(), Ext2Error> {
+        // A fast symlink's target lives in `i_block`, which the block walk
+        // would otherwise read as fifteen block numbers and free.
+        if !target.is_fast_symlink() {
+            self.release_file_blocks(target, BlockOwner::File(target_num.raw()))?;
+        }
+        ext2_alloc::free_inode(
+            target_num,
+            &self.geom,
+            &mut self.superblock,
+            &mut *self.cache,
+            self.device,
+        )?;
+        if is_dir {
+            self.adjust_used_dirs(target_num, -1)?;
+        }
+
+        // `i_dtime` is what every other ext2 implementation stamps on a free,
+        // and what `e2fsck` reads to tell a freed inode from a corrupt one.
+        target.mode = 0;
+        target.links_count = 0;
+        target.blocks = 0;
+        target.size = 0;
+        target.flags = 0;
+        target.block = [BlockNum::ZERO; 15];
+        target.dtime = time::now_unix();
+        self.write_inode_num(target_num, target)
+    }
+
+    /// Complete the deferred free of an orphaned inode: unthread it from the
+    /// list and release its blocks.
+    ///
+    /// Idempotent against an inode that is not on the list — a second call, or
+    /// a call for an inode a crashing boot's `e2fsck` already drained, does
+    /// nothing rather than freeing a live file.
+    #[inline(never)]
+    pub fn release_orphan(&mut self, ino: u32) -> Result<(), Ext2Error> {
+        self.check_writable()?;
+        self.transaction(|fs| {
+            let ino = InodeNum(ino);
+            let mut inode = fs.read_inode_num(ino)?;
+            // A record that gained a link, or that is already freed, is not
+            // this orphan any more. Freeing it would take a live file with it.
+            if inode.links_count != 0 || inode.mode == 0 {
+                return Ok(());
+            }
+            if !fs.orphan_remove(ino)? {
+                return Ok(());
+            }
+            let is_dir = inode.is_directory();
+            fs.free_detached_inode(ino, &mut inode, is_dir)?;
+            fs.superblock_dirty = true;
+            Ok(())
+        })
+    }
+
+    /// Push `ino` onto the head of the on-disk orphan list.
+    ///
+    /// The inode's own record carries the next member's number in `i_dtime`,
+    /// which is ext2's own mechanism: a freed inode's `i_dtime` is a deletion
+    /// timestamp, and an orphan's is a link, told apart by `links_count == 0`
+    /// with a nonzero `i_mode`. The head is written last, so a crash between
+    /// the two leaves a list that is shorter than the truth — leaked blocks
+    /// `e2fsck` reclaims — rather than one naming an inode that never joined.
+    fn orphan_push(&mut self, ino: InodeNum) -> Result<(), Ext2Error> {
+        let head = self.superblock.last_orphan;
+        if head == ino.raw() {
+            return Ok(());
+        }
+        let mut inode = self.read_inode_num(ino)?;
+        inode.dtime = head;
+        self.write_inode_num(ino, &inode)?;
+        // The member's next-pointer must be *on the device* before the head
+        // names it. `write_inode_num` only dirties a cached block, whereas
+        // `write_orphan_head` writes through and barriers, so without this the
+        // real on-disk order is the inverse: a crash would leave the head
+        // naming an inode whose `i_dtime` is still its pre-push value — zero
+        // on a freshly created one — truncating the whole chain behind it and
+        // leaking every orphan already on the list.
+        self.flush_inode_record(ino)?;
+        self.superblock.last_orphan = ino.raw();
+        self.superblock_dirty = true;
+        self.write_orphan_head()
+    }
+
+    /// Put one inode's table block on the device and barrier behind it.
+    ///
+    /// Narrower than [`Self::sync_inode`] on purpose: this orders one record
+    /// against a superblock field, and pulling the inode's data blocks along
+    /// would make an `unlink` pay for a writeback it does not need.
+    fn flush_inode_record(&mut self, ino: InodeNum) -> Result<(), Ext2Error> {
+        let (table_block, _) = self.inode_disk_offset(ino)?;
+        if self.cache.flush_block(table_block, self.device)? {
+            self.device_barrier()?;
+        }
         Ok(())
+    }
+
+    /// Unthread `ino`, answering whether it was on the list at all.
+    ///
+    /// Bounded by the inode count: a damaged image can carry a cycle, and this
+    /// walk must terminate rather than spin under the mount lock.
+    fn orphan_remove(&mut self, ino: InodeNum) -> Result<bool, Ext2Error> {
+        let target = ino.raw();
+        if self.superblock.last_orphan == target {
+            let next = self.read_inode_num(ino)?.dtime;
+            self.superblock.last_orphan = next;
+            self.superblock_dirty = true;
+            self.write_orphan_head()?;
+            return Ok(true);
+        }
+
+        let mut current = self.superblock.last_orphan;
+        let mut steps = 0u32;
+        let limit = self.geom.inodes_count();
+        while current != 0 {
+            steps += 1;
+            if steps > limit {
+                return Err(Ext2Error::DirectoryFormat);
+            }
+            let mut prev = self.read_inode_num(InodeNum(current))?;
+            if prev.dtime == target {
+                prev.dtime = self.read_inode_num(ino)?.dtime;
+                self.write_inode_num(InodeNum(current), &prev)?;
+                return Ok(true);
+            }
+            current = prev.dtime;
+        }
+        Ok(false)
+    }
+
+    /// The head pointer goes to the device on the spot, barriered, rather than
+    /// waiting for a `sync`.
+    ///
+    /// This is the field that makes an unreachable inode recoverable, and the
+    /// window it covers is exactly the one in which the kernel might not get
+    /// to write anything again. It is a sub-block write, invisible to the
+    /// cache, so it costs nothing an ordinary operation was going to pay.
+    #[inline(never)]
+    fn write_orphan_head(&mut self) -> Result<(), Ext2Error> {
+        let mut sb_buf = [0u8; 1024];
+        self.device
+            .read_at(1024, &mut sb_buf)
+            .map_err(|_| Ext2Error::DeviceError)?;
+        sb_buf[S_LAST_ORPHAN_OFF..S_LAST_ORPHAN_OFF + 4]
+            .copy_from_slice(&self.superblock.last_orphan.to_le_bytes());
+        self.device
+            .write_at(1024, &sb_buf)
+            .map_err(|_| Ext2Error::DeviceError)?;
+        self.device_barrier()
+    }
+
+    /// Free every inode the orphan list names, at mount, on an image this
+    /// implementation may write. Answers how many were reclaimed.
+    ///
+    /// This is the crash-recovery half: a boot that died with an unlinked file
+    /// still open left its blocks allocated and reachable from nowhere but
+    /// this list. Draining is bounded by the inode count and stops at the
+    /// first member that no longer looks like an orphan, so a damaged list
+    /// leaks space rather than freeing a live file.
+    #[inline(never)]
+    pub fn drain_orphans(&mut self) -> Result<u32, Ext2Error> {
+        if self.read_only || self.superblock.last_orphan == 0 {
+            return Ok(0);
+        }
+        let mut freed = 0u32;
+        let limit = self.geom.inodes_count();
+        while self.superblock.last_orphan != 0 && freed <= limit {
+            let ino = InodeNum(self.superblock.last_orphan);
+            let Ok(inode) = self.read_inode_num(ino) else {
+                // An unreadable head cannot be walked past, and guessing would
+                // free whatever the rest of the chain happens to name.
+                break;
+            };
+            if inode.links_count != 0 || inode.mode == 0 {
+                break;
+            }
+            self.release_orphan(ino.raw())?;
+            freed += 1;
+        }
+        // Whatever the walk stopped on is no longer something this
+        // implementation can drain; clearing the head hands the remainder to
+        // `e2fsck` rather than re-walking it on every mount.
+        if self.superblock.last_orphan != 0 {
+            self.superblock.last_orphan = 0;
+            self.superblock_dirty = true;
+            self.write_orphan_head()?;
+        }
+        Ok(freed)
+    }
+
+    pub fn orphan_head(&self) -> u32 {
+        self.superblock.last_orphan
     }
 
     /// Move `old_name` under `old_parent` to `new_name` under `new_parent`.
@@ -1202,6 +1611,25 @@ impl<'a> Ext2Fs<'a> {
         new_parent: u32,
         new_name: &[u8],
     ) -> Result<(), Ext2Error> {
+        self.rename_entry_with(old_parent, old_name, new_parent, new_name, LastLink::Free)
+            .map(|_| ())
+    }
+
+    /// `rename` where `displaced` chooses what happens to an inode the
+    /// destination name was the last link of. Answers that inode when it was
+    /// orphaned rather than freed.
+    ///
+    /// A rename over an open file is the same hazard as an `unlink` of one:
+    /// POSIX says the displaced inode's contents survive until its last
+    /// descriptor closes.
+    pub fn rename_entry_with(
+        &mut self,
+        old_parent: u32,
+        old_name: &[u8],
+        new_parent: u32,
+        new_name: &[u8],
+        displaced: LastLink,
+    ) -> Result<Option<u32>, Ext2Error> {
         self.check_writable()?;
         self.transaction(|fs| {
             fs.rename_within(
@@ -1209,7 +1637,9 @@ impl<'a> Ext2Fs<'a> {
                 old_name,
                 InodeNum(new_parent),
                 new_name,
+                displaced,
             )
+            .map(|o| o.map(|n| n.raw()))
         })
     }
 
@@ -1222,7 +1652,8 @@ impl<'a> Ext2Fs<'a> {
         old_name: &[u8],
         new_parent: InodeNum,
         new_name: &[u8],
-    ) -> Result<(), Ext2Error> {
+        displaced_policy: LastLink,
+    ) -> Result<Option<InodeNum>, Ext2Error> {
         if new_name.is_empty() || new_name.len() > 255 {
             return Err(Ext2Error::NameTooLong);
         }
@@ -1232,17 +1663,24 @@ impl<'a> Ext2Fs<'a> {
             }
         }
         if old_parent == new_parent && old_name == new_name {
-            return Ok(());
+            return Ok(None);
         }
 
         let Some(plan) = self.rename_plan(old_parent, old_name, new_parent, new_name)? else {
-            return Ok(());
+            return Ok(None);
         };
 
+        let mut orphaned = None;
         if let Some(kind) = plan.displaced {
             // POSIX: a directory may only be renamed over an *empty* one, and
-            // that check lives in `remove_entry`, ahead of the removal.
-            self.remove_entry(new_parent, new_name, kind)?;
+            // that check lives in `remove_entry`, ahead of the removal. A
+            // directory is never orphaned — `open` refuses one, so no
+            // descriptor can be holding it.
+            let policy = match kind {
+                RemoveKind::Directory => LastLink::Free,
+                RemoveKind::NonDirectory => displaced_policy,
+            };
+            orphaned = self.remove_entry(new_parent, new_name, kind, policy)?;
         }
 
         self.rename_link_new(new_parent, new_name, &plan)?;
@@ -1257,7 +1695,7 @@ impl<'a> Ext2Fs<'a> {
         self.write_inode_num(plan.source, &moved)?;
         self.superblock_dirty = true;
 
-        Ok(())
+        Ok(orphaned)
     }
 
     /// Validate a rename and describe what it will do. `Ok(None)` means the
@@ -1546,6 +1984,7 @@ impl<'a> Ext2Fs<'a> {
             .read_at(1024, &mut sb_buf)
             .map_err(|_| Ext2Error::DeviceError)?;
         self.superblock.encode_mutable_fields(&mut sb_buf);
+        ondisk::SuperblockBookkeeping::stamp_write(&mut sb_buf, time::now_unix_opt());
         self.device
             .write_at(1024, &sb_buf)
             .map_err(|_| Ext2Error::DeviceError)?;

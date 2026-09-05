@@ -177,13 +177,49 @@ fn path_is_sealed(path: &[u8]) -> bool {
     }
 }
 
+/// `unlink(2)`: remove a name.
+///
+/// The inode's contents outlive the name whenever a descriptor still holds
+/// them — POSIX's rule, and what stops an `unlink` handing a live reader's
+/// blocks to the next allocation. Which of the two removals runs is decided by
+/// the open-reference count, under the lock that count is taken under, so an
+/// inode opened concurrently is never freed out from under the opener.
+///
+/// The cheap path is the common one: nothing holds the inode open, and the
+/// filesystem frees it with the name exactly as before.
 pub fn vfs_unlink(path: &[u8]) -> VfsResult<()> {
+    use crate::vfs::orphan::{DetachPlan, RemovalOutcome, begin_removal, end_removal};
+
     if path_is_sealed(path) {
         return Err(VfsError::PermissionDenied);
     }
     let (parent, name) = resolve_parent(path)?;
     parent.check_writable()?;
-    parent.fs.unlink(parent.inode, name)
+
+    // A name that resolves to nothing cannot be holding an inode open, and a
+    // filesystem that reports its own `ENOENT` gives a better error than a
+    // lookup here would.
+    let Ok(inode) = parent.fs.lookup(parent.inode, name) else {
+        return parent.fs.unlink(parent.inode, name);
+    };
+
+    if begin_removal(parent.fs, inode) == DetachPlan::FreeNow {
+        let result = parent.fs.unlink(parent.inode, name);
+        let _ = end_removal(parent.fs, inode, RemovalOutcome::Nothing);
+        return result;
+    }
+
+    let result = parent.fs.detach(parent.inode, name);
+    let outcome = match result {
+        Ok(Some(_)) => RemovalOutcome::Deferred,
+        _ => RemovalOutcome::Nothing,
+    };
+    // A close that landed inside the scope above is the one case where the
+    // free becomes runnable with nobody left to notice.
+    if end_removal(parent.fs, inode, outcome) {
+        crate::vfs::orphan::drain_or_wake(parent.fs);
+    }
+    result.map(|_| ())
 }
 
 /// `rmdir(2)`: remove an empty directory. Refuses a mount point outright —
@@ -231,6 +267,8 @@ pub fn vfs_readlink(path: &[u8], buf: &mut [u8]) -> VfsResult<usize> {
 }
 
 pub fn vfs_rename(old_path: &[u8], new_path: &[u8]) -> VfsResult<()> {
+    use crate::vfs::orphan::{DetachPlan, RemovalOutcome, begin_removal, end_removal};
+
     // Both ends: renaming a sealed file moves it out from under the path its
     // privilege is keyed on, and renaming over one replaces it just as a write
     // would.
@@ -246,9 +284,37 @@ pub fn vfs_rename(old_path: &[u8], new_path: &[u8]) -> VfsResult<()> {
     old_parent.check_writable()?;
     new_parent.check_writable()?;
 
-    old_parent
-        .fs
-        .rename(old_parent.inode, old_name, new_parent.inode, new_name)
+    // Renaming *over* an open file is the same hazard as unlinking one: the
+    // displaced name was that inode's last, and freeing it hands a live
+    // reader's blocks away. A destination that names nothing, or nothing open,
+    // takes the plain path.
+    let displaced = new_parent.fs.lookup(new_parent.inode, new_name).ok();
+    let Some(displaced) = displaced else {
+        return old_parent
+            .fs
+            .rename(old_parent.inode, old_name, new_parent.inode, new_name);
+    };
+
+    if begin_removal(new_parent.fs, displaced) == DetachPlan::FreeNow {
+        let result = old_parent
+            .fs
+            .rename(old_parent.inode, old_name, new_parent.inode, new_name);
+        let _ = end_removal(new_parent.fs, displaced, RemovalOutcome::Nothing);
+        return result;
+    }
+
+    let result =
+        old_parent
+            .fs
+            .rename_detaching(old_parent.inode, old_name, new_parent.inode, new_name);
+    let outcome = match result {
+        Ok(Some(_)) => RemovalOutcome::Deferred,
+        _ => RemovalOutcome::Nothing,
+    };
+    if end_removal(new_parent.fs, displaced, outcome) {
+        crate::vfs::orphan::drain_or_wake(new_parent.fs);
+    }
+    result.map(|_| ())
 }
 
 /// Commits every mount, returning the first error. Snapshots the table and

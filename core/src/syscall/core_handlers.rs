@@ -43,10 +43,16 @@ define_syscall!(syscall_clock_gettime
     (ctx, clock_id: u64, ts: UserPtr<Timespec>) cap(NoneSelf)
     -> Result<(), Errno>
 {
-    if clock_id != CLOCK_MONOTONIC && clock_id != CLOCK_REALTIME {
-        return Err(Errno::EINVAL);
-    }
-    let ns = slopos_kernel_services::clock::monotonic_ns();
+    // `CLOCK_REALTIME` answers the wall clock the bootloader anchored, and
+    // falls back to monotonic only when the boot established none — a machine
+    // whose firmware reported no date has no better answer, and `EINVAL` for a
+    // clock POSIX requires every system to have is worse than an uptime.
+    let ns = match clock_id {
+        CLOCK_MONOTONIC => slopos_kernel_services::clock::monotonic_ns(),
+        CLOCK_REALTIME => slopos_kernel_services::clock::realtime_ns()
+            .unwrap_or_else(slopos_kernel_services::clock::monotonic_ns),
+        _ => return Err(Errno::EINVAL),
+    };
     let value = Timespec {
         tv_sec: ns / 1_000_000_000,
         tv_nsec: ns % 1_000_000_000,
