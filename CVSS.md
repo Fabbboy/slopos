@@ -1,10 +1,50 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-**No findings are currently open.** Last swept 2026-09-05 (Phase 4 crash
-consistency: ext2 mount state, `errors=remount-ro`, orphan inodes, the VFS
-open-inode reference table).
+**No findings are currently open.** Last swept 2026-09-06 (Phase 5: the ext2
+disk as the default, writable root — the seal, the exec path, `/bin` write
+protection, disk exhaustion, and what "the root is now writable by userland"
+newly reaches).
 
-That sweep found two unprivileged denial-of-service defects
+That sweep found three defects, all fixed inside the same unreleased change
+and therefore not ledger entries. They are recorded as method because each is
+a class, not an instance:
+
+- **A seal on the contents is not a seal on the name.** Every grant-path
+  binary carried `EXT2_IMMUTABLE_FL`, so `/bin/halt` could not be overwritten
+  — but `/bin` itself was an ordinary directory. `rename("/bin", "/x")`,
+  `mkdir("/bin")`, plant a `halt`, and `exec::grants` confers `TASK_FLAG_POWER`
+  on whatever was planted, because program identity is a path and the table is
+  keyed on it (`core/src/exec/grants.rs`). Confidence 95 — evidence 40 (the
+  grant table and the unsealed inode were both read directly), exploitability
+  30 (three syscalls, any unprivileged process on the disk root; the RAM root
+  had the same hole because ramfs never checked a parent's seal at all),
+  reproducibility 25 (`grant_directories_are_sealed` in `spawn_privilege_test`
+  was confirmed to fail on both roots with the fix reverted). Would have
+  scored `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H` — **7.8 HIGH**. The
+  fix seals `/bin` and `/sbin` on both roots and makes ramfs enforce a
+  parent's seal on create, unlink and rename as ext2 already did. The general
+  rule: a privilege keyed on a path must seal every component of that path,
+  because the attack that replaces the leaf and the attack that replaces its
+  parent reach the same grant.
+- **A reserve on one table is not a reserve on the other.** ext2's
+  `s_r_blocks_count` stops an unprivileged writer filling the *block* pool,
+  but ext2 has no `s_r_inodes_count`: a process creating empty files exhausts
+  the inode table with every block still free, and `/sbin/init` gets `ENOSPC`
+  on its next create. Confidence 90 — the allocator was read, the fixture
+  image has 4 096 inodes against 4 096 blocks, and
+  `test_ext2_reserve_refuses_unprivileged_allocation` pins the inode half.
+  Would have scored `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` — **5.5
+  MEDIUM**. The fix applies the block reserve's ratio to the inode table.
+- **A blocking primitive re-entered by its own wake.** Not a security finding
+  — no attacker chooses when a virtio completion lands — but recorded here
+  because it was found by this sweep's method: the scheduler's deferred
+  reschedule and trap-exit paths skipped a `Blocked` current task and not a
+  `Ready` one, so a wake landing between the Blocked-CAS and the deschedule
+  let `schedule()` dequeue the caller as its own successor and spin on its own
+  `on_cpu` forever. A quarter of disk-root runs stalled on it. Reverting the
+  fix reproduced 3 stalls in 10; with it, 0 in 21.
+
+The previous sweep (2026-09-05, Phase 4) found two unprivileged denial-of-service defects
 (`CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H`, 5.5 MEDIUM each) and one
 cross-file disclosure race, all three introduced *and* fixed inside the same
 unreleased change, so none is a ledger entry under the open-findings-only

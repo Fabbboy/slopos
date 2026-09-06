@@ -270,8 +270,41 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ),
     ("ordinary_spawn_still_works", ordinary_spawn_still_works),
     ("granted_binaries_are_sealed", granted_binaries_are_sealed),
+    ("grant_directories_are_sealed", grant_directories_are_sealed),
     ("launch_bounds_the_raise_site", launch_bounds_the_raise_site),
 ];
+
+/// A sealed binary is only as safe as the directory that names it: rename
+/// `/bin` aside, `mkdir /bin`, plant a `halt`, and the grant table keyed on
+/// `/bin/halt` confers Power on whatever was planted. So the directory refuses
+/// rename, and refuses a create or unlink beneath it, on whichever root booted.
+fn grant_directories_are_sealed() -> bool {
+    let mut ok = true;
+    for dir in ["/bin", "/sbin"] {
+        if std::fs::rename(dir, "/spawn_priv_moved").is_ok() {
+            eprintln!("spawn_privilege_test: {dir} was renamed aside");
+            let _ = std::fs::rename("/spawn_priv_moved", dir);
+            ok = false;
+        }
+        let planted = format!("{dir}/spawn_priv_planted");
+        if std::fs::write(&planted, b"x").is_ok() {
+            eprintln!("spawn_privilege_test: a file was created inside {dir}");
+            let _ = std::fs::remove_file(&planted);
+            ok = false;
+        }
+        if std::fs::remove_dir(dir).is_ok() {
+            eprintln!("spawn_privilege_test: {dir} was removed");
+            ok = false;
+        }
+    }
+    // The seal is on those two names and nothing else.
+    if std::fs::create_dir("/spawn_priv_dir").is_err() {
+        eprintln!("spawn_privilege_test: the directory seal reached the root");
+        ok = false;
+    }
+    let _ = std::fs::remove_dir("/spawn_priv_dir");
+    ok
+}
 
 fn main() {
     slopos_slibc::test_harness::run(CASES);

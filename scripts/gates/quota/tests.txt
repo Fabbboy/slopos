@@ -64,6 +64,14 @@
 #     so only the deterministic row is re-recorded and the measured margins on
 #     the order-dependent rows are left alone.
 #
+# 2026-09-06, `persist_test` spawns one unprivileged child (the disk-reserve
+# filler: the utest itself carries TASK_FLAG_SYSTEM, which is exactly the
+# entitlement the reserve waives, so the filler must be a separate process):
+#   process    122 -> 123. Deterministic at 123; the cap stays exact. A fresh
+#     --emit-allowlist over this run measured pages 656 963, kernelmeta 2918
+#     and task 5, all inside the spreads above, so as before only the
+#     deterministic row moves.
+#
 # `task` moves with scheduling (measured 5-7 across runs), so its cap carries
 # the observed spread as margin rather than a single observation.
 #
@@ -101,7 +109,7 @@ post-userland-tests	kernelmeta	6933
 post-userland-tests	objectrow	257
 post-userland-tests	pages	735232
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	122
+post-userland-tests	process	123
 post-userland-tests	task	10
 
 # The charge path's cost. It runs on every syscall that allocates, so a

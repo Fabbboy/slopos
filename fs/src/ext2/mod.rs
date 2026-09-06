@@ -297,6 +297,20 @@ impl<'a> Ext2Fs<'a> {
         Ok((superblock, block_size, inode_size))
     }
 
+    /// `s_r_blocks_count`, read straight off the device.
+    ///
+    /// Its own read rather than a fourth element on [`Self::mount_params`]'s
+    /// tuple, which every other caller would have to name and discard.
+    /// `#[inline(never)]` for the same 1 KiB-buffer reason.
+    #[inline(never)]
+    pub fn read_block_reserve(device: &dyn BlockDevice) -> Result<u32, Ext2Error> {
+        let mut sb_buf = [0u8; 1024];
+        device
+            .read_at(1024, &mut sb_buf)
+            .map_err(|_| Ext2Error::DeviceError)?;
+        Ok(ondisk::reserved_blocks_of(&sb_buf))
+    }
+
     /// **Performs no allocation** — the cache lives in the long-lived FS state
     /// and is merely borrowed, so building one of these per VFS call is free.
     pub fn new(
@@ -325,6 +339,15 @@ impl<'a> Ext2Fs<'a> {
 
     pub fn geometry(&self) -> &Ext2Geometry {
         &self.geom
+    }
+
+    /// Hold back `reserved` blocks from unprivileged allocation
+    /// (`s_r_blocks_count`).
+    ///
+    /// Per call rather than per mount: entitlement is a property of who is
+    /// asking, and the mount is shared by every process on it.
+    pub fn set_block_reserve(&mut self, reserved: u32) {
+        self.geom = self.geom.with_reserve(reserved);
     }
 
     pub fn is_read_only(&self) -> bool {

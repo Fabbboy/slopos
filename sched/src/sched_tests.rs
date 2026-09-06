@@ -6881,6 +6881,86 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
+/// A current task that a wake found mid-protocol — committed `Running →
+/// Blocked`, then CASed back to `Ready` and enqueued by a peer before it
+/// descheduled — must not be rescheduled from the trap exit: `schedule()`
+/// there dequeues the caller as its own successor and spins on its own
+/// `on_cpu`, which only the switch that spin stands in front of can clear.
+/// Without the guard this test hangs the run rather than failing.
+pub fn test_ready_current_is_not_rescheduled_from_trap_exit() -> TestResult {
+    use crate::trap::{TrapExitSource, scheduler_handoff_on_trap_exit};
+
+    let _fixture = SchedFixture::new();
+    // `schedule_internal` returns before any dispatch when this CPU has no
+    // idle task, which would make the check below pass vacuously.
+    if scheduler::create_idle_task() != 0 {
+        return TestResult::Fail;
+    }
+
+    let task_id = task_create(
+        b"ReadyCurrent\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    if !scheduler::clear_nascent_for_test(task_id) || !dispatch_as_current(task_id) {
+        park_bootstrap_on_current_cpu();
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    let mut outcome = TestResult::Pass;
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        scheduler::set_scheduler_enabled_for_test(true);
+
+        let Some(task_ref) = task_find_by_id(task_id) else {
+            klog_info!("SCHED_TEST: fixture task vanished");
+            outcome = TestResult::Fail;
+            return;
+        };
+        // A running task is `on_cpu`; the test dispatch does not set it, and
+        // without it the unguarded code re-dispatches the task instead of
+        // spinning on itself, so the test would pass for the wrong reason.
+        task_ref.set_on_cpu(true);
+        if task_set_state(task_id, TaskStatus::Blocked) != 0
+            || scheduler::unblock_task(&task_ref) != 0
+            || task_ref.status() != TaskStatus::Ready
+        {
+            klog_info!("SCHED_TEST: could not stage a Ready current task");
+            outcome = TestResult::Fail;
+        } else {
+            PreemptGuard::set_reschedule_pending();
+            scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
+            let still_current = slopos_sched_current_for_test().is_some_and(|c| c.id() == task_id);
+            if !still_current {
+                klog_info!("SCHED_TEST: a Ready current task was switched away from");
+                outcome = TestResult::Fail;
+            }
+            // The wake is consumed the way the protocol would consume it, so
+            // the task leaves the fixture Running and owned by nothing.
+            if let Some(c) = slopos_sched_current_for_test() {
+                let _ = scheduler::consume_ready_wake_for_current_for_test(&c);
+            }
+        }
+        task_ref.set_on_cpu(false);
+
+        scheduler::set_scheduler_enabled_for_test(false);
+        PreemptGuard::clear_reschedule_pending();
+    });
+    park_bootstrap_on_current_cpu();
+    let _ = task_terminate(task_id);
+    outcome
+}
+
+slopos_testing::stest!(
+    name = test_ready_current_is_not_rescheduled_from_trap_exit,
+    suite = sched_core
+);
+
 /// A task that goes terminal while parked is not restored to Running.
 ///
 /// The wait protocol's cancel of its own `Running -> Blocked` commit is a

@@ -655,8 +655,8 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     }
 
-    // The unset default is `root=auto`: the initramfs when Limine loaded a
-    // module, otherwise the ext2 disk.
+    // The unset default is `root=auto`: a writable ext2 disk when there is
+    // one, otherwise the initramfs. See `boot_services::boot_step_rootfs_init`.
     if cmdline.contains("root=initramfs") {
         crate::boot_services::set_root_mode(crate::boot_services::ROOT_INITRAMFS);
         boot_info(b"Boot option: root=initramfs\0");

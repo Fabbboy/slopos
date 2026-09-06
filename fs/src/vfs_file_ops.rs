@@ -227,11 +227,11 @@ impl FileOps for VfsFileOps {
                         };
                     }
                 },
-                Err(_) => {
+                Err(e) => {
                     return if total > 0 {
                         total as isize
                     } else {
-                        Errno::EIO.as_isize()
+                        e.to_errno().as_isize()
                     };
                 }
             }
@@ -285,11 +285,11 @@ impl FileOps for VfsFileOps {
                         break;
                     }
                 }
-                Err(_) => {
+                Err(e) => {
                     return if total > 0 {
                         total as isize
                     } else {
-                        Errno::EIO.as_isize()
+                        e.to_errno().as_isize()
                     };
                 }
             }

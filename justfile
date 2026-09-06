@@ -13,6 +13,7 @@ ovmf_dir         := "third_party/ovmf"
 fs_image_dir     := "fs/assets"
 fs_image         := fs_image_dir / "ext2.img"
 fs_image_tests   := fs_image_dir / "ext2-tests.img"
+fs_image_persist := fs_image_dir / "ext2-persist.img"
 fs_image_size    := env("FS_IMAGE_SIZE", "16M")
 initramfs        := build_dir / "initramfs.cpio"
 initramfs_tests  := build_dir / "initramfs-tests.cpio"
@@ -80,13 +81,24 @@ _build-userland-tests: _build-userland
 
 # `VERITY=off` for the tests image because the suite writes to it; the
 # shipped image keeps its trailer and `test_verity_artifact_*` mounts it.
+# `PRESERVE_FS_IMAGE=0` on the tests image is load-bearing: a persistent `/`
+# makes every filesystem test a mutation of the image the next run boots
+# from, so CI is order-independent only if each run starts from a fresh one.
 _fs-image: _build-userland
-    FS_IMAGE_SIZE={{fs_image_size}} VERITY=on \
+    FS_IMAGE_SIZE={{fs_image_size}} VERITY=on PRESERVE_FS_IMAGE=0 \
         scripts/build_fs_image.sh "{{fs_image}}" "{{build_dir}}" {{userland_bins}}
 
 _fs-image-tests: _build-userland-tests
-    FS_IMAGE_SIZE={{fs_image_size}} VERITY=off \
+    FS_IMAGE_SIZE={{fs_image_size}} VERITY=off PRESERVE_FS_IMAGE=0 \
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
+
+# The developer's persistent disk: unverified so the kernel mounts it as a
+# writable `/`, preserved across builds so what the guest wrote survives, and
+# separate from the shipped image so `just boot`'s `verity=require` keeps
+# meaning what it says. Refreshes only the binaries that changed.
+_fs-image-persist: _build-userland
+    FS_IMAGE_SIZE={{fs_image_size}} VERITY=off PRESERVE_FS_IMAGE=1 \
+        scripts/build_fs_image.sh "{{fs_image_persist}}" "{{build_dir}}" {{userland_bins}}
 
 _initramfs: _build-userland
     scripts/build_initramfs.sh "{{initramfs}}" "{{build_dir}}" {{userland_bins}}
@@ -171,6 +183,16 @@ boot:
 boot-fast:
     BOOT_CMDLINE="{{boot_cmdline_effective}} roulette=skip" just _iso-notests
     just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
+
+[doc("Boot from a persistent, writable disk root that survives rebuilds (fs/assets/ext2-persist.img)")]
+boot-persist:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # No `verity=require`: this disk is unverified by design, that is what
+    # makes it writable. `roulette=skip` as `boot-fast` does.
+    BOOT_CMDLINE="tests=off roulette=skip" just _iso-notests
+    just _fs-image-persist
+    just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image_persist}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 
 [doc("Boot SlopOS with release-optimized kernel (production build)")]
 boot-prod:

@@ -3281,6 +3281,52 @@ fn symlink_roundtrip_body_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str>
     Ok(())
 }
 
+/// The block and inode reserves refuse an unprivileged allocation while the
+/// tables still have room, and a handle with the reserve waived spends into
+/// it. Both tables: `s_r_blocks_count` is the image's own number, and the
+/// inode reserve is that number's ratio applied to the inode table, because
+/// ext2 carries no `s_r_inodes_count` and an inode exhaustion denies
+/// `/sbin/init` a file with every block still free.
+pub fn test_ext2_reserve_refuses_unprivileged_allocation() -> TestResult {
+    let Some(device) = phase3_image(b"r.txt", b"x") else {
+        return TestResult::Skipped;
+    };
+    match with_mounted(&device, reserve_body) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => slopos_testing::fail!("{}", msg),
+    }
+}
+
+#[inline(never)]
+fn reserve_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let free_blocks = fs.superblock().free_blocks_count;
+    let free_inodes = fs.superblock().free_inodes_count;
+    if free_blocks < 8 || free_inodes < 4 {
+        return Err("fixture has no headroom to reserve");
+    }
+
+    // Reserve everything but a sliver, so one directory (an inode plus a
+    // block) is exactly what the reserve forbids.
+    fs.set_block_reserve(free_blocks - 1);
+    let reserved_inodes = fs.geometry().reserved_inodes();
+    if reserved_inodes == 0 {
+        return Err("a block reserve implied no inode reserve");
+    }
+    if !matches!(fs.create_file(2, b"refused"), Err(Ext2Error::NoSpace)) {
+        return Err("an allocation inside the reserve was accepted");
+    }
+    if fs.superblock().free_blocks_count != free_blocks
+        || fs.superblock().free_inodes_count != free_inodes
+    {
+        return Err("a refused allocation moved the free counts");
+    }
+
+    fs.set_block_reserve(0);
+    fs.create_file(2, b"granted")
+        .map_err(|_| "a waived reserve still refused")?;
+    Ok(())
+}
+
 /// `set_mode` writes permission bits through and leaves the type nibble;
 /// `set_sealed` stamps `EXT2_IMMUTABLE_FL` and every mutation then refuses.
 pub fn test_ext2_mode_and_seal() -> TestResult {
@@ -3677,6 +3723,10 @@ slopos_testing::stest!(name = test_ext2_rename_over_and_into_descendant, suite =
 slopos_testing::stest!(name = test_ext2_rmdir_semantics, suite = fs);
 slopos_testing::stest!(name = test_ext2_symlink_roundtrip, suite = fs);
 slopos_testing::stest!(name = test_ext2_mode_and_seal, suite = fs);
+slopos_testing::stest!(
+    name = test_ext2_reserve_refuses_unprivileged_allocation,
+    suite = fs
+);
 slopos_testing::stest!(name = test_ext2_seal_survives_a_remount, suite = fs);
 slopos_testing::stest!(
     name = test_ext2_failed_op_leaves_no_partial_state,

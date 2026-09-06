@@ -93,12 +93,18 @@ pub fn scheduler_handoff_on_trap_exit(source: TrapExitSource) {
         return;
     }
 
-    // A task that has committed `Running → Blocked` but not yet yielded must
-    // not be descheduled from the trap exit: it would park with no wake armed
-    // and no timeout.
-    if crate::task_struct::Current::get()
-        .is_some_and(|current| current.task().status() == TaskStatus::Blocked)
-    {
+    // A task inside its blocking protocol — committed `Running → Blocked`, not
+    // yet yielded — must not be descheduled from the trap exit. `Blocked` would
+    // park with no wake armed; `Ready` is a wake that already landed and
+    // enqueued the task still running here, which `schedule` would dequeue as
+    // its own successor and wait on forever. See
+    // `scheduler::deferred_reschedule_callback`.
+    if crate::task_struct::Current::get().is_some_and(|current| {
+        matches!(
+            current.task().status(),
+            TaskStatus::Blocked | TaskStatus::Ready
+        )
+    }) {
         return;
     }
 

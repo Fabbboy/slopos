@@ -15,11 +15,11 @@ use slopos_fs::ext2_vfs::EXT2_VFS_STATIC;
 use slopos_fs::verity::VerityStatus;
 use slopos_fs::vfs::{MOUNT_RDONLY, mount, unmount};
 use slopos_fs::{
-    ext2_vfs_init_with_device, ext2_vfs_is_initialized, ext2_vfs_is_read_only,
-    vfs_init_builtin_filesystems,
+    RootBacking, ext2_vfs_init_with_device, ext2_vfs_is_initialized, ext2_vfs_is_read_only,
+    vfs_init_builtin_filesystems_with,
 };
 use slopos_ostd::KBox;
-use slopos_ostd::sync::InitFlag;
+use slopos_ostd::sync::{InitFlag, OnceLock};
 
 /// Selected root-filesystem backing, set from the `root=` cmdline knob by
 /// `early_init::boot_step_boot_config_fn` (default [`ROOT_AUTO`]).
@@ -64,12 +64,35 @@ fn register_fs_hooks() {
 /// step mounts the ext2 disk at `/` instead.
 fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     let archive = crate::limine_protocol::initramfs();
+    // Before the decision, not after: `root=auto` picks the disk, so the
+    // outcome of attaching it is the input to the choice.
+    let disk = attach_disk0_once();
+
+    let mounted = matches!(disk, DiskAttachOutcome::Mounted(_));
+    let writable_disk = matches!(disk, DiskAttachOutcome::Mounted(info) if !info.read_only);
     let use_initramfs = match ROOT_MODE.load(Ordering::Relaxed) {
         ROOT_INITRAMFS => true,
         ROOT_VIRTIO => false,
-        _ => archive.is_some(), // ROOT_AUTO: initramfs iff a module is present
+        // A read-only disk falls back to the initramfs as a no-disk boot does:
+        // nothing written to such a root survives, so preferring it buys no
+        // persistence and costs a writable `/`. That is what keeps `just boot`
+        // working, whose shipped image is verified and therefore read-only.
+        // With no initramfs to fall back to, a read-only disk is still a root.
+        _ => !writable_disk && archive.is_some(),
     };
     if !use_initramfs {
+        if !mounted {
+            klog_info!("ROOTFS: no initramfs module and no mountable disk — no root to install");
+            return -1;
+        }
+        klog_info!(
+            "ROOTFS: root=disk — / is the ext2 disk{}",
+            if writable_disk {
+                ", and what it holds persists"
+            } else {
+                " (read-only)"
+            }
+        );
         return 0;
     }
 
@@ -83,9 +106,9 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
 
     register_fs_hooks();
 
-    // ext2 is not initialized at this priority, so this mounts RamFs at `/`; a
-    // no-op if the kernel-test phase already mounted the builtin filesystems.
-    if vfs_init_builtin_filesystems().is_err() {
+    // Explicitly ramfs: a writable disk may be initialised by now, and the
+    // unpack must never land on it.
+    if vfs_init_builtin_filesystems_with(RootBacking::Ramfs).is_err() {
         klog_info!("ROOTFS: failed to mount builtin filesystems");
         return -1;
     }
@@ -130,6 +153,19 @@ enum DiskAttachOutcome {
     Mounted(slopos_fs::Ext2MountInfo),
 }
 
+/// The attach verdict, computed once: two boot steps need it, and
+/// [`attach_disk0`] claims the device's exclusive write capability, which a
+/// second call could not take.
+static DISK0_ATTACH: OnceLock<DiskAttachOutcome> = OnceLock::new();
+
+fn attach_disk0_once() -> DiskAttachOutcome {
+    DISK0_ATTACH.call_once(attach_disk0);
+    DISK0_ATTACH
+        .get()
+        .copied()
+        .unwrap_or(DiskAttachOutcome::NoDisk)
+}
+
 fn attach_disk0() -> DiskAttachOutcome {
     let Some(disk0) = virtio_blk::blk_device_by_index(BlockDeviceIndex(0)) else {
         return DiskAttachOutcome::NoDisk;
@@ -160,7 +196,7 @@ fn attach_disk0() -> DiskAttachOutcome {
 fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     register_fs_hooks();
 
-    let outcome = attach_disk0();
+    let outcome = attach_disk0_once();
     if let DiskAttachOutcome::Mounted(info) = outcome {
         klog_info!(
             "FS: ext2 initialized from virtio-blk disk0 ({}, verity {})",
@@ -227,15 +263,28 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         return 0;
     }
 
-    if vfs_init_builtin_filesystems().is_ok() {
+    if vfs_init_builtin_filesystems_with(RootBacking::Ext2).is_ok() {
         if ext2_vfs_is_initialized() {
             // The kernel-test phase may already have mounted RamFs at `/` and
             // tripped the one-shot init flag, so the call above returned without
             // mounting ext2.
             let _ = unmount(b"/");
-            match mount(b"/", &EXT2_VFS_STATIC, ext2_mount_flags()) {
+            let flags = ext2_mount_flags();
+            match mount(b"/", &EXT2_VFS_STATIC, flags) {
                 Ok(_) => {
-                    klog_info!("VFS: mounted / (ext2), /tmp (ramfs), /dev (devfs)");
+                    if flags & MOUNT_RDONLY == 0 {
+                        slopos_ostd::boot_flags::set_flag(
+                            slopos_ostd::boot_flags::BOOT_FLAG_ROOT_PERSISTENT,
+                        );
+                    }
+                    klog_info!(
+                        "VFS: mounted / (ext2, {}), /tmp (ramfs), /dev (devfs)",
+                        if flags & MOUNT_RDONLY != 0 {
+                            "read-only"
+                        } else {
+                            "read-write"
+                        },
+                    );
                 }
                 Err(e) => {
                     klog_info!("VFS: failed to install ext2 root: {:?}", e);

@@ -303,6 +303,9 @@ impl RamFs {
                 if parent_inode.file_type != FileType::Directory {
                     return Err(VfsError::NotDirectory);
                 }
+                if parent_inode.sealed {
+                    return Err(VfsError::PermissionDenied);
+                }
                 parent_inode.lookup(name)?
             };
 
@@ -439,6 +442,9 @@ impl FileSystem for RamFs {
                 let parent_inode = inner.get_inode(parent)?;
                 if parent_inode.file_type != FileType::Directory {
                     return Err(VfsError::NotDirectory);
+                }
+                if parent_inode.sealed {
+                    return Err(VfsError::PermissionDenied);
                 }
                 if parent_inode.lookup(name).is_ok() {
                     return Err(VfsError::AlreadyExists);
@@ -618,6 +624,9 @@ impl FileSystem for RamFs {
                 if old_parent_node.file_type != FileType::Directory {
                     return Err(VfsError::NotDirectory);
                 }
+                if old_parent_node.sealed {
+                    return Err(VfsError::PermissionDenied);
+                }
                 old_parent_node.lookup(old_name)?
             };
 
@@ -635,6 +644,9 @@ impl FileSystem for RamFs {
                 let new_parent_node = inner.get_inode(new_parent)?;
                 if new_parent_node.file_type != FileType::Directory {
                     return Err(VfsError::NotDirectory);
+                }
+                if new_parent_node.sealed {
+                    return Err(VfsError::PermissionDenied);
                 }
                 match new_parent_node.lookup(new_name) {
                     Ok(existing) => Some(existing),

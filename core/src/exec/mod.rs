@@ -42,6 +42,15 @@ pub const EXEC_MAX_ARGS: usize = 32;
 pub const EXEC_MAX_ENVS: usize = 32;
 pub const EXEC_MAX_ELF_SIZE: usize = 16 * 1024 * 1024;
 
+/// Bytes per `FileSystem::read` while staging an ELF.
+///
+/// One block per call costs a mount-lock acquisition and a device round trip
+/// each: on ext2 the read runs under `CACHED_EXT2`, so a 712 KiB shell took 178
+/// acquisitions of a lock every path walk on that mount waits behind. Bounded
+/// rather than the whole file, so how long one `exec` may hold that lock stays
+/// a stated number.
+pub const EXEC_READ_CHUNK: usize = 64 * 1024;
+
 pub const INIT_PATH: &[u8] = b"/sbin/init";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -456,7 +465,7 @@ pub fn do_exec(
     let mut offset = 0u64;
     while (offset as usize) < file_size {
         let remaining = file_size - offset as usize;
-        let chunk_size = remaining.min(4096);
+        let chunk_size = remaining.min(EXEC_READ_CHUNK);
         let read = handle
             .read(
                 offset,

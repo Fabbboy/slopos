@@ -166,6 +166,22 @@ pub struct Superblock {
     pub last_orphan: u32,
 }
 
+/// `s_r_blocks_count`: blocks only a privileged writer may consume.
+///
+/// ext2's own answer to "one writer must not be able to deny the disk to the
+/// rest of the system", carried on the image so `mke2fs -m`, `tune2fs -m` and
+/// `dumpe2fs` all agree with the kernel about the size of the reserve.
+///
+/// Deliberately **not** a [`Superblock`] field, for the reason
+/// [`SuperblockBookkeeping`] is not one either: a `Superblock` is copied onto
+/// every operation's stack frame and again into every transaction snapshot,
+/// and the stack gate is what says so. This value moves only when `tune2fs`
+/// moves it, so [`Ext2Geometry`](super::geometry::Ext2Geometry) reads it once
+/// at mount and holds it.
+pub fn reserved_blocks_of(data: &[u8]) -> u32 {
+    le32(data, 8)
+}
+
 impl Superblock {
     pub fn parse(data: &[u8]) -> Result<Self, Ext2Error> {
         if data.len() < 1024 {

@@ -1864,11 +1864,27 @@ fn deferred_reschedule_callback() {
         return;
     }
 
-    // An involuntary reschedule must never park a task that has committed
-    // `Running → Blocked` but is still executing its blocking protocol: it would
-    // deschedule with no wake armed and no timeout yet, parking it forever.
+    // An involuntary reschedule must never run while the current task is
+    // inside its blocking protocol — committed `Running → Blocked` and not
+    // yet descheduled. Two states mean that, and both are skipped:
+    //
+    //  - `Blocked`: no wake armed and no timeout yet, so descheduling would
+    //    park it forever.
+    //  - `Ready`: a wake landed *after* the Blocked-CAS and enqueued the task
+    //    while it is still the one executing here. `schedule()` would dequeue
+    //    the caller itself and spin on its own `on_cpu` flag — a flag only the
+    //    switch that spin is standing in front of can clear. The protocol's
+    //    `commit_blocked_deschedule` consumes such a wake; this callback must
+    //    leave it to that.
+    //
+    // A `Zombie`/`Terminated` current task still schedules through here: the
+    // exit path's last preempt-guard drop is what takes it off the CPU.
     let skip = Current::get().is_some_and(|current| {
-        task_has_no_preempt_flag(current.task()) || current.task().status() == TaskStatus::Blocked
+        task_has_no_preempt_flag(current.task())
+            || matches!(
+                current.task().status(),
+                TaskStatus::Blocked | TaskStatus::Ready
+            )
     });
     if skip {
         return;
@@ -1929,6 +1945,21 @@ pub fn current_task_pgid() -> u32 {
 
 pub fn current_task_sid() -> u32 {
     Current::get().map_or(0, |c| c.task().sid())
+}
+
+/// Whether the running task may spend a resource the system holds in reserve
+/// against exhaustion — ext2's `s_r_blocks_count` today.
+///
+/// A kernel thread answers `true` because the flusher writing back must not be
+/// the caller that is refused, or a full disk becomes an unrecoverable one;
+/// `TASK_FLAG_SYSTEM` is `/sbin/init`, which must still be able to write once
+/// userland has filled the volume.
+pub fn current_task_is_privileged() -> bool {
+    use slopos_abi::task::{TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE};
+    Current::get().is_none_or(|c| {
+        let flags = c.task().flags;
+        flags & TASK_FLAG_USER_MODE == 0 || flags & TASK_FLAG_SYSTEM != 0
+    })
 }
 
 pub fn current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyIndex> {

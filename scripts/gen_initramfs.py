@@ -8,10 +8,11 @@ ext2 disk image never drift: each binary lands at /bin/<name> except `init`
 which goes to /sbin/init; fonts go to /usr/share/fonts; the wallpaper to
 /usr/share/slopos/wallpapers/default.png.
 
-Only file records are emitted — the kernel's cpio loader auto-creates parent
-directories, and /tmp, /dev and /mnt are mount-point overlays rather than real
-root entries, so they are deliberately absent here. No host `cpio` tool is
-required (we emit the format directly, like Linux's gen_init_cpio).
+Parent directories of a file are auto-created by the kernel's cpio loader, so
+only a directory nothing writes into needs its own record (see EMPTY_DIRS).
+/tmp, /dev and /mnt are mount-point overlays rather than real root entries and
+are deliberately absent. No host `cpio` tool is required (we emit the format
+directly, like Linux's gen_init_cpio).
 """
 
 import os
@@ -19,8 +20,15 @@ import sys
 
 # st_mode values: type bits | permission bits.
 S_IFREG = 0o100000
+S_IFDIR = 0o040000
 MODE_EXEC = S_IFREG | 0o755  # binaries
 MODE_DATA = S_IFREG | 0o644  # fonts, wallpaper
+MODE_DIR = S_IFDIR | 0o755
+
+# Directories nothing writes into at build time, so they need their own record.
+# Mirrors build_fs_image.sh: the ext2 root does not auto-create parents the way
+# ramfs does, and both roots must agree about whether a path is writable.
+EMPTY_DIRS = (b"/etc", b"/var")
 
 # Mirror the kernel's per-component name cap (fs/src/lib.rs MAX_NAME_LEN).
 MAX_NAME_LEN = 32
@@ -77,7 +85,9 @@ def main() -> None:
     bins = sys.argv[3:]
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    entries: list[tuple[bytes, int, bytes]] = []
+    entries: list[tuple[bytes, int, bytes]] = [
+        (path, MODE_DIR, b"") for path in EMPTY_DIRS
+    ]
 
     for name in bins:
         src = os.path.join(build_dir, name + ".elf")

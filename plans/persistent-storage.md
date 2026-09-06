@@ -1,21 +1,19 @@
 # Persistent Storage
 
 Make a file written on one boot readable on the next, on the root filesystem
-and under failure. A file written under `/mnt` and committed — with `fsync`, or
-by opening it `O_SYNC` — survives a reboot, and `just test-persist` boots one
-image twice and reads the payload back with CI running it. That is the narrow
-case:
-
-- **The root is still RAM.** Nothing written to `/` outlives the boot; the disk
-  is a secondary mount at `/mnt`, and `root=virtio` is exercised by no recipe,
-  test or CI job.
+and under failure. **Done for the root.** A boot with a writable disk mounts it
+at `/` by default, what is written there outlives the boot, and
+`just test-persist` boots one image twice and reads a payload back from
+`/var` with CI running it. The initramfs is the fallback for the machine that
+has no disk (`just boot-ramonly`) and for a disk that mounted read-only — which
+is what keeps `just boot`'s `verity=require` meaning "the disk I run
+`/sbin/init` from is attested" while `/` stays a RAM root on that image.
 
 Crash consistency is closed: an image that was never marked clean mounts
 read-only rather than being silently trusted, a filesystem found damaged stops
 being written to, an unlinked-but-open file keeps its contents until the last
 close on both sides of the disk, and the whole of it is held down by a
-crash-injection test that cuts the device at every write boundary. What remains
-is making the persistent root the real one.
+crash-injection test that cuts the device at every write boundary.
 
 Verity is settled and out of scope here: a trailer makes the device
 write-protected and the mount read-only (`MOUNT_RDONLY`, `EROFS`), the shipped
@@ -25,17 +23,22 @@ is an *upgrade* — persisting the set of blocks a boot rewrote so an image can
 be both writable and mostly attested — and it lives in Phase 6 as 6.6, because
 nothing before it needs it.
 
+What remains is Phase 6: block-layer breadth, and the one-mutex-per-mount
+serialisation (G5) that the disk root now makes the ordinary case.
+
 ## Why this matters beyond files
 
-Persistence is the enabler under a long tail of features that are currently
-either fake or impossible: a keymap choice that survives (`/etc/keymap` is
-written today into a ramfs and lost), user data of any kind, a package or
-application store, logs that outlive the crash that produced them, a W/L
-ledger with somewhere to live other than the boot medium
+Persistence is the enabler under a long tail of features that were fake or
+impossible while `/` was RAM: a keymap choice that survives (`/etc/keymap` now
+lands on the disk root and `init` re-applies it), user data of any kind, a
+package or application store, logs that outlive the crash that produced them,
+a W/L ledger with somewhere to live other than the boot medium
 (`plans/microtransactions.md` Phase 1 chose a Limine module precisely because
-there is no writable store), shell history, compositor layout, wallpaper
+there was no writable store), shell history, compositor layout, wallpaper
 selection, and every "settings" surface the GUI would otherwise have to
-pretend to have.
+pretend to have. `/etc` and `/var` exist on both roots for exactly this, and
+`BOOT_FLAG_ROOT_PERSISTENT` is how a program tells a root that persists from
+one whose successful `fsync` still loses the data at power-off.
 
 ---
 
@@ -144,46 +147,75 @@ The shape, which the code states more precisely:
   blocks it names; and every barrier decision reads `unbarriered_writes` rather
   than what the caller wrote, because eviction writes back and clears the dirty
   bit without a barrier, so a clean cache is not a durable one.
+- **The disk is the root.** `root=auto` picks a *writable* disk over the
+  initramfs (`boot_step_rootfs_init`); the attach verdict is computed once and
+  memoised, because it claims the device's exclusive write capability. A
+  read-only disk falls back to the initramfs exactly as no disk does — nothing
+  written to such a root survives, so preferring it buys no persistence and
+  costs a writable `/` — and is mounted at `/mnt` instead. `root=virtio` still
+  forces it, honestly read-only. `BOOT_FLAG_ROOT_PERSISTENT` says which case a
+  boot is, and the persist test asserts the disk case on the tests image.
+- **The build no longer wipes the disk.** `PRESERVE_FS_IMAGE=1` refreshes a
+  writable image's binaries in place via `debugfs` and keeps everything the
+  guest wrote; a stamp of the binaries and assets skips the work when nothing
+  changed. A verified image, a wrong-sized one, and one `e2fsck` rejects all
+  fall back to `mkfs`, because refreshing binaries into a damaged filesystem
+  propagates the damage into the next boot's `/sbin/init`.
+- **Disk space is held in reserve.** ext2's own `s_r_blocks_count` is
+  enforced in `allocate_block_near`, and the same ratio is applied to the
+  inode table because ext2 carries no `s_r_inodes_count` and an inode
+  exhaustion denies `/sbin/init` a file with every block still free. Kernel
+  threads and `TASK_FLAG_SYSTEM` spend into the reserve; everyone else gets
+  `ENOSPC` while it holds. The reserve lives on `Ext2Geometry`, read once at
+  mount, not on `Superblock` — that struct is copied onto every operation's
+  frame and into every transaction snapshot, and the 2 KiB stack gate refused
+  the first version that put it there. Set with `mke2fs -m` / `tune2fs -m`;
+  `dumpe2fs` reports the number the kernel enforces.
+- **The grant directories are sealed.** A sealed binary could not be
+  overwritten, but its *directory* could be renamed aside and a fresh
+  `/bin/halt` planted under the path the grant table is keyed on. `/bin` and
+  `/sbin` now carry the seal on both roots (`EXT2_IMMUTABLE_FL` on disk, set
+  after the cpio unpack on ramfs), and ramfs enforces a parent's seal on
+  create, unlink and rename as ext2 always had. `spawn_privilege_test`'s
+  `grant_directories_are_sealed` fails with either half reverted.
+- **A blocking primitive is not re-entered by its own wake.** The scheduler's
+  deferred-reschedule and trap-exit paths skip a current task that is `Ready`
+  as well as one that is `Blocked`: a wake that lands between the Blocked-CAS
+  and the deschedule enqueues the task still running, and a `schedule()` from
+  either path then dequeued the caller as its own successor and spun on its
+  own `on_cpu` flag forever. Reachable on a RAM root in principle, but the
+  disk root is what made it ordinary — every `exec` parks on a virtio
+  completion — and it stalled one run in four until it was found. `exec`
+  stages an ELF in 64 KiB chunks rather than 4 KiB, because on ext2 each
+  chunk is a `CACHED_EXT2` acquisition and a device round trip, and the block
+  cache is 512 entries rather than 128 so a shell binary fits it.
 
 ## 2. The gaps
 
 Grouped by subsystem; the phase list below sequences them.
 
-### G1 — The root filesystem is RAM, and the disk-as-root path is unexercised
+### G1 — Closed: the disk is the root, and the path is exercised
 
-`boot_step_rootfs_init` unpacks the initramfs into RamFs and sets
-`ROOTFS_IS_RAMFS` (`boot/src/boot_services.rs:53-57`, `:93`);
-`boot_step_fs_init` sees that flag and mounts ext2 at `/mnt` as a secondary
-instead of at `/` (`:122-131`). `root=auto` — the default, and what every
-`just` recipe boots (`justfile:52`) — takes that branch whenever a Limine
-initramfs module is present. `root=virtio` is named by no recipe, no test and
-no CI job; it appears only in the cmdline parser
-(`boot/src/early_init.rs:658-666`).
+Was: `root=auto` took the initramfs whenever a module was present, and
+`root=virtio` was named by no recipe, test or CI job. Now §1 records the
+default, the read-only fallback, and the persist test that asserts it. The
+unexercised path was also a broken one — the scheduler self-wait §1 describes
+stalled a quarter of disk-root runs and had never been seen because nothing
+ran that way.
 
-So nothing in the *root* filesystem persists, and the code path that would is
-unexercised.
-
-Two facts about the disk shape Phase 5:
-
-- **ext2 is initialised on `disk0` unconditionally**, before and independent of
-  the `ROOTFS_IS_RAMFS` branch (`boot_step_fs_init`). On a writable image that
-  claims the exclusive `BlockWriteToken` and runs `mark_dirty_on_disk`, so the
-  default boot of the *tests* image writes the superblock twice (mount and
-  orderly shutdown). The shipped `ext2.img` is verified, so its default boot
-  writes nothing.
-- **Verity does not cover the superblock.** Superblock I/O is sub-block —
-  `read_at(1024, …)` direct to the device, bypassing the cache — and only a
-  block fully contained in a read is verified. On a verified device this is
-  moot, since the device refuses the write, but 6.6 has to say what it means
-  for block 0.
+One fact carries forward to 6.6: **verity does not cover the superblock.**
+Superblock I/O is sub-block — `read_at(1024, …)` direct to the device,
+bypassing the cache — and only a block fully contained in a read is verified.
+On a verified device this is moot, since the device refuses the write, but 6.6
+has to say what it means for block 0.
 
 ### G2 — A verified image cannot be a writable one
 
 Settled by construction rather than open: a verity trailer makes the device
 write-protected, so the "written on boot 1, unverifiable on boot 2" case
 cannot arise. The cost is that the persistent root gets no integrity checking
-at all, and the images that persist (`ext2-tests.img` today, the root in
-Phase 5) are built `VERITY=off`. Buying most of that coverage back is 6.6.
+at all: the image that persists is built `VERITY=off`, and a verified disk is
+not chosen as the root. Buying most of that coverage back is 6.6.
 
 
 ### G5 — A sync stalls every user of its mount
@@ -196,6 +228,14 @@ multiply the cost — the second one in finds nothing dirty and nothing
 unbarriered and returns without touching the device — but nothing bounds the
 wait behind the pass in flight. A lock finer than one per mount is the fix,
 which makes this the page-cache work in 6.5 rather than a sync change.
+
+With the disk as the root this is the ordinary case, not an edge: every
+`exec` on the machine reads its ELF under that lock. Phase 5 took the two
+cheap wins — `EXEC_READ_CHUNK` at 64 KiB so a spawn is a handful of
+acquisitions rather than one per block, and a 512-entry block cache so a
+shell binary is not evicted while it is being read — and measured the suite
+green 21 runs out of 21 afterwards. Neither is the fix; both are what made
+the scheduler bug above visible as a bug rather than as slowness.
 
 Two narrower limits sit alongside it:
 
@@ -258,21 +298,29 @@ early can appear again as a synthesised mount later. Both need the mount table
 keyed by identity rather than position, which is 6.4's territory — that is when
 userland can mount, and therefore when the race becomes reachable on purpose.
 
-### G10 — Disk space is not a charged resource
+### G10 — Closed as a reserve, open as a per-process charge
 
-`abi/src/quota.rs` enumerates eight `ResourceKind`s and none of them covers
-disk blocks or on-disk inodes. With a writable root, any unprivileged process
-can write until `Ext2Error::NoSpace` and deny the disk to every other process
-and to the kernel's own writes. `statfs` (Phase 6.3) reports free space; it
-does not limit it.
+Was: any unprivileged process could write until `NoSpace` and deny the disk to
+`/sbin/init` and the kernel's own writes. Now §1 records ext2's own answer:
+`s_r_blocks_count` and its inode-table ratio, spendable only by kernel threads
+and `TASK_FLAG_SYSTEM`. That is a *system* floor, not a *per-process* ceiling
+— one process can still consume everything above the reserve and deny the
+disk to every other unprivileged process. A `ResourceKind` charged in the
+allocator is what closes that half, and it was deliberately not done here:
+the reserve is what the plan's own threat ("deny it to `/sbin/init`") needed,
+it is the answer every ext2 implementation already agrees on, and a ninth
+kind moves every row of `check_quota_headroom.sh`'s gate file on the same
+commit as the disk root. It belongs with `statfs` in 6.3, where the number a
+process is charged against becomes one it can read.
 
-### G12 — The build wipes the disk on every kernel build
+### G12 — Closed: the build preserves a writable image
 
-`just build` depends on `_fs-image`, and `scripts/build_fs_image.sh` starts
-with `rm -f "$IMAGE_PATH"` and a fresh `mkfs.ext2`. So a developer iterating on
-the kernel loses disk contents on every build, and persistence is observable
-only by booting twice with no build in between. There is no recipe that
-preserves the image, and no test that boots twice.
+See §1. `PRESERVE_FS_IMAGE=1` is opt-in rather than the default because the
+*tests* image must be regenerated per run: a writable, persistent `/` makes
+every filesystem test a mutation of the image the next boot runs `/sbin/init`
+from, and CI is order-independent only if each run starts from a fresh one.
+The harness already regenerates the scratch and verified disks per run; the
+tests image now joins them.
 
 ### G13 — The block layer sees one whole-device filesystem
 
@@ -282,7 +330,7 @@ be spelled and `root=` selects by driver name only. No `statfs`, so nothing can
 report free space. `MAX_MOUNTS` is 16, and `MOUNT_RDONLY` is the only mount
 flag with a reader.
 
-The name-length limits differ between the two roots that Phase 5 makes
+The name-length limits differ between the two roots, which are now
 interchangeable: `fs::MAX_NAME_LEN = 32` is enforced by ramfs
 (`fs/src/ramfs/mod.rs:111`) and cpio but *not* on the ext2 path, which accepts
 ext2's 255 (`ext2/mod.rs:374`). A long name on disk is reachable — the path
@@ -303,56 +351,13 @@ coherent with the 128-entry ext2 `BlockCache`.
 ## 3. Plan
 
 Each phase ends green on `just test` plus the pre-commit gate sequence in
-`AGENTS.md`. Phases 5 and 6 are independent of each other. Numbering starts at
-5 because the earlier phases are done and their results are §1; the numbers are
-kept so commit messages and issue references to them still resolve.
-
-### Phase 5 — Make the persistent root the real one
-
-The write surface and the on-disk seal are in place, so `root=virtio` is no
-longer a privilege-escalation surface nor a root that cannot overwrite a
-file. What remains is making it the default and paying for that.
-
-- [ ] **5.0** Decide what a writable root does to the test harness.
-  `scripts/qemu_run.sh` records why `disk1` exists: destructive tests target
-  the scratch device, never the live root image, so a buggy test cannot
-  corrupt an on-disk binary — the incident it names happened. A writable,
-  persistent `/` makes every filesystem test a mutation of the image the next
-  boot runs `/sbin/init` from, and CI becomes order-dependent (`AGENTS.md`
-  already documents the `'*ext2_aaa*'` ordering coupling). Either regenerate the
-  tests image per CI run, or give the persistence test a preserved copy of its
-  own. The harness already attaches the shipped verified `ext2.img` as a
-  snapshot `disk2` for `test_verity_artifact_*`; a writable root is the
-  moment that image and the tests image stop being interchangeable, and the
-  `verity=require` default in `just boot` must keep meaning "the disk I run
-  `/sbin/init` from is attested".
-- [ ] **5.1** Stop clobbering the image: `_fs-image` rebuilds only when the
-  binaries changed, and a `PRESERVE_FS_IMAGE=1` path that updates `/bin` in
-  place via `debugfs` rather than `mkfs`. A developer iterating on the kernel
-  must not lose disk state.
-- [ ] **5.2** `/etc` exists on both roots, created by `build_fs_image.sh` and
-  `gen_initramfs.py` — today neither creates it, and `/etc/keymap` only works
-  because ramfs auto-creates parents.
-- [ ] **5.3** A boot with a disk mounts it read-write at `/` and keeps the
-  initramfs as the fallback for the no-disk case (`just boot-ramonly` is the
-  existing proof of that path and must stay green). The `root=` knob keeps its
-  three values; what changes is which one `auto` picks when a disk is present
-  and healthy.
-- [ ] **5.4** Extend `just test-persist` to the disk root: today it writes under
-  `/mnt`, which is where the disk is mounted while `/` is RAM.
-- [ ] **5.5** Disk-space accounting (G10) before the root is writable: a
-  `ResourceKind` charged in `allocate_block`/`allocate_inode`, so one process
-  cannot fill the disk and deny it to `/sbin/init`. Moves
-  `check_quota_headroom.sh` — `KIND_COUNT` and every per-kind row in the gate
-  file change.
-- [ ] **5.6** A security sweep of the newly-reachable configuration per the
-  `CVSS.md` workflow: the seal, the exec path, `/bin` write protection, disk
-  exhaustion, and whatever else "the root filesystem is now writable by
-  userland" newly exposes.
+`AGENTS.md`. Numbering starts at 6 because the earlier phases are done and
+their results are §1; the numbers are kept so commit messages and issue
+references to them still resolve.
 
 ### Phase 6 — Block layer breadth
 
-Independent of 2–5; do it when a second device or a real disk demands it.
+Do it when a second device or a real disk demands it.
 
 - [ ] **6.1** GPT parsing, MBR as fallback, exposing partitions as
   `BlockDevice`s over an offset window of the parent. Required before SlopOS
@@ -416,9 +421,9 @@ Independent of 2–5; do it when a second device or a real disk demands it.
   field assignment, an infallible `BlockCache` method, or a device write whose
   result is deliberately discarded — a destructor has nowhere to report one),
   `check_process_designator.sh` (any new entry point under `fs/src/fileio/`),
-  `check_quota_headroom.sh` (5.5's new `ResourceKind`; also moves on every
-  added utest, because each is one more charged process),
-  `check_sched_spread.sh` (Phase 5 changes when the flusher kthread is placed).
+  `check_quota_headroom.sh` (a per-process disk `ResourceKind` in 6.3 moves
+  `KIND_COUNT` and every per-kind row; it also moves on every added utest,
+  because each is one more charged process).
 - **Licensing.** ext2's on-disk layout, feature bits, `errno` values and
   `s_last_orphan` semantics are interface facts and free to use. Upstream
   *prose* — a Linux or Asterinas comment block — is not, and neither is
@@ -430,12 +435,13 @@ Independent of 2–5; do it when a second device or a real disk demands it.
 
 ## 5. Effort and sequencing
 
-Phase 5 is a week, not two days — the disk root by default moves four ratchets
-(`check_test_count.sh`, `check_lockdep_headroom.sh`, `check_sched_spread.sh`,
-`check_authority_reachability.sh`), each needing a re-measure and a commit
-message explaining the delta. Phase 6 is unbounded and last.
+Phase 6 is unbounded and last. 6.5 is the one item the disk root made urgent
+rather than optional: G5 is now every `exec`'s path, and the two mitigations
+Phase 5 took are a bound on the symptom, not the fix.
 
-A file already survives a reboot on `/mnt` — `just test-persist` proves it, on
-an image that is honestly unverified rather than one that only looked verified,
-and it now survives a *crash* as well as an orderly shutdown. Phase 5 alone is
-what moves it to `/`.
+A file survives a reboot on `/` — `just test-persist` proves it from `/var`,
+on an image that is honestly unverified rather than one that only looked
+verified, and it survives a *crash* as well as an orderly shutdown. Phase 5
+ran a week as estimated, and most of it went on the two things nobody had
+measured: a scheduler self-wait the unexercised path had been hiding, and a
+directory that the seal on its contents had never protected.

@@ -165,10 +165,27 @@ fn parse_record(archive: &[u8], pos: usize) -> Result<Option<CpioRecord<'_>>, Cp
     }))
 }
 
+/// Directories holding program-identity grant paths. Sealed after the unpack:
+/// a sealed binary cannot be overwritten, but an unsealed parent could be
+/// renamed aside and a fresh `/bin/halt` planted under the path the grant is
+/// keyed on. Sealing the parent closes create, unlink and rename beneath it.
+const SEALED_DIRS: &[&[u8]] = &[b"/bin", b"/sbin"];
+
 /// Unpack a `newc` cpio archive into the currently mounted root filesystem,
 /// creating directories and files via the VFS. Returns the number of entries
 /// materialized (directories + regular files; other types are skipped).
 pub fn unpack_cpio_into_root(archive: &[u8]) -> Result<usize, CpioError> {
+    let created = unpack_entries(archive)?;
+    for dir in SEALED_DIRS {
+        match vfs_set_sealed(dir) {
+            Ok(()) | Err(VfsError::NotFound) => {}
+            Err(e) => return Err(CpioError::Vfs(e)),
+        }
+    }
+    Ok(created)
+}
+
+fn unpack_entries(archive: &[u8]) -> Result<usize, CpioError> {
     let mut created = 0usize;
 
     for_each_cpio_entry(archive, |entry| {

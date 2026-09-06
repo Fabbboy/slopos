@@ -47,6 +47,7 @@ pub struct Ext2Geometry {
     gdt_blocks: u32,
     itable_blocks_per_group: u32,
     ptrs_per_block: u32,
+    reserved_blocks: u32,
 }
 
 impl Ext2Geometry {
@@ -125,7 +126,40 @@ impl Ext2Geometry {
             gdt_blocks,
             itable_blocks_per_group,
             ptrs_per_block: block_size / 4,
+            reserved_blocks: 0,
         })
+    }
+
+    /// Install `s_r_blocks_count`, clamped to the volume. See
+    /// [`ondisk::reserved_blocks_of`](super::ondisk::reserved_blocks_of).
+    #[inline]
+    pub fn with_reserve(mut self, reserved_blocks: u32) -> Self {
+        self.reserved_blocks = reserved_blocks.min(self.blocks_count);
+        self
+    }
+
+    /// Blocks an unprivileged allocation must leave free. `s_r_blocks_count`
+    /// as the image declares it, clamped to the volume; zero on a handle whose
+    /// caller is entitled to spend the reserve.
+    #[inline]
+    pub fn reserved_blocks(self) -> u32 {
+        self.reserved_blocks
+    }
+
+    /// Inodes an unprivileged allocation must leave free.
+    ///
+    /// ext2 carries no `s_r_inodes_count`, so this is the block reserve's ratio
+    /// applied to the inode table: an image reserving 5% of its blocks reserves
+    /// 5% of its inodes. Without it a process that creates empty files denies
+    /// `/sbin/init` a new inode with every block still free — the same
+    /// exhaustion the block reserve exists to stop, through the other table.
+    #[inline]
+    pub fn reserved_inodes(self) -> u32 {
+        if self.reserved_blocks == 0 || self.blocks_count == 0 {
+            return 0;
+        }
+        let ratio = self.reserved_blocks as u64 * self.inodes_count as u64;
+        (ratio / self.blocks_count as u64) as u32
     }
 
     #[inline]

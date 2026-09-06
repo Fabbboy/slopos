@@ -45,6 +45,9 @@ const _: () = assert!(
 
 pub const BOOT_FLAG_ROULETTE_SKIP: u32 = 1 << 0;
 pub const BOOT_FLAG_TESTS_ENABLED: u32 = 1 << 1;
+/// `/` is backed by a block device: a write there survives the reboot. Clear
+/// for a RAM root, whose successful `fsync` still loses the data at power-off.
+pub const BOOT_FLAG_ROOT_PERSISTENT: u32 = 1 << 5;
 
 /// POSIX-style timespec returned by `SYSCALL_CLOCK_GETTIME`.
 #[repr(C)]

@@ -7,7 +7,10 @@ pub mod path;
 pub mod traits;
 
 pub use canon::{CanonPath, canonicalise};
-pub use init::{vfs_init_builtin_filesystems, vfs_is_initialized};
+pub use init::{
+    RootBacking, vfs_init_builtin_filesystems, vfs_init_builtin_filesystems_with,
+    vfs_is_initialized,
+};
 pub use mount::{MAX_MOUNTS, MOUNT_RDONLY, Mounted, mount, mount_at, unmount, with_mount_table};
 pub use ops::{
     ListCursor, VfsHandle, VfsOpenFlags, vfs_list, vfs_list_from, vfs_mkdir, vfs_open,

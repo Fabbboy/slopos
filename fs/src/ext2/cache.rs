@@ -6,7 +6,7 @@ use super::ondisk::EXT2_MAX_BLOCK_SIZE;
 use super::types::BlockNum;
 use crate::blockdev::BlockDevice;
 
-const CACHE_ENTRIES: usize = 128;
+const CACHE_ENTRIES: usize = 512;
 
 /// Snapshots one operation may hold. Each owns a block-sized copy, so this is
 /// the ceiling on the rollback guard's memory: at a 4 KiB block size, 2 MiB.

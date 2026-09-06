@@ -6,6 +6,14 @@ use super::types::{BlockNum, GroupIdx, InodeNum};
 use crate::blockdev::BlockDevice;
 use slopos_ostd::bitmap_slice;
 
+/// ext2's own denial-of-service answer: `s_r_blocks_count` blocks are spendable
+/// only by a writer entitled to them, so a process that fills the disk still
+/// leaves the reserve for `/sbin/init` and the kernel's own writes. A handle
+/// whose caller is entitled carries a reserve of zero.
+fn reserve_permits_allocation(geom: &Ext2Geometry, superblock: &Superblock) -> bool {
+    superblock.free_blocks_count > geom.reserved_blocks()
+}
+
 pub fn allocate_block_near(
     goal: BlockNum,
     geom: &Ext2Geometry,
@@ -13,6 +21,9 @@ pub fn allocate_block_near(
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
 ) -> Result<BlockNum, Ext2Error> {
+    if !reserve_permits_allocation(geom, superblock) {
+        return Err(Ext2Error::NoSpace);
+    }
     let first_group = geom.group(0).ok_or(Ext2Error::NoSpace)?;
     let goal_group = geom
         .locate_block(goal)
@@ -54,6 +65,9 @@ pub fn allocate_inode(
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
 ) -> Result<InodeNum, Ext2Error> {
+    if superblock.free_inodes_count <= geom.reserved_inodes() {
+        return Err(Ext2Error::NoSpace);
+    }
     // Locality: files in one directory belong in one group.
     if let Some(ino) = try_alloc_inode_in_group(parent_group, geom, superblock, cache, device)? {
         return Ok(ino);

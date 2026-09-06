@@ -7,6 +7,7 @@ use crate::ext2::cache::BlockCache;
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode, Ext2Superblock, ReadOnlyReason};
 use crate::verity::{FsExtent, VerityError, VerityStatus};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult, orphan};
+use slopos_kernel_services::driver_runtime::current_task_is_privileged;
 use slopos_ostd::KBox;
 use slopos_ostd::klog_info;
 use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait};
@@ -21,6 +22,9 @@ struct CachedExt2 {
     superblock: Ext2Superblock,
     block_size: u32,
     inode_size: u16,
+    /// `s_r_blocks_count`: what an unprivileged allocation must leave free.
+    /// Read once at mount, because it moves only when `tune2fs` moves it.
+    reserved_blocks: u32,
     /// Sized to `block_size` at mount.
     cache: BlockCache,
     /// Free-count drift from a mutating op. Lives here — not only on the
@@ -130,6 +134,11 @@ fn with_cached_fs<R>(
     fs.set_superblock_dirty(cached.superblock_dirty);
     if cached.read_only {
         fs.force_read_only();
+    }
+    // Per call, because the mount is shared and the entitlement is the
+    // caller's.
+    if !current_task_is_privileged() {
+        fs.set_block_reserve(cached.reserved_blocks);
     }
     // Classified here rather than only inside the mutating entry points,
     // because a *read* that finds a group descriptor pointing outside the
@@ -548,6 +557,9 @@ fn install_cached(
     inode_size: u16,
     read_only: bool,
 ) -> VfsResult<()> {
+    // Zero on a device that cannot answer: a reserve of zero refuses nothing,
+    // rather than failing a mount that would otherwise succeed.
+    let reserved_blocks = Ext2Fs::read_block_reserve(&*device).unwrap_or(0);
     let cache = BlockCache::new(block_size).map_err(ext2_error_to_vfs)?;
     let mut guard = CACHED_EXT2.lock().map_err(|_| VfsError::Interrupted)?;
     *guard = Some(CachedExt2 {
@@ -555,6 +567,7 @@ fn install_cached(
         superblock,
         block_size,
         inode_size: if inode_size == 0 { 128 } else { inode_size },
+        reserved_blocks,
         cache,
         superblock_dirty: false,
         read_only,

@@ -16,6 +16,14 @@ pub const BOOT_FLAG_PANIC_RECOVER_SMOKE: u32 = 1 << 3;
 /// that power-cycles the machine mid-run.
 pub const BOOT_FLAG_FATE_REBOOT: u32 = 1 << 4;
 
+/// `/` is backed by a block device, so what is written there outlives the boot.
+///
+/// Clear for a RAM root, where every write is lost at power-off. Userland has
+/// no other way to tell the two apart — both answer the same syscalls and both
+/// report a successful `fsync` — so a program that must not silently pretend
+/// to have saved something reads this.
+pub const BOOT_FLAG_ROOT_PERSISTENT: u32 = 1 << 5;
+
 pub fn set_flag(flag: u32) {
     FLAGS.fetch_or(flag, Ordering::Relaxed);
 }

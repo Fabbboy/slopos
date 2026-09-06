@@ -34,6 +34,6 @@ pub use ext2_vfs::{
 pub use fileio::*;
 pub use ramfs::RamFs;
 pub use vfs::{
-    FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult, mount,
-    vfs_init_builtin_filesystems, vfs_is_initialized,
+    FileStat, FileSystem, FileType, InodeId, RootBacking, VfsError, VfsResult, mount,
+    vfs_init_builtin_filesystems, vfs_init_builtin_filesystems_with, vfs_is_initialized,
 };
