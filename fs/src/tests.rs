@@ -1,3 +1,9 @@
+pub mod filemap;
+pub mod mount;
+pub mod partition;
+pub mod statfs;
+pub mod verity_rw;
+
 use slopos_abi::fs::UserFsEntry;
 use slopos_ostd::KVec;
 use slopos_ostd::klog_info;
@@ -1853,7 +1859,9 @@ fn test_verity_trailer_outcomes() -> TestResult {
     };
     future.with_buffer_mut(|img| {
         let h = 4 * bs + 4 * 4;
-        img[h + 4..h + 8].copy_from_slice(&2u32.to_le_bytes());
+        // 1 and 2 are both real trailer versions; 3 is past what this kernel
+        // implements.
+        img[h + 4..h + 8].copy_from_slice(&3u32.to_le_bytes());
     });
     match build_verified(future, extent) {
         Err(VerityError::UnsupportedTrailer) => TestResult::Pass,

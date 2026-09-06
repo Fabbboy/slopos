@@ -832,6 +832,41 @@ impl Drop for BlockWriteToken {
     }
 }
 
+/// Read-only [`BlockDevice`] view of a registered device: it takes no write
+/// claim, so it can back a `/dev/vd*` node without competing with a mount's
+/// [`BlockWriteToken`].
+pub struct BlockReader {
+    handle: DevHandle,
+}
+
+impl BlockReader {
+    pub const fn new(handle: DevHandle) -> Self {
+        Self { handle }
+    }
+}
+
+impl BlockDevice for BlockReader {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
+        if blk_read(self.handle, offset, buffer) {
+            Ok(())
+        } else {
+            Err(BlockDeviceError::InvalidBuffer)
+        }
+    }
+
+    fn write_at(&self, _offset: u64, _buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        Err(BlockDeviceError::WriteProtected)
+    }
+
+    fn capacity(&self) -> u64 {
+        blk_capacity(self.handle)
+    }
+
+    fn write_protected(&self) -> bool {
+        true
+    }
+}
+
 fn read_capacity(caps: &VirtioMmioCaps) -> u64 {
     if !caps.has_device_cfg() {
         return 0;

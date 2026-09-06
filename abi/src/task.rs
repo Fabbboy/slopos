@@ -250,6 +250,14 @@ pub const TASK_FLAG_POWER: u16 = 0x1000;
 /// dock's programs). `TASK_FLAG_SYSTEM` implies it.
 pub const TASK_FLAG_LAUNCH: u16 = 0x2000;
 
+/// May attach and detach filesystems: `mount(2)` and `umount2(2)`.
+///
+/// The mount table is one global namespace, so a mount is authority over every
+/// other process's view of the filesystem — a mount over `/bin` replaces the
+/// binaries the program-identity grant table is keyed on. Conferred on no
+/// shipped program; `TASK_FLAG_SYSTEM` implies it.
+pub const TASK_FLAG_MOUNT: u16 = 0x4000;
+
 // `task.flags` is the entirety of SlopOS's privilege model; the four masks
 // below partition it, so "may a caller set this bit?" is answered once, here.
 
@@ -274,7 +282,8 @@ pub const SPAWN_PRIVILEGED: u16 = TASK_FLAG_NO_PREEMPT
     | TASK_FLAG_CONSOLE_ADMIN
     | TASK_FLAG_PROC_ADMIN
     | TASK_FLAG_POWER
-    | TASK_FLAG_LAUNCH;
+    | TASK_FLAG_LAUNCH
+    | TASK_FLAG_MOUNT;
 
 /// The two ring bits. They describe where the task executes, not what it may do,
 /// hence classified apart from the privileges. `USER_MODE` is forced on
@@ -291,7 +300,7 @@ pub const SPAWN_MODE_BITS: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_KERNEL_MODE;
 /// `0x0040` is the retired `TASK_FLAG_FPU_INITIALIZED` and must not be reused.
 /// Adding a `TASK_FLAG_*` means clearing its bit here *and* adding it to exactly
 /// one of the three masks above; the asserts fail until both are done.
-pub const SPAWN_RESERVED: u16 = 0xC040;
+pub const SPAWN_RESERVED: u16 = 0x8040;
 
 const _: () = assert!(
     (SPAWN_USER_SETTABLE | SPAWN_PRIVILEGED | SPAWN_MODE_BITS | SPAWN_RESERVED) == u16::MAX,

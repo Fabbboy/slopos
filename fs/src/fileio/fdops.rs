@@ -13,8 +13,8 @@ use slopos_abi::syscall::{
 
 use crate::pipe;
 use crate::pipe_file_ops::{PIPE_READ_OPS, PIPE_WRITE_OPS, pipe_backings};
-use crate::vfs::{vfs_list, vfs_mkdir, vfs_stat, vfs_unlink};
-use crate::vfs_file_ops::{VFS_FILE_OPS, vfs_open_handle_flags, vnode_backing};
+use crate::vfs::{FsStats, vfs_list, vfs_mkdir, vfs_stat, vfs_unlink};
+use crate::vfs_file_ops::{VFS_FILE_OPS, vfs_file_statfs, vfs_open_handle_flags, vnode_backing};
 use slopos_abi::tty_error::TtyError;
 use slopos_ostd::process::quota::FileBacking;
 
@@ -508,6 +508,10 @@ pub fn file_truncate_path(path: &[u8], length: u64) -> c_int {
     if let Err(e) = resolved.check_writable() {
         return e.to_errno().raw() as _;
     }
+    // A live page set holds pre-truncate pages, and its writeback would put
+    // them back over the region this call clears. Forgotten, not flushed: the
+    // bytes are the ones the caller asked to discard.
+    crate::filemap::forget_inode(resolved.fs, resolved.inode);
     errno_of(resolved.fs.truncate(resolved.inode, length))
 }
 
@@ -951,6 +955,26 @@ pub fn file_fstat_fd(
     snap.ops().stat(snap.handle(), out_stat)
 }
 
+/// `fstatfs(2)`: the capacity of the filesystem the descriptor's file lives
+/// on.
+///
+/// A pipe, a tty or a socket answers `ENOSYS` rather than a fabricated
+/// geometry — the same refusal [`crate::vfs::FileSystem::statfs`] defaults to.
+pub fn file_statfs_fd(table: FdTable, fd: c_int) -> Result<FsStats, Errno> {
+    let snap = {
+        let inner = lock_table_slot(table).ok_or(Errno::ESRCH)?;
+        snapshot_fd(&inner, fd).ok_or(Errno::EBADF)?
+    };
+    if snap.ops().kind() != FileKind::Regular {
+        return Err(Errno::ENOSYS);
+    }
+    // Off the table lock: a filesystem's `statfs` may take a sleeping mutex.
+    match vfs_file_statfs(snap.handle()) {
+        Some(result) => result.map_err(|e| e.to_errno()),
+        None => Err(Errno::EBADF),
+    }
+}
+
 pub fn fileio_open_socket_fd(
     table: FdTable,
     socket_idx: u32,
@@ -990,12 +1014,12 @@ pub fn fileio_open_fd_with_ops(
     )
 }
 
-pub fn fileio_get_open_file_handle(table: FdTable, fd: i32) -> Option<(FileKind, usize)> {
+pub fn fileio_get_open_file_handle(table: FdTable, fd: i32) -> Option<(FileKind, usize, OpenMode)> {
     let snap = {
         let inner = lock_table_slot(table)?;
         snapshot_fd(&inner, fd)?
     };
-    Some((snap.ops().kind(), snap.handle()))
+    Some((snap.ops().kind(), snap.handle(), snap.status_flags()))
 }
 
 /// Confers no ownership: the caller's own fd keeps the file alive for the

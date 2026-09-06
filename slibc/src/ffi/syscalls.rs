@@ -267,6 +267,14 @@ pub unsafe extern "C" fn slopos_munmap(addr: *mut u8, len: usize) -> i32 {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn slopos_msync(addr: *mut u8, len: usize, flags: i32) -> i32 {
+    match Sys::msync(addr, len, flags as u64) {
+        Ok(()) => 0,
+        Err(e) => -(e.raw()),
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn slopos_socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
     match Sys::socket(domain, sock_type, protocol) {
         Ok(fd) => fd,

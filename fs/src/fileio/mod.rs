@@ -34,9 +34,12 @@ use slopos_ostd::process::{AccountId, Process, ProcessId, root_account};
 /// the length of every per-process descriptor table.
 pub(super) const FILEIO_MAX_OPEN_FILES: usize = 256;
 
+/// A descriptor's open mode. Public because it travels out with the fd's
+/// handle: `mmap(MAP_SHARED, PROT_WRITE)` is a write path too, and answers to
+/// the mode `open(2)` was checked against.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
-pub(crate) struct OpenMode(u32);
+pub struct OpenMode(u32);
 
 impl OpenMode {
     pub const EMPTY: Self = Self(0);

@@ -297,6 +297,12 @@ impl Pal for Sys {
         Ok(())
     }
 
+    fn msync(addr: *mut u8, len: usize, flags: u64) -> Result<(), Errno> {
+        let ret = unsafe { syscall3(SYSCALL_MSYNC, addr as u64, len as u64, flags) };
+        to_result(ret)?;
+        Ok(())
+    }
+
     fn fork() -> Result<i32, Errno> {
         let ret = unsafe { syscall0(SYSCALL_FORK) };
         let val = to_result(ret)?;
@@ -771,6 +777,43 @@ impl Pal for Sys {
 
     fn sync() -> Result<(), Errno> {
         let ret = unsafe { syscall0(SYSCALL_SYNC) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn statfs(path: *const u8, buf: *mut u8) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_STATFS, path as u64, buf as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn fstatfs(fd: i32, buf: *mut u8) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_FSTATFS, fd as u64, buf as u64) };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn mount(
+        source: *const u8,
+        target: *const u8,
+        fstype: *const u8,
+        flags: u32,
+    ) -> Result<(), Errno> {
+        let ret = unsafe {
+            syscall4(
+                SYSCALL_MOUNT,
+                source as u64,
+                target as u64,
+                fstype as u64,
+                flags as u64,
+            )
+        };
+        to_result(ret)?;
+        Ok(())
+    }
+
+    fn umount2(target: *const u8, flags: u32) -> Result<(), Errno> {
+        let ret = unsafe { syscall2(SYSCALL_UMOUNT2, target as u64, flags as u64) };
         to_result(ret)?;
         Ok(())
     }

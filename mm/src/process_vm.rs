@@ -26,7 +26,7 @@ use crate::user_mappings::{
     ostd_get_pte_flags_4kb, ostd_map_4kb_user_fresh, ostd_map_4kb_user_shared, ostd_mark_cow_4kb,
     ostd_mark_range_user_4kb, ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_virt_to_phys_4kb,
 };
-use crate::vma_region::{Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion};
+use crate::vma_region::{FileMapRef, Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion};
 use slopos_abi::task::INVALID_PROCESS_ID;
 
 /// Per-process VM slot, protected by the per-slot lock in `PROCESS_VMS`.
@@ -696,8 +696,9 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
         }
     }
 
+    let mut released_page_set = false;
     inner.vma_map.drain(|start, end, region| {
-        dec_removed_shared_mapcount(start, end, region);
+        released_page_set |= dec_removed_shared_mapcount(start, end, region);
     });
     tlb::flush_all_for_process(key);
 
@@ -717,6 +718,12 @@ pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
     // to the account for the window between the two.
     let rc = seed_fresh_layout(inner, slot, false);
     abort_guard.disarm();
+    drop(proc);
+    // The per-process lock is gone, so the writeback the releases queued can
+    // be completed here rather than at the next `acquire`.
+    if released_page_set {
+        crate::filemap_hook::filemap_drain();
+    }
     rc
 }
 
@@ -815,7 +822,7 @@ fn seed_fresh_layout(inner: &mut ProcessVm, slot: usize, map_stack: bool) -> c_i
 fn teardown_inner_mappings(inner: &mut ProcessVm, key: TlbProcessKey) {
     tlb::flush_all_for_process(key);
     inner.vma_map.drain(|start, end, region| {
-        dec_removed_shared_mapcount(start, end, region);
+        let _ = dec_removed_shared_mapcount(start, end, region);
     });
     inner.heap_end = inner.heap_start;
     inner.heap_break = inner.heap_start;
@@ -927,9 +934,19 @@ fn vma_page_count(start: u64, end: u64) -> u32 {
     ((end - start) / PAGE_SIZE_4KB) as u32
 }
 
-fn dec_removed_shared_mapcount(start: u64, end: u64, region: &VmaRegion) {
+/// Returns whether a file page set was released: `filemap_release` runs under
+/// the per-process lock (and a preempt guard on task exit), so the writeback
+/// it queues must be drained by the caller.
+fn dec_removed_shared_mapcount(start: u64, end: u64, region: &VmaRegion) -> bool {
     if let Some(handle) = region.memfd_handle() {
         crate::memfd::memfd_dec_mapcount_by(handle, vma_page_count(start, end));
+    }
+    match region.filemap_ref() {
+        Some(map) => {
+            crate::filemap_hook::filemap_release(map, vma_page_count(start, end));
+            true
+        }
+        None => false,
     }
 }
 
@@ -2345,6 +2362,100 @@ pub fn process_vm_map_ring(process: ProcessId, paddrs: &[PhysAddr]) -> u64 {
     start_addr
 }
 
+/// Base address an mmap lands at: `MAP_FIXED` clears the requested range,
+/// anything else takes a gap. `0` if the request cannot be satisfied.
+///
+/// Out of line because the `MAP_FIXED` arm's frame is what the 2 KiB stack
+/// gate measures against every mmap caller.
+#[inline(never)]
+fn resolve_mmap_base(
+    inner: &mut ProcessVm,
+    slot: usize,
+    addr_hint: u64,
+    size: u64,
+    is_fixed: bool,
+) -> u64 {
+    use crate::memory_layout_defs::{PROCESS_MMAP_END_VA, PROCESS_MMAP_START_VA};
+
+    if !is_fixed {
+        let chosen = find_mmap_gap_inner(inner, size);
+        if chosen == 0 {
+            klog_info!("process_vm_mmap: No free region found for {} bytes", size);
+        }
+        return chosen;
+    }
+
+    if (addr_hint & (PAGE_SIZE_4KB - 1)) != 0 {
+        klog_info!("process_vm_mmap: MAP_FIXED address not page-aligned");
+        return 0;
+    }
+    if addr_hint < PROCESS_MMAP_START_VA
+        || addr_hint
+            .checked_add(size)
+            .is_none_or(|end| end > PROCESS_MMAP_END_VA)
+    {
+        klog_info!("process_vm_mmap: MAP_FIXED address out of mmap region");
+        return 0;
+    }
+    let end_addr = addr_hint + size;
+    let overlaps = match collect_overlapping_vmas(inner, addr_hint, end_addr) {
+        Ok(overlaps) => overlaps,
+        Err(_) => {
+            klog_info!("process_vm_mmap MAP_FIXED: overlap allocation failed");
+            return 0;
+        }
+    };
+    // Force a panic fatal while `vm_space` is out of `inner`; unwinding
+    // through the half-mutated global would leave it torn for later
+    // syscalls.
+    let abort_guard = AbortOnUnwind::new();
+    let mut vm_space_taken = inner
+        .vm_space
+        .take()
+        .expect("process_vm_mmap MAP_FIXED: vm_space present for live pid");
+
+    for (overlap_start, overlap_end, region) in overlaps.iter() {
+        match unmap_region_range_dir(
+            &mut vm_space_taken,
+            slot_tlb_key(slot),
+            *overlap_start,
+            *overlap_end,
+            region,
+        ) {
+            Ok(_) => {}
+            Err(err) => {
+                if err.processed_end > addr_hint {
+                    inner.vma_map.remove_range(
+                        addr_hint,
+                        err.processed_end,
+                        |removed_start, removed_end, region| {
+                            let _ = dec_removed_shared_mapcount(removed_start, removed_end, region);
+                        },
+                    );
+                }
+                klog_info!(
+                    "process_vm_mmap MAP_FIXED: overlap unmap failed: {:?}",
+                    err.err
+                );
+                inner.vm_space = Some(vm_space_taken);
+                abort_guard.disarm();
+                return 0;
+            }
+        }
+    }
+
+    inner
+        .vma_map
+        .remove_range(addr_hint, end_addr, |removed_start, removed_end, region| {
+            let _ = dec_removed_shared_mapcount(removed_start, removed_end, region);
+        });
+
+    inner.vm_space = Some(vm_space_taken);
+    abort_guard.disarm();
+
+    addr_hint
+}
+
 fn process_vm_mmap_inner(
     process: ProcessId,
     addr_hint: u64,
@@ -2355,7 +2466,6 @@ fn process_vm_mmap_inner(
     offset: u64,
     memfd_handle: Option<crate::memfd::MemfdHandle>,
 ) -> u64 {
-    use crate::memory_layout_defs::{PROCESS_MMAP_END_VA, PROCESS_MMAP_START_VA};
     use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, MAP_SHARED};
 
     let is_shared = flags_val & MAP_SHARED != 0;
@@ -2418,87 +2528,11 @@ fn process_vm_mmap_inner(
         return 0;
     }
 
-    let is_fixed = flags_val & MAP_FIXED != 0;
-
-    let start_addr = if is_fixed {
-        if (addr_hint & (PAGE_SIZE_4KB - 1)) != 0 {
-            klog_info!("process_vm_mmap: MAP_FIXED address not page-aligned");
-            return 0;
-        }
-        if addr_hint < PROCESS_MMAP_START_VA
-            || addr_hint
-                .checked_add(size)
-                .map_or(true, |end| end > PROCESS_MMAP_END_VA)
-        {
-            klog_info!("process_vm_mmap: MAP_FIXED address out of mmap region");
-            return 0;
-        }
-        let end_addr = addr_hint + size;
-        let inner = &mut *proc;
-        let overlaps = match collect_overlapping_vmas(inner, addr_hint, end_addr) {
-            Ok(overlaps) => overlaps,
-            Err(_) => {
-                klog_info!("process_vm_mmap MAP_FIXED: overlap allocation failed");
-                return 0;
-            }
-        };
-        // Force a panic fatal while `vm_space` is out of `inner`; unwinding
-        // through the half-mutated global would leave it torn for later
-        // syscalls.
-        let abort_guard = AbortOnUnwind::new();
-        let mut vm_space_taken = inner
-            .vm_space
-            .take()
-            .expect("process_vm_mmap MAP_FIXED: vm_space present for live pid");
-
-        for (overlap_start, overlap_end, region) in overlaps.iter() {
-            match unmap_region_range_dir(
-                &mut vm_space_taken,
-                slot_tlb_key(slot),
-                *overlap_start,
-                *overlap_end,
-                region,
-            ) {
-                Ok(_) => {}
-                Err(err) => {
-                    if err.processed_end > addr_hint {
-                        inner.vma_map.remove_range(
-                            addr_hint,
-                            err.processed_end,
-                            |removed_start, removed_end, region| {
-                                dec_removed_shared_mapcount(removed_start, removed_end, region);
-                            },
-                        );
-                    }
-                    klog_info!(
-                        "process_vm_mmap MAP_FIXED: overlap unmap failed: {:?}",
-                        err.err
-                    );
-                    inner.vm_space = Some(vm_space_taken);
-                    abort_guard.disarm();
-                    return 0;
-                }
-            }
-        }
-
-        inner
-            .vma_map
-            .remove_range(addr_hint, end_addr, |removed_start, removed_end, region| {
-                dec_removed_shared_mapcount(removed_start, removed_end, region);
-            });
-
-        inner.vm_space = Some(vm_space_taken);
-        abort_guard.disarm();
-
-        addr_hint
-    } else {
-        let chosen = find_mmap_gap_inner(&proc, size);
-        if chosen == 0 {
-            klog_info!("process_vm_mmap: No free region found for {} bytes", size);
-            return 0;
-        }
-        chosen
-    };
+    let start_addr =
+        resolve_mmap_base(&mut proc, slot, addr_hint, size, flags_val & MAP_FIXED != 0);
+    if start_addr == 0 {
+        return 0;
+    }
 
     let end_addr = start_addr + size;
 
@@ -2589,6 +2623,251 @@ fn process_vm_mmap_inner(
     }
 }
 
+#[inline]
+fn user_pte_flags(prot: u64) -> u64 {
+    use slopos_abi::syscall::PROT_WRITE;
+    if prot & PROT_WRITE != 0 {
+        PageFlags::USER_RW.bits()
+    } else {
+        PageFlags::USER_RO.bits()
+    }
+}
+
+/// The VMA a file mapping installs. `lazy` is false in both modes: the #PF
+/// handler cannot sleep, so a file page is never faulted in from the device.
+fn file_region(prot: u64, backing: RegionBacking) -> VmaRegion {
+    let prot_bits = prot_to_region(prot);
+    VmaRegion {
+        protection: prot_bits.protection,
+        backing,
+        lazy: false,
+        cow: false,
+        user: true,
+        purpose: RegionPurpose::General,
+    }
+}
+
+fn file_mmap_extent(length: u64, pages: usize) -> Option<u64> {
+    if length == 0 || pages == 0 {
+        return None;
+    }
+    let size = length.checked_add(PAGE_SIZE_4KB - 1)? & !(PAGE_SIZE_4KB - 1);
+    if (size / PAGE_SIZE_4KB) as usize != pages {
+        klog_info!(
+            "process_vm_mmap file: {} pages offered for a {}-byte mapping",
+            pages,
+            size
+        );
+        return None;
+    }
+    Some(size)
+}
+
+/// Map a `MAP_SHARED` file mapping. `paddrs` names the filesystem page set's
+/// frames, one per 4 KiB page in region order; each PTE takes its own
+/// reference, so a page outlives every mapping of it. Returns the user base
+/// address, or `0` — a partial map is rolled back.
+pub fn process_vm_mmap_file_shared(
+    process: ProcessId,
+    addr_hint: u64,
+    length: u64,
+    prot: u64,
+    flags_val: u64,
+    map: FileMapRef,
+    paddrs: &[u64],
+) -> u64 {
+    use slopos_abi::syscall::MAP_FIXED;
+
+    let Some(size) = file_mmap_extent(length, paddrs.len()) else {
+        return 0;
+    };
+
+    let Some(slot) = find_slot_for_pid(process) else {
+        return 0;
+    };
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id != process.id() {
+        return 0;
+    }
+
+    let start_addr =
+        resolve_mmap_base(&mut proc, slot, addr_hint, size, flags_val & MAP_FIXED != 0);
+    if start_addr == 0 {
+        return 0;
+    }
+    let end_addr = start_addr + size;
+
+    let page_count = (size / PAGE_SIZE_4KB) as u32;
+    // Retained before the first PTE: a stale handle means the set may already
+    // be freeing these frames. Only a writable mapping arms writeback.
+    let writable = prot & slopos_abi::syscall::PROT_WRITE != 0;
+    if !crate::filemap_hook::filemap_retain(map, page_count, writable) {
+        klog_info!("process_vm_mmap file: the page set handle is stale");
+        return 0;
+    }
+
+    let inner = &mut *proc;
+    // Charged before a single PTE is written, so a refusal costs no rollback.
+    let Ok(reserved) = inner.vma_map.reserve_pages(start_addr, end_addr) else {
+        klog_info!("process_vm_mmap file: address space is at its page ceiling");
+        crate::filemap_hook::filemap_release(map, page_count);
+        return 0;
+    };
+    let vm_space = inner
+        .vm_space
+        .as_mut()
+        .expect("process_vm_mmap file: vm_space present for live pid");
+    let pte_flags = user_pte_flags(prot);
+
+    for (i, pa) in paddrs.iter().enumerate() {
+        let vaddr = start_addr + (i as u64) * PAGE_SIZE_4KB;
+        if let Err(err) = ostd_map_4kb_user_shared(
+            vm_space,
+            VirtAddr::new(vaddr),
+            PhysAddr::new(*pa),
+            pte_flags,
+        ) {
+            klog_info!("process_vm_mmap file: cursor map failed: {:?}", err);
+            for j in 0..i {
+                let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
+                let _ = ostd_unmap_4kb_user(vm_space, VirtAddr::new(rv));
+            }
+            crate::filemap_hook::filemap_release(map, page_count);
+            return 0;
+        }
+    }
+
+    let region = file_region(prot, RegionBacking::SharedFile { map });
+    inner
+        .vma_map
+        .insert_reserved(start_addr, end_addr, region, reserved);
+
+    start_addr
+}
+
+/// Map a `MAP_PRIVATE` file mapping: fresh anonymous pages copied from
+/// `src_paddrs`, the filesystem page set, at map time.
+///
+/// POSIX leaves later visibility of file changes unspecified, so the region
+/// needs no file backing — from here it is ordinary anonymous memory.
+pub fn process_vm_mmap_file_private(
+    process: ProcessId,
+    addr_hint: u64,
+    length: u64,
+    prot: u64,
+    flags_val: u64,
+    src_paddrs: &[u64],
+) -> u64 {
+    use slopos_abi::syscall::MAP_FIXED;
+
+    let Some(size) = file_mmap_extent(length, src_paddrs.len()) else {
+        return 0;
+    };
+
+    let Some(slot) = find_slot_for_pid(process) else {
+        return 0;
+    };
+    let mut proc = PROCESS_VMS[slot].lock();
+    if proc.process_id != process.id() {
+        return 0;
+    }
+
+    let start_addr =
+        resolve_mmap_base(&mut proc, slot, addr_hint, size, flags_val & MAP_FIXED != 0);
+    if start_addr == 0 {
+        return 0;
+    }
+    let end_addr = start_addr + size;
+
+    let inner = &mut *proc;
+    let Ok(reserved) = inner.vma_map.reserve_pages(start_addr, end_addr) else {
+        klog_info!("process_vm_mmap private file: address space is at its page ceiling");
+        return 0;
+    };
+    let vm_space = inner
+        .vm_space
+        .as_mut()
+        .expect("process_vm_mmap private file: vm_space present for live pid");
+    // A read-only mapping can still be populated: the copy below goes through
+    // the HHDM, not through this mapping.
+    let pte_flags = user_pte_flags(prot);
+
+    for (i, src) in src_paddrs.iter().enumerate() {
+        let vaddr = start_addr + (i as u64) * PAGE_SIZE_4KB;
+        let mapped = ostd_map_4kb_user_fresh(vm_space, VirtAddr::new(vaddr), pte_flags);
+        let copied = match mapped {
+            Ok(dst) => copy_page_hhdm(PhysAddr::new(*src), dst),
+            Err(err) => {
+                klog_info!("process_vm_mmap private file: cursor map failed: {:?}", err);
+                false
+            }
+        };
+        if !copied {
+            for j in 0..=i {
+                let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
+                let _ = ostd_unmap_4kb_user(vm_space, VirtAddr::new(rv));
+            }
+            return 0;
+        }
+    }
+
+    let region = file_region(prot, RegionBacking::Anonymous);
+    inner
+        .vma_map
+        .insert_reserved(start_addr, end_addr, region, reserved);
+
+    start_addr
+}
+
+/// Copy one 4 KiB page between two frames the caller has pinned.
+fn copy_page_hhdm(src: PhysAddr, dst: PhysAddr) -> bool {
+    let (Some(src_virt), Some(dst_virt)) = (src.try_to_virt(), dst.try_to_virt()) else {
+        return false;
+    };
+    slopos_ostd::mm::hhdm_bytes::copy_page(src_virt, dst_virt)
+}
+
+/// The distinct file page sets `[addr, end)` maps, for `msync(2)`.
+///
+/// `None` if the range has a hole — `msync`'s `ENOMEM`. Empty means the range
+/// is mapped but nothing in it is file-backed, which `msync` calls success.
+pub fn process_vm_collect_filemaps(
+    process: ProcessId,
+    addr: u64,
+    end: u64,
+) -> Option<KVec<FileMapRef>> {
+    let slot = find_slot_for_pid(process)?;
+    let proc = PROCESS_VMS[slot].lock();
+    if proc.process_id != process.id() {
+        return None;
+    }
+
+    let mut maps: KVec<FileMapRef> = KVec::new();
+    let mut covered = addr;
+    for (vma_start, vma_end, region) in proc.vma_map.iter() {
+        if vma_end <= covered {
+            continue;
+        }
+        if vma_start > covered {
+            return None;
+        }
+        if let Some(map) = region.filemap_ref()
+            && !maps.iter().any(|m| *m == map)
+            && maps.push(map).is_err()
+        {
+            return None;
+        }
+        covered = vma_end;
+        if covered >= end {
+            break;
+        }
+    }
+    if covered < end {
+        return None;
+    }
+    Some(maps)
+}
+
 pub fn process_vm_munmap(process: ProcessId, addr: u64, length: u64) -> i32 {
     if length == 0 || (addr & (PAGE_SIZE_4KB - 1)) != 0 {
         return -1;
@@ -2657,7 +2936,7 @@ pub fn process_vm_munmap(process: ProcessId, addr: u64, length: u64) -> i32 {
                         addr,
                         err.processed_end,
                         |removed_start, removed_end, region| {
-                            dec_removed_shared_mapcount(removed_start, removed_end, region);
+                            let _ = dec_removed_shared_mapcount(removed_start, removed_end, region);
                         },
                     );
                 }
@@ -2669,15 +2948,22 @@ pub fn process_vm_munmap(process: ProcessId, addr: u64, length: u64) -> i32 {
         }
     }
 
+    let mut released_page_set = false;
     inner
         .vma_map
         .remove_range(addr, end, |removed_start, removed_end, region| {
-            dec_removed_shared_mapcount(removed_start, removed_end, region);
+            released_page_set |= dec_removed_shared_mapcount(removed_start, removed_end, region);
         });
 
     inner.vm_space = Some(vm_space_taken);
 
     abort_guard.disarm();
+    drop(proc);
+    // The per-process lock is gone; complete the writeback the release queued
+    // rather than leaving it to the next `acquire` or the ext2 flusher.
+    if released_page_set {
+        crate::filemap_hook::filemap_drain();
+    }
     0
 }
 
@@ -2724,6 +3010,12 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
         };
 
         old_protection = region.protection;
+        // Widening a file mapping is write access to the file, but the
+        // descriptor that authorised it — and with it the seal and the mount's
+        // read-only flag — is not reachable from here, so it is refused.
+        if region.filemap_ref().is_some() && new_prot.protection.write && !old_protection.write {
+            return slopos_abi::Errno::EACCES.raw();
+        }
         region.protection = new_prot.protection;
         new_page_flags = region.to_page_flags();
     }
@@ -2962,6 +3254,13 @@ fn clone_cow_populate_child(
         }
         if let Some(memfd_handle) = parent_region.memfd_handle() {
             crate::memfd::memfd_inc_mapcount_by(memfd_handle, vma_page_count(vma_start, vma_end));
+        }
+        if let Some(map) = parent_region.filemap_ref() {
+            crate::filemap_hook::filemap_retain(
+                map,
+                vma_page_count(vma_start, vma_end),
+                parent_region.protection.write,
+            );
         }
 
         // The child slot lock held by the caller is the sole owner of the

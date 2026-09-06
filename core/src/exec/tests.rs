@@ -771,6 +771,15 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
     );
 
     assert_test!(
+        grant_for(b"/bin/seat_test") == (TASK_FLAG_COMPOSITOR, None),
+        "the seat test must be granted COMPOSITOR and nothing more"
+    );
+    assert_test!(
+        grant_for(b"/bin/mount_test") == (slopos_abi::task::TASK_FLAG_MOUNT, None),
+        "the mount test must be granted MOUNT and nothing more"
+    );
+
+    assert_test!(
         grant_for(INIT_PATH) == (0, None),
         "init must not be grantable: SYSTEM stays kernel-only"
     );
@@ -792,6 +801,32 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
     assert_test!(
         grant_for(b"") == (0, None),
         "the empty path must get nothing"
+    );
+
+    use super::grants::covers_grant_path;
+    assert_test!(
+        covers_grant_path(b"/bin"),
+        "/bin holds every grant path and must be uncoverable"
+    );
+    assert_test!(
+        covers_grant_path(b"/"),
+        "the root is an ancestor of every grant path"
+    );
+    assert_test!(
+        covers_grant_path(b"/bin/halt"),
+        "a grant path itself must be uncoverable"
+    );
+    assert_test!(
+        !covers_grant_path(b"/bindings"),
+        "a prefix that is not a component boundary must not match"
+    );
+    assert_test!(
+        !covers_grant_path(b"/bin/halt/deeper"),
+        "a path below a grant path covers nothing: no grant is keyed under it"
+    );
+    assert_test!(
+        !covers_grant_path(b"/tmp"),
+        "an ordinary directory must stay mountable"
     );
 
     TestResult::Pass

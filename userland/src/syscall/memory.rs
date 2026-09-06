@@ -3,7 +3,7 @@
 use core::ffi::c_void;
 
 use super::numbers::*;
-use super::raw::{syscall1, syscall2};
+use super::raw::{syscall1, syscall2, syscall3};
 
 #[inline(always)]
 pub fn brk(addr: *mut c_void) -> *mut c_void {
@@ -51,6 +51,16 @@ pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64)
 #[inline(always)]
 pub fn munmap(addr: u64, length: u64) -> i32 {
     unsafe { syscall2(SYSCALL_MUNMAP, addr, length) as i32 }
+}
+
+#[inline(always)]
+pub fn mprotect(addr: u64, length: u64, prot: u64) -> i32 {
+    unsafe { syscall3(SYSCALL_MPROTECT, addr, length, prot) as i32 }
+}
+
+#[inline(always)]
+pub fn msync(addr: u64, length: u64, flags: u64) -> i32 {
+    unsafe { syscall3(SYSCALL_MSYNC, addr, length, flags) as i32 }
 }
 
 #[inline(always)]

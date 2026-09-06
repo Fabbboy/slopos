@@ -406,8 +406,33 @@ pub const SYSCALL_TRUNCATE: u64 = 183;
 /// `st_mode` is not a caller's to change.
 pub const SYSCALL_CHMOD: u64 = 184;
 
+/// `statfs(path: *const u8, out: *mut UserStatfs)` — filesystem-wide counters
+/// for the mount the path resolves through. `EOPNOTSUPP` from a filesystem
+/// that keeps none.
+pub const SYSCALL_STATFS: u64 = 185;
+
+/// `fstatfs(fd, out: *mut UserStatfs)` — as [`SYSCALL_STATFS`] for the mount an
+/// open descriptor lives on.
+pub const SYSCALL_FSTATFS: u64 = 186;
+
+/// `mount(source: *const u8, target: *const u8, fstype: *const u8, flags)` —
+/// attach a filesystem at a path. Gated on `Capability::Mount`. Linux's
+/// `data` argument has no analogue: the mountable set is closed and none of
+/// its members takes options.
+pub const SYSCALL_MOUNT: u64 = 187;
+
+/// `umount2(path: *const u8, flags)` — detach the filesystem mounted exactly at
+/// `path`. `EBUSY` when a descriptor is still open on it, unless
+/// `MNT_DETACH` is set. Gated on `Capability::Mount`.
+pub const SYSCALL_UMOUNT2: u64 = 188;
+
+/// `msync(addr, length, flags)` — write a shared file mapping's dirty pages
+/// back through the filesystem. `MS_SYNC` waits for the device, `MS_ASYNC`
+/// queues the writeback, `MS_INVALIDATE` is refused with `EINVAL`.
+pub const SYSCALL_MSYNC: u64 = 189;
+
 /// Size of the dispatch table; every syscall number must be below this.
-pub const SYSCALL_TABLE_SIZE: usize = 185;
+pub const SYSCALL_TABLE_SIZE: usize = 190;
 
 const _: () = assert!((SYSCALL_PIDFD_OPEN as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SIGNALFD as usize) < SYSCALL_TABLE_SIZE);
@@ -433,6 +458,11 @@ const _: () = assert!((SYSCALL_SYMLINK as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_READLINK as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_TRUNCATE as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_CHMOD as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_STATFS as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_FSTATFS as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_MOUNT as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_UMOUNT2 as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_MSYNC as usize) < SYSCALL_TABLE_SIZE);
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

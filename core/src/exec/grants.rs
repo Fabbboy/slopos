@@ -14,7 +14,7 @@
 
 use slopos_abi::task::{
     TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_LAUNCH,
-    TASK_FLAG_NET_ADMIN, TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN, TaskPriority,
+    TASK_FLAG_MOUNT, TASK_FLAG_NET_ADMIN, TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN, TaskPriority,
 };
 
 struct ProgramGrant {
@@ -102,6 +102,13 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         flags: TASK_FLAG_COMPOSITOR,
         priority: None,
     },
+    // Same bargain as the seat test: no shipped program may graft a
+    // filesystem onto the namespace.
+    ProgramGrant {
+        path: b"/bin/mount_test",
+        flags: TASK_FLAG_MOUNT,
+        priority: None,
+    },
 ];
 
 /// The flags and tier the kernel adds for `path`; `(0, None)` for any program
@@ -111,4 +118,23 @@ pub fn grant_for(path: &[u8]) -> (u16, Option<TaskPriority>) {
         Some(grant) => (grant.flags, grant.priority),
         None => (0, None),
     }
+}
+
+/// Whether `path` is, or is an ancestor of, a path this table keys a privilege
+/// on. `path` must be canonical.
+///
+/// `mount(2)` asks this: a grant is keyed on a *path*, so a writable ramfs
+/// over `/bin` would let a planted `halt` spawn with `TASK_FLAG_POWER`. The
+/// inode seal cannot see it — a mount changes the namespace rather than an
+/// inode.
+pub fn covers_grant_path(path: &[u8]) -> bool {
+    PROGRAM_GRANTS.iter().any(|grant| {
+        if grant.path == path {
+            return true;
+        }
+        // A prefix only at a component boundary: `/bindings` is not `/bin`.
+        grant.path.len() > path.len()
+            && grant.path.starts_with(path)
+            && (path == b"/" || grant.path[path.len()] == b'/')
+    })
 }

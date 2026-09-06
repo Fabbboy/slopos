@@ -5,8 +5,8 @@ use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use crate::blockdev::BlockDevice;
 use crate::ext2::cache::BlockCache;
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode, Ext2Superblock, ReadOnlyReason};
-use crate::verity::{FsExtent, VerityError, VerityStatus};
-use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult, orphan};
+use crate::verity::{AttestTrust, FsExtent, VerityError, VerityStatus};
+use crate::vfs::{FileStat, FileSystem, FileType, FsStats, InodeId, VfsError, VfsResult, orphan};
 use slopos_kernel_services::driver_runtime::current_task_is_privileged;
 use slopos_ostd::KBox;
 use slopos_ostd::klog_info;
@@ -91,7 +91,12 @@ const FLUSH_BACKOFF_MIN_MS: u64 = 50;
 /// than the periodic flush cadence.
 const FLUSH_BACKOFF_MAX_MS: u64 = FLUSH_INTERVAL_MS;
 
-pub struct StaticExt2Vfs;
+/// Not a ZST deliberately: filesystem identity is the address of the `static`
+/// (`vfs::traits::same_filesystem`), and two zero-sized statics are not
+/// promised distinct addresses.
+pub struct StaticExt2Vfs(
+    #[expect(dead_code, reason = "gives the static an address of its own")] u8,
+);
 
 impl StaticExt2Vfs {
     fn with_fs<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
@@ -414,12 +419,16 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
         ext2_vfs_sync()
     }
 
+    fn statfs(&self) -> VfsResult<FsStats> {
+        ext2_vfs_statfs()
+    }
+
     fn sync_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()> {
         ext2_vfs_sync_inode(inode, data_only)
     }
 }
 
-pub static EXT2_VFS_STATIC: StaticExt2Vfs = StaticExt2Vfs;
+pub static EXT2_VFS_STATIC: StaticExt2Vfs = StaticExt2Vfs(0);
 
 /// Mount the ext2 image on `device`. A verity trailer, when present, makes
 /// the mount read-only; a trailer that is present but unusable refuses the
@@ -451,10 +460,18 @@ fn mount_device(device: KBox<dyn BlockDevice + Send + Sync>) -> VfsResult<Ext2Mo
         block_size,
         blocks: superblock.blocks_count as u64,
     };
-    let (device, verity) = crate::verity::build_verified(device, extent).map_err(|e| {
-        klog_info!("verity: refusing to mount — {:?}", e);
-        verity_error_to_vfs(e)
-    })?;
+    // An image the last boot never marked clean may have blocks rewritten
+    // after its bitmap was persisted, so its attestation is stale this boot.
+    let trust = if superblock.state == crate::ext2::ondisk::EXT2_VALID_FS {
+        AttestTrust::Persisted
+    } else {
+        AttestTrust::NoneThisBoot
+    };
+    let (device, verity) =
+        crate::verity::build_verified_trusting(device, extent, trust).map_err(|e| {
+            klog_info!("verity: refusing to mount — {:?}", e);
+            verity_error_to_vfs(e)
+        })?;
     log_verity_status(verity);
 
     // Asked against the superblock as it came off the disk: `install_cached`
@@ -544,6 +561,16 @@ fn log_verity_status(verity: VerityStatus) {
             blocks,
             block_size,
         ),
+        VerityStatus::VerifiedWritable {
+            blocks,
+            block_size,
+            attested,
+        } => klog_info!(
+            "verity: enabled — {} of {} blocks of {} bytes still attested, device writable",
+            attested,
+            blocks,
+            block_size,
+        ),
     }
 }
 
@@ -602,6 +629,50 @@ pub fn ext2_vfs_is_read_only() -> bool {
     EXT2_VFS_INIT.is_set() && EXT2_READ_ONLY.load(Ordering::Acquire)
 }
 
+/// Capacity of the mounted ext2 filesystem, off the in-memory superblock.
+///
+/// Takes the mount lock, so a `statfs` racing a write sees one side of it or
+/// the other, but issues no block I/O: every count is already in `CachedExt2`.
+fn ext2_vfs_statfs() -> VfsResult<FsStats> {
+    if !EXT2_VFS_INIT.is_set() {
+        return Err(VfsError::IoError);
+    }
+    let guard = CACHED_EXT2.lock().map_err(|_| VfsError::Interrupted)?;
+    let cached = guard.as_ref().ok_or(VfsError::IoError)?;
+    Ok(ext2_stats_of(
+        &cached.superblock,
+        cached.block_size,
+        cached.reserved_blocks,
+        cached.read_only,
+    ))
+}
+
+/// The superblock's counts as `statfs(2)` wants them. Split from the mount
+/// lookup so a test can call it on an image it mounted itself.
+pub(crate) fn ext2_stats_of(
+    superblock: &Ext2Superblock,
+    block_size: u32,
+    reserved_blocks: u32,
+    read_only: bool,
+) -> FsStats {
+    let free_blocks = u64::from(superblock.free_blocks_count);
+    FsStats {
+        magic: slopos_abi::fs::EXT2_SUPER_MAGIC,
+        block_size,
+        blocks: u64::from(superblock.blocks_count),
+        blocks_free: free_blocks,
+        // The reserve is what the allocator refuses an unprivileged writer, so
+        // reporting it as available would be a lie the next `write` contradicts.
+        blocks_available: free_blocks.saturating_sub(u64::from(reserved_blocks)),
+        inodes: u64::from(superblock.inodes_count),
+        inodes_free: u64::from(superblock.free_inodes_count),
+        // The VFS limit, not ext2's own 255: a longer name is refused
+        // `ENAMETOOLONG` before this filesystem ever sees it.
+        max_name_len: crate::MAX_NAME_LEN as u32,
+        read_only,
+    }
+}
+
 fn verity_error_to_vfs(e: VerityError) -> VfsError {
     match e {
         VerityError::UnsupportedTrailer => VfsError::NotSupported,
@@ -657,6 +728,9 @@ pub fn ext2_vfs_shutdown_sync() {
     // this boot can still free, and a free left to the next mount's drain is
     // one that costs a mount-time pass over the list.
     orphan::drain_releasable(&EXT2_VFS_STATIC);
+    // Writeback goes before the sync below, or a mapped page's bytes are lost
+    // and the sync reports a clean image.
+    crate::filemap::flush_all();
     let _ = ext2_vfs_sync();
     mark_filesystem_clean();
 }
@@ -681,6 +755,18 @@ fn mark_filesystem_clean() {
         return;
     }
     if cached.read_only {
+        return;
+    }
+    // The verity attested bitmap goes down, and is flushed, BEFORE the clean
+    // stamp: a crash in between leaves the image not clean, so the next mount
+    // trusts no attestation rather than verifying a block this boot rewrote
+    // against a stale bitmap.
+    if let Err(e) = cached.device.checkpoint() {
+        klog_info!("verity: could not persist the attested bitmap: {:?}", e);
+        return;
+    }
+    if let Err(e) = cached.device.flush() {
+        klog_info!("ext2: device flush before the clean stamp failed: {:?}", e);
         return;
     }
     let (sb, bs, is) = (cached.superblock, cached.block_size, cached.inode_size);
@@ -717,7 +803,11 @@ fn ext2_flusher_entry(token: KernelIoToken<'static>) {
         } else {
             token.park_timeout(
                 &FLUSH_STOP,
-                || DIRTY_PENDING.load(Ordering::Relaxed) > 0 || orphan::releasable_count() > 0,
+                || {
+                    DIRTY_PENDING.load(Ordering::Relaxed) > 0
+                        || orphan::releasable_count() > 0
+                        || crate::filemap::pending_count() > 0
+                },
                 FLUSH_INTERVAL_MS,
             )
         };
@@ -726,6 +816,10 @@ fn ext2_flusher_entry(token: KernelIoToken<'static>) {
         // rather than waiting a further tick. Takes the mount lock itself, so
         // it must not run under one.
         orphan::drain_releasable(&EXT2_VFS_STATIC);
+
+        // A file mapping's writeback goes through the filesystem, so it cannot
+        // run from the `release` that queued it.
+        crate::filemap::drain_pending();
 
         // Sync on the stop path too: dirty blocks that never reach the device
         // are lost.

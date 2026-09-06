@@ -79,6 +79,13 @@ pub enum Capability {
     Fate,
     /// The test harness entry points. Empty in shipped images.
     TestHarness,
+
+    /// Attaching and detaching filesystems. The mount table is one global
+    /// namespace, so a mount changes every other process's view of every path
+    /// — including the paths the program-identity grant table is keyed on.
+    /// Deletion condition: dies with per-namespace mounts on a descriptor for
+    /// the directory covered.
+    Mount,
 }
 
 impl Capability {
@@ -102,6 +109,7 @@ impl Capability {
             Self::ClipboardGlobal => 1 << 8,
             Self::Fate => 1 << 9,
             Self::TestHarness => 1 << 10,
+            Self::Mount => 1 << 11,
         }
     }
 
@@ -131,6 +139,7 @@ impl Capability {
             Self::ClipboardGlobal => "ClipboardGlobal",
             Self::Fate => "Fate",
             Self::TestHarness => "TestHarness",
+            Self::Mount => "Mount",
         }
     }
 
@@ -152,6 +161,7 @@ impl Capability {
         Self::ClipboardGlobal,
         Self::Fate,
         Self::TestHarness,
+        Self::Mount,
     ];
 }
 
@@ -214,6 +224,7 @@ cap_kinds!(
     ClipboardGlobal,
     Fate,
     TestHarness,
+    Mount,
 );
 
 /// Proof that a capability check ran, for the request it was minted in.
@@ -426,7 +437,7 @@ pub(crate) fn mint_kernel_power() -> Cap<'static, Power> {
 pub const fn caps_from_task_flags(flags: u16) -> u64 {
     use slopos_abi::task::{
         TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
-        TASK_FLAG_LAUNCH, TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
+        TASK_FLAG_LAUNCH, TASK_FLAG_MOUNT, TASK_FLAG_POWER, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
     };
 
     // Universal: each names a global with no object form yet, so a grant would
@@ -454,6 +465,9 @@ pub const fn caps_from_task_flags(flags: u16) -> u64 {
     }
     if flags & (TASK_FLAG_LAUNCH | TASK_FLAG_SYSTEM) != 0 {
         mask |= Capability::Launch.bit();
+    }
+    if flags & (TASK_FLAG_MOUNT | TASK_FLAG_SYSTEM) != 0 {
+        mask |= Capability::Mount.bit();
     }
     if flags & TASK_FLAG_SYSTEM != 0 {
         mask |= Capability::ProcSignal.bit() | Capability::TestHarness.bit();

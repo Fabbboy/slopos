@@ -9,15 +9,19 @@ set -euo pipefail
 #
 # Environment:
 #   FS_IMAGE_SIZE - image size (default: 16M)
-#   VERITY        - `on` (default) appends the integrity trailer, which makes
-#                   the kernel mount the image read-only; `off` leaves the
-#                   image writable, for the images the test suite writes to.
+#   VERITY        - `on` (default) appends a v1 integrity trailer, which makes
+#                   the kernel mount the image read-only; `rw` appends a v2
+#                   trailer, which leaves the image writable (a write
+#                   un-attests the blocks it touches); `off` leaves the image
+#                   unverified, for images the test suite writes to.
 #   PRESERVE_FS_IMAGE - `1` refreshes the binaries of an existing writable
 #                   image in place instead of running mkfs, so a developer
 #                   iterating on the kernel keeps whatever the guest wrote.
-#                   Ignored when no image exists, when the image carries a
-#                   verity trailer (its hashes cover the bytes we would
-#                   rewrite), or when the image is a different size.
+#                   Ignored when no image exists, when the image is a
+#                   different size, or when the image carries a v1 trailer
+#                   (its hashes cover the bytes we would rewrite). A v2
+#                   trailer is recomputed at the end of the run, so it does
+#                   not block a refresh.
 
 IMAGE_PATH="${1:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
 BUILD_DIR="${2:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
@@ -27,8 +31,8 @@ BINS=("$@")
 FS_IMAGE_SIZE="${FS_IMAGE_SIZE:-16M}"
 VERITY="${VERITY:-on}"
 case "$VERITY" in
-    on|off) ;;
-    *) echo "build_fs_image: VERITY must be 'on' or 'off', got '$VERITY'" >&2; exit 2 ;;
+    on|off|rw) ;;
+    *) echo "build_fs_image: VERITY must be 'on', 'off' or 'rw', got '$VERITY'" >&2; exit 2 ;;
 esac
 
 # macOS: extend PATH to find e2fsprogs tools installed via Homebrew
@@ -80,19 +84,37 @@ image_carries_verity_trailer() {
     [ "$magic" = "54525653" ]
 }
 
+verity_trailer_version() {
+    tail -c 32 "$1" | od -An -tu4 -j4 -N4 | tr -d ' \n'
+}
+
+# The filesystem's own extent, from the trailer header. Everything past it is
+# hash array, bitmap and pad, which no size check should count.
+verity_trailer_fs_bytes() {
+    local bs bc
+    bs=$(tail -c 32 "$1" | od -An -tu4 -j12 -N4 | tr -d ' \n')
+    bc=$(tail -c 32 "$1" | od -An -tu8 -j16 -N8 | tr -d ' \n')
+    echo $((bs * bc))
+}
+
 # Only an image e2fsck vouches for: refreshing binaries into a damaged
 # filesystem propagates the damage into the next boot's /sbin/init, and the
 # fallback (a fresh mkfs) is the recovery a developer wants anyway.
 image_is_preservable() {
     [ "$PRESERVE_FS_IMAGE" = "1" ] || return 1
     [ -f "$IMAGE_PATH" ] || return 1
-    if image_carries_verity_trailer "$IMAGE_PATH"; then
-        echo "preserve: $IMAGE_PATH carries a verity trailer — rebuilding"
-        return 1
-    fi
     local want have
     want=$(numfmt --from=iec "$FS_IMAGE_SIZE")
     have=$(stat -c %s "$IMAGE_PATH" 2>/dev/null || echo 0)
+    if image_carries_verity_trailer "$IMAGE_PATH"; then
+        # A v1 trailer's hashes cover the bytes a refresh would rewrite; a v2
+        # trailer is recomputed at the end of this run.
+        if [ "$VERITY" != "rw" ] || [ "$(verity_trailer_version "$IMAGE_PATH")" != "2" ]; then
+            echo "preserve: $IMAGE_PATH carries a verity trailer — rebuilding"
+            return 1
+        fi
+        have=$(verity_trailer_fs_bytes "$IMAGE_PATH")
+    fi
     if [ "$want" != "$have" ]; then
         echo "preserve: $IMAGE_PATH is ${have}B, want ${want}B — rebuilding"
         return 1
@@ -219,13 +241,16 @@ if [ -d "$KEYMAPS_DIR" ]; then
 fi
 
 # Append a block-integrity (verity) trailer so the kernel detects on-disk
-# corruption at read time (fs/src/verity.rs). A trailer makes the mount
-# read-only, so it must be the LAST step — it hashes the finished image — and
-# it must be skipped for an image a boot is expected to write to.
+# corruption at read time (fs/src/verity.rs). Must be the LAST step — it
+# hashes the finished image.
 if [ "$VERITY" = "off" ]; then
     echo "verity: VERITY=off — $IMAGE_PATH will mount unverified and writable"
 elif command -v python3 >/dev/null 2>&1; then
-    python3 "${SCRIPT_DIR}/gen_verity.py" "$IMAGE_PATH"
+    if [ "$VERITY" = "rw" ]; then
+        python3 "${SCRIPT_DIR}/gen_verity.py" --version 2 "$IMAGE_PATH"
+    else
+        python3 "${SCRIPT_DIR}/gen_verity.py" --version 1 "$IMAGE_PATH"
+    fi
 else
     # Not a warning: a build that silently produced a writable image where a
     # verified one was asked for is the fail-open this trailer exists to end.

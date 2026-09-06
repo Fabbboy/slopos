@@ -48,7 +48,7 @@ define_syscall!(syscall_ring_enter
     requires(let task_id: task_id, let process_id: process_id)
     -> Result<u64, Errno>
 {
-    let (kind, handle) =
+    let (kind, handle, _mode) =
         slopos_fs::fileio::fileio_get_open_file_handle(process_id, ring_fd.raw())
             .ok_or(Errno::EBADF)?;
     if kind != slopos_abi::file_ops::FileKind::Ring {
@@ -70,7 +70,7 @@ define_syscall!(syscall_ring_register
 {
     // SLOPRING § 13, ABI v2. Ownership is checked ahead of `op` so a foreign or
     // non-ring fd fails EBADF rather than ENOSYS.
-    let (kind, handle) =
+    let (kind, handle, _mode) =
         slopos_fs::fileio::fileio_get_open_file_handle(process_id, ring_fd.raw())
             .ok_or(Errno::EBADF)?;
     if kind != slopos_abi::file_ops::FileKind::Ring {

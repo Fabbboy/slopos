@@ -2,7 +2,12 @@
 
 use slopos_userland as _;
 
-use slopos_abi::syscall::{BOOT_FLAG_ROOT_PERSISTENT, UserSysInfo};
+use slopos_abi::fs::{O_RDONLY, O_RDWR};
+use slopos_abi::syscall::posix::{MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE};
+use slopos_abi::syscall::{BOOT_FLAG_ROOT_PERSISTENT, MS_SYNC, UserSysInfo};
+use slopos_userland::syscall::fs as fs_syscall;
+use slopos_userland::syscall::memory;
+use std::ffi::c_char;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};
 
@@ -203,6 +208,66 @@ fn etc_is_writable() -> bool {
     ok
 }
 
+/// `statfs(2)` and `fstatfs(2)` must describe the same filesystem: a caller
+/// sizes a write from one form and performs it through the other.
+///
+/// The probe lives under `/etc` so the descriptor and `/` name one filesystem
+/// on a RAM root too, where `durable_dir()` would be a second mount.
+fn statfs_agrees_with_fstatfs() -> bool {
+    let probe = "/etc/.statfs-probe\0";
+    if let Err(e) = fs::write(&probe[..probe.len() - 1], b"x") {
+        println!("STATFS: probe create failed: {e}");
+        return false;
+    }
+    let by_path = fs_syscall::statfs_path(b"/\0".as_ptr() as *const c_char);
+    let fd = fs_syscall::open_path(probe.as_ptr() as *const c_char, O_RDONLY);
+    let by_fd = fd.and_then(|fd| fs_syscall::fstatfs(fd.raw()));
+    let _ = fs::remove_file(&probe[..probe.len() - 1]);
+
+    let (by_path, by_fd) = match (by_path, by_fd) {
+        (Ok(p), Ok(f)) => (p, f),
+        (Err(e), _) => {
+            println!("STATFS: statfs(\"/\") failed: {e}");
+            return false;
+        }
+        (_, Err(e)) => {
+            println!("STATFS: fstatfs failed: {e}");
+            return false;
+        }
+    };
+
+    if by_path.f_bsize == 0 {
+        println!("STATFS: f_bsize is zero — a caller cannot size anything from that");
+        return false;
+    }
+    // Free counts are live; the filesystem's identity and geometry are not.
+    if (
+        by_path.f_type,
+        by_path.f_bsize,
+        by_path.f_blocks,
+        by_path.f_files,
+    ) != (by_fd.f_type, by_fd.f_bsize, by_fd.f_blocks, by_fd.f_files)
+    {
+        println!(
+            "STATFS: path and fd disagree: type {:#x}/{:#x} bsize {}/{} blocks {}/{} files {}/{}",
+            by_path.f_type,
+            by_fd.f_type,
+            by_path.f_bsize,
+            by_fd.f_bsize,
+            by_path.f_blocks,
+            by_fd.f_blocks,
+            by_path.f_files,
+            by_fd.f_files,
+        );
+        return false;
+    }
+    if by_path.f_bavail > by_path.f_bfree {
+        println!("STATFS: f_bavail exceeds f_bfree — the reserve was not subtracted");
+        return false;
+    }
+    true
+}
+
 /// The block reserve (`s_r_blocks_count`) is what stops an unprivileged writer
 /// denying the disk to `/sbin/init`.
 ///
@@ -260,6 +325,264 @@ fn the_disk_reserve_refuses_an_unprivileged_filler() -> bool {
     ok
 }
 
+/// A `MAP_SHARED` mapping and `read(2)` agree in both directions: the mapping
+/// shows the file's bytes, and a store through it is what a later `read(2)`
+/// returns.
+fn mmap_shared_file_is_coherent_with_read() -> bool {
+    const BODY: &[u8] = b"mmap-shared-original-contents-0123456789";
+    const STORED: &[u8] = b"STORED";
+
+    let path = unique_probe_path("mmap-shared");
+    if let Err(e) = fs::write(&path, BODY) {
+        println!("MMAP: create failed: {e}");
+        return false;
+    }
+    let mut path_z = path.clone();
+    path_z.push('\0');
+    let Ok(fd) = fs_syscall::open_path(path_z.as_ptr() as *const c_char, O_RDWR) else {
+        println!("MMAP: open failed");
+        return false;
+    };
+
+    let base = memory::mmap(
+        0,
+        BODY.len() as u64,
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED,
+        fd.raw() as i64,
+        0,
+    );
+    if base == 0 || (base as i64) < 0 {
+        println!("MMAP: MAP_SHARED of a regular file was refused ({base:#x})");
+        return false;
+    }
+
+    let mapped_matches = read_mapping(base, BODY.len()) == BODY;
+    store_through(base, STORED);
+    let synced = memory::msync(base, BODY.len() as u64, MS_SYNC);
+    let _ = memory::munmap(base, BODY.len() as u64);
+    let _ = fs_syscall::close_fd(fd);
+
+    let readback = fs::read(&path).unwrap_or_default();
+    let _ = fs::remove_file(&path);
+
+    if !mapped_matches {
+        println!("MMAP: the mapping did not show the file's bytes");
+        return false;
+    }
+    if synced != 0 {
+        println!("MMAP: msync(MS_SYNC) failed: {synced}");
+        return false;
+    }
+    if readback.len() != BODY.len() {
+        println!(
+            "MMAP: read back {} bytes, expected {}",
+            readback.len(),
+            BODY.len()
+        );
+        return false;
+    }
+    if &readback[..STORED.len()] != STORED {
+        println!("MMAP: read(2) did not see the bytes stored through the mapping");
+        return false;
+    }
+    if readback[STORED.len()..] != BODY[STORED.len()..] {
+        println!("MMAP: the store clobbered bytes outside its own range");
+        return false;
+    }
+    true
+}
+
+/// A `MAP_PRIVATE` mapping is populated from the same authority, and a store
+/// through it never reaches the file.
+fn mmap_private_file_keeps_its_store_private() -> bool {
+    const BODY: &[u8] = b"mmap-private-original-contents-abcdefghij";
+    const STORED: &[u8] = b"PRIVATE";
+
+    let path = unique_probe_path("mmap-private");
+    if let Err(e) = fs::write(&path, BODY) {
+        println!("MMAP: create failed: {e}");
+        return false;
+    }
+    let mut path_z = path.clone();
+    path_z.push('\0');
+    let Ok(fd) = fs_syscall::open_path(path_z.as_ptr() as *const c_char, O_RDWR) else {
+        println!("MMAP: open failed");
+        return false;
+    };
+
+    let base = memory::mmap(
+        0,
+        BODY.len() as u64,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE,
+        fd.raw() as i64,
+        0,
+    );
+    if base == 0 || (base as i64) < 0 {
+        println!("MMAP: MAP_PRIVATE of a regular file was refused ({base:#x})");
+        return false;
+    }
+
+    let mapped_matches = read_mapping(base, BODY.len()) == BODY;
+    store_through(base, STORED);
+    let stored_visible = read_mapping(base, STORED.len()) == STORED;
+    let _ = memory::munmap(base, BODY.len() as u64);
+    let _ = fs_syscall::close_fd(fd);
+
+    let readback = fs::read(&path).unwrap_or_default();
+    let _ = fs::remove_file(&path);
+
+    if !mapped_matches {
+        println!("MMAP: the private mapping did not show the file's bytes");
+        return false;
+    }
+    if !stored_visible {
+        println!("MMAP: a store through a private mapping was not readable back");
+        return false;
+    }
+    if readback != BODY {
+        println!("MMAP: a private store reached the file");
+        return false;
+    }
+    true
+}
+
+/// A read-only descriptor cannot be turned into write access to the file:
+/// neither by a shared writable `mmap` nor by `mprotect` afterwards. A private
+/// writable mapping stays legal, since its store never reaches the file.
+fn mmap_shared_write_needs_a_writable_descriptor() -> bool {
+    const BODY: &[u8] = b"mmap-mode-gate-contents";
+
+    let path = unique_probe_path("mmap-mode");
+    if let Err(e) = fs::write(&path, BODY) {
+        println!("MMAP: create failed: {e}");
+        return false;
+    }
+    let mut path_z = path.clone();
+    path_z.push('\0');
+    let Ok(fd) = fs_syscall::open_path(path_z.as_ptr() as *const c_char, O_RDONLY) else {
+        println!("MMAP: open failed");
+        return false;
+    };
+
+    let len = BODY.len() as u64;
+    let raw = fd.raw() as i64;
+    let mut ok = true;
+
+    let refused = memory::mmap(0, len, PROT_READ | PROT_WRITE, MAP_SHARED, raw, 0);
+    if refused != 0 && (refused as i64) > 0 {
+        println!("MMAP: a read-only descriptor mapped shared-writable");
+        let _ = memory::munmap(refused, len);
+        ok = false;
+    }
+
+    let private = memory::mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, raw, 0);
+    if private == 0 || (private as i64) < 0 {
+        println!("MMAP: a private writable mapping of a read-only fd was refused ({private:#x})");
+        ok = false;
+    } else {
+        if read_mapping(private, BODY.len()) != BODY {
+            println!("MMAP: the private mapping did not show the file's bytes");
+            ok = false;
+        }
+        let _ = memory::munmap(private, len);
+    }
+
+    let shared_ro = memory::mmap(0, len, PROT_READ, MAP_SHARED, raw, 0);
+    if shared_ro == 0 || (shared_ro as i64) < 0 {
+        println!("MMAP: a read-only shared mapping was refused ({shared_ro:#x})");
+        ok = false;
+    } else {
+        if memory::mprotect(shared_ro, len, PROT_READ | PROT_WRITE) == 0 {
+            println!("MMAP: mprotect widened a shared file mapping to writable");
+            ok = false;
+        }
+        let _ = memory::munmap(shared_ro, len);
+    }
+
+    let _ = fs_syscall::close_fd(fd);
+    let _ = fs::remove_file(&path);
+    ok
+}
+
+/// A truncation under a live mapping is not undone by that mapping's
+/// writeback: the page set is unkeyed before the size changes.
+fn truncate_under_a_mapping_stays_truncated() -> bool {
+    const BODY: &[u8] = b"mmap-truncate-original-contents";
+
+    let path = unique_probe_path("mmap-trunc");
+    if let Err(e) = fs::write(&path, BODY) {
+        println!("MMAP: create failed: {e}");
+        return false;
+    }
+    let mut path_z = path.clone();
+    path_z.push('\0');
+    let Ok(fd) = fs_syscall::open_path(path_z.as_ptr() as *const c_char, O_RDWR) else {
+        println!("MMAP: open failed");
+        return false;
+    };
+
+    let len = BODY.len() as u64;
+    let base = memory::mmap(
+        0,
+        len,
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED,
+        fd.raw() as i64,
+        0,
+    );
+    if base == 0 || (base as i64) < 0 {
+        println!("MMAP: MAP_SHARED of a regular file was refused ({base:#x})");
+        let _ = fs_syscall::close_fd(fd);
+        let _ = fs::remove_file(&path);
+        return false;
+    }
+    store_through(base, b"CLOBBER");
+
+    let truncated = fs_syscall::truncate_path(path_z.as_ptr() as *const c_char, 0);
+    let synced = memory::msync(base, len, MS_SYNC);
+    let _ = memory::munmap(base, len);
+    let _ = fs_syscall::close_fd(fd);
+    let _ = fs_syscall::sync();
+
+    let readback = fs::read(&path).unwrap_or_default();
+    let _ = fs::remove_file(&path);
+
+    if truncated.is_err() {
+        println!("MMAP: truncate of a mapped file failed");
+        return false;
+    }
+    if synced != 0 {
+        println!("MMAP: msync after a truncate failed: {synced}");
+        return false;
+    }
+    if !readback.is_empty() {
+        println!(
+            "MMAP: a mapping's writeback resurrected {} bytes over a truncate",
+            readback.len()
+        );
+        return false;
+    }
+    true
+}
+
+fn read_mapping(base: u64, len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        let p = (base + i as u64) as *const u8;
+        out.push(unsafe { p.read_volatile() });
+    }
+    out
+}
+
+fn store_through(base: u64, data: &[u8]) {
+    for (i, byte) in data.iter().enumerate() {
+        let p = (base + i as u64) as *mut u8;
+        unsafe { p.write_volatile(*byte) };
+    }
+}
+
 const FILL_ARG: &[u8] = b"--fill-until-refused\0";
 const FILLER_PATH: &str = "/var/reserve-filler";
 
@@ -311,9 +634,26 @@ fn main() {
         ),
         ("o_sync_write_needs_no_fsync", o_sync_write_needs_no_fsync),
         ("etc_is_writable", etc_is_writable),
+        ("statfs_agrees_with_fstatfs", statfs_agrees_with_fstatfs),
         (
             "the_disk_reserve_refuses_an_unprivileged_filler",
             the_disk_reserve_refuses_an_unprivileged_filler,
+        ),
+        (
+            "mmap_shared_file_is_coherent_with_read",
+            mmap_shared_file_is_coherent_with_read,
+        ),
+        (
+            "mmap_private_file_keeps_its_store_private",
+            mmap_private_file_keeps_its_store_private,
+        ),
+        (
+            "mmap_shared_write_needs_a_writable_descriptor",
+            mmap_shared_write_needs_a_writable_descriptor,
+        ),
+        (
+            "truncate_under_a_mapping_stays_truncated",
+            truncate_under_a_mapping_stays_truncated,
         ),
     ]);
 }

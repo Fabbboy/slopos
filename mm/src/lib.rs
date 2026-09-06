@@ -7,6 +7,7 @@ pub mod cow;
 pub mod demand;
 pub mod elf;
 pub mod error;
+pub mod filemap_hook;
 pub mod hhdm;
 pub mod io_mem_mapper_shim;
 pub mod kconsole;

@@ -15,6 +15,16 @@ use slopos_ostd::{KBTreeMap, KVec};
 use crate::memfd::MemfdHandle;
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
+/// A generation-checked slot in the filesystem's per-inode page set.
+///
+/// Lives in `mm` because [`RegionBacking`] must stay `PartialEq` and `mm`
+/// cannot name an fs type; [`crate::filemap_hook`] resolves it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileMapRef {
+    pub slot: u16,
+    pub generation: u32,
+}
+
 /// What backs a memory region's physical pages.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RegionBacking {
@@ -23,6 +33,9 @@ pub enum RegionBacking {
     /// Shared memfd — pages belong to the MemfdObject, not the process.
     /// Must not be freed on munmap; only mapcount decrement.
     SharedMemfd { handle: MemfdHandle },
+    /// Shared file mapping — pages belong to the filesystem's per-inode page
+    /// set, not the process. Must not be freed on munmap; the set is told.
+    SharedFile { map: FileMapRef },
     /// SlopRing shared region (SLOPRING § 5.1). The kernel-side ring object
     /// owns the frames as `Frame<RingMeta>`s and the user PTE holds an
     /// independent `from_in_use` ref, so a mapping outliving the fd cannot
@@ -108,8 +121,13 @@ impl VmaRegion {
         matches!(self.backing, RegionBacking::Anonymous)
     }
 
+    /// `true` iff the pages are owned outside this address space: unmap drops
+    /// only this alias, and fork maps them verbatim instead of COW-marking.
     pub fn is_shared(&self) -> bool {
-        matches!(self.backing, RegionBacking::SharedMemfd { .. })
+        matches!(
+            self.backing,
+            RegionBacking::SharedMemfd { .. } | RegionBacking::SharedFile { .. }
+        )
     }
 
     /// `true` iff this region is a SlopRing shared mapping; like `is_shared()`,
@@ -121,6 +139,13 @@ impl VmaRegion {
     pub fn memfd_handle(&self) -> Option<MemfdHandle> {
         match &self.backing {
             RegionBacking::SharedMemfd { handle } => Some(*handle),
+            _ => None,
+        }
+    }
+
+    pub fn filemap_ref(&self) -> Option<FileMapRef> {
+        match &self.backing {
+            RegionBacking::SharedFile { map } => Some(*map),
             _ => None,
         }
     }

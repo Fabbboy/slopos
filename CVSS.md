@@ -1,11 +1,65 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-**No findings are currently open.** Last swept 2026-09-06 (Phase 5: the ext2
-disk as the default, writable root — the seal, the exec path, `/bin` write
-protection, disk exhaustion, and what "the root is now writable by userland"
-newly reaches).
+**One finding is open.** Last swept 2026-09-06 (Phase 6: partition tables,
+block-device nodes, `statfs`, `mount(2)`/`umount2(2)`, file-backed `mmap`, and
+verity on a writable image — the new syscall surface, hostile disk input, and
+what "userland can map a file and name a device" newly reaches).
 
-That sweep found three defects, all fixed inside the same unreleased change
+That sweep found six defects. Five were fixed inside the same unreleased
+change and are therefore not ledger entries; the sixth is
+`SLOPOS-2026-0054` below. The five are recorded here as method, because each
+is a class rather than an instance:
+
+- **A new way to reach an object must re-ask the question the old way
+  answered.** `mmap(MAP_SHARED, PROT_WRITE)` resolved a descriptor to
+  `(fs, inode)` and checked only "regular file, within EOF" — not the
+  descriptor's open mode, not `EXT2_IMMUTABLE_FL`, not `MOUNT_RDONLY`. Since
+  the per-inode page set is the authority `read(2)` is routed through for
+  every process, a sealed `/bin/halt` opened `O_RDONLY` could be rewritten in
+  the view every other reader gets. Would have scored
+  `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N` — **5.5 MEDIUM** (the disk
+  was saved only by `Ext2Fs::write_file` refusing an immutable inode, i.e. by
+  two unrelated layers agreeing rather than by a rule). The fix carries the
+  descriptor's `OpenMode` out of `fileio_get_open_file_handle` and refuses a
+  writable shared mapping without it, with the seal re-checked inside
+  `filemap::acquire` — and, from the second review round, `mprotect` refuses
+  to widen a file mapping to writable at all, because the descriptor that
+  authorised the mapping is not reachable from there.
+- **"Read-only" is not "harmless".** `/dev/vd*` served raw device bytes to any
+  process. SlopOS has no per-file read permission, so live file contents were
+  not newly disclosed — but `unlink` is this kernel's only primitive for
+  making something unreadable and ext2 does not zero freed blocks, so a
+  process that never held a file open could recover it afterwards, and the
+  whole-device node also spanned every partition the mount namespace did not.
+  Would have scored `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N` — **3.3
+  LOW**. The fix gates a block node's read on the entitlement the ext2 block
+  reserve already asks for (a kernel thread or `TASK_FLAG_SYSTEM`).
+- **A mount is a namespace change over the path a grant is keyed on.** The
+  Phase 5 sweep's rule — "a privilege keyed on a path must seal every
+  component of that path" — was satisfied by sealing the inodes, which a
+  mount does not touch: a `Capability::Mount` holder could mount a fresh
+  writable ramfs over `/bin`, plant `halt`, and receive `TASK_FLAG_POWER` from
+  the path-keyed grant table. Not a ledger entry because no shipped program
+  holds the capability, so there is no attacker-reachable trigger; the fix
+  refuses a mount whose target equals or prefixes any path in
+  `core::exec::grants`.
+- **A default that is safe for one caller is a defect for another.** The file
+  page set armed writeback for *any* mapping, so a `PROT_READ` shared mapping
+  rewrote every page of an unmodified file on unmap — stamping its timestamps
+  and, on a `VERITY=rw` image, un-attesting blocks nobody had written. The fix
+  passes the mapping's write protection into `retain` and arms writeback only
+  for a writable one.
+- **Identity by address needs an address.** `same_filesystem` compares data
+  addresses because a `&dyn FileSystem`'s vtable differs per coercing crate —
+  but two of the filesystem statics were zero-sized, and Rust does not promise
+  two distinct zero-sized statics distinct addresses. Had they aliased, the
+  open-inode table, the cross-device rename check, the re-resolution check,
+  the ramfs pool index and the page set's `holds` would all have confused ext2
+  with devfs, whose inode numbers 1-6 collide directly. Each static now
+  carries a byte, and a kernel test asserts the mounted ones are pairwise
+  distinct.
+
+The Phase 5 sweep found three defects, all fixed inside the same unreleased change
 and therefore not ledger entries. They are recorded as method because each is
 a class, not an instance:
 
@@ -59,10 +113,10 @@ fix was to split the caller-argument case into `InvalidRange`, which
 `test_ext2_corruption_latches_but_caller_errors_do_not` pins both directions
 and was confirmed to fail against the vulnerable code.
 
-This file is the living ledger of open security findings. It is empty of
-findings by design, not by neglect: every entry recorded since 2026-03-17 has
-been fixed and removed under the pre-alpha policy below. What remains is the
-method and the tooling, so the next sweep has a shape to follow.
+This file is the living ledger of open security findings. Nearly every entry
+recorded since 2026-03-17 has been fixed and removed under the pre-alpha
+policy below; what stays is the method, the tooling, and whatever is still
+open.
 
 > **Pre-alpha ledger policy.** SlopOS is pre-alpha with no backwards-compatibility
 > or audit-trail obligations, so this ledger tracks **open findings only**. When a
@@ -71,8 +125,8 @@ method and the tooling, so the next sweep has a shape to follow.
 > gaps in the numbering are expected and IDs are never reused. The git history is
 > the audit trail; `git log -- CVSS.md` recovers any entry that was here.
 
-The highest ID issued so far is **SLOPOS-2026-0053**. The next finding is
-`SLOPOS-2026-0054`.
+The highest ID issued so far is **SLOPOS-2026-0054**. The next finding is
+`SLOPOS-2026-0055`.
 
 ## Method
 
@@ -198,21 +252,53 @@ Analogs worth citing when they match a finding's shape:
 
 | ID | Title | Score | Severity |
 |---|---|---|---|
-| — | none open | — | — |
+| SLOPOS-2026-0054 | the file-mapping page budget is global and charged to nobody | — | unscored (confidence 74) |
 
 ## Open SlopOS findings
 
-None. SLOPOS-2026-0053 (verity trailer unreachable when the image is not a
-whole number of sectors) was closed on 2026-09-03: `gen_verity.py` pads the
-image to a sector multiple, `build_verified` refuses a trailer it cannot use
-instead of failing open, `verity=require` turns an unverified disk into a
-failed boot step, and `test_verity_artifact_*` mounts the shipped artifact
-through a real virtio capacity under `just test`. The same sweep looked at
-what the fix newly exposed — a trailer forged inside the filesystem's own
-data blocks, the `verity=require` arms that did not reach the trailer parse,
-a kernel-internal `VfsHandle` writing through a read-only mount, and `EROFS`
-collapsed to `ENOENT`/`EINVAL` on two syscall funnels — and closed each in
-the same change.
+### SLOPOS-2026-0054
+- Title: the file-mapping page budget is global and charged to nobody, so one
+  process can deny file `mmap` to every other while it holds its mappings
+- Status: `open`
+- Confidence: 74 — evidence 36 (the caps, the system-wide `held` sum and the
+  absence of any charge were read directly, and the registry's own comment
+  says the memory is unreclaimable), exploitability 20 (any unprivileged
+  process, but only for as long as it holds the mappings: the permanent form
+  — a queued release nothing drained, on a boot with no writable ext2 flusher
+  — was fixed in this change by draining at the head of `acquire` and by
+  releasing inline where the caller can sleep), reproducibility 18 (the code
+  path is unconditional; the denial was not observed under QEMU, only derived)
+- CVSS vector/score: omitted — confidence is below 80. What would raise it: a
+  utest that holds `MAX_MAPPED_INODES` mappings in one process and observes a
+  second process's `mmap` answer `ENOMEM`, which would settle exploitability
+  and reproducibility together.
+- Impact: `MAX_MAPPED_INODES = 16` and `MAX_MAPPED_PAGES = 1024` are one
+  system-wide budget, and `plan_acquire` sums the pages held across every
+  slot. Nothing charges those kernel frames to the mapper: the `mmap` path
+  reserves *address-space* pages against the caller's quota, not the page
+  set's frames. So a process holding sixteen mapped inodes, or four megabytes
+  of one, makes file-backed `mmap` and `msync` unavailable to everything else
+  for as long as it likes, at no cost to its own accounted budget.
+- Evidence:
+  - `fs/src/filemap.rs` — `MAX_MAPPED_INODES` / `MAX_MAPPED_PAGES`, and the
+    module comment stating the pages are not visible to reclaim
+  - `fs/src/filemap.rs` — `plan_acquire` sums `held` across all slots before
+    refusing with `TooManyInodes` / `TooManyPages`
+  - `mm/src/process_vm.rs` — `process_vm_mmap_file_shared` reserves address
+    space through `vma_map.reserve_pages`; no `PagesAxis` charge covers the
+    frames the page set owns
+- Repro: in one process, `mmap(MAP_SHARED)` sixteen distinct files (or 1024
+  pages of fewer), and hold them; in another, `mmap(MAP_SHARED, fd, …)` of any
+  file answers `ENOMEM` until the first releases. `fs/src/tests/filemap.rs`'s
+  `test_filemap_inode_cap_refuses` already exercises the refusal itself — what
+  is missing is the cross-process half.
+- Remediation: charge the page set to the acquiring account through the same
+  `PagesAxis`/`try_charge` mechanism the VMA reservation uses, so the caps
+  become a registry bound rather than a shared resource one caller can corner.
+  That is the per-process disk/memory charge `plans/persistent-storage.md`
+  tracks as Phase 7.3, and it moves `KIND_COUNT` and every per-kind row of
+  `scripts/gates/quota/tests.txt`, which is why it is a commit of its own
+  rather than part of the change that introduced the registry.
 
 ## Structural invariants the closed findings left behind
 
@@ -235,11 +321,39 @@ changes what a defect there would have to look like:
   and a new region kind is added in one place.
 - **The per-tier aging backstop bounds how long a runnable tier can be passed
   over**, so strict priority cannot starve a lower tier indefinitely.
-- **A verity trailer is recognised only beyond the filesystem's own extent,
-  and a verified device is write-protected.** `build_verified` takes the
-  superblock's block count, so bytes a user can write into a file are never a
-  trailer, and a trailer that is present but unusable refuses the mount rather
-  than mounting unverified. Read-only-ness is one rule
-  (`Ext2Fs::read_only_for`) and reaches userland as `EROFS` through
-  `MOUNT_RDONLY`, checked at every `vfs::ops` mutation before the filesystem
-  sees it.
+- **A verity trailer is recognised only beyond the filesystem's own extent.**
+  `build_verified` takes the superblock's block count, so bytes a user can
+  write into a file are never a trailer, and a trailer that is present but
+  unusable refuses the mount rather than mounting unverified. A **v1** trailer
+  write-protects the device; a **v2** one is writable and records which blocks
+  a boot rewrote, un-attesting every block a write touches — partial writes
+  included — so a rewritten block reads unverified rather than failing. The
+  bitmap is persisted *before* the filesystem is marked clean, and a mount
+  that finds an unclean image, or a bitmap whose CRC does not match, trusts
+  nothing for that boot. Read-only-ness is one rule
+  (`Ext2Fs::read_only_for`, keyed on `BlockDevice::write_protected`) and
+  reaches userland as `EROFS` through `MOUNT_RDONLY`, checked at every
+  `vfs::ops` mutation before the filesystem sees it.
+- **Filesystem identity is the address of a non-zero-sized `static`.**
+  `vfs::traits::same_filesystem` is the one comparison, and every mountable
+  filesystem carries at least a byte so the address is its own. `ptr::eq` is
+  the wrong tool here — a `&dyn FileSystem`'s vtable differs between the
+  crates that coerce it, so a cross-crate comparison of two references to one
+  filesystem answers `false`.
+- **A writable mapping of a file is authorised once, at `mmap`, by the
+  descriptor's open mode.** `open(2)` is where the seal and the read-only
+  mount are checked, so the mode is the proxy for both; `mprotect` refuses to
+  widen a file mapping to writable, because the descriptor that authorised it
+  is not reachable from there. The per-inode page set is the authority
+  `read(2)` is routed through for the ranges it covers, so a writable PTE over
+  it is write access to the file, not merely to a private copy.
+- **A `/dev` block node is read-only and entitlement-gated.** The exclusive
+  write claim belongs to the mount for the kernel's lifetime, so a node never
+  competes with it; and a read requires a kernel thread or
+  `TASK_FLAG_SYSTEM`, because a raw device read bypasses every filesystem
+  permission check above it and `unlink` is this kernel's only primitive for
+  making something unreadable.
+- **`mount(2)`'s target may not shadow a grant path.** Program-identity
+  privilege is keyed on a path, so a mount over `/bin` would confer it on
+  whatever the mount contains; the refusal is a scan of
+  `core::exec::grants`'s own table, which stays correct as the table grows.

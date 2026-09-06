@@ -1,6 +1,6 @@
 use slopos_ostd::KVec;
 
-use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
+use crate::vfs::{FileStat, FileSystem, FileType, FsStats, InodeId, VfsError, VfsResult};
 use slopos_ostd::sync::SpinLock;
 use slopos_ostd::sync::lock_tracking::LockClassKey;
 
@@ -281,6 +281,14 @@ impl RamFs {
         let mut inner = self.inner.lock();
         inner.ensure_initialized();
         f(&mut *inner)
+    }
+
+    /// Drop every inode, so a pooled instance handed to a later `mount(2)`
+    /// cannot serve the previous mount's contents.
+    pub fn reset(&self) {
+        let mut inner = self.inner.lock();
+        inner.inodes.clear();
+        inner.initialized = false;
     }
 
     /// Remove a name, reclaiming the inode's slot now or leaving it for a
@@ -728,5 +736,28 @@ impl FileSystem for RamFs {
 
     fn sync(&self) -> VfsResult<()> {
         Ok(())
+    }
+
+    /// Inode totals are real; block counts are zero.
+    ///
+    /// A heap-backed filesystem with no size limit has no capacity of its own
+    /// to report — Linux's ramfs reports zeros there too. `block_size` stays
+    /// the page size so a byte count computed from it is zero, not a division
+    /// by zero.
+    fn statfs(&self) -> VfsResult<FsStats> {
+        let used = self.with_inner(|inner| inner.inodes.iter().filter(|i| i.in_use).count() as u64);
+        // Slot 0 is a sentinel, so it is not one of the inodes on offer.
+        let total = (RAMFS_MAX_INODES - ROOT_SLOT) as u64;
+        Ok(FsStats {
+            magic: slopos_abi::fs::RAMFS_MAGIC,
+            block_size: 4096,
+            blocks: 0,
+            blocks_free: 0,
+            blocks_available: 0,
+            inodes: total,
+            inodes_free: total.saturating_sub(used),
+            max_name_len: MAX_NAME_LEN as u32,
+            read_only: false,
+        })
     }
 }

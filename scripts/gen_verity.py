@@ -3,7 +3,9 @@
 
 Layout (little-endian), appended after the existing image content:
 
-    [ image: N full blocks ][ pad ][ hash array: N × u32 ][ 32-byte header ]
+    v1  [ image: N full blocks ][ pad ][ hash array: N × u32 ][ 32-byte header ]
+    v2  [ image: N full blocks ][ pad ][ hash array: N × u32 ]
+        [ attested bitmap: ceil(N/8) ][ 32-byte header ]
 
 The 32-byte header is the LAST 32 bytes of the file, so the kernel locates the
 trailer from the block device's capacity alone — no filesystem parsing. Each
@@ -11,31 +13,38 @@ entry of the hash array is the CRC-32 (IEEE/zlib, the same `zlib.crc32` used
 here) of the corresponding 4 KiB data block; the header's `root` field is the
 CRC-32 of the whole hash array, so a corrupt array is self-detecting.
 
+Version 2 adds the attested bitmap and spends the header's `reserved` u32 on
+its CRC-32: a set bit means the block still matches its build-time hash. A v2
+image is a writable root; a v1 image is write-protected outright.
+
 The pad makes the finished file a whole number of 512-byte sectors. A block
 device reports its capacity in sectors, so an unpadded trailer whose header
 straddled the last partial sector would sit *beyond* the reported capacity and
 the kernel would never see it (SLOPOS-2026-0053). The pad goes before the
-hash array, never after the header, so the header stays the last 32 bytes.
+hash array, never after the header, so the header stays the last 32 bytes, and
+neither the hash array nor the bitmap describes it.
 
 Kernel side: fs/src/verity.rs (must keep the header layout + CRC in sync). A
-trailer-carrying device is write-protected there: verification and
+v1 trailer-carrying device is write-protected there: verification and
 writability are one decision, as in dm-verity.
 
 This is an INTEGRITY check (detects accidental corruption / tampering loudly at
 read time), not a cryptographic authenticity guarantee — see verity.rs docs.
 """
 
+import argparse
 import struct
 import sys
 import zlib
 
 MAGIC = 0x53565254  # 'TVRS' LE — SlopOS verity
-VERSION = 1
 ALGO_CRC32 = 1
 HEADER_FMT = "<IIIIQII"  # magic, version, algo, block_size, block_count(u64), root, reserved
+HEADER_SIZE = 32
 SECTOR_SIZE = 512
 
 EXT2_SUPERBLOCK_OFFSET = 1024
+EXT2_SUPERBLOCK_LEN = 1024
 EXT2_MAGIC = 0xEF53
 
 
@@ -55,15 +64,68 @@ def ext2_block_size(data: bytes) -> int:
     return 1024 << log_block_size
 
 
+def strip_trailer(data: bytes) -> bytes:
+    """Drop a trailer this script already wrote, so a re-run recomputes rather
+    than hashing the previous trailer as filesystem data."""
+    if len(data) < HEADER_SIZE:
+        return data
+    magic, version, algo, block_size, block_count, _root, _reserved = struct.unpack(
+        HEADER_FMT, data[-HEADER_SIZE:]
+    )
+    if magic != MAGIC:
+        return data
+    if version not in (1, 2) or algo != ALGO_CRC32 or block_size == 0:
+        raise SystemExit(
+            f"gen_verity: the image carries a trailer this script does not understand"
+            f" (version {version}, algo {algo}, block_size {block_size})"
+        )
+    fs_bytes = block_size * block_count
+    if fs_bytes == 0 or fs_bytes > len(data) - HEADER_SIZE:
+        raise SystemExit(
+            f"gen_verity: the existing trailer claims {fs_bytes}B of filesystem,"
+            f" which does not fit a {len(data)}B file"
+        )
+    return data[:fs_bytes]
+
+
+def superblock_block_range(block_size: int) -> range:
+    """The blocks the ext2 superblock lives in. Permanently unattested in v2:
+    the kernel rewrites them on every mount."""
+    first = EXT2_SUPERBLOCK_OFFSET // block_size
+    last = (EXT2_SUPERBLOCK_OFFSET + EXT2_SUPERBLOCK_LEN - 1) // block_size
+    return range(first, last + 1)
+
+
+def attested_bitmap(n: int, block_size: int) -> bytearray:
+    """Every block attested except the superblock's. Bit `i` is `1 << (i % 8)`
+    of byte `i // 8`; bits past block `n` are zero so the CRC is defined."""
+    bitmap = bytearray(b"\xff" * ((n + 7) // 8))
+    if n % 8:
+        bitmap[-1] = (1 << (n % 8)) - 1
+    for block in superblock_block_range(block_size):
+        if block < n:
+            bitmap[block >> 3] &= ~(1 << (block & 7)) & 0xFF
+    return bitmap
+
+
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: gen_verity.py <image>", file=sys.stderr)
-        return 2
-    path = sys.argv[1]
+    parser = argparse.ArgumentParser(description="append a SlopOS verity trailer")
+    parser.add_argument("image", help="raw ext2 image to seal in place")
+    parser.add_argument(
+        "--version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="trailer version: 1 = write-protected (default), 2 = writable with an attested bitmap",
+    )
+    args = parser.parse_args()
+    path = args.image
+    version = args.version
 
     with open(path, "rb") as f:
         data = f.read()
 
+    data = strip_trailer(data)
     block_size = ext2_block_size(data)
 
     if len(data) == 0 or len(data) % block_size != 0:
@@ -80,23 +142,35 @@ def main() -> int:
         arr += struct.pack("<I", zlib.crc32(block) & 0xFFFFFFFF)
 
     root = zlib.crc32(bytes(arr)) & 0xFFFFFFFF
-    header = struct.pack(HEADER_FMT, MAGIC, VERSION, ALGO_CRC32, block_size, n, root, 0)
-    assert len(header) == 32, f"header is {len(header)} bytes, expected 32"
+    if version == 2:
+        bitmap = bytes(attested_bitmap(n, block_size))
+        reserved = zlib.crc32(bitmap) & 0xFFFFFFFF
+    else:
+        bitmap = b""
+        reserved = 0
+    header = struct.pack(HEADER_FMT, MAGIC, version, ALGO_CRC32, block_size, n, root, reserved)
+    assert len(header) == HEADER_SIZE, f"header is {len(header)} bytes, expected {HEADER_SIZE}"
 
-    unpadded = len(data) + len(arr) + len(header)
+    unpadded = len(data) + len(arr) + len(bitmap) + len(header)
     pad = (-unpadded) % SECTOR_SIZE
 
-    with open(path, "ab") as f:
+    # `r+b` plus truncate, not `ab`: a re-run replaces the stripped trailer
+    # instead of appending a second one.
+    with open(path, "r+b") as f:
+        f.seek(len(data))
         f.write(b"\0" * pad)
         f.write(bytes(arr))
+        f.write(bitmap)
         f.write(header)
+        f.truncate()
 
     total = unpadded + pad
     assert total % SECTOR_SIZE == 0, f"image is {total} bytes, not sector-aligned"
 
+    attested = "" if version == 1 else f", {len(bitmap)}B attested bitmap crc 0x{reserved:08x}"
     print(
-        f"verity: appended trailer for {n} blocks ({block_size}B), root crc 0x{root:08x},"
-        f" {pad}B pad, {total} bytes total"
+        f"verity: appended v{version} trailer for {n} blocks ({block_size}B),"
+        f" root crc 0x{root:08x}{attested}, {pad}B pad, {total} bytes total"
     )
     return 0
 

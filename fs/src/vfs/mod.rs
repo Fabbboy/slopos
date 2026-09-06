@@ -4,6 +4,7 @@ pub mod mount;
 pub mod ops;
 pub mod orphan;
 pub mod path;
+pub mod statfs;
 pub mod traits;
 
 pub use canon::{CanonPath, canonicalise};
@@ -18,4 +19,5 @@ pub use ops::{
     vfs_symlink, vfs_sync_all, vfs_unlink,
 };
 pub use path::{ResolvedPath, resolve_parent, resolve_path};
-pub use traits::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
+pub use statfs::vfs_statfs;
+pub use traits::{FileStat, FileSystem, FileType, FsStats, InodeId, VfsError, VfsResult};

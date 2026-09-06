@@ -483,6 +483,62 @@ fn boot_step_limine_protocol_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     0
 }
 
+/// `/dev/vdX[N]` or `vdX[N]` to a (device index, 1-based partition) pair, where
+/// `X` is the probe-order letter and a missing `N` means the whole device.
+fn parse_root_block_spec(spec: &str) -> Option<(u16, u8)> {
+    let name = spec.strip_prefix("/dev/").unwrap_or(spec);
+    let rest = name.strip_prefix("vd")?;
+    let mut chars = rest.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_lowercase() {
+        return None;
+    }
+    let index = (letter as u8 - b'a') as u16;
+    let digits = chars.as_str();
+    if digits.is_empty() {
+        return Some((index, 0));
+    }
+    let partition = digits.parse::<u8>().ok()?;
+    if partition == 0 {
+        return None;
+    }
+    Some((index, partition))
+}
+
+/// The unset default is `root=auto`: a writable ext2 disk when there is one,
+/// otherwise the initramfs. See `boot_services::boot_step_rootfs_init`.
+///
+/// Split out of [`boot_step_boot_config_fn`], whose frame is at the
+/// stack-size gate's limit.
+#[inline(never)]
+fn apply_root_option(cmdline: &str) {
+    for token in cmdline.split_whitespace() {
+        let Some(spec) = token.strip_prefix("root=") else {
+            continue;
+        };
+        match spec {
+            "auto" => boot_info(b"Boot option: root=auto\0"),
+            "initramfs" => {
+                crate::boot_services::set_root_mode(crate::boot_services::ROOT_INITRAMFS);
+                boot_info(b"Boot option: root=initramfs\0");
+            }
+            "virtio" => {
+                crate::boot_services::set_root_mode(crate::boot_services::ROOT_VIRTIO);
+                boot_info(b"Boot option: root=virtio\0");
+            }
+            _ => match parse_root_block_spec(spec) {
+                Some((index, partition)) => {
+                    crate::boot_services::set_root_block_device(index, partition);
+                    boot_info(b"Boot option: root=<block device>\0");
+                }
+                None => boot_info(
+                    b"Boot option: root= ignored (want auto|initramfs|virtio|/dev/vdXN)\0",
+                ),
+            },
+        }
+    }
+}
+
 fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let cmdline = BOOT_RUNTIME.lock().cmdline.unwrap_or_default();
     let enable_debug = cmdline.contains("boot.debug=on")
@@ -655,15 +711,7 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     }
 
-    // The unset default is `root=auto`: a writable ext2 disk when there is
-    // one, otherwise the initramfs. See `boot_services::boot_step_rootfs_init`.
-    if cmdline.contains("root=initramfs") {
-        crate::boot_services::set_root_mode(crate::boot_services::ROOT_INITRAMFS);
-        boot_info(b"Boot option: root=initramfs\0");
-    } else if cmdline.contains("root=virtio") {
-        crate::boot_services::set_root_mode(crate::boot_services::ROOT_VIRTIO);
-        boot_info(b"Boot option: root=virtio\0");
-    }
+    apply_root_option(cmdline);
 
     if cmdline.split_whitespace().any(|t| t == "verity=require") {
         crate::boot_services::set_verity_required(true);

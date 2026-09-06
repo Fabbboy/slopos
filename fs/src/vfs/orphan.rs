@@ -40,7 +40,7 @@ use slopos_ostd::klog_info;
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
 
-use crate::vfs::traits::{FileSystem, InodeId};
+use crate::vfs::traits::{FileSystem, InodeId, same_filesystem};
 
 /// Tracked inodes. An entry exists while an inode is open, or detached and
 /// waiting to be freed, so this bounds neither open files nor unlinked ones
@@ -89,7 +89,7 @@ static UNDRAINABLE_REPORTED: InitFlag = InitFlag::new();
 fn find(table: &KVec<Tracked>, fs: &'static dyn FileSystem, inode: InodeId) -> Option<usize> {
     table
         .iter()
-        .position(|e| e.inode == inode && core::ptr::eq(e.fs, fs))
+        .position(|e| e.inode == inode && same_filesystem(e.fs, fs))
 }
 
 /// Drop an entry that holds neither a reference nor an obligation.
@@ -324,7 +324,7 @@ fn take_releasable(fs: &'static dyn FileSystem) -> Option<InodeId> {
     let mut table = TRACKED.lock();
     let idx = table
         .iter()
-        .position(|e| e.releasable && core::ptr::eq(e.fs, fs))?;
+        .position(|e| e.releasable && same_filesystem(e.fs, fs))?;
     let entry = table.swap_remove(idx);
     RELEASABLE.fetch_sub(1, Ordering::Relaxed);
     Some(entry.inode)
@@ -354,13 +354,25 @@ pub fn forget_filesystem(fs: &'static dyn FileSystem) {
     let mut i = table.len();
     while i > 0 {
         i -= 1;
-        if core::ptr::eq(table[i].fs, fs) {
+        if same_filesystem(table[i].fs, fs) {
             if table[i].releasable {
                 RELEASABLE.fetch_sub(1, Ordering::Relaxed);
             }
             table.swap_remove(i);
         }
     }
+}
+
+/// Whether any tracked record naming `fs` still holds an open reference.
+///
+/// `umount2`'s busy test. A record that is merely detached does not count: it
+/// is an obligation the unmount discharges, not a descriptor that would
+/// observe the filesystem going away.
+pub fn has_open_refs(fs: &'static dyn FileSystem) -> bool {
+    let table = TRACKED.lock();
+    table
+        .iter()
+        .any(|e| e.refs > 0 && same_filesystem(e.fs, fs))
 }
 
 /// Tracked inodes: open, detached, or both.

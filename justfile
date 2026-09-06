@@ -62,7 +62,7 @@ debug_flag    := if debug =~ '^(1|true|on|yes)$' { "boot.debug=on" } else { "" }
 boot_cmdline_effective := trim(boot_cmdline + " " + debug_flag)
 
 userland_bins      := "init shell terminal compositor roulette halt file_manager image_viewer sysmon nmap ip keymap ss nc curl ping oops_smoke"
-test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test spawn_privilege_test seat_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test"
+test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test spawn_privilege_test seat_test mount_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test spawn_output_test dns_resolve_test persist_test"
 
 [doc("Install Rust + Go toolchains and verify workspace")]
 setup:
@@ -92,12 +92,13 @@ _fs-image-tests: _build-userland-tests
     FS_IMAGE_SIZE={{fs_image_size}} VERITY=off PRESERVE_FS_IMAGE=0 \
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
-# The developer's persistent disk: unverified so the kernel mounts it as a
-# writable `/`, preserved across builds so what the guest wrote survives, and
+# The developer's persistent disk: `VERITY=rw` (a v2 trailer) so the kernel
+# mounts it as a writable `/` that is still attested for every block no boot
+# rewrote, preserved across builds so what the guest wrote survives, and
 # separate from the shipped image so `just boot`'s `verity=require` keeps
 # meaning what it says. Refreshes only the binaries that changed.
 _fs-image-persist: _build-userland
-    FS_IMAGE_SIZE={{fs_image_size}} VERITY=off PRESERVE_FS_IMAGE=1 \
+    FS_IMAGE_SIZE={{fs_image_size}} VERITY=rw PRESERVE_FS_IMAGE=1 \
         scripts/build_fs_image.sh "{{fs_image_persist}}" "{{build_dir}}" {{userland_bins}}
 
 _initramfs: _build-userland
@@ -188,8 +189,9 @@ boot-fast:
 boot-persist:
     #!/usr/bin/env bash
     set -euo pipefail
-    # No `verity=require`: this disk is unverified by design, that is what
-    # makes it writable. `roulette=skip` as `boot-fast` does.
+    # No `verity=require`: this disk's v2 trailer keeps it writable, and the
+    # knob is `just boot`'s assertion about the shipped image, not this one.
+    # `roulette=skip` as `boot-fast` does.
     BOOT_CMDLINE="tests=off roulette=skip" just _iso-notests
     just _fs-image-persist
     just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image_persist}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}

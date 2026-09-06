@@ -40,6 +40,18 @@ pub trait BlockDevice {
     fn flush(&self) -> Result<(), BlockDeviceError> {
         Ok(())
     }
+
+    /// Write out per-device metadata the filesystem's own blocks do not carry
+    /// — today the verity attested bitmap (see [`crate::verity`]).
+    ///
+    /// Ordering: a filesystem MUST call this, and flush, *before* it marks
+    /// itself clean. The other order can leave a bitmap attesting blocks a
+    /// later write rewrote, which reads as an integrity failure next boot;
+    /// this one leaves the image unclean, and an unclean image is treated as
+    /// wholly unattested.
+    fn checkpoint(&self) -> Result<(), BlockDeviceError> {
+        Ok(())
+    }
 }
 
 pub struct MemoryBlockDevice {

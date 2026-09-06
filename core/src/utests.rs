@@ -58,6 +58,7 @@ crate::utest!(
     bin = "/bin/spawn_privilege_test"
 );
 crate::utest!(name = utest_seat, bin = "/bin/seat_test");
+crate::utest!(name = utest_mount, bin = "/bin/mount_test");
 crate::utest!(name = utest_stdio_stream, bin = "/bin/stdio_stream_test");
 crate::utest!(name = utest_ip_e2e, bin = "/bin/ip_e2e_test");
 crate::utest!(name = utest_rlimit, bin = "/bin/rlimit_test");

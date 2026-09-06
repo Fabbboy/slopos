@@ -9,6 +9,7 @@ pub mod kconsole_serial_tests;
 pub mod keyboard_tests;
 pub mod madt_tests;
 pub mod msix_tests;
+pub mod partition_device_tests;
 pub mod pci_binding;
 pub mod pci_cap_tests;
 pub mod platform_acpi_tests;

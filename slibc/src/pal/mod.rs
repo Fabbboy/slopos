@@ -50,6 +50,7 @@ pub trait Pal {
     ) -> Result<*mut u8, Errno>;
     fn munmap(addr: *mut u8, len: usize) -> Result<(), Errno>;
     fn mprotect(addr: *mut u8, len: usize, prot: u64) -> Result<(), Errno>;
+    fn msync(addr: *mut u8, len: usize, flags: u64) -> Result<(), Errno>;
 
     fn fork() -> Result<i32, Errno>;
     fn exec(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> Result<(), Errno>;
@@ -160,6 +161,20 @@ pub trait Pal {
     fn fsync(fd: i32) -> Result<(), Errno>;
     fn fdatasync(fd: i32) -> Result<(), Errno>;
     fn sync() -> Result<(), Errno>;
+
+    /// `statfs(2)`: `buf` is a [`slopos_abi::fs::UserStatfs`].
+    fn statfs(path: *const u8, buf: *mut u8) -> Result<(), Errno>;
+    fn fstatfs(fd: i32, buf: *mut u8) -> Result<(), Errno>;
+
+    /// `mount(source, target, fstype, flags)`, each string NUL-terminated.
+    fn mount(
+        source: *const u8,
+        target: *const u8,
+        fstype: *const u8,
+        flags: u32,
+    ) -> Result<(), Errno>;
+    /// `umount2(2)`. `MNT_DETACH` detaches a mount a descriptor still holds.
+    fn umount2(target: *const u8, flags: u32) -> Result<(), Errno>;
 
     /// Report a single subtest result to the kernel-side userland-test
     /// runner. Best-effort: returning `Err` means the kernel has no test

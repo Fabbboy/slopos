@@ -10,7 +10,7 @@ use slopos_abi::syscall::{
     TIOCGPTPEER, TIOCGSID, TIOCGWINSZ, TIOCSCTTY, TIOCSWINSZ, UserPollFd, UserTermios, UserTimeval,
     UserWinsize,
 };
-use slopos_abi::{UserFsList, UserFsStat};
+use slopos_abi::{UserFsList, UserFsStat, UserStatfs};
 use slopos_slibc::pal::{Pal, Sys};
 
 /// Open a file by path.
@@ -107,6 +107,19 @@ pub fn write_slice(fd: RawFd, buf: &[u8]) -> SyscallResult<usize> {
 #[inline(always)]
 pub fn stat_path(path: *const c_char, out_stat: &mut UserFsStat) -> SyscallResult<()> {
     let result = unsafe { syscall2(SYSCALL_FS_STAT, path as u64, out_stat as *mut _ as u64) };
+    demux(result).map(|_| ())
+}
+
+/// Set a regular file's length by path, freeing blocks past it or extending
+/// sparsely.
+///
+/// # Errors
+/// * `ENOENT` - File not found
+/// * `EISDIR` - The path names a directory
+/// * `EROFS` - The mount is read-only, or the inode is sealed
+#[inline(always)]
+pub fn truncate_path(path: *const c_char, length: u64) -> SyscallResult<()> {
+    let result = unsafe { syscall2(SYSCALL_TRUNCATE, path as u64, length) };
     demux(result).map(|_| ())
 }
 
@@ -386,4 +399,81 @@ pub fn set_fd_cloexec(fd: RawFd) -> SyscallResult<()> {
     let _ = Sys::fcntl(fd, F_SETFD as i32, (current as u64) | FD_CLOEXEC)
         .map_err(SyscallError::from)?;
     Ok(())
+}
+
+/// Filesystem statistics for the mount `path` resolves through.
+///
+/// # Errors
+/// * `ENOENT` - Path not found
+/// * `EOPNOTSUPP` - The filesystem reports no capacity (devfs)
+#[inline(always)]
+pub fn statfs_path(path: *const c_char) -> SyscallResult<UserStatfs> {
+    let mut stats = UserStatfs::default();
+    Sys::statfs(path as *const u8, (&mut stats as *mut UserStatfs).cast())
+        .map(|()| stats)
+        .map_err(Into::into)
+}
+
+/// Filesystem statistics for the filesystem `fd`'s file lives on.
+///
+/// # Errors
+/// * `EBADF` - Invalid file descriptor
+/// * `ENOSYS` - The descriptor has no filesystem behind it (pipe, socket, tty)
+#[inline(always)]
+pub fn fstatfs(fd: RawFd) -> SyscallResult<UserStatfs> {
+    let mut stats = UserStatfs::default();
+    Sys::fstatfs(fd, (&mut stats as *mut UserStatfs).cast())
+        .map(|()| stats)
+        .map_err(Into::into)
+}
+
+/// NUL-terminate `src` inside `dst`; a value with no room for the terminator
+/// is refused, since the kernel reads these as C strings.
+fn copy_mount_field(dst: &mut [u8], src: &[u8]) -> bool {
+    if src.len() >= dst.len() {
+        return false;
+    }
+    dst[..src.len()].copy_from_slice(src);
+    dst[src.len()] = 0;
+    true
+}
+
+/// `mount(2)`. `source` is meaningful only for a filesystem with a device to
+/// name: `ramfs` and `devfs` ignore it, and `ext2` refuses a non-empty one
+/// because the kernel holds exactly one instance, bound at boot to `root=`.
+///
+/// # Errors
+/// * `EPERM` - The caller does not hold the mount capability
+/// * `ENODEV` - Unsupported `fstype`, or no ext2 attached
+/// * `ENOTDIR` - `target` is not a directory
+/// * `EBUSY` - `target` is `/` or already a mount point
+/// * `ENOSPC` - The mount table or the ramfs pool is full
+pub fn mount(source: &[u8], target: &[u8], fstype: &[u8], flags: u32) -> SyscallResult<()> {
+    use super::error::SyscallError;
+    let mut source_buf = [0u8; 256];
+    let mut target_buf = [0u8; 256];
+    let mut fstype_buf = [0u8; slopos_abi::fs::MOUNT_FSTYPE_MAX];
+    if !copy_mount_field(&mut source_buf, source)
+        || !copy_mount_field(&mut target_buf, target)
+        || !copy_mount_field(&mut fstype_buf, fstype)
+    {
+        return Err(SyscallError::from(slopos_slibc::errno::ENAMETOOLONG));
+    }
+    Sys::mount(
+        source_buf.as_ptr(),
+        target_buf.as_ptr(),
+        fstype_buf.as_ptr(),
+        flags,
+    )
+    .map_err(Into::into)
+}
+
+/// `umount2(2)`. `MNT_DETACH` drops a mount a descriptor still holds.
+///
+/// # Errors
+/// * `EPERM` - The caller does not hold the mount capability
+/// * `EINVAL` - Nothing is mounted at `target`
+/// * `EBUSY` - `target` is `/`, or a descriptor still holds the filesystem
+pub fn umount2(target: *const c_char, flags: u32) -> SyscallResult<()> {
+    Sys::umount2(target as *const u8, flags).map_err(Into::into)
 }

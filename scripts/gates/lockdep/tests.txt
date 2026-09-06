@@ -188,36 +188,60 @@ require-phase post-userland-tests
 #               pools moved within their existing bands (kernel edges 159-162,
 #               chains 359-361; userland edges 196-200, chains 409-410), so
 #               they are left as recorded.
+#   2026-09-06  kernel 188 -> 199, userland 198 -> 209: Phase 6's new
+#               declaration sites, uniform +11 in both test phases with boot
+#               unchanged at 72 — the signature of new locks none of which the
+#               boot path acquires before its report. They are
+#               `DEVFS_BLOCK_NODES` (the runtime block-node registry devfs
+#               grew for `/dev/vd*`), `VerifiedBlockDevice.attested` (the
+#               rewritten-block bitmap of a v2 verity trailer), `FILEMAP_IO`
+#               and `FILEMAP` (the file-mapping page set's populate/writeback
+#               mutex and its bookkeeping spinlock), `FILEMAP_OPS` (mm's hook
+#               onto that registry), `RAMFS_POOL_0..3` (the four instances
+#               `mount(2)` hands out for `fstype=ramfs`, one class each
+#               because a path walk crossing a mount holds one mount's lock
+#               while taking the next one's), and the test-only
+#               `FILEMAP_TEST_MOUNT`, `RAMFS_MOUNT_TEST_0..3` and
+#               `STATFS_RDONLY_PROBE`. Only a site that is actually acquired
+#               registers, which is why fifteen declarations add eleven
+#               classes. Measured 199/209 on all three runs of one pinned ISO.
 boot	classes	72
-post-kernel-tests	classes	188
-post-userland-tests	classes	198
+post-kernel-tests	classes	199
+post-userland-tests	classes	209
 
-# Boot edges and chains — exact, because boot has no test scheduling in it and
-# measures 43 edges and 110 chains on every run recorded here.
-boot	edges	49
-boot	chains	112
+# Boot edges and chains — exact, because boot has no test scheduling in it.
+# Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
+# caps of 49 and 112 the old convention left here are tightened onto that
+# measurement. The one extra chain over the 110 recorded in prose is a new
+# ordering among locks that already existed, not a new lock: boot's class
+# count did not move.
+boot	edges	43
+boot	chains	111
 
 # Bands, for the two phases whose edge and chain counts move with scheduling.
 # Each band is the recorded range widened by that range's own width on each
 # side, so a band is three times as wide as the spread it was measured over and
 # a re-measurement that finds a wider spread widens the band with it.
 #
-#   post-kernel-tests    edges   148-160  (spread 12)  ->  136-172
-#   post-userland-tests  edges   196-202  (spread  6)  ->  190-208
-#   post-kernel-tests    chains  345-360  (spread 15)  ->  330-375
-#   post-userland-tests  chains  395-413  (spread 18)  ->  377-431
+#   post-kernel-tests    edges   148-168  (spread 20)  ->  128-188
+#   post-userland-tests  edges   196-207  (spread 11)  ->  185-218
+#   post-kernel-tests    chains  345-381  (spread 36)  ->  309-417
+#   post-userland-tests  chains  395-431  (spread 36)  ->  359-467
 #
 # Each recorded range is the union of the measurements this file already
 # carried, not one sitting: the 24-run set taken when the sleep queue moved
 # from the global tick counter to the HPET millisecond clock (12 runs on the
 # change, 12 on unmodified develop, indistinguishable distributions), the
 # twelve-run set taken for the `tests_exec_boundary` / `tests_pcid` /
-# OOM-quarantine work, and the three- and four-run sets before them. A union
-# across tree states is the right input here precisely because none of those
-# states differed in class count — the check that would have moved had any of
-# them been a real ordering change. Leaving a band is not a failure, so a band
-# set slightly tight costs a DRIFT line to read, never a red run.
-band post-kernel-tests edges 136 172
-band post-userland-tests edges 190 208
-band post-kernel-tests chains 330 375
-band post-userland-tests chains 377 431
+# OOM-quarantine work, and the three- and four-run sets before them, now with
+# the three Phase 6 runs (kernel edges 168, chains 378-381; userland edges
+# 207, chains 428-431) folded in. A union across tree states is the right
+# input here precisely because none of those states differed in class count
+# for a reason the class caps did not already record — the check that would
+# have moved had any of them been a real ordering change. Leaving a band is
+# not a failure, so a band set slightly tight costs a DRIFT line to read,
+# never a red run.
+band post-kernel-tests edges 128 188
+band post-userland-tests edges 185 218
+band post-kernel-tests chains 309 417
+band post-userland-tests chains 359 467

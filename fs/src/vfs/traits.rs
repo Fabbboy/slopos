@@ -4,6 +4,17 @@
 /// Each filesystem maintains its own inode number space.
 pub type InodeId = u64;
 
+/// Whether two references name the same filesystem instance.
+///
+/// Compares data addresses, not whole fat pointers: the same instance coerced
+/// to `&dyn FileSystem` in two crates gets two vtables, so `ptr::eq` would
+/// call the two references different. Every filesystem here is a `static`, so
+/// its address is its identity.
+#[inline]
+pub fn same_filesystem(a: &dyn FileSystem, b: &dyn FileSystem) -> bool {
+    core::ptr::addr_eq(a as *const dyn FileSystem, b as *const dyn FileSystem)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FileType {
@@ -92,6 +103,47 @@ impl FileStat {
             sealed: false,
         }
     }
+
+    /// A block device node; `size` is the device's capacity in bytes.
+    ///
+    /// `0o660` rather than a character device's `0o666`: the raw disk bypasses
+    /// every filesystem permission check above it.
+    pub const fn new_block_device(inode: InodeId, size: u64, major: u32, minor: u32) -> Self {
+        Self {
+            inode,
+            file_type: FileType::BlockDevice,
+            size,
+            mode: 0o660,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
+            dev_major: major,
+            dev_minor: minor,
+            sealed: false,
+        }
+    }
+}
+
+/// What a filesystem knows about its own capacity, as `statfs(2)` asks for it.
+/// Block counts are in units of [`Self::block_size`]; a filesystem with no
+/// block accounting reports zeros rather than inventing a geometry.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FsStats {
+    pub magic: u64,
+    pub block_size: u32,
+    pub blocks: u64,
+    pub blocks_free: u64,
+    /// Free blocks an unprivileged caller can actually spend: `blocks_free`
+    /// less whatever reserve the allocator enforces.
+    pub blocks_available: u64,
+    pub inodes: u64,
+    pub inodes_free: u64,
+    pub max_name_len: u32,
+    /// The filesystem refuses mutation independently of its mount flags.
+    pub read_only: bool,
 }
 
 pub type VfsResult<T> = Result<T, VfsError>;
@@ -349,6 +401,15 @@ pub trait FileSystem: Send + Sync {
     /// tightened permissions it never touched.
     fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {
         let _ = (inode, mode);
+        Err(VfsError::NotSupported)
+    }
+
+    /// This filesystem's own capacity, for `statfs(2)`.
+    ///
+    /// Refuses rather than reporting zeros, which would claim a filesystem
+    /// with no space, no inodes and no name limit; devfs deliberately keeps
+    /// this default.
+    fn statfs(&self) -> VfsResult<FsStats> {
         Err(VfsError::NotSupported)
     }
 

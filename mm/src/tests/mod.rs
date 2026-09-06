@@ -9,6 +9,7 @@ pub mod tests;
 pub mod tests_cow_edge;
 pub mod tests_demand;
 pub mod tests_exec_boundary;
+pub mod tests_filemap_vma;
 pub mod tests_map_ownership;
 pub mod tests_oom;
 pub mod tests_pcid;

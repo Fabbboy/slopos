@@ -72,6 +72,13 @@
 #     and task 5, all inside the spreads above, so as before only the
 #     deterministic row moves.
 #
+# 2026-09-06, Phase 6 lands one more utest binary (`mount_test`, for
+# `mount(2)`/`umount2(2)`):
+#   process    123 -> 124. Deterministic at 124; the cap stays exact. A fresh
+#     --emit-allowlist over this run measured pages 667 963, kernelmeta 3160
+#     and task 5, all inside the spreads above, so as before only the
+#     deterministic row moves.
+#
 # `task` moves with scheduling (measured 5-7 across runs), so its cap carries
 # the observed spread as margin rather than a single observation.
 #
@@ -109,7 +116,7 @@ post-userland-tests	kernelmeta	6933
 post-userland-tests	objectrow	257
 post-userland-tests	pages	735232
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	123
+post-userland-tests	process	124
 post-userland-tests	task	10
 
 # The charge path's cost. It runs on every syscall that allocates, so a

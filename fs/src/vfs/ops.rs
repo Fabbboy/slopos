@@ -1,8 +1,9 @@
-use crate::vfs::mount::{MAX_MOUNTS, with_mount_table};
-use crate::vfs::path::{resolve_parent, resolve_path};
-use crate::vfs::traits::{FileType, InodeId, VfsError, VfsResult};
+use crate::vfs::mount::{MAX_MOUNTS, MountTable, with_mount_table};
+use crate::vfs::path::{ResolvedPath, resolve_parent, resolve_path};
+use crate::vfs::traits::{FileType, InodeId, VfsError, VfsResult, same_filesystem};
 use slopos_abi::fs::{
-    FS_TYPE_CHARDEV, FS_TYPE_DIRECTORY, FS_TYPE_FILE, FS_TYPE_SYMLINK, FS_TYPE_UNKNOWN, UserFsEntry,
+    FS_TYPE_BLOCKDEV, FS_TYPE_CHARDEV, FS_TYPE_DIRECTORY, FS_TYPE_FILE, FS_TYPE_SYMLINK,
+    FS_TYPE_UNKNOWN, UserFsEntry,
 };
 use slopos_ostd::KVec;
 
@@ -64,6 +65,16 @@ impl VfsOpenFlags {
     }
 }
 
+/// One creation-time name limit whatever the root filesystem is: a name a
+/// disk root would accept but `UserFsEntry.name`'s 64 bytes cannot hold would
+/// list truncated and then fail to open.
+fn check_name_len(name: &[u8]) -> VfsResult<()> {
+    if name.len() > crate::MAX_NAME_LEN {
+        return Err(VfsError::NameTooLong);
+    }
+    Ok(())
+}
+
 pub fn vfs_open(path: &[u8], create: bool) -> VfsResult<VfsHandle> {
     vfs_open_flags(
         path,
@@ -95,6 +106,10 @@ pub fn vfs_open_flags(path: &[u8], flags: VfsOpenFlags) -> VfsResult<VfsHandle> 
                 }
             }
             if flags.truncate && flags.writable && stat.file_type == FileType::Regular {
+                // `forget_inode`, not `detach_inode`: a flush would write back
+                // the bytes the truncate discards, and a set left keyed would
+                // put pre-truncate pages back over the zeroed region.
+                crate::filemap::forget_inode(resolved.fs, resolved.inode);
                 resolved.fs.truncate(resolved.inode, 0)?;
             }
             Ok(VfsHandle {
@@ -105,6 +120,7 @@ pub fn vfs_open_flags(path: &[u8], flags: VfsOpenFlags) -> VfsResult<VfsHandle> 
         }
         Err(VfsError::NotFound) if flags.create => {
             let (parent, name) = resolve_parent(path)?;
+            check_name_len(name)?;
             parent.check_writable()?;
             let new_inode = parent.fs.create(parent.inode, name, FileType::Regular)?;
             Ok(VfsHandle {
@@ -124,6 +140,8 @@ pub fn vfs_stat(path: &[u8]) -> VfsResult<(u8, u32)> {
     let kind = match stat.file_type {
         FileType::Directory => FS_TYPE_DIRECTORY,
         FileType::Regular => FS_TYPE_FILE,
+        FileType::CharDevice => FS_TYPE_CHARDEV,
+        FileType::BlockDevice => FS_TYPE_BLOCKDEV,
         _ => FS_TYPE_UNKNOWN,
     };
 
@@ -132,6 +150,7 @@ pub fn vfs_stat(path: &[u8]) -> VfsResult<(u8, u32)> {
 
 pub fn vfs_mkdir(path: &[u8]) -> VfsResult<()> {
     let (parent, name) = resolve_parent(path)?;
+    check_name_len(name)?;
     parent.check_writable()?;
     parent.fs.create(parent.inode, name, FileType::Directory)?;
     Ok(())
@@ -203,6 +222,11 @@ pub fn vfs_unlink(path: &[u8]) -> VfsResult<()> {
         return parent.fs.unlink(parent.inode, name);
     };
 
+    // Before the removal: the flush is only safe while the inode's blocks are
+    // still its own, and the forget must land before the inode number can be
+    // reallocated.
+    crate::filemap::detach_inode(parent.fs, inode);
+
     if begin_removal(parent.fs, inode) == DetachPlan::FreeNow {
         let result = parent.fs.unlink(parent.inode, name);
         let _ = end_removal(parent.fs, inode, RemovalOutcome::Nothing);
@@ -235,6 +259,11 @@ pub fn vfs_rmdir(path: &[u8]) -> VfsResult<()> {
     }
     let (parent, name) = resolve_parent(path)?;
     parent.check_writable()?;
+    // Only a regular file can carry a page set while `mmap` refuses every
+    // other type, and that is not a rule to leave load-bearing.
+    if let Ok(inode) = parent.fs.lookup(parent.inode, name) {
+        crate::filemap::detach_inode(parent.fs, inode);
+    }
     parent.fs.rmdir(parent.inode, name)
 }
 
@@ -253,6 +282,7 @@ pub fn vfs_symlink(target: &[u8], link_path: &[u8]) -> VfsResult<()> {
         return Err(VfsError::PermissionDenied);
     }
     let (parent, name) = resolve_parent(link_path)?;
+    check_name_len(name)?;
     parent.check_writable()?;
     parent.fs.symlink(parent.inode, name, target).map(|_| ())
 }
@@ -277,8 +307,9 @@ pub fn vfs_rename(old_path: &[u8], new_path: &[u8]) -> VfsResult<()> {
     }
     let (old_parent, old_name) = resolve_parent(old_path)?;
     let (new_parent, new_name) = resolve_parent(new_path)?;
+    check_name_len(new_name)?;
 
-    if !core::ptr::eq(old_parent.fs, new_parent.fs) {
+    if !same_filesystem(old_parent.fs, new_parent.fs) {
         return Err(VfsError::CrossDevice);
     }
     old_parent.check_writable()?;
@@ -294,6 +325,8 @@ pub fn vfs_rename(old_path: &[u8], new_path: &[u8]) -> VfsResult<()> {
             .fs
             .rename(old_parent.inode, old_name, new_parent.inode, new_name);
     };
+
+    crate::filemap::detach_inode(new_parent.fs, displaced);
 
     if begin_removal(new_parent.fs, displaced) == DetachPlan::FreeNow {
         let result = old_parent
@@ -321,6 +354,9 @@ pub fn vfs_rename(old_path: &[u8], new_path: &[u8]) -> VfsResult<()> {
 /// drops its `IrqRwLock` before the first `sync`: ext2's takes a sleeping
 /// mutex, which must not be acquired under it.
 pub fn vfs_sync_all() -> VfsResult<()> {
+    // Before the mounts: page-set writeback reaches a filesystem through
+    // `write`, so it must land before that filesystem's `sync`.
+    crate::filemap::flush_all();
     let mut snapshot: [Option<&'static dyn crate::vfs::FileSystem>; MAX_MOUNTS] =
         [None; MAX_MOUNTS];
     let mut n = 0usize;
@@ -354,16 +390,19 @@ pub fn vfs_list(path: &[u8], entries: &mut [UserFsEntry]) -> VfsResult<usize> {
 }
 
 /// Where a paged listing resumes. Opaque to userland: the filesystem chooses
-/// what its cookie means, and the mount-point pass carries its own index
-/// because those entries are synthesised by the VFS rather than read from the
-/// filesystem.
+/// what its cookie means, and the mount-point pass carries the identity of the
+/// last mount it emitted, because those entries are synthesised by the VFS
+/// rather than read from the filesystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ListCursor {
     /// The filesystem's own resumption point, or [`Self::DIR_DONE`] once the
     /// directory itself is exhausted and only mount entries remain.
     fs_cookie: u64,
-    /// How many child mount points have already been listed.
-    mounts_done: u32,
+    /// The last child mount emitted, 0 before the first. Keyed on the mount's
+    /// identity, not its table position: a released slot is reused at once, so
+    /// an ordinal would drop or repeat entries between pages.
+    last_mount_id: u32,
+    done: bool,
 }
 
 impl ListCursor {
@@ -375,21 +414,24 @@ impl ListCursor {
     pub const fn start() -> Self {
         Self {
             fs_cookie: 0,
-            mounts_done: 0,
+            last_mount_id: 0,
+            done: false,
         }
     }
 
     pub fn is_end(&self) -> bool {
-        self.fs_cookie == Self::DIR_DONE && self.mounts_done == u32::MAX
+        self.done
     }
 
-    /// Pack into the single opaque `u64` the ABI carries.
+    /// Pack into the single opaque `u64` the ABI carries. A mount id is 32
+    /// bits wide, so `MOUNT_PHASE | id` can never collide with
+    /// [`slopos_abi::fs::FS_LIST_CURSOR_END`]'s all-ones.
     pub fn to_abi(self) -> u64 {
-        if self.is_end() {
+        if self.done {
             return slopos_abi::fs::FS_LIST_CURSOR_END;
         }
         if self.fs_cookie == Self::DIR_DONE {
-            return Self::MOUNT_PHASE | (self.mounts_done as u64);
+            return Self::MOUNT_PHASE | (self.last_mount_id as u64);
         }
         self.fs_cookie
     }
@@ -398,20 +440,136 @@ impl ListCursor {
         if raw == slopos_abi::fs::FS_LIST_CURSOR_END {
             return Self {
                 fs_cookie: Self::DIR_DONE,
-                mounts_done: u32::MAX,
+                last_mount_id: 0,
+                done: true,
             };
         }
         if raw & Self::MOUNT_PHASE != 0 {
             return Self {
                 fs_cookie: Self::DIR_DONE,
-                mounts_done: (raw & 0xFFFF_FFFF) as u32,
+                last_mount_id: (raw & 0xFFFF_FFFF) as u32,
+                done: false,
             };
         }
         Self {
             fs_cookie: raw,
-            mounts_done: 0,
+            last_mount_id: 0,
+            done: false,
         }
     }
+}
+
+/// Whether `name`, as a listing page of `dir` stored it, is shadowed by a
+/// direct child mount. `truncated` clips the mount's own name the way the ABI
+/// entry clipped `name`, or both passes would emit that name.
+fn mount_shadows(mt: &MountTable, dir: &[u8], name: &[u8], truncated: bool) -> bool {
+    if mt.has_child_mount(dir, name) {
+        return true;
+    }
+    if !truncated {
+        return false;
+    }
+    let mut hit = false;
+    mt.for_each_child_mount_from(dir, 0, &mut |_, child| {
+        if child.len() > name.len() && &child[..name.len()] == name {
+            hit = true;
+        }
+        !hit
+    });
+    hit
+}
+
+/// Drop from `page` every name a child mount of `dir` shadows, compacting the
+/// survivors to the front and answering how many remain. The mount pass is
+/// then the single authority for those names across every page.
+fn drop_shadowed_names(mt: &MountTable, dir: &[u8], page: &mut [UserFsEntry]) -> usize {
+    let mut kept = 0usize;
+    for i in 0..page.len() {
+        let cap = page[i].name.len();
+        let elen = page[i].name.iter().position(|&b| b == 0).unwrap_or(cap);
+        if mount_shadows(mt, dir, &page[i].name[..elen], elen == cap - 1) {
+            continue;
+        }
+        if kept != i {
+            let entry = page[i];
+            page[kept] = entry;
+        }
+        kept += 1;
+    }
+    kept
+}
+
+/// One filesystem page of a listing.
+///
+/// The mount table is taken only *after* the filesystem calls have returned:
+/// `MOUNT_TABLE` is an `IrqRwLock` at `LOCK_LEVEL_REGISTRY` — IRQs and
+/// preemption off — and ext2's own lock is a sleeping mutex, so the table must
+/// not be held across block I/O. Never inlined so its frame is not charged to
+/// [`vfs_list_from`]'s.
+#[inline(never)]
+fn list_fs_page(
+    resolved: &ResolvedPath,
+    dir: &[u8],
+    entries: &mut [UserFsEntry],
+    inodes: &mut KVec<u64>,
+    cursor: &mut ListCursor,
+) -> VfsResult<usize> {
+    let max = entries.len();
+    let mut filled = 0usize;
+
+    resolved.fs.readdir_cookie(
+        resolved.inode,
+        cursor.fs_cookie,
+        &mut |next, name, inode, file_type| {
+            // The callback's own bound, not merely the `filled < max`
+            // return below: correctness must not rest on every filesystem
+            // honouring a stop request promptly, because an index past the
+            // end panics the kernel in a `forbid(unsafe_code)` crate.
+            if filled >= max {
+                return false;
+            }
+            let entry = &mut entries[filled];
+            *entry = UserFsEntry::new();
+
+            let nlen = name.len().min(entry.name.len() - 1);
+            entry.name[..nlen].copy_from_slice(&name[..nlen]);
+            entry.name[nlen] = 0;
+
+            entry.type_ = match file_type {
+                FileType::Directory => FS_TYPE_DIRECTORY,
+                FileType::Regular => FS_TYPE_FILE,
+                FileType::Symlink => FS_TYPE_SYMLINK,
+                FileType::CharDevice => FS_TYPE_CHARDEV,
+                FileType::BlockDevice => FS_TYPE_BLOCKDEV,
+                _ => FS_TYPE_UNKNOWN,
+            };
+
+            inodes[filled] = inode;
+            filled += 1;
+            // Advanced past this entry *before* the buffer-full check, so
+            // a resumed call does not repeat it.
+            cursor.fs_cookie = next;
+            filled < max
+        },
+    )?;
+
+    if filled < max {
+        cursor.fs_cookie = ListCursor::DIR_DONE;
+    } else if cursor.fs_cookie >= ListCursor::MOUNT_PHASE {
+        // A cookie that cannot round-trip through the ABI would resume the
+        // walk somewhere else entirely.
+        return Err(VfsError::InvalidArgument);
+    }
+
+    for i in 0..filled {
+        if let Ok(child_stat) = resolved.fs.stat(inodes[i]) {
+            entries[i].size = child_stat.size as u32;
+        }
+    }
+
+    Ok(with_mount_table(|mt| {
+        drop_shadowed_names(mt, dir, &mut entries[..filled])
+    }))
 }
 
 /// Fill `entries` from `cursor`, advancing it to where the next call resumes.
@@ -435,59 +593,24 @@ pub fn vfs_list_from(
         return Err(VfsError::InvalidArgument);
     }
 
-    let mut count = 0usize;
+    // The mount table is keyed on canonical paths, so a listing of `//tmp`
+    // must ask about `/tmp` or it sees none of that directory's child mounts.
+    let canon = crate::vfs::canon::canonicalise(path)?;
+    let dir = canon.as_bytes();
+
     let max = entries.len();
     // Sized with the buffer rather than fixed at 64: this holds the inode of
     // every entry written, which the second `stat` pass reads back.
     let mut inodes = KVec::<u64>::zeroed(max).map_err(|_| VfsError::NoSpace)?;
 
-    if cursor.fs_cookie != ListCursor::DIR_DONE {
-        resolved.fs.readdir_cookie(
-            resolved.inode,
-            cursor.fs_cookie,
-            &mut |next, name, inode, file_type| {
-                // The callback's own bound, not merely the `count < max`
-                // return below: correctness must not rest on every filesystem
-                // honouring a stop request promptly, because an index past the
-                // end panics the kernel in a `forbid(unsafe_code)` crate.
-                if count >= max {
-                    return false;
-                }
-                let entry = &mut entries[count];
-                *entry = UserFsEntry::new();
-
-                let nlen = name.len().min(entry.name.len() - 1);
-                entry.name[..nlen].copy_from_slice(&name[..nlen]);
-                entry.name[nlen] = 0;
-
-                entry.type_ = match file_type {
-                    FileType::Directory => FS_TYPE_DIRECTORY,
-                    FileType::Regular => FS_TYPE_FILE,
-                    FileType::Symlink => FS_TYPE_SYMLINK,
-                    FileType::CharDevice => FS_TYPE_CHARDEV,
-                    _ => FS_TYPE_UNKNOWN,
-                };
-
-                inodes[count] = inode;
-                count += 1;
-                // Advanced past this entry *before* the buffer-full check, so
-                // a resumed call does not repeat it.
-                cursor.fs_cookie = next;
-                count < max
-            },
-        )?;
-        if count < max {
-            cursor.fs_cookie = ListCursor::DIR_DONE;
-        } else if cursor.fs_cookie >= ListCursor::MOUNT_PHASE {
-            // A cookie that cannot round-trip through the ABI would resume the
-            // walk somewhere else entirely.
-            return Err(VfsError::InvalidArgument);
-        }
-    }
-
-    for i in 0..count {
-        if let Ok(child_stat) = resolved.fs.stat(inodes[i]) {
-            entries[i].size = child_stat.size as u32;
+    let mut count = 0usize;
+    while cursor.fs_cookie != ListCursor::DIR_DONE {
+        count = list_fs_page(&resolved, dir, entries, &mut inodes, cursor)?;
+        // An all-shadowed page must not go back empty: an empty page is how a
+        // finished listing looks to a caller. Bounded, since a whole listing
+        // can drop at most `MAX_MOUNTS` names.
+        if count > 0 {
+            break;
         }
     }
 
@@ -497,52 +620,30 @@ pub fn vfs_list_from(
 
     // Mount points appear as directory entries in the parent listing even when
     // the underlying filesystem has no matching entry (Linux VFS behaviour).
-    let skip = cursor.mounts_done;
-    let mut seen = 0u32;
     let mut exhausted = true;
     with_mount_table(|mt| {
-        mt.for_each_child_mount(path, &mut |child_name| {
-            seen += 1;
-            if seen <= skip {
-                return true;
-            }
+        mt.for_each_child_mount_from(dir, cursor.last_mount_id, &mut |id, child_name| {
             if count >= max {
                 exhausted = false;
                 return false;
             }
-            cursor.mounts_done = seen;
-
-            // A mount point always lists as a directory, whatever the entry it
-            // shadows was. Only within this page: the shadowed entry may have
-            // gone out in an earlier one, in which case the synthesised entry
-            // below is a duplicate name — a cheaper defect than a listing that
-            // omits a mount, and the same trade the linear cookie walk makes.
-            for i in 0..count {
-                let elen = entries[i]
-                    .name
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(entries[i].name.len());
-                if elen == child_name.len() && &entries[i].name[..elen] == child_name {
-                    entries[i].type_ = FS_TYPE_DIRECTORY;
-                    return true;
-                }
-            }
-
             let entry = &mut entries[count];
             *entry = UserFsEntry::new();
             let nlen = child_name.len().min(entry.name.len() - 1);
             entry.name[..nlen].copy_from_slice(&child_name[..nlen]);
             entry.name[nlen] = 0;
+            // A mount point always lists as a directory, whatever the entry it
+            // shadows was.
             entry.type_ = FS_TYPE_DIRECTORY;
             entry.size = 0;
             count += 1;
+            cursor.last_mount_id = id;
             true
         });
     });
 
     if exhausted {
-        cursor.mounts_done = u32::MAX;
+        cursor.done = true;
     }
 
     Ok(count)

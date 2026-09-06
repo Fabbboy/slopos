@@ -193,6 +193,10 @@ name = "seat_test"
 path = "src/bin/tests/seat_test.rs"
 
 [[bin]]
+name = "mount_test"
+path = "src/bin/tests/mount_test.rs"
+
+[[bin]]
 name = "shell_script_test"
 path = "src/bin/tests/shell_script_test.rs"
 

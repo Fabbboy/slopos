@@ -11,7 +11,21 @@ pub const FS_TYPE_FILE: u8 = 0;
 pub const FS_TYPE_DIRECTORY: u8 = 1;
 pub const FS_TYPE_CHARDEV: u8 = 2;
 pub const FS_TYPE_SYMLINK: u8 = 3;
+pub const FS_TYPE_BLOCKDEV: u8 = 4;
 pub const FS_TYPE_UNKNOWN: u8 = 0xFF;
+
+/// `mount(2)` flags, Linux values.
+pub const MS_RDONLY: u32 = 1;
+/// `umount2(2)`: detach the mount now and tear it down when it goes idle.
+pub const MNT_DETACH: u32 = 2;
+
+/// `statfs(2)` `f_flags` bits. Linux values.
+pub const ST_RDONLY: u64 = 1;
+pub const ST_NOSUID: u64 = 2;
+
+/// `f_type` magics, as reported by Linux for the same filesystems.
+pub const EXT2_SUPER_MAGIC: u64 = 0xEF53;
+pub const RAMFS_MAGIC: u64 = 0x8584_58F6;
 
 /// POSIX file open flags (access mode in low 2 bits, modifiers above).
 pub const O_RDONLY: u32 = 0;
@@ -131,3 +145,32 @@ impl Default for UserFsList {
         }
     }
 }
+
+/// Filesystem statistics returned by `statfs(2)` and `fstatfs(2)`.
+///
+/// Field order, widths and the trailing `_spare` words are the Linux x86-64
+/// `struct statfs` ones — every member a `long`.
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct UserStatfs {
+    pub f_type: u64,
+    pub f_bsize: u64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    pub f_fsid: u64,
+    pub f_namelen: u64,
+    pub f_frsize: u64,
+    pub f_flags: u64,
+    pub _spare: [u64; 4],
+}
+
+const _: () = assert!(
+    core::mem::size_of::<UserStatfs>() == 120,
+    "UserStatfs must carry no implicit padding"
+);
+
+/// The longest `mount(2)` filesystem-type name the kernel accepts.
+pub const MOUNT_FSTYPE_MAX: usize = 32;

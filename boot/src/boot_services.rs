@@ -7,19 +7,23 @@ use slopos_sched::scheduler::{
     boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init,
 };
 
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
 use slopos_drivers::virtio_blk;
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceIndex};
+use slopos_fs::devfs::devfs_register_block_device;
 use slopos_fs::ext2_vfs::EXT2_VFS_STATIC;
+use slopos_fs::partition::{
+    PartitionDevice, PartitionScheme, PartitionTable, SharedBlockDevice, probe,
+};
 use slopos_fs::verity::VerityStatus;
 use slopos_fs::vfs::{MOUNT_RDONLY, mount, unmount};
 use slopos_fs::{
     RootBacking, ext2_vfs_init_with_device, ext2_vfs_is_initialized, ext2_vfs_is_read_only,
     vfs_init_builtin_filesystems_with,
 };
-use slopos_ostd::KBox;
 use slopos_ostd::sync::{InitFlag, OnceLock};
+use slopos_ostd::{KArc, KBox};
 
 /// Selected root-filesystem backing, set from the `root=` cmdline knob by
 /// `early_init::boot_step_boot_config_fn` (default [`ROOT_AUTO`]).
@@ -28,6 +32,37 @@ pub const ROOT_INITRAMFS: u8 = 1;
 pub const ROOT_VIRTIO: u8 = 2;
 
 static ROOT_MODE: AtomicU8 = AtomicU8::new(ROOT_AUTO);
+
+/// `root=/dev/vdX[N]`: the probe-order device index and a 1-based partition
+/// (0 = whole device). `u16::MAX` is unset, i.e. disk0 whole-device.
+static ROOT_BLOCK_INDEX: AtomicU16 = AtomicU16::new(u16::MAX);
+static ROOT_BLOCK_PARTITION: AtomicU8 = AtomicU8::new(0);
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct RootBlockSpec {
+    pub index: BlockDeviceIndex,
+    /// 1-based, 0 for the whole device.
+    pub partition: u8,
+    /// `true` when the boot named this device rather than defaulting to disk0.
+    pub explicit: bool,
+}
+
+/// Naming a device does not force the disk root the way `root=virtio` does —
+/// an absent device or partition degrades to the initramfs as no disk does —
+/// so this sets no [`ROOT_MODE`].
+pub fn set_root_block_device(index: u16, partition: u8) {
+    ROOT_BLOCK_INDEX.store(index, Ordering::Relaxed);
+    ROOT_BLOCK_PARTITION.store(partition, Ordering::Relaxed);
+}
+
+fn root_block_spec() -> RootBlockSpec {
+    let raw = ROOT_BLOCK_INDEX.load(Ordering::Relaxed);
+    RootBlockSpec {
+        index: BlockDeviceIndex(if raw == u16::MAX { 0 } else { raw }),
+        partition: ROOT_BLOCK_PARTITION.load(Ordering::Relaxed),
+        explicit: raw != u16::MAX,
+    }
+}
 
 /// `verity=require`: a disk that is attached must come up verified, or the
 /// boot step fails. No disk at all is the initramfs-only case and passes. A
@@ -56,6 +91,7 @@ fn register_fs_hooks() {
     }
     slopos_fs::fileio_register_tty_ops(&slopos_drivers::tty_file_ops::TTY_FILE_OPS);
     slopos_fs::fileio_register_socket_ops(&slopos_net::socket_file_ops::SOCKET_FILE_OPS);
+    slopos_mm::filemap_hook::filemap_register_ops(slopos_fs::filemap::filemap_ops());
 }
 
 /// Bring up the RAM-resident root from a Limine-loaded initramfs (cpio) module.
@@ -166,31 +202,207 @@ fn attach_disk0_once() -> DiskAttachOutcome {
         .unwrap_or(DiskAttachOutcome::NoDisk)
 }
 
+/// The root device's single claim: the exclusive write capability can only be
+/// taken once, so the mount and the `/dev` node both delegate to this.
+static ROOT_BLOCK_DEVICE: OnceLock<KArc<dyn BlockDevice + Send + Sync>> = OnceLock::new();
+
 fn attach_disk0() -> DiskAttachOutcome {
-    let Some(disk0) = virtio_blk::blk_device_by_index(BlockDeviceIndex(0)) else {
+    let spec = root_block_spec();
+    let Some(handle) = virtio_blk::blk_device_by_index(spec.index) else {
+        if spec.explicit {
+            klog_info!(
+                "FS: root= named block device {} but no such virtio-blk device is present — \
+                 degrading as though there were no disk",
+                spec.index.0
+            );
+        }
         return DiskAttachOutcome::NoDisk;
     };
-    if !virtio_blk::blk_is_ready(disk0) {
+    if !virtio_blk::blk_is_ready(handle) {
         return DiskAttachOutcome::NotReady;
     }
-    let token = match virtio_blk::open_writer(disk0) {
+    let token = match virtio_blk::open_writer(handle) {
         Ok(t) => t,
         Err(e) => {
-            klog_info!("FS: could not claim disk0 write capability: {:?}", e);
+            klog_info!(
+                "FS: could not claim disk{} write capability: {:?}",
+                spec.index.0,
+                e
+            );
             return DiskAttachOutcome::Unclaimable;
         }
     };
-    let Ok(boxed) = KBox::try_new(token) else {
+    let Ok(owned) = KArc::try_new(token) else {
         return DiskAttachOutcome::NoMemory;
     };
-    let device: KBox<dyn BlockDevice + Send + Sync> = boxed;
+    let shared: KArc<dyn BlockDevice + Send + Sync> = owned;
+    ROOT_BLOCK_DEVICE.call_once(|| shared.clone());
+
+    let device = match root_mount_device(&shared, spec) {
+        Ok(d) => d,
+        Err(outcome) => return outcome,
+    };
     match ext2_vfs_init_with_device(device) {
         Ok(info) => DiskAttachOutcome::Mounted(info),
         Err(e) => {
-            klog_info!("FS: virtio-blk disk0 found but ext2 init failed: {:?}", e);
+            klog_info!(
+                "FS: virtio-blk disk{} found but ext2 init failed: {:?}",
+                spec.index.0,
+                e
+            );
             DiskAttachOutcome::MountFailed
         }
     }
+}
+
+/// The window ext2 mounts: the whole device unless `root=` named a partition.
+fn root_mount_device(
+    shared: &KArc<dyn BlockDevice + Send + Sync>,
+    spec: RootBlockSpec,
+) -> Result<KBox<dyn BlockDevice + Send + Sync>, DiskAttachOutcome> {
+    if spec.partition == 0 {
+        let Ok(boxed) = KBox::try_new(SharedBlockDevice(shared.clone())) else {
+            return Err(DiskAttachOutcome::NoMemory);
+        };
+        return Ok(boxed);
+    }
+
+    let table = match probe(shared.as_ref()) {
+        Ok(t) => t,
+        Err(e) => {
+            klog_info!(
+                "FS: root= named partition {} of disk{} but its partition table is unusable \
+                 ({:?}) — degrading as though there were no disk",
+                spec.partition,
+                spec.index.0,
+                e
+            );
+            return Err(DiskAttachOutcome::NoDisk);
+        }
+    };
+    let Some(entry) = table.find(spec.partition) else {
+        klog_info!(
+            "FS: root= named partition {} of disk{} but the {:?} table has no such partition — \
+             degrading as though there were no disk",
+            spec.partition,
+            spec.index.0,
+            table.scheme
+        );
+        return Err(DiskAttachOutcome::NoDisk);
+    };
+    let window = match PartitionDevice::try_new(shared.clone(), entry.start, entry.len) {
+        Ok(w) => w,
+        Err(e) => {
+            klog_info!("FS: partition {} is unusable: {:?}", spec.partition, e);
+            return Err(DiskAttachOutcome::NoDisk);
+        }
+    };
+    let Ok(boxed) = KBox::try_new(window) else {
+        return Err(DiskAttachOutcome::NoMemory);
+    };
+    klog_info!(
+        "FS: root is partition {} of disk{} ({} bytes at offset {})",
+        spec.partition,
+        spec.index.0,
+        entry.len,
+        entry.start
+    );
+    Ok(boxed)
+}
+
+/// Publish `/dev/vd<letter>` for every probed virtio-blk device and
+/// `/dev/vd<letter><n>` for its partitions. A registration failure is only a
+/// warning: a missing `/dev` node does not stop an already-mounted kernel.
+fn register_block_device_nodes() {
+    let root = root_block_spec();
+    // One letter per device, `vda`..`vdz`.
+    let count = virtio_blk::blk_device_count().min(26);
+    for index in 0..count as u16 {
+        let Some(handle) = virtio_blk::blk_device_by_index(BlockDeviceIndex(index)) else {
+            continue;
+        };
+        if !virtio_blk::blk_is_ready(handle) {
+            continue;
+        }
+        // The root device's claim is exclusive, so its node shares the mount's
+        // `KArc` instead of opening a second view.
+        let whole: KArc<dyn BlockDevice + Send + Sync> = match ROOT_BLOCK_DEVICE.get() {
+            Some(shared) if index == root.index.0 => shared.clone(),
+            _ => match KArc::try_new(virtio_blk::BlockReader::new(handle)) {
+                Ok(reader) => reader,
+                Err(_) => {
+                    klog_info!("DEVFS: out of memory registering block device {}", index);
+                    continue;
+                }
+            },
+        };
+
+        let letter = b'a' + index as u8;
+        let mut name = [b'v', b'd', letter, 0, 0, 0];
+        if let Err(e) = devfs_register_block_device(&name[..3], whole.clone()) {
+            klog_info!("DEVFS: could not register /dev/vd{}: {:?}", index, e);
+            continue;
+        }
+
+        let table = match probe(whole.as_ref()) {
+            Ok(t) => t,
+            Err(e) => {
+                klog_info!("DEVFS: /dev/vd{} partition table unusable: {:?}", index, e);
+                continue;
+            }
+        };
+        if table.scheme == PartitionScheme::None {
+            continue;
+        }
+        register_partition_nodes(&whole, &table, &mut name);
+    }
+}
+
+fn register_partition_nodes(
+    whole: &KArc<dyn BlockDevice + Send + Sync>,
+    table: &PartitionTable,
+    name: &mut [u8; 6],
+) {
+    for entry in table.entries.iter() {
+        let len = partition_node_name(name, entry.number);
+        let window = match PartitionDevice::try_new(whole.clone(), entry.start, entry.len) {
+            Ok(w) => w,
+            Err(e) => {
+                klog_info!("DEVFS: partition {} unusable: {:?}", entry.number, e);
+                continue;
+            }
+        };
+        let device: KArc<dyn BlockDevice + Send + Sync> = match KArc::try_new(window) {
+            Ok(d) => d,
+            Err(_) => {
+                klog_info!("DEVFS: out of memory registering a partition node");
+                continue;
+            }
+        };
+        if let Err(e) = devfs_register_block_device(&name[..len], device) {
+            klog_info!(
+                "DEVFS: could not register partition {}: {:?}",
+                entry.number,
+                e
+            );
+        }
+    }
+}
+
+/// Appends `number` in decimal after the `vd<letter>` prefix in `name`,
+/// answering the new length. Three digits: a GPT table may hold 128 entries.
+fn partition_node_name(name: &mut [u8; 6], number: u8) -> usize {
+    let mut len = 3;
+    if number >= 100 {
+        name[len] = b'0' + number / 100;
+        len += 1;
+    }
+    if number >= 10 {
+        name[len] = b'0' + (number / 10) % 10;
+        len += 1;
+    }
+    name[len] = b'0' + number % 10;
+    len + 1
 }
 
 fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
@@ -208,6 +420,7 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
             match info.verity {
                 VerityStatus::Absent => "absent",
                 VerityStatus::Verified { .. } => "enabled",
+                VerityStatus::VerifiedWritable { .. } => "enabled (writable)",
             },
         );
         if info.orphans_drained > 0 {
@@ -223,6 +436,7 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
             );
         }
     }
+    register_block_device_nodes();
     // Absence is not an error: on real hardware the root came from the
     // initramfs. A disk that is there, though, must come up verified when the
     // boot said so — and a disk that is there but could not be mounted is
@@ -233,6 +447,10 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
             DiskAttachOutcome::NoDisk
                 | DiskAttachOutcome::Mounted(slopos_fs::Ext2MountInfo {
                     verity: VerityStatus::Verified { .. },
+                    ..
+                })
+                | DiskAttachOutcome::Mounted(slopos_fs::Ext2MountInfo {
+                    verity: VerityStatus::VerifiedWritable { .. },
                     ..
                 })
         );

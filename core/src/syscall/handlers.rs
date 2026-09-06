@@ -14,14 +14,15 @@ use crate::syscall::font_handlers::syscall_font_set;
 use crate::syscall::fs::{
     syscall_chmod, syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fdatasync,
     syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
-    syscall_fs_stat, syscall_fs_unlink, syscall_fs_write, syscall_fstat, syscall_fsync,
-    syscall_ioctl, syscall_lseek, syscall_pipe, syscall_pipe2, syscall_poll, syscall_readlink,
-    syscall_rename, syscall_rmdir, syscall_select, syscall_symlink, syscall_sync, syscall_truncate,
+    syscall_fs_stat, syscall_fs_unlink, syscall_fs_write, syscall_fstat, syscall_fstatfs,
+    syscall_fsync, syscall_ioctl, syscall_lseek, syscall_mount, syscall_pipe, syscall_pipe2,
+    syscall_poll, syscall_readlink, syscall_rename, syscall_rmdir, syscall_select, syscall_statfs,
+    syscall_symlink, syscall_sync, syscall_truncate, syscall_umount2,
 };
 use crate::syscall::keymap_handlers::{syscall_keymap_get_name, syscall_keymap_load};
 pub use crate::syscall::memory_handlers::{
     syscall_brk, syscall_ftruncate, syscall_memfd_create, syscall_mmap, syscall_mprotect,
-    syscall_munmap,
+    syscall_msync, syscall_munmap,
 };
 use crate::syscall::net_config_handlers::{
     syscall_net_addr_ctl, syscall_net_iface_ctl, syscall_net_monitor, syscall_net_resolver_set,
@@ -136,6 +137,10 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_READLINK]  => syscall_readlink,  "readlink";
     [SYSCALL_TRUNCATE]  => syscall_truncate,  "truncate";
     [SYSCALL_CHMOD]     => syscall_chmod,     "chmod";
+    [SYSCALL_STATFS]    => syscall_statfs,    "statfs";
+    [SYSCALL_FSTATFS]   => syscall_fstatfs,   "fstatfs";
+    [SYSCALL_MOUNT]     => syscall_mount,     "mount";
+    [SYSCALL_UMOUNT2]   => syscall_umount2,   "umount2";
 
     [SYSCALL_SOCKET]  => syscall_socket,  "socket";
     [SYSCALL_BIND]    => syscall_bind,    "bind";
@@ -182,6 +187,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_MMAP]         => syscall_mmap,         "mmap";
     [SYSCALL_MUNMAP]       => syscall_munmap,       "munmap";
     [SYSCALL_MPROTECT]     => syscall_mprotect,     "mprotect";
+    [SYSCALL_MSYNC]        => syscall_msync,        "msync";
     [SYSCALL_MEMFD_CREATE] => syscall_memfd_create, "memfd_create";
     [SYSCALL_FTRUNCATE]    => syscall_ftruncate,    "ftruncate";
 
@@ -272,10 +278,10 @@ const fn count_of(cap: Capability) -> usize {
 ///
 /// Every capability appears, including the ones at zero, so adding an entry
 /// point to a capability that had none still moves a number here.
-const CAP_COUNTS: [(Capability, usize); 15] = [
+const CAP_COUNTS: [(Capability, usize); 16] = [
     (Capability::Unimplemented, 59),
-    (Capability::NoneSelf, 44),
-    (Capability::NoneFd, 49),
+    (Capability::NoneSelf, 45),
+    (Capability::NoneFd, 51),
     (Capability::NoneRelation, 14),
     (Capability::Power, 2),
     (Capability::Launch, 0),
@@ -288,6 +294,7 @@ const CAP_COUNTS: [(Capability, usize); 15] = [
     (Capability::ClipboardGlobal, 2),
     (Capability::Fate, 2),
     (Capability::TestHarness, 2),
+    (Capability::Mount, 2),
 ];
 
 const _: () = {
@@ -342,6 +349,6 @@ const _: () = {
 };
 
 /// Per-capability entry-point counts, for the boot-time dump and the tests.
-pub fn cap_counts() -> &'static [(Capability, usize); 15] {
+pub fn cap_counts() -> &'static [(Capability, usize); 16] {
     &CAP_COUNTS
 }

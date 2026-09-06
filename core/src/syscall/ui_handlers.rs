@@ -239,7 +239,7 @@ define_syscall!(syscall_fb_flip
     let damage_count = damage_count as usize;
 
     let table = ctx.require_process()?;
-    let (kind, handle) =
+    let (kind, handle, _mode) =
         slopos_fs::fileio::fileio_get_open_file_handle(table, fd).ok_or(Errno::EBADF)?;
     if kind != slopos_abi::file_ops::FileKind::Memfd {
         return Err(Errno::EINVAL);

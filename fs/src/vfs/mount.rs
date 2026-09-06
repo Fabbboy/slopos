@@ -1,3 +1,4 @@
+use crate::vfs::canon::canonicalise;
 use crate::vfs::traits::{FileSystem, VfsError, VfsResult};
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::{IrqRwLock, LOCK_LEVEL_REGISTRY};
@@ -14,6 +15,9 @@ pub const MOUNT_RDONLY: u32 = 1 << 0;
 pub struct Mounted {
     pub fs: &'static dyn FileSystem,
     pub flags: u32,
+    /// Identity of the *mount*, not of the filesystem: one filesystem mounted
+    /// at two paths carries two ids.
+    pub id: u32,
 }
 
 impl Mounted {
@@ -27,6 +31,7 @@ pub struct MountPoint {
     path_len: usize,
     fs: Option<&'static dyn FileSystem>,
     flags: u32,
+    id: u32,
 }
 
 impl MountPoint {
@@ -36,6 +41,7 @@ impl MountPoint {
             path_len: 0,
             fs: None,
             flags: 0,
+            id: 0,
         }
     }
 
@@ -48,9 +54,44 @@ impl MountPoint {
     }
 }
 
+fn trim_trailing_slashes(path: &[u8]) -> &[u8] {
+    let mut len = path.len();
+    while len > 1 && path[len - 1] == b'/' {
+        len -= 1;
+    }
+    &path[..len]
+}
+
+/// The trailing component of `mp_path` when it is a *direct* child of
+/// `parent` — `b"tmp"` for parent `b"/"` and mount `b"/tmp"`. `None` when
+/// `mp_path` is the parent itself, a deeper descendant, or unrelated.
+fn child_component<'a>(parent: &[u8], mp_path: &'a [u8]) -> Option<&'a [u8]> {
+    let start = if parent == b"/" {
+        if mp_path.len() <= 1 || mp_path[0] != b'/' {
+            return None;
+        }
+        1
+    } else {
+        if mp_path.len() <= parent.len() + 1
+            || &mp_path[..parent.len()] != parent
+            || mp_path[parent.len()] != b'/'
+        {
+            return None;
+        }
+        parent.len() + 1
+    };
+
+    let child = &mp_path[start..];
+    if child.is_empty() || child.contains(&b'/') {
+        return None;
+    }
+    Some(child)
+}
+
 pub struct MountTable {
     mounts: [MountPoint; MAX_MOUNTS],
     count: usize,
+    next_id: u32,
 }
 
 impl MountTable {
@@ -58,97 +99,69 @@ impl MountTable {
         Self {
             mounts: [const { MountPoint::empty() }; MAX_MOUNTS],
             count: 0,
+            next_id: 1,
         }
     }
 
+    /// Monotonic within a boot and never reused: a *slot index* is reused the
+    /// instant a mount is released, which would make a paged listing keyed on
+    /// position drop or repeat an entry when the set changes between pages.
+    /// Exhaustion refuses the mount rather than wrapping. Id 0 means "before
+    /// any mount", so a resumption cursor can start there.
+    fn alloc_id(&mut self) -> VfsResult<u32> {
+        let id = self.next_id;
+        if id == u32::MAX {
+            return Err(VfsError::NoSpace);
+        }
+        self.next_id = id + 1;
+        Ok(id)
+    }
+
     pub fn mount(&mut self, path: &[u8], fs: &'static dyn FileSystem, flags: u32) -> VfsResult<()> {
-        if path.is_empty() || path[0] != b'/' {
-            return Err(VfsError::InvalidPath);
-        }
-        if path.len() > MAX_PATH_LEN {
-            return Err(VfsError::NameTooLong);
-        }
+        // Canonical, so `/tmp/` and `/tmp` cannot both occupy the table while
+        // only one of them is matchable by the per-component walk.
+        let canon = canonicalise(path)?;
+        let path = canon.as_bytes();
 
         for mp in self.mounts.iter() {
-            if mp.is_active() && mp.path_len == path.len() && &mp.path[..path.len()] == path {
+            if mp.is_active() && mp.path_bytes() == path {
                 return Err(VfsError::AlreadyExists);
             }
         }
 
-        let slot = self
+        let slot_idx = self
             .mounts
-            .iter_mut()
-            .find(|m| !m.is_active())
+            .iter()
+            .position(|m| !m.is_active())
             .ok_or(VfsError::NoSpace)?;
+        let id = self.alloc_id()?;
 
+        let slot = &mut self.mounts[slot_idx];
         slot.path[..path.len()].copy_from_slice(path);
         slot.path_len = path.len();
         slot.fs = Some(fs);
         slot.flags = flags;
+        slot.id = id;
         self.count += 1;
 
         Ok(())
     }
 
     pub fn unmount(&mut self, path: &[u8]) -> VfsResult<()> {
+        let canon = canonicalise(path)?;
+        let path = canon.as_bytes();
+
         for mp in self.mounts.iter_mut() {
-            if mp.is_active() && mp.path_len == path.len() && &mp.path[..path.len()] == path {
+            if mp.is_active() && mp.path_bytes() == path {
                 mp.fs = None;
                 mp.path_len = 0;
+                mp.flags = 0;
+                mp.id = 0;
                 self.count -= 1;
                 return Ok(());
             }
         }
         Err(VfsError::NotFound)
-    }
-
-    pub fn resolve(&self, path: &[u8]) -> VfsResult<(Mounted, usize)> {
-        if path.is_empty() || path[0] != b'/' {
-            return Err(VfsError::InvalidPath);
-        }
-
-        let mut best_match: Option<(&MountPoint, usize)> = None;
-
-        for mp in self.mounts.iter() {
-            if !mp.is_active() {
-                continue;
-            }
-
-            let mp_path = mp.path_bytes();
-
-            let matches = if mp_path == b"/" {
-                true
-            } else if path.len() >= mp_path.len() {
-                let prefix_matches = &path[..mp_path.len()] == mp_path;
-                let boundary_ok =
-                    path.len() == mp_path.len() || path.get(mp_path.len()) == Some(&b'/');
-                prefix_matches && boundary_ok
-            } else {
-                false
-            };
-
-            if matches {
-                let match_len = mp_path.len();
-                if best_match.map_or(true, |(_, len)| match_len > len) {
-                    best_match = Some((mp, match_len));
-                }
-            }
-        }
-
-        let (mp, match_len) = best_match.ok_or(VfsError::NotFound)?;
-        let fs = mp.fs.ok_or(VfsError::NotFound)?;
-
-        Ok((
-            Mounted {
-                fs,
-                flags: mp.flags,
-            },
-            match_len,
-        ))
-    }
-
-    pub fn mount_count(&self) -> usize {
-        self.count
     }
 
     /// Once per mount point, so a filesystem mounted twice is visited twice.
@@ -160,59 +173,50 @@ impl MountTable {
         }
     }
 
-    /// Iterate over mount points that are direct children of `parent_path`,
-    /// calling `callback` with the child's name component (`b"tmp"` when parent
-    /// is `b"/"` and the mount is `b"/tmp"`). Returns the number visited.
-    pub fn for_each_child_mount(
+    /// Whether `name` is a direct child mount of `parent_path`.
+    pub fn has_child_mount(&self, parent_path: &[u8], name: &[u8]) -> bool {
+        let parent = trim_trailing_slashes(parent_path);
+        self.mounts
+            .iter()
+            .any(|mp| mp.is_active() && child_component(parent, mp.path_bytes()) == Some(name))
+    }
+
+    /// Direct child mounts of `parent_path` in ascending id order, resuming
+    /// strictly after `after_id`. Id order rather than slot order is what
+    /// makes a paged listing resumable across a concurrent mount or unmount.
+    pub fn for_each_child_mount_from(
         &self,
         parent_path: &[u8],
-        callback: &mut dyn FnMut(&[u8]) -> bool,
-    ) -> usize {
-        let plen = {
-            let mut len = parent_path.len();
-            while len > 1 && parent_path[len - 1] == b'/' {
-                len -= 1;
-            }
-            len
-        };
-        let parent = &parent_path[..plen];
+        after_id: u32,
+        callback: &mut dyn FnMut(u32, &[u8]) -> bool,
+    ) {
+        let parent = trim_trailing_slashes(parent_path);
+        let mut cursor = after_id;
 
-        let mut count = 0;
-        for mp in self.mounts.iter() {
-            if !mp.is_active() {
-                continue;
-            }
-            let mp_path = mp.path_bytes();
-
-            if mp_path.len() == plen && &mp_path[..plen] == parent {
-                continue;
-            }
-
-            let child_start = if parent == b"/" {
-                if mp_path.len() <= 1 || mp_path[0] != b'/' {
+        loop {
+            // Selection scan over the whole table: id order with no
+            // allocation and no sorted snapshot.
+            let mut next: Option<(u32, &[u8])> = None;
+            for mp in self.mounts.iter() {
+                if !mp.is_active() || mp.id <= cursor {
                     continue;
                 }
-                1
-            } else {
-                if mp_path.len() <= plen + 1 || &mp_path[..plen] != parent || mp_path[plen] != b'/'
-                {
+                let Some(name) = child_component(parent, mp.path_bytes()) else {
                     continue;
+                };
+                if next.is_none_or(|(id, _)| mp.id < id) {
+                    next = Some((mp.id, name));
                 }
-                plen + 1
+            }
+
+            let Some((id, name)) = next else {
+                return;
             };
-
-            let child_part = &mp_path[child_start..];
-
-            if child_part.is_empty() || child_part.contains(&b'/') {
-                continue;
+            cursor = id;
+            if !callback(id, name) {
+                return;
             }
-
-            if !callback(child_part) {
-                break;
-            }
-            count += 1;
         }
-        count
     }
 }
 
@@ -248,21 +252,7 @@ pub fn mount_at(path: &[u8]) -> Option<Mounted> {
             mp.fs.map(|fs| Mounted {
                 fs,
                 flags: mp.flags,
+                id: mp.id,
             })
         })
-}
-
-pub fn resolve_mount<'a>(path: &'a [u8]) -> VfsResult<(Mounted, &'a [u8])> {
-    let (mounted, match_len) = {
-        let guard = MOUNT_TABLE.read();
-        guard.resolve(path)?
-    };
-
-    let relative = if match_len >= path.len() {
-        b"/" as &[u8]
-    } else {
-        &path[match_len..]
-    };
-
-    Ok((mounted, relative))
 }

@@ -5435,7 +5435,7 @@ pub fn test_unix_send_wakes_blocked_poll_waiter() -> TestResult {
 }
 
 fn socket_handle_for_fd(table: FdTable, fd: i32) -> Option<slopos_net::unix_socket::SocketHandle> {
-    let (kind, raw) = fileio_get_open_file_handle(table, fd)?;
+    let (kind, raw, _mode) = fileio_get_open_file_handle(table, fd)?;
     (kind == slopos_abi::file_ops::FileKind::Socket)
         .then(|| slopos_net::unix_socket::SocketHandle::from_usize(raw))
 }
@@ -6172,7 +6172,7 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
 
     let recv_fd = slopos_fs::fileio_install_file_ref(pid, out.pop().expect("delivered file"));
     assert_test!(recv_fd >= 0, "install of delivered file failed");
-    let (kind, handle) =
+    let (kind, handle, _mode) =
         slopos_fs::fileio::fileio_get_open_file_handle(pid, recv_fd).expect("resolve recv fd");
     assert_test!(
         kind == slopos_abi::file_ops::FileKind::Memfd && handle == mfd_handle,
@@ -8081,4 +8081,323 @@ slopos_testing::stest!(
 slopos_testing::stest!(
     name = test_unix_scm_rights_refuses_ring_fd,
     suite = syscall_net
+);
+
+/// Stage `mount(2)`'s three C-string arguments in one user page, answering the
+/// (target, fstype) user addresses. `source` is the empty string at the page's
+/// base, which is what every fstype but `ext2` expects.
+#[inline(never)]
+fn stage_mount_args(
+    table: FdTable,
+    user_buf: u64,
+    target: &[u8],
+    fstype: &[u8],
+) -> Option<(u64, u64)> {
+    let target_at = user_buf + 8;
+    let fstype_at = user_buf + 8 + 256;
+    let mut staged = [0u8; 8 + 256 + 32];
+    staged[8..8 + target.len()].copy_from_slice(target);
+    staged[8 + 256..8 + 256 + fstype.len()].copy_from_slice(fstype);
+    let Ok(bytes) = slopos_mm::user_ptr::UserBytes::try_new(user_buf, staged.len()) else {
+        return None;
+    };
+    let ok = with_user_process_context(table, || {
+        slopos_mm::user_copy::copy_bytes_to_user(bytes, &staged).is_ok()
+    })
+    .unwrap_or(false);
+    ok.then_some((target_at, fstype_at))
+}
+
+/// Grafting a filesystem onto the namespace is `Capability::Mount`, and the
+/// dispatcher is the only thing that checks it — so this goes through the
+/// table entry rather than the handler.
+pub fn test_mount_requires_the_mount_capability() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    // The kernel-test phase runs before the boot step that mounts the builtin
+    // filesystems, so `/tmp` is a mount point only once this has run.
+    if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
+        return fail!("the VFS is unavailable");
+    }
+
+    let plain_id = create_test_user_task();
+    assert_test!(plain_id != INVALID_TASK_ID, "failed to create user task");
+    let granted_id =
+        create_test_user_task_with(TASK_FLAG_USER_MODE | slopos_abi::task::TASK_FLAG_MOUNT);
+    assert_test!(granted_id != INVALID_TASK_ID, "failed to create mount task");
+
+    let plain_guard = assert_some!(task_find_by_id(plain_id), "task lookup failed");
+    let Some(plain_pid) = plain_guard.process().as_deref().and_then(FdTable::of) else {
+        return TestResult::Fail;
+    };
+    let granted_guard = assert_some!(task_find_by_id(granted_id), "task lookup failed");
+    let Some(granted_pid) = granted_guard.process().as_deref().and_then(FdTable::of) else {
+        return TestResult::Fail;
+    };
+
+    let mount_entry = assert_some!(
+        syscall_lookup(slopos_abi::syscall::SYSCALL_MOUNT),
+        "mount is not registered"
+    );
+
+    // `/tmp` is already a mount point, so a caller holding the capability is
+    // refused by the mount logic instead: a *different* refusal is what proves
+    // the gate is the only thing between the two callers.
+    let Some(plain_buf) = map_user_rw_page(plain_pid) else {
+        return fail!("could not map a user page");
+    };
+    let Some((plain_target, plain_fstype)) =
+        stage_mount_args(plain_pid, plain_buf, b"/tmp", b"ramfs")
+    else {
+        return fail!("could not stage the mount arguments");
+    };
+    let mut plain_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    plain_frame.regs_mut().rdi = plain_buf;
+    plain_frame.regs_mut().rsi = plain_target;
+    plain_frame.regs_mut().rdx = plain_fstype;
+    plain_frame.regs_mut().r10 = 0;
+    let _ = with_user_process_context(plain_pid, || {
+        crate::syscall::dispatch::dispatch_entry(mount_entry, &plain_guard, &mut *plain_frame)
+    });
+    assert_eq_test!(
+        plain_frame.rax(),
+        slopos_abi::Errno::EPERM.as_u64(),
+        "an unprivileged task reached mount(2)"
+    );
+
+    let Some(granted_buf) = map_user_rw_page(granted_pid) else {
+        return fail!("could not map a user page");
+    };
+    let Some((granted_target, granted_fstype)) =
+        stage_mount_args(granted_pid, granted_buf, b"/tmp", b"ramfs")
+    else {
+        return fail!("could not stage the mount arguments");
+    };
+    let mut granted_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    granted_frame.regs_mut().rdi = granted_buf;
+    granted_frame.regs_mut().rsi = granted_target;
+    granted_frame.regs_mut().rdx = granted_fstype;
+    granted_frame.regs_mut().r10 = 0;
+    let _ = with_user_process_context(granted_pid, || {
+        crate::syscall::dispatch::dispatch_entry(mount_entry, &granted_guard, &mut *granted_frame)
+    });
+    assert_eq_test!(
+        granted_frame.rax(),
+        slopos_abi::Errno::EBUSY.as_u64(),
+        "a granted caller must reach the mount logic and be refused by it"
+    );
+
+    drop(plain_guard);
+    drop(granted_guard);
+    task_terminate(plain_id);
+    task_terminate(granted_id);
+    pass!()
+}
+
+/// `umount2` refuses a filesystem an open reference still names, and
+/// `MNT_DETACH` overrides that refusal.
+///
+/// Every filesystem is a `static`, so the surviving reference stays readable
+/// after the name is gone; the pooled instance is therefore not reset while
+/// that reference lives, and the capacity check at the end pins the slot
+/// coming back once it dies.
+pub fn test_umount2_busy_unless_detached() -> TestResult {
+    use crate::syscall::fs::mount_handlers::umount_path;
+    use slopos_abi::fs::MNT_DETACH;
+
+    if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
+        return fail!("the VFS is unavailable");
+    }
+
+    const MP: &[u8] = b"/tmp/umount_busy_mp";
+    let _ = slopos_fs::vfs::vfs_rmdir(MP);
+    if slopos_fs::vfs::vfs_mkdir(MP).is_err() {
+        return fail!("could not create the mount point");
+    }
+
+    let outcome = umount_busy_body(MP);
+
+    // A mount left behind is a mount every later test sees. Plain first, so
+    // the common path gives the pool slot back rather than retiring it.
+    if umount_path(MP, 0).is_err() {
+        let _ = umount_path(MP, MNT_DETACH);
+    }
+    let _ = slopos_fs::vfs::vfs_rmdir(MP);
+
+    match outcome {
+        Ok(()) => pass!(),
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+fn umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
+    use crate::syscall::fs::mount_handlers::{mount_apply, umount_path};
+    use slopos_abi::fs::MNT_DETACH;
+    use slopos_fs::vfs::mount::mount_at;
+    use slopos_fs::vfs::orphan::{close_ref, open_ref};
+
+    mount_apply(b"", mp, b"ramfs", 0).map_err(|_| "mount of a pooled ramfs failed")?;
+
+    let handle = slopos_fs::vfs::vfs_open(b"/tmp/umount_busy_mp/held", true)
+        .map_err(|_| "could not create a file through the mount")?;
+    open_ref(handle.fs, handle.inode).map_err(|_| "could not take an open reference")?;
+
+    let busy = umount_path(mp, 0);
+    if busy != Err(slopos_abi::Errno::EBUSY) {
+        let _ = close_ref(handle.fs, handle.inode);
+        return Err("umount2 of a held filesystem was not EBUSY");
+    }
+    if umount_path(mp, MNT_DETACH).is_err() {
+        let _ = close_ref(handle.fs, handle.inode);
+        return Err("MNT_DETACH did not detach a held filesystem");
+    }
+    if mount_at(mp).is_some() {
+        let _ = close_ref(handle.fs, handle.inode);
+        return Err("a detached mount is still in the table");
+    }
+
+    // Still readable through the surviving reference: what makes the lazy
+    // unmount safe rather than merely cheap.
+    let mut buf = [0u8; 4];
+    let readable = handle.read(0, &mut buf).is_ok();
+    let _ = close_ref(handle.fs, handle.inode);
+    if !readable {
+        return Err("a descriptor lost its inode to a lazy unmount");
+    }
+
+    // The instance a later mount gets is reset, whichever slot it comes from.
+    mount_apply(b"", mp, b"ramfs", 0).map_err(|_| "the pool refused a second mount")?;
+    let fresh = slopos_fs::vfs::vfs_open(b"/tmp/umount_busy_mp/held", false);
+    umount_path(mp, 0).map_err(|_| "the re-mounted filesystem would not unmount")?;
+    if fresh.is_ok() {
+        return Err("a pooled instance served the previous mount's file");
+    }
+
+    pool_is_at_full_capacity()
+}
+
+/// Every pool slot is claimable again.
+///
+/// The load-bearing case is the slot the `MNT_DETACH` above retired: a retired
+/// slot whose last reference has gone must come back, or a lazy unmount costs
+/// the system one of four ramfs mounts for the rest of the boot.
+fn pool_is_at_full_capacity() -> Result<(), &'static str> {
+    use slopos_fs::vfs::init::{RAMFS_POOL_LEN, vfs_ramfs_pool_claim, vfs_ramfs_pool_release};
+    use slopos_fs::vfs::traits::FileSystem;
+
+    let mut claimed: [Option<&'static slopos_fs::ramfs::RamFs>; RAMFS_POOL_LEN] =
+        [None; RAMFS_POOL_LEN];
+    for slot in claimed.iter_mut() {
+        *slot = vfs_ramfs_pool_claim();
+    }
+    let short = claimed.iter().any(|slot| slot.is_none());
+    for slot in claimed.iter().flatten() {
+        let instance: &'static dyn FileSystem = *slot;
+        let _ = vfs_ramfs_pool_release(instance, false);
+    }
+    if short {
+        return Err("a lazy unmount cost the ramfs pool a slot for the rest of the boot");
+    }
+    Ok(())
+}
+
+/// A mount over a directory the grant table keys a privilege on is refused.
+///
+/// Without it a holder of `Capability::Mount` covers `/bin` with a writable
+/// ramfs, creates `halt` in it, and spawns the planted binary into
+/// `TASK_FLAG_POWER`.
+pub fn test_mount_over_a_grant_path_is_refused() -> TestResult {
+    use crate::syscall::fs::mount_handlers::mount_apply;
+
+    if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
+        return fail!("the VFS is unavailable");
+    }
+
+    assert_eq_test!(
+        mount_apply(b"", b"/bin", b"ramfs", 0),
+        Err(slopos_abi::Errno::EPERM),
+        "a mount over /bin was allowed"
+    );
+    // Non-canonical too: the target is canonicalised before the table is
+    // consulted.
+    assert_eq_test!(
+        mount_apply(b"", b"/bin/halt", b"ramfs", 0),
+        Err(slopos_abi::Errno::EPERM),
+        "a mount over a granted program was allowed"
+    );
+    assert_eq_test!(
+        mount_apply(b"", b"/tmp/../bin", b"ramfs", 0),
+        Err(slopos_abi::Errno::EPERM),
+        "a non-canonical spelling of /bin got past the grant check"
+    );
+    pass!()
+}
+
+/// Unmounting a singleton filesystem's *second* mount must not end the
+/// filesystem's in-memory life: the first mount is still using it.
+///
+/// devfs rather than ext2, the other singleton `mount(2)` will place twice:
+/// the disk is attached after the kernel-test phase, so ext2 would make this
+/// conditional on the image. Either way the defect is `forget_filesystem`
+/// dropping the surviving mount's orphan records.
+pub fn test_umount2_of_a_second_mount_spares_the_first() -> TestResult {
+    use crate::syscall::fs::mount_handlers::{mount_apply, umount_path};
+    use slopos_fs::vfs::init::vfs_devfs_instance;
+    use slopos_fs::vfs::orphan::{close_ref, has_open_refs, open_ref};
+    use slopos_fs::vfs::traits::FileSystem;
+
+    if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
+        return fail!("the VFS is unavailable");
+    }
+
+    const MP: &[u8] = b"/tmp/devfs_second";
+    let _ = slopos_fs::vfs::vfs_rmdir(MP);
+    if slopos_fs::vfs::vfs_mkdir(MP).is_err() {
+        return fail!("could not create the mount point");
+    }
+
+    let devfs: &'static dyn FileSystem = vfs_devfs_instance();
+    let inode = devfs.root_inode();
+    // Stands for a descriptor open under the first mount, `/dev`.
+    if open_ref(devfs, inode).is_err() {
+        let _ = slopos_fs::vfs::vfs_rmdir(MP);
+        return fail!("could not take an open reference");
+    }
+
+    let outcome = (|| -> Result<(), &'static str> {
+        mount_apply(b"", MP, b"devfs", 0).map_err(|_| "the second devfs mount failed")?;
+        if umount_path(MP, 0).is_err() {
+            return Err("a descriptor on /dev made a second devfs mount busy");
+        }
+        if !has_open_refs(devfs) {
+            return Err("unmounting a second mount dropped the first mount's records");
+        }
+        Ok(())
+    })();
+
+    let _ = umount_path(MP, 0);
+    let _ = close_ref(devfs, inode);
+    let _ = slopos_fs::vfs::vfs_rmdir(MP);
+
+    match outcome {
+        Ok(()) => pass!(),
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+slopos_testing::stest!(
+    name = test_mount_requires_the_mount_capability,
+    suite = syscall_core
+);
+slopos_testing::stest!(
+    name = test_umount2_busy_unless_detached,
+    suite = syscall_core
+);
+slopos_testing::stest!(
+    name = test_mount_over_a_grant_path_is_refused,
+    suite = syscall_core
+);
+slopos_testing::stest!(
+    name = test_umount2_of_a_second_mount_spares_the_first,
+    suite = syscall_core
 );

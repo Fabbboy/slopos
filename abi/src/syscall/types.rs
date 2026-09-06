@@ -117,3 +117,11 @@ pub struct UserPerCpuStats {
     pub ready_count: u32,
     pub _pad2: u32,
 }
+
+/// `msync(2)` flags, Linux values.
+///
+/// `MS_INVALIDATE` is accepted by the ABI and refused by the kernel: one page
+/// set per inode, so there is no second copy to invalidate against.
+pub const MS_ASYNC: u64 = 1;
+pub const MS_INVALIDATE: u64 = 2;
+pub const MS_SYNC: u64 = 4;

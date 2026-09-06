@@ -10,6 +10,8 @@ pub mod devfs;
 pub mod ext2;
 pub mod ext2_vfs;
 pub mod fileio;
+pub mod filemap;
+pub mod partition;
 pub mod pipe;
 pub mod pipe_file_ops;
 pub mod ramfs;

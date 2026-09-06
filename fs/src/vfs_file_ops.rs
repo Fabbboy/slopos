@@ -13,6 +13,7 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use crate::fileio::OpenMode;
 
+use crate::vfs::traits::same_filesystem;
 use crate::vfs::{FileSystem, InodeId};
 
 /// Open vnodes system-wide — this kernel's `fs.file-max`.
@@ -55,6 +56,20 @@ fn with_table<R>(f: impl FnOnce(&mut HandleTable<OpenVnode>) -> R) -> R {
 fn resolve(handle: usize) -> Option<(&'static dyn FileSystem, InodeId)> {
     let h = Handle::<OpenVnode>::unpack(handle, SLOT_BITS);
     with_table(|t| t.get(h).map(|v| (v.fs, v.inode)).ok())
+}
+
+/// The capacity of the filesystem behind an open vnode handle — `fstatfs(2)`.
+/// `None` when the handle names no live vnode, which the caller reports as
+/// `EBADF`.
+pub fn vfs_file_statfs(handle: usize) -> Option<crate::vfs::VfsResult<crate::vfs::FsStats>> {
+    let (fs, _) = resolve(handle)?;
+    Some(fs.statfs())
+}
+
+/// The `(filesystem, inode)` an open vnode handle names, for `mmap(2)`: a
+/// file mapping is keyed on the inode, not on the descriptor that opened it.
+pub fn vfs_file_inode(handle: usize) -> Option<(&'static dyn FileSystem, InodeId)> {
+    resolve(handle)
 }
 
 pub struct VfsFileOps;
@@ -120,7 +135,7 @@ pub fn vfs_open_handle_flags(
 #[inline(never)]
 fn still_resolves(path: &[u8], fs: &'static dyn FileSystem, inode: InodeId) -> bool {
     match crate::vfs::resolve_path(path) {
-        Ok(again) => again.inode == inode && core::ptr::eq(again.fs, fs),
+        Ok(again) => again.inode == inode && same_filesystem(again.fs, fs),
         Err(_) => false,
     }
 }
@@ -186,6 +201,103 @@ pub(crate) fn vnode_backing(handle: usize, account: AccountId) -> Option<KArc<dy
     }
 }
 
+/// A vnode handle over `(fs, inode)` without a path walk, so a kernel test can
+/// drive the [`FileOps`] loops, where the coverage-boundary rules live.
+#[cfg(feature = "tests")]
+pub(crate) fn vnode_handle_for_tests(fs: &'static dyn FileSystem, inode: InodeId) -> Option<usize> {
+    with_table(|t| {
+        t.insert(OpenVnode { fs, inode })
+            .ok()
+            .map(|h| h.pack(SLOT_BITS))
+    })
+}
+
+#[cfg(feature = "tests")]
+pub(crate) fn drop_vnode_for_tests(handle: usize) {
+    let h = Handle::<OpenVnode>::unpack(handle, SLOT_BITS);
+    let _ = with_table(|t| t.remove(h));
+}
+
+/// One chunk of a `read(2)`, taken from the inode's page set when it covers
+/// `offset` and from the filesystem otherwise.
+///
+/// Both clips are load-bearing. The length stays the filesystem's answer,
+/// because the set holds whole pages and the tail of its last one is zero-fill
+/// past EOF; and a chunk that *starts* below the set is cut where coverage
+/// begins, or the rest would be read from the filesystem while the set holds
+/// newer bytes. A short answer is a coverage boundary, not EOF: only `Ok(0)`
+/// ends a read.
+pub(crate) fn read_chunk(
+    fs: &'static dyn FileSystem,
+    inode: InodeId,
+    offset: u64,
+    buf: &mut [u8],
+) -> crate::vfs::VfsResult<usize> {
+    match crate::filemap::coverage_at(fs, inode, offset) {
+        crate::filemap::Coverage::Here => {
+            let size = fs.stat(inode)?.size;
+            if offset >= size {
+                return Ok(0);
+            }
+            let want = clip(buf.len(), size - offset);
+            match crate::filemap::read_through(fs, inode, offset, &mut buf[..want]) {
+                Some(n) => Ok(n),
+                None => fs.read(inode, offset, &mut buf[..want]),
+            }
+        }
+        crate::filemap::Coverage::Above(boundary) => {
+            let want = clip(buf.len(), boundary - offset);
+            fs.read(inode, offset, &mut buf[..want])
+        }
+        crate::filemap::Coverage::Absent => fs.read(inode, offset, buf),
+    }
+}
+
+/// One chunk of a `write(2)`. A range the page set covers is written into the
+/// set, which is the authority for it; a chunk starting below the set is cut
+/// at the boundary, or the bytes past it would be invisible to every mapper
+/// and then overwritten by the set's own writeback.
+///
+/// A write reaching past the end of the file goes to *both*: the set cannot
+/// lengthen a file, and writeback is clamped to the length. Both copies then
+/// hold the same bytes, so the later writeback is idempotent.
+pub(crate) fn write_chunk(
+    fs: &'static dyn FileSystem,
+    inode: InodeId,
+    offset: u64,
+    buf: &[u8],
+) -> crate::vfs::VfsResult<usize> {
+    match crate::filemap::coverage_at(fs, inode, offset) {
+        crate::filemap::Coverage::Above(boundary) => {
+            let want = clip(buf.len(), boundary - offset);
+            return fs.write(inode, offset, &buf[..want]);
+        }
+        crate::filemap::Coverage::Absent => return fs.write(inode, offset, buf),
+        crate::filemap::Coverage::Here => {}
+    }
+    let size = fs.stat(inode)?.size;
+    let written = match crate::filemap::write_through(fs, inode, offset, buf) {
+        crate::filemap::WriteThrough::Served(n) => n,
+        crate::filemap::WriteThrough::Interrupted => {
+            return Err(crate::vfs::VfsError::Interrupted);
+        }
+        crate::filemap::WriteThrough::NotCovered => return fs.write(inode, offset, buf),
+    };
+    let end = offset + written as u64;
+    if end > size {
+        let tail_start = offset.max(size);
+        let from = usize::try_from(tail_start - offset).unwrap_or(written);
+        fs.write(inode, tail_start, &buf[from..written])?;
+    }
+    Ok(written)
+}
+
+/// `len` clipped to `limit`, saturating a `u64` that does not fit a `usize`.
+#[inline]
+fn clip(len: usize, limit: u64) -> usize {
+    usize::try_from(limit).unwrap_or(usize::MAX).min(len)
+}
+
 impl FileOps for VfsFileOps {
     fn kind(&self) -> FileKind {
         FileKind::Regular
@@ -210,7 +322,7 @@ impl FileOps for VfsFileOps {
 
         while total < want {
             let chunk = (want - total).min(staging.len());
-            match fs.read(inode, offset + total as u64, &mut staging[..chunk]) {
+            match read_chunk(fs, inode, offset + total as u64, &mut staging[..chunk]) {
                 Ok(0) => break,
                 Ok(n) => match buf.copy_in(total, &staging[..n]) {
                     Ok(w) => {
@@ -278,13 +390,11 @@ impl FileOps for VfsFileOps {
                     };
                 }
             };
-            match fs.write(inode, offset + total as u64, &staging[..n]) {
-                Ok(w) => {
-                    total += w;
-                    if w < n {
-                        break;
-                    }
-                }
+            // A short chunk is a coverage boundary, not a full device: the
+            // loop continues from there and stops only when nothing moves.
+            match write_chunk(fs, inode, offset + total as u64, &staging[..n]) {
+                Ok(0) => break,
+                Ok(w) => total += w,
                 Err(e) => {
                     return if total > 0 {
                         total as isize
@@ -326,6 +436,11 @@ impl FileOps for VfsFileOps {
         let Some((fs, inode)) = resolve(handle) else {
             return Errno::EBADF.raw();
         };
+        // Before the commit, not after: the page set holds bytes the
+        // filesystem has not seen.
+        if let Err(e) = crate::filemap::flush_inode(fs, inode) {
+            return e.to_errno().raw();
+        }
         match fs.sync_inode(inode, data_only) {
             Ok(()) => 0,
             Err(e) => e.to_errno().raw(),
