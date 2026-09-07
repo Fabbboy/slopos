@@ -9,6 +9,7 @@
 use super::Ext2Error;
 use super::ondisk::{GroupDesc, Superblock};
 use super::types::{BlockNum, GroupIdx, InodeNum};
+use slopos_ostd::process::AccountId;
 
 /// A group-descriptor location proven to lie inside the descriptor table.
 #[derive(Debug, Copy, Clone)]
@@ -48,6 +49,9 @@ pub struct Ext2Geometry {
     itable_blocks_per_group: u32,
     ptrs_per_block: u32,
     reserved_blocks: u32,
+    /// Who a block allocation is charged to. Beside the reserve because both
+    /// are properties of the *caller* rather than of the image.
+    account: AccountId,
 }
 
 impl Ext2Geometry {
@@ -127,6 +131,7 @@ impl Ext2Geometry {
             itable_blocks_per_group,
             ptrs_per_block: block_size / 4,
             reserved_blocks: 0,
+            account: AccountId::NONE,
         })
     }
 
@@ -136,6 +141,22 @@ impl Ext2Geometry {
     pub fn with_reserve(mut self, reserved_blocks: u32) -> Self {
         self.reserved_blocks = reserved_blocks.min(self.blocks_count);
         self
+    }
+
+    /// Charge allocations through this handle to `account`.
+    ///
+    /// Per call, because the mount is shared. [`AccountId::NONE`] — a kernel
+    /// thread's writeback — names no row, so it is charged to nobody rather
+    /// than to a bystander.
+    #[inline]
+    pub fn with_account(mut self, account: AccountId) -> Self {
+        self.account = account;
+        self
+    }
+
+    #[inline]
+    pub fn account(self) -> AccountId {
+        self.account
     }
 
     /// Blocks an unprivileged allocation must leave free. `s_r_blocks_count`

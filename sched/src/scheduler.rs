@@ -1962,6 +1962,17 @@ pub fn current_task_is_privileged() -> bool {
     })
 }
 
+/// The account the running task's allocations are charged to, or
+/// [`AccountId::NONE`] for a task that belongs to no process — which names no
+/// row, so a kernel thread's writeback is accounted to nobody rather than to
+/// whichever process happens to be running.
+pub fn current_task_account() -> slopos_ostd::process::AccountId {
+    use slopos_ostd::process::AccountId;
+    Current::get()
+        .and_then(|c| c.task().process().as_deref().map(|p| p.account()))
+        .unwrap_or(AccountId::NONE)
+}
+
 pub fn current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyIndex> {
     Current::get().and_then(|c| c.task().controlling_tty())
 }

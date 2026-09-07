@@ -16,7 +16,6 @@ editing.
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
-| `persistent-storage.md` | Files that survive a reboot: per-inode durability, the ext2 write surface, crash consistency, the disk as `/` |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
@@ -30,6 +29,18 @@ the two instances, and `drivers/src/tests/bus_generic.rs` for what the protocol 
 Deferred-probe-to-fixpoint, unbind and hotplug were the plan's Phase 2 and are deliberately
 not planned in the mid term; the `Deferred` outcome and the Binding-above-Devres slot order
 are the seams they would build on.
+
+Persistent storage has **landed and its plan is retired**. A file written on one
+boot is readable on the next on the root filesystem and under failure: a
+writable disk is `/` by default, a metadata redo log in `/.journal` makes an
+operation retractable and a crash recoverable, a writeback pass is bounded so
+`sync(2)` no longer stalls every path walk on the mount for its duration, and a
+per-process `ResourceKind::DiskBlocks` bounds what one principal can hold.
+Read the code rather than a document: `fs/src/ext2/journal.rs` for the log's
+format and its replay, `fs/src/ext2/cache.rs` for how a commit, a rollback and
+an eviction interact with it, `Ext2Fs::sync_step` for the bounded pass, and
+`slopos-ostd/src/process/quota/disk.rs` for the block ledger. `AGENTS.md`
+states the invariants a change there must keep.
 
 The authority model has **landed and its plan is retired**. Authority is a flat
 per-capability mask whose classification is total by compile-time construction:

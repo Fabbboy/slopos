@@ -14,7 +14,7 @@ fs_image_dir     := "fs/assets"
 fs_image         := fs_image_dir / "ext2.img"
 fs_image_tests   := fs_image_dir / "ext2-tests.img"
 fs_image_persist := fs_image_dir / "ext2-persist.img"
-fs_image_size    := env("FS_IMAGE_SIZE", "16M")
+fs_image_size    := env("FS_IMAGE_SIZE", "32M")
 initramfs        := build_dir / "initramfs.cpio"
 initramfs_tests  := build_dir / "initramfs-tests.cpio"
 

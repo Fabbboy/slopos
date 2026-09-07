@@ -81,8 +81,11 @@ const fn build_crc32_table() -> [u32; 256] {
 
 static CRC32_TABLE: [u32; 256] = build_crc32_table();
 
+/// Starting state of a running CRC-32, before any byte is fed.
+pub(crate) const CRC32_INIT: u32 = 0xFFFF_FFFF;
+
 /// Feed `data` into a running (pre-final-inversion) CRC-32 state.
-fn crc32_feed(mut state: u32, data: &[u8]) -> u32 {
+pub(crate) fn crc32_feed(mut state: u32, data: &[u8]) -> u32 {
     for &b in data {
         let idx = ((state ^ b as u32) & 0xFF) as usize;
         state = (state >> 8) ^ CRC32_TABLE[idx];
@@ -90,9 +93,14 @@ fn crc32_feed(mut state: u32, data: &[u8]) -> u32 {
     state
 }
 
+/// Close a running state into the value [`crc32`] would have returned.
+pub(crate) fn crc32_finish(state: u32) -> u32 {
+    state ^ 0xFFFF_FFFF
+}
+
 /// CRC-32 (IEEE, reflected) of `data`. `crc32(&[]) == 0`, matching `zlib.crc32`.
 pub fn crc32(data: &[u8]) -> u32 {
-    crc32_feed(0xFFFF_FFFF, data) ^ 0xFFFF_FFFF
+    crc32_finish(crc32_feed(CRC32_INIT, data))
 }
 
 /// The byte range the filesystem claims, from its own superblock. A trailer

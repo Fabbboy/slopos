@@ -79,6 +79,19 @@
 #     and task 5, all inside the spreads above, so as before only the
 #     deterministic row moves.
 #
+# 2026-09-07, Phase 7 lands a ninth kind (`diskblocks`, the per-principal
+# ext2 block ceiling) and five kernel tests that each spawn a scratch
+# process:
+#   diskblocks new rows. Both deterministic over three runs: 6 in the kernel
+#     phase and 3875 in the userland phase, the latter being `persist_test`'s
+#     disk-reserve filler taking the volume down to `s_r_blocks_count`. No
+#     denial: the enforced per-process default (8192) sits above what that
+#     filler legitimately holds, which is the whole point of `max-denials 0`.
+#   kernelmeta post-kernel-tests 2200 -> 2300. The new tests' scratch
+#     processes are task stacks at 12 pages each. Measured 2191/2233/2245 over
+#     three runs, so the cap is the maximum plus that 54-page spread, in the
+#     same style as the order-dependent rows above.
+#
 # `task` moves with scheduling (measured 5-7 across runs), so its cap carries
 # the observed spread as margin rather than a single observation.
 #
@@ -104,13 +117,15 @@ require-phase post-userland-tests
 
 boot	kernelmeta	900
 post-kernel-tests	custody	8
+post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	2200
+post-kernel-tests	kernelmeta	2300
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	65536
 post-kernel-tests	process	20
 post-kernel-tests	task	8
 post-userland-tests	custody	8
+post-userland-tests	diskblocks	3875
 post-userland-tests	fdslot	256
 post-userland-tests	kernelmeta	6933
 post-userland-tests	objectrow	257

@@ -8,7 +8,10 @@ set -euo pipefail
 # Each binary is placed in /bin/<name> except 'init' which goes to /sbin/init.
 #
 # Environment:
-#   FS_IMAGE_SIZE - image size (default: 16M)
+#   FS_IMAGE_SIZE - image size (default: 32M)
+#   FS_JOURNAL_SIZE - size of the metadata log at /.journal (default: 4M);
+#                   `0` builds no log, which makes the kernel fall back to
+#                   undo-scoped operations and refuse an unclean mount.
 #   VERITY        - `on` (default) appends a v1 integrity trailer, which makes
 #                   the kernel mount the image read-only; `rw` appends a v2
 #                   trailer, which leaves the image writable (a write
@@ -28,7 +31,8 @@ BUILD_DIR="${2:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] 
 shift 2
 BINS=("$@")
 
-FS_IMAGE_SIZE="${FS_IMAGE_SIZE:-16M}"
+FS_IMAGE_SIZE="${FS_IMAGE_SIZE:-32M}"
+FS_JOURNAL_SIZE="${FS_JOURNAL_SIZE:-4M}"
 VERITY="${VERITY:-on}"
 case "$VERITY" in
     on|off|rw) ;;
@@ -58,6 +62,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 PRESERVE_FS_IMAGE="${PRESERVE_FS_IMAGE:-0}"
+# Set when this run rewrote binaries into an image it kept, which obliges it to
+# invalidate a log whose records describe the old ones.
+REFRESHED_BINARIES=0
 STAMP_PATH="${IMAGE_PATH}.stamp"
 
 # What the image's content is a function of: an equal stamp means a preserved
@@ -161,6 +168,7 @@ if image_is_preservable; then
     # A refresh that dies midway must not leave the old stamp, or the next run
     # reports an image missing a binary as current.
     rm -f "$STAMP_PATH"
+    REFRESHED_BINARIES=1
 else
     echo "Rebuilding ext2 image at $IMAGE_PATH ($FS_IMAGE_SIZE)"
     rm -f "$IMAGE_PATH" "$STAMP_PATH"
@@ -175,6 +183,73 @@ mkdir_p /sbin
 # whether a path is writable. Mirrors gen_initramfs.py's EMPTY_DIRS.
 mkdir_p /etc
 mkdir_p /var
+
+# The metadata log (fs/src/ext2/journal.rs). A plain preallocated file, so
+# `e2fsck` sees a file and the format carries no feature bit; the seal is what
+# refuses every write, rename and unlink of it from userland.
+#
+# Filled with non-zero bytes: `debugfs write` leaves a hole where its source
+# block is all zeros, and the kernel refuses a sparse log because writing into
+# a hole would have to allocate mid-commit.
+journal_blocks() {
+    debugfs -R "stat /.journal" "$IMAGE_PATH" 2>/dev/null |
+        sed -n 's/.*Blockcount: \([0-9]*\).*/\1/p'
+}
+
+# Byte offset of the log's own superblock, i.e. of its first block.
+journal_first_byte() {
+    local first bs
+    first=$(debugfs -R "blocks /.journal" "$IMAGE_PATH" 2>/dev/null | awk '{print $1}')
+    bs=$(dumpe2fs -h "$IMAGE_PATH" 2>/dev/null | sed -n 's/^Block size:  *\([0-9]*\)/\1/p')
+    echo $((first * bs))
+}
+
+install_journal() {
+    [ "$FS_JOURNAL_SIZE" != "0" ] || return 0
+    local have
+    have="$(journal_blocks)"
+    if [ -n "$have" ] && [ "$have" != "0" ]; then
+        # Kept, not rebuilt: a preserved image's log may hold transactions the
+        # next mount owes a replay. Its superblock is zeroed after a binary
+        # refresh, because debugfs rewrote inodes the log knows nothing about
+        # and replaying stale copies of them would lose the fresh ones.
+        if [ "$REFRESHED_BINARIES" = "1" ]; then
+            dd if=/dev/zero of="$IMAGE_PATH" bs=1 count=4 conv=notrunc status=none \
+                seek="$(journal_first_byte)" 2>/dev/null || true
+            echo "journal: invalidated /.journal — its records predate this refresh"
+        else
+            echo "journal: /.journal already present — leaving it alone"
+        fi
+        return 0
+    fi
+
+
+    if [ -n "$have" ]; then
+        debugfs -w -R "rm /.journal" "$IMAGE_PATH" >/dev/null 2>&1 || true
+    fi
+    local filled bytes
+    bytes="$(numfmt --from=iec "$FS_JOURNAL_SIZE")"
+    # Under the build directory, not $TMPDIR: debugfs word-splits the request
+    # string, so the path must be one this repo controls.
+    filled="$(mktemp "${IMAGE_DIR}/journal.XXXXXX")"
+    trap 'rm -f "$filled"' RETURN
+    # Read the length rather than piping through a filter: a pipeline whose
+    # head exits early takes SIGPIPE under `set -o pipefail`.
+    head -c "$bytes" /dev/urandom > "$filled"
+    if ! debugfs -w -R "write $filled /.journal" "$IMAGE_PATH" >/dev/null 2>&1; then
+        echo "journal: no room for a ${FS_JOURNAL_SIZE} log in $IMAGE_PATH" >&2
+        exit 1
+    fi
+    debugfs -w -R "set_inode_field /.journal mode 0100600" "$IMAGE_PATH" >/dev/null
+    debugfs -w -R "set_inode_field /.journal flags 0x10" "$IMAGE_PATH" >/dev/null
+    have="$(journal_blocks)"
+    if [ -z "$have" ] || [ "$have" = "0" ]; then
+        echo "journal: /.journal came out sparse — the kernel would refuse it" >&2
+        exit 1
+    fi
+    echo "journal: installed /.journal ($FS_JOURNAL_SIZE, $have sectors)"
+}
+install_journal
 
 for bin in "${BINS[@]}"; do
     src="${BUILD_DIR}/${bin}.elf"

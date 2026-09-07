@@ -8,8 +8,8 @@
 //! make that claim true.
 
 use slopos_abi::quota::{
-    CustodyAxis, FdSlot, KernelMetaAxis, ObjectRow, PagesAxis, PinnedBytesAxis, ProcCount, Refund,
-    ResourceKind, TaskCount, Unit,
+    CustodyAxis, DiskBlocksAxis, FdSlot, KernelMetaAxis, ObjectRow, PagesAxis, PinnedBytesAxis,
+    ProcCount, Refund, ResourceKind, TaskCount, Unit,
 };
 
 mod sealed {
@@ -58,6 +58,7 @@ impl_axis! {
     PagesAxis       => Pages,       cost = 1;
     PinnedBytesAxis => PinnedBytes, cost = 1;
     KernelMetaAxis  => KernelMeta,  cost = 1;
+    DiskBlocksAxis  => DiskBlocks,  cost = 1;
 }
 
 #[cfg(test)]
@@ -82,5 +83,6 @@ mod tests {
         check::<PinnedBytesAxis>(ResourceKind::PinnedBytes);
         check::<CustodyAxis>(ResourceKind::Custody);
         check::<KernelMetaAxis>(ResourceKind::KernelMeta);
+        check::<DiskBlocksAxis>(ResourceKind::DiskBlocks);
     }
 }

@@ -35,7 +35,7 @@ const CAP_FIXTURES: usize = 16;
 
 struct TestMount {
     device: MemoryBlockDevice,
-    cache: BlockCache,
+    cache: KBox<BlockCache>,
     /// Boxed so a per-call copy is the only 1 KiB superblock on any frame.
     superblock: KBox<Ext2Superblock>,
     superblock_dirty: bool,
@@ -192,7 +192,7 @@ fn install_mount(device: MemoryBlockDevice) -> bool {
     let Ok(boxed) = KBox::try_new(superblock) else {
         return false;
     };
-    let Ok(cache) = BlockCache::new(block_size) else {
+    let Ok(cache) = BlockCache::new_boxed(block_size) else {
         return false;
     };
     let Ok(mut guard) = TEST_MOUNT.lock() else {
@@ -311,7 +311,7 @@ fn read_fresh(
     offset: u64,
     buf: &mut [u8],
 ) -> bool {
-    let Ok(mut cache) = BlockCache::new(block_size) else {
+    let Ok(mut cache) = BlockCache::new_boxed(block_size) else {
         return false;
     };
     let Ok(mut fs) = Ext2Fs::new(device, &mut cache, *superblock, block_size, inode_size) else {

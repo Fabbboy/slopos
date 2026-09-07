@@ -6,6 +6,7 @@ pub mod ext2_alloc;
 pub mod file;
 pub mod geometry;
 pub mod inode;
+pub mod journal;
 pub mod ondisk;
 pub mod symlink;
 pub mod time;
@@ -18,11 +19,16 @@ use ondisk::{
     EXT2_VALID_FS, GroupDesc, Inode, MODE_DIRECTORY, MODE_FILE, MODE_PERM_MASK,
     RO_COMPAT_LARGE_FILE, S_LAST_ORPHAN_OFF, Superblock,
 };
-use types::{BlockNum, GroupIdx, InodeNum};
+use types::{BlockNum, FileBlock, GroupIdx, InodeNum};
 
 use crate::blockdev::BlockDevice;
+use slopos_ostd::KVec;
 
 pub use ondisk::EXT2_MAX_BLOCK_SIZE;
+
+/// Where the metadata log lives. A plain preallocated file, so an image that
+/// has none simply has none and `e2fsck` needs to know nothing about it.
+pub const JOURNAL_PATH: &[u8] = b"/.journal";
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Ext2Error {
@@ -173,6 +179,41 @@ fn dir_file_type(inode: &Inode) -> u8 {
     }
 }
 
+/// Which ordered phase a writeback pass is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncPhase {
+    Data,
+    Metadata,
+    Logged,
+    Superblock,
+    Done,
+}
+
+/// A whole-filesystem writeback pass, resumable across mount-lock releases.
+///
+/// Carrying the epoch, the log head and the log generation it opened on is
+/// what bounds the pass: an operation that runs between two steps is entirely
+/// outside it, so the resumed pass can neither publish that operation's
+/// metadata ahead of its data nor empty a log that has grown — or been emptied
+/// and refilled — behind it.
+#[derive(Debug, Clone, Copy)]
+pub struct SyncPass {
+    epoch: u64,
+    phase: SyncPhase,
+    cursor: u32,
+    limit: u32,
+    /// Which emptying of the log `cursor` and `limit` index. Another pass can
+    /// reset and refill it between two steps, after which those indices name
+    /// someone else's records.
+    generation: u32,
+}
+
+impl SyncPass {
+    pub fn is_done(&self) -> bool {
+        self.phase == SyncPhase::Done
+    }
+}
+
 /// RAII scope for one all-or-nothing ext2 operation.
 ///
 /// Rolls back on drop unless [`Self::commit`] ran, which covers the `?` exits
@@ -210,9 +251,22 @@ impl<'t, 'a> Ext2Txn<'t, 'a> {
         }
     }
 
-    fn commit(&mut self) {
+    /// Publishing the transaction can fail on the device, and a commit that
+    /// did not reach the log is not a commit: leaving `committed` clear hands
+    /// the failure to [`Drop`], which rolls the operation back.
+    fn commit(&mut self, device: &dyn BlockDevice) -> Result<(), Ext2Error> {
+        self.fs.cache.commit_op(device)?;
         self.committed = true;
-        self.fs.cache.commit_op();
+        if self.outermost && self.fs.take_pending_orphan_head().is_some() {
+            // After the commit, never before: the head may only name a
+            // member whose record is already recoverable. Best-effort, as the
+            // rollback's compensation is — failing leaves a list shorter than
+            // the truth, which `e2fsck` reclaims, not a chain that lies.
+            if self.fs.write_orphan_head_now().is_err() {
+                self.fs.corruption_seen = true;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -237,7 +291,10 @@ impl Drop for Ext2Txn<'_, '_> {
             // Best-effort by necessity: this is a destructor, so a device
             // error has nowhere to go. Failing leaves exactly the state that
             // not trying would have, and `e2fsck` reclaims it.
-            if self.fs.superblock.last_orphan != self.superblock.last_orphan {
+            // Under a log the head write was deferred past a commit that
+            // never happened, so there is nothing on the device to retract.
+            let deferred = self.fs.take_pending_orphan_head().is_some();
+            if !deferred && self.fs.superblock.last_orphan != self.superblock.last_orphan {
                 let published = self.fs.superblock.last_orphan;
                 self.fs.superblock.last_orphan = self.superblock.last_orphan;
                 let _ = self.fs.write_orphan_head();
@@ -275,6 +332,13 @@ pub struct Ext2Fs<'a> {
     /// A [`Ext2Txn`] scope is open, so a nested one must not take a second
     /// superblock snapshot.
     in_transaction: bool,
+    /// `s_last_orphan` an open transaction moved, owed to the device once it
+    /// commits. Only set under a log, which is what makes deferring it safe:
+    /// the member's record reaches the log before the head names it.
+    pending_orphan_head: Option<u32>,
+    /// The log's own file, kept even when no log was attached: the reason to
+    /// refuse a reader is the file's contents, not whether this boot logs.
+    journal_inode: Option<u32>,
 }
 
 impl<'a> Ext2Fs<'a> {
@@ -334,6 +398,8 @@ impl<'a> Ext2Fs<'a> {
             read_only,
             corruption_seen: false,
             in_transaction: false,
+            pending_orphan_head: None,
+            journal_inode: None,
         })
     }
 
@@ -348,6 +414,25 @@ impl<'a> Ext2Fs<'a> {
     /// asking, and the mount is shared by every process on it.
     pub fn set_block_reserve(&mut self, reserved: u32) {
         self.geom = self.geom.with_reserve(reserved);
+    }
+
+    /// Charge block allocations through this handle to `account`.
+    ///
+    /// Per call, for the same reason the reserve is: the mount is shared and
+    /// the allocation is the caller's.
+    pub fn set_account(&mut self, account: slopos_ostd::process::AccountId) {
+        self.geom = self.geom.with_account(account);
+    }
+
+    /// The log's file, for the mount to carry across handles.
+    pub fn journal_inode(&self) -> Option<u32> {
+        self.journal_inode
+    }
+
+    /// Refuse readers of the log's file on this handle. Per call, like the
+    /// reserve and the account: the value belongs to the mount.
+    pub fn set_journal_inode(&mut self, ino: Option<u32>) {
+        self.journal_inode = ino;
     }
 
     pub fn is_read_only(&self) -> bool {
@@ -432,15 +517,21 @@ impl<'a> Ext2Fs<'a> {
     /// block it dirtied and every free-count it moved, so a later flush cannot
     /// publish half of it.
     ///
-    /// Every mutating entry point below is wrapped in one. What the rollback
-    /// does *not* cover is a block the cache had to evict mid-operation, which
-    /// reached the device before the failure; [`BlockCache::find_or_evict`]
-    /// makes that the victim of last resort, and closing the residual needs a
-    /// journal rather than a wider guard.
+    /// With a redo log the retraction is exact, because no home block carries
+    /// the operation's changes until its commit record is on the medium.
+    /// Without one the scope is cache-deep: a block evicted mid-operation
+    /// reached its home before the failure, and
+    /// [`BlockCache::find_or_evict`] only makes that the case of last resort.
     fn transaction<R>(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<R, Ext2Error>,
     ) -> Result<R, Ext2Error> {
+        // The only point at which the log can be emptied: a check point
+        // publishes committed content, and mid-operation the same blocks hold
+        // uncommitted content.
+        if !self.in_transaction && !self.cache.journal_has_headroom() {
+            self.checkpoint_journal()?;
+        }
         let mut txn = Ext2Txn::begin(self);
         let result = f(txn.fs);
         if let Err(e) = &result
@@ -456,7 +547,8 @@ impl<'a> Ext2Fs<'a> {
             return Err(Ext2Error::NoSpace);
         }
         if result.is_ok() {
-            txn.commit();
+            let device = txn.fs.device;
+            txn.commit(device)?;
         }
         result
     }
@@ -662,31 +754,226 @@ impl<'a> Ext2Fs<'a> {
         Ok((first, last.max(first)))
     }
 
-    /// Ordered durability, following the ext2 `data=ordered` discipline (minus a
-    /// metadata journal): data blocks, barrier, metadata blocks, barrier,
-    /// superblock free-counts, barrier. A crash between phases can leave
+    /// Whether a writeback pass would do anything at all.
+    ///
+    /// A barrier over nothing orders nothing, and this is asked on every
+    /// flusher tick and every `sync(2)`. The log counts as work even with a
+    /// clean cache: a rollback can leave a block whose only copy is a record.
+    pub fn sync_pending(&self) -> bool {
+        self.cache.dirty_count() > 0
+            || self.cache.unbarriered_writes() > 0
+            || self.superblock_dirty
+            || !self.cache.journal_is_empty()
+    }
+
+    /// Open a writeback pass over everything dirty *now*.
+    ///
+    /// The epoch is fixed here, so a pass driven one [`Self::sync_step`] at a
+    /// time with the mount lock dropped in between still writes nothing a
+    /// later operation dirtied — which is what keeps the phases ordered.
+    pub fn begin_sync(&self) -> SyncPass {
+        SyncPass {
+            epoch: self.cache.writeback_epoch(),
+            phase: SyncPhase::Data,
+            cursor: 1,
+            limit: self.cache.journal_head(),
+            generation: self.cache.journal_generation(),
+        }
+    }
+
+    /// Advance `pass` by at most `budget` device writes.
+    ///
+    /// Ordered durability, following ext2's `data=ordered` discipline: data
+    /// blocks, barrier, metadata blocks, the log's own leftovers, barrier,
+    /// superblock free counts, barrier. A crash between phases can leave
     /// recoverable free-count drift but never a directory entry or inode
     /// pointing at uninitialised on-disk data.
-    pub fn sync(&mut self) -> Result<(), Ext2Error> {
-        // A barrier over nothing orders nothing, and this runs on the flusher's
-        // five-second tick and on every unprivileged `sync(2)`.
-        if self.cache.dirty_count() == 0
-            && self.cache.unbarriered_writes() == 0
-            && !self.superblock_dirty
-        {
-            return Ok(());
-        }
-        self.cache.flush_kind(cache::BlockKind::Data, self.device)?;
-        self.device_barrier()?;
-        self.cache
-            .flush_kind(cache::BlockKind::Metadata, self.device)?;
-        self.device_barrier()?;
-        if self.superblock_dirty {
-            self.write_superblock()?;
-            self.device_barrier()?;
-            self.superblock_dirty = false;
+    pub fn sync_step(&mut self, pass: &mut SyncPass, budget: usize) -> Result<(), Ext2Error> {
+        match pass.phase {
+            SyncPhase::Data => {
+                let progress =
+                    self.cache
+                        .flush_bounded(self.device, pass.epoch, budget, |kind, _| {
+                            kind == cache::BlockKind::Data
+                        })?;
+                if !progress.more {
+                    self.device_barrier()?;
+                    pass.phase = SyncPhase::Metadata;
+                }
+            }
+            SyncPhase::Metadata => {
+                let progress =
+                    self.cache
+                        .flush_bounded(self.device, pass.epoch, budget, |kind, _| {
+                            kind == cache::BlockKind::Metadata
+                        })?;
+                if !progress.more {
+                    pass.phase = SyncPhase::Logged;
+                }
+            }
+            SyncPhase::Logged => {
+                // A log emptied behind the pass invalidates both indices, and
+                // whoever reset it check pointed those records — so the rest
+                // is the next pass's.
+                if self.cache.journal_generation() != pass.generation {
+                    pass.phase = SyncPhase::Superblock;
+                    return Ok(());
+                }
+                // Bounded by the head the pass opened on: a record appended
+                // since may belong to an operation still running.
+                let progress =
+                    self.cache
+                        .checkpoint_logged(self.device, pass.cursor, budget, pass.limit)?;
+                pass.cursor = progress.cursor;
+                if !progress.more {
+                    if self.cache.unbarriered_writes() > 0 {
+                        self.device_barrier()?;
+                    }
+                    // Only when nothing was appended behind the pass: half an
+                    // emptied log is not a state the format can express.
+                    if self.cache.journal_head() == pass.limit {
+                        self.cache.journal_reset(self.device)?;
+                    }
+                    pass.phase = SyncPhase::Superblock;
+                }
+            }
+            SyncPhase::Superblock => {
+                if self.superblock_dirty {
+                    self.write_superblock()?;
+                    self.device_barrier()?;
+                    self.superblock_dirty = false;
+                }
+                pass.phase = SyncPhase::Done;
+            }
+            SyncPhase::Done => {}
         }
         Ok(())
+    }
+
+    /// Drive a whole pass without releasing anything. The callers that can
+    /// afford to yield use [`Self::sync_step`].
+    pub fn sync(&mut self) -> Result<(), Ext2Error> {
+        if !self.sync_pending() {
+            return Ok(());
+        }
+        let mut pass = self.begin_sync();
+        while !pass.is_done() {
+            self.sync_step(&mut pass, usize::MAX)?;
+        }
+        Ok(())
+    }
+
+    /// Attach the image's metadata log, replaying whatever a previous boot
+    /// committed and never check pointed.
+    ///
+    /// `Ok(None)` for an image with no usable log: a journal is an ext2
+    /// image's optional property, and without one operations fall back to
+    /// undo-scoped. A read-only mount attaches none — replay is a write.
+    #[inline(never)]
+    pub fn attach_journal(&mut self) -> Result<Option<journal::JournalRecovery>, Ext2Error> {
+        let ino = match self.resolve_path(JOURNAL_PATH) {
+            Ok(ino) => ino,
+            Err(Ext2Error::PathNotFound | Ext2Error::NotDirectory | Ext2Error::NotFile) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        let inode = self.read_inode_num(InodeNum(ino))?;
+        // The seal is what refuses every write, rename and unlink of the file,
+        // so a log file without one is not a log this kernel will use.
+        if !inode.is_regular_file() || !inode.is_immutable() {
+            return Ok(None);
+        }
+        let blocks = u32::try_from(inode.size / self.block_size as u64).unwrap_or(0);
+        if blocks < journal::MIN_LOG_SLOTS + 1 {
+            return Ok(None);
+        }
+        // Recorded once the shape says it really is a log, and before the
+        // read-only bail: a mount that cannot replay still owes readers the
+        // refusal. Earlier would reserve the name against an ordinary file,
+        // which *can* be deleted — and the refusal would then follow its inode
+        // number to whatever reused it.
+        self.journal_inode = Some(ino);
+        if self.read_only {
+            return Ok(None);
+        }
+        let Some(slots) = self.map_log_blocks(ino, blocks)? else {
+            return Ok(None);
+        };
+        let extent = journal::LogExtent {
+            first_data_block: self.geom.first_data_block().raw(),
+            blocks_count: self.geom.blocks_count(),
+        };
+        let (log, recovery) =
+            journal::Journal::attach(slots, self.block_size, ino, extent, self.device)?;
+        if recovery.replayed() {
+            // The replay wrote home locations under the reads this function
+            // just did, so anything cached before it is stale.
+            self.cache.invalidate_all_clean();
+            // Including the blocks that named the log's own extent: if the
+            // replay moved them, this list is no longer `/.journal`'s.
+            if !self.log_blocks_unchanged(ino, blocks, log.slots())? {
+                return Ok(None);
+            }
+        }
+        self.cache.install_journal(log)?;
+        Ok(Some(recovery))
+    }
+
+    /// Whether the log file still maps to exactly `slots`.
+    #[inline(never)]
+    fn log_blocks_unchanged(
+        &mut self,
+        ino: u32,
+        blocks: u32,
+        slots: &[u32],
+    ) -> Result<bool, Ext2Error> {
+        let again = self.map_log_blocks(ino, blocks)?;
+        Ok(again.as_ref().map(|s| s.as_slice()) == Some(slots))
+    }
+
+    /// The log file's blocks, or `None` for a file this kernel will not log
+    /// into. Each is checked against the volume, because the log writes to
+    /// them without consulting the filesystem again.
+    fn map_log_blocks(&mut self, ino: u32, blocks: u32) -> Result<Option<KVec<u32>>, Ext2Error> {
+        let inode = self.read_inode_num(InodeNum(ino))?;
+        let mut slots = KVec::with_capacity(blocks as usize).map_err(|_| Ext2Error::OutOfMemory)?;
+        for index in 0..blocks {
+            let block = blockmap::map_block(
+                &inode,
+                FileBlock(index),
+                self.ptrs_per_block,
+                &mut *self.cache,
+                self.device,
+                BlockOwner::File(ino),
+            )?;
+            // A hole means the file was never preallocated; a block outside
+            // the volume means the mapping is not this file's. Writing into
+            // either would land on something else.
+            if !block.is_valid() || self.geom.checked_block(block.raw()).is_none() {
+                return Ok(None);
+            }
+            slots
+                .push(block.raw())
+                .map_err(|_| Ext2Error::OutOfMemory)?;
+        }
+        Ok(Some(slots))
+    }
+
+    /// Whether the log has filled far enough that the flusher should drain it
+    /// before an operation is forced to check point under the mount lock.
+    pub fn journal_needs_drain(&self) -> bool {
+        self.cache.journal_needs_drain()
+    }
+
+    /// Where the log's append point stands. `1` is empty, and so is no log.
+    pub fn journal_head(&self) -> u32 {
+        self.cache.journal_head()
+    }
+
+    /// Empty the log so the next operation has room to log itself.
+    fn checkpoint_journal(&mut self) -> Result<(), Ext2Error> {
+        self.sync()
     }
 
     pub fn flush(&mut self) -> Result<(), Ext2Error> {
@@ -764,12 +1051,19 @@ impl<'a> Ext2Fs<'a> {
         Ok(())
     }
 
+    /// The log's own file is refused rather than read: its blocks hold copies
+    /// of bitmaps, inode tables and directory blocks, so a reader of it sees
+    /// the metadata of files whose permissions it does not hold.
+    /// `EXT2_IMMUTABLE_FL` refuses the write half; this is the read half.
     pub fn read_file(
         &mut self,
         ino: u32,
         offset: u64,
         buffer: &mut [u8],
     ) -> Result<usize, Ext2Error> {
+        if self.journal_inode == Some(ino) {
+            return Err(Ext2Error::Immutable);
+        }
         let inode = self.read_inode_num(InodeNum(ino))?;
         file::read_file(
             &inode,
@@ -1505,7 +1799,12 @@ impl<'a> Ext2Fs<'a> {
         // naming an inode whose `i_dtime` is still its pre-push value — zero
         // on a freshly created one — truncating the whole chain behind it and
         // leaking every orphan already on the list.
-        self.flush_inode_record(ino)?;
+        // A home write of an uncommitted record is what the log forbids;
+        // under one the ordering comes from the commit, because
+        // `write_orphan_head` defers past it.
+        if self.cache.journal().is_none() {
+            self.flush_inode_record(ino)?;
+        }
         self.superblock.last_orphan = ino.raw();
         self.superblock_dirty = true;
         self.write_orphan_head()
@@ -1534,7 +1833,12 @@ impl<'a> Ext2Fs<'a> {
             let next = self.read_inode_num(ino)?.dtime;
             self.superblock.last_orphan = next;
             self.superblock_dirty = true;
-            self.write_orphan_head()?;
+            // Immediate, where a push defers: removal shares a transaction
+            // with the free that overwrites this member's `i_dtime`, so a head
+            // published after the commit would name an inode whose chain link
+            // is already gone, and the next mount's drain would stop there and
+            // discard everything behind it.
+            self.write_orphan_head_now()?;
             return Ok(true);
         }
 
@@ -1564,8 +1868,25 @@ impl<'a> Ext2Fs<'a> {
     /// window it covers is exactly the one in which the kernel might not get
     /// to write anything again. It is a sub-block write, invisible to the
     /// cache, so it costs nothing an ordinary operation was going to pay.
-    #[inline(never)]
+    ///
+    /// Under a log it is *deferred to the commit*: the ordering the list needs
+    /// is then the log's, and writing the head from inside the operation would
+    /// publish a field of a transaction that may still roll back.
     fn write_orphan_head(&mut self) -> Result<(), Ext2Error> {
+        if self.in_transaction && self.cache.journal().is_some() {
+            self.pending_orphan_head = Some(self.superblock.last_orphan);
+            return Ok(());
+        }
+        self.write_orphan_head_now()
+    }
+
+    /// Whether a deferred head write is owed.
+    fn take_pending_orphan_head(&mut self) -> Option<u32> {
+        self.pending_orphan_head.take()
+    }
+
+    #[inline(never)]
+    fn write_orphan_head_now(&mut self) -> Result<(), Ext2Error> {
         let mut sb_buf = [0u8; 1024];
         self.device
             .read_at(1024, &mut sb_buf)

@@ -29,6 +29,7 @@
 mod arena;
 mod axis;
 mod charged;
+mod disk;
 mod token;
 
 pub use arena::{
@@ -42,6 +43,7 @@ pub use charged::{
     AliasOf, ChargeAuditEntry, Charged, FileBacking, SharedCharge, charge_audit_entries,
     sealed as charged_sealed,
 };
+pub use disk::{blocks_held, charge_blocks, refund_blocks};
 pub use token::{Charge, ChargeSlot, Reservation};
 
 #[cfg(test)]
@@ -432,6 +434,35 @@ mod tests {
         );
         slot.take();
         assert_eq!(used(a, ResourceKind::FdSlot), 0);
+    }
+
+    /// A latched charge is released in pieces as the resource is given back,
+    /// so over-shrinking must saturate rather than credit the account for an
+    /// amount it never held.
+    #[test]
+    fn a_charge_slot_shrinks_by_what_it_holds_and_no_more() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+        let slot: ChargeSlot<FdSlot> = ChargeSlot::empty();
+
+        slot.put(try_charge::<FdSlot>(child, 3).expect("charge"));
+        slot.grow(try_charge::<FdSlot>(child, 5).expect("charge"));
+        assert_eq!(slot.amount(), 8);
+        assert_eq!(used(child, ResourceKind::FdSlot), 8);
+
+        slot.shrink(3);
+        assert_eq!(slot.amount(), 5, "the remainder stays charged");
+        assert_eq!(used(child, ResourceKind::FdSlot), 5);
+        assert_eq!(used(parent, ResourceKind::FdSlot), 5, "and up the chain");
+
+        slot.shrink(u32::MAX);
+        assert_eq!(slot.amount(), 0);
+        assert_eq!(used(child, ResourceKind::FdSlot), 0);
+        assert_eq!(used(root(), ResourceKind::FdSlot), 0);
+
+        slot.take();
+        assert_eq!(used(child, ResourceKind::FdSlot), 0, "no second refund");
     }
 
     #[test]

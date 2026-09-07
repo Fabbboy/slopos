@@ -257,6 +257,10 @@ pub fn account_release(id: AccountId) {
     // crediting the parent ahead of it dips the parent below their sum.
     row.live.store(false, Ordering::Release);
 
+    // Before the outstanding amounts move up: inheriting the disk row would
+    // bill the parent for blocks nothing can attribute to anyone.
+    super::disk::release(id);
+
     let parent_slot = row.parent.load(Ordering::Acquire);
     if parent_slot != NO_PARENT {
         let parent = account_id_at(parent_slot);

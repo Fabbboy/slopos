@@ -24,6 +24,24 @@ pub fn allocate_block_near(
     if !reserve_permits_allocation(geom, superblock) {
         return Err(Ext2Error::NoSpace);
     }
+    // Charged before the search, so a caller over its ceiling costs no bitmap
+    // work, and given back below if the search finds nothing. The reserve
+    // above is a system floor; this is the per-principal ceiling.
+    cache.charge_blocks(geom.account(), 1)?;
+    let allocated = allocate_searching(goal, geom, superblock, cache, device);
+    if allocated.is_err() {
+        cache.note_blocks_freed(geom.account(), 1);
+    }
+    allocated
+}
+
+fn allocate_searching(
+    goal: BlockNum,
+    geom: &Ext2Geometry,
+    superblock: &mut Superblock,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+) -> Result<BlockNum, Ext2Error> {
     let first_group = geom.group(0).ok_or(Ext2Error::NoSpace)?;
     let goal_group = geom
         .locate_block(goal)
@@ -96,6 +114,12 @@ pub fn free_block(
     device: &dyn BlockDevice,
 ) -> Result<(), Ext2Error> {
     let (group, bit) = geom.locate_block(block).ok_or(Ext2Error::InvalidBlock)?;
+    // Before the bitmap moves: no earlier log record may be replayed into
+    // this block, because the next allocation may hand it out as file data.
+    cache.note_revoke(block, device)?;
+    // Deferred to the commit: a rollback restores the bitmap, so an operation
+    // that frees and then fails still owes the block.
+    cache.note_blocks_freed(geom.account(), 1);
 
     let mut desc = read_group_desc(group, geom, cache, device)?;
     let bitmap_block = desc.block_bitmap;

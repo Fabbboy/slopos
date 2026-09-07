@@ -1,4 +1,6 @@
+pub mod dquota;
 pub mod filemap;
+pub mod journal;
 pub mod mount;
 pub mod partition;
 pub mod statfs;
@@ -26,7 +28,7 @@ macro_rules! mount_ext2 {
             Ok(v) => v,
             Err(_) => return TestResult::Fail,
         };
-        let mut $cache = match BlockCache::new(bs) {
+        let mut $cache = match BlockCache::new_boxed(bs) {
             Ok(c) => c,
             Err(_) => return TestResult::Fail,
         };
@@ -1147,7 +1149,7 @@ pub fn test_ext2_device_write_error_on_metadata() -> TestResult {
         Ok(v) => v,
         Err(_) => return TestResult::Pass,
     };
-    let mut cache = match BlockCache::new(bs) {
+    let mut cache = match BlockCache::new_boxed(bs) {
         Ok(c) => c,
         Err(_) => return TestResult::Fail,
     };
@@ -1572,7 +1574,7 @@ fn narrow_image() -> Option<MemoryBlockDevice> {
 #[inline(never)]
 fn count_sync_inode(device: &CountingBlockDevice, bystanders: u32) -> Option<usize> {
     let (sb, bs, is) = Ext2Fs::mount_params(device).ok()?;
-    let mut cache = BlockCache::new(bs).ok()?;
+    let mut cache = BlockCache::new_boxed(bs).ok()?;
     let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is).ok()?;
     count_sync_inode_inner(&mut fs, device, bystanders)
 }
@@ -2929,7 +2931,7 @@ pub fn test_block_cache_reclaim_keeps_the_index_coherent() -> TestResult {
     else {
         return TestResult::Skipped;
     };
-    let Ok(mut cache) = BlockCache::new(BLOCK_SIZE) else {
+    let Ok(mut cache) = BlockCache::new_boxed(BLOCK_SIZE) else {
         return TestResult::Fail;
     };
 
@@ -2996,7 +2998,7 @@ fn with_mounted(
     body: fn(&mut Ext2Fs<'_>) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
     let (sb, bs, is) = Ext2Fs::mount_params(device).map_err(|_| "mount_params")?;
-    let mut cache = BlockCache::new(bs).map_err(|_| "cache")?;
+    let mut cache = BlockCache::new_boxed(bs).map_err(|_| "cache")?;
     let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is).map_err(|_| "mount")?;
     body(&mut fs)
 }
@@ -3930,7 +3932,7 @@ fn crash_workload_write_count() -> Option<usize> {
 #[inline(never)]
 fn crash_workload(device: &FaultyBlockDevice) -> Result<(), Ext2Error> {
     let (sb, bs, is) = Ext2Fs::mount_params(device)?;
-    let mut cache = BlockCache::new(bs)?;
+    let mut cache = BlockCache::new_boxed(bs)?;
     let mut fs = Ext2Fs::new(device, &mut cache, sb, bs, is)?;
     fs.mark_dirty_on_disk()?;
     let ino = fs.create_file(2, b"crash.txt")?;

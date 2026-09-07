@@ -15,6 +15,34 @@ Boot targets rebuild a secondary `builddir/slop-notests.iso` with `tests=off`; o
 
 **The disk is the root.** `root=auto` mounts a writable `disk0` at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the shipped verified `ext2.img`, so `just boot` still runs `/sbin/init` from RAM with the attested disk at `/mnt`). `root=` also accepts `initramfs`, `virtio`, and a device name — `/dev/vda`, `/dev/vda1`, `vdb2` — where the partition comes from the GPT or MBR table on that device; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot-persist` is the developer's persistent machine: it boots `fs/assets/ext2-persist.img`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`, binaries only) so what the guest wrote survives. `VERITY=on` builds the shipped v1 trailer, which write-protects the device and is what `just boot`'s `verity=require` asserts; `VERITY=off` builds no trailer. The shipped and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
 
+**A write is logged before it lands.** A writable ext2 image carries a metadata
+redo log in a preallocated sealed file at `/.journal` (`FS_JOURNAL_SIZE`,
+default 4M; `0` builds none), located at mount by path lookup and used as a
+physical redo log: an operation's metadata — and its data too, when the write
+is small enough to be cheaper logged than barriered — goes into the log with a
+CRC-covered commit record before any of it reaches a home location. That is
+what makes an operation retractable (a rollback rewinds the log; nothing was
+published) and a crash recoverable: a mount that finds `s_state` unclean and
+replays a committed transaction comes up **read-write**, which is the one case
+in which this kernel repairs an image instead of deferring to `e2fsck`. The log
+is an *image* property, not a kernel one — an image without one gets the
+previous undo-scoped behaviour and still refuses an unclean mount — and the
+boot log says which of the two a mount got. `/.journal` is refused to readers
+and protected from write, rename, unlink and truncate by `EXT2_IMMUTABLE_FL`:
+its blocks hold copies of bitmaps, inode tables and directory blocks, so a
+reader of it would see the metadata of every recently changed file. The default
+image is 32M rather than 16M because the log takes 4M of it.
+
+**A writeback pass is bounded.** `sync(2)` and the flusher drive
+`Ext2Fs::sync_step` in chunks of `WRITEBACK_CHUNK` device writes, releasing the
+mount lock between them, so a path walk or an `exec` queued behind a pass waits
+for a chunk rather than for the whole pass. A pass fixes a *dirty epoch* and the
+log's head and generation when it opens, which is what keeps the ordered phases
+ordered across those gaps: an operation that runs in one is entirely outside the
+pass. Mutations remain serialised per mount — the plan's per-inode locking is
+deliberately not what landed, because the wait, not the lock count, is what G5
+was about.
+
 ## Knowledge Index (AI)
 `knowledge/` hosts a local semantic index for querying the codebase. Build once with `python3 -m venv knowledge/.venv && . knowledge/.venv/bin/activate && pip install -r knowledge/requirements.txt && python knowledge/index.py`, then query via `python knowledge/query.py "<question>"` for signatures, drivers, or file locations. Rebuild after large refactors or merges. Never commit the venv or embedding database artifacts.
 

@@ -1,14 +1,33 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-**One finding is open.** Last swept 2026-09-06 (Phase 6: partition tables,
-block-device nodes, `statfs`, `mount(2)`/`umount2(2)`, file-backed `mmap`, and
-verity on a writable image — the new syscall surface, hostile disk input, and
-what "userland can map a file and name a device" newly reaches).
+**Two findings are open.** Last swept 2026-09-07 (Phase 7: the ext2 metadata
+redo log, the bounded writeback pass, and the per-process disk-block quota —
+the new hostile input at replay, the new userland-reachable log file, and what
+"a ledger keyed on a principal" newly depends on).
 
-That sweep found six defects. Five were fixed inside the same unreleased
-change and are therefore not ledger entries; the sixth is
-`SLOPOS-2026-0054` below. The five are recorded here as method, because each
-is a class rather than an instance:
+That sweep found eight defects. Seven were fixed inside the same unreleased
+change and are therefore not ledger entries; the eighth is
+`SLOPOS-2026-0055`. The Phase 6 sweep before it found six, of which five were
+fixed the same way and the sixth is `SLOPOS-2026-0054`. Both sets of fixes are
+recorded here as method, because each is a class rather than an instance:
+
+- **A block number read off the medium is a write offset.** The log's replay
+  bounds-checked every field except the one it multiplies into an offset, so a
+  crafted or foreign `/.journal` turned a mount into an arbitrary write inside
+  the partition — including past the filesystem extent, over the verity
+  trailer that exists to detect it. Fixed by carrying the volume's extent into
+  the log and refusing an out-of-range target at the scan, at the disposition
+  and at the write.
+- **A record that validates its geometry has not proved it is yours.** The log
+  superblock checked magic, version, block size and capacity — all of which a
+  log built for a different filesystem of the same shape also satisfies. Fixed
+  by folding the log's inode, its first block and the volume's block count
+  into the record and refusing a mismatch.
+- **A refusal keyed on state is not a refusal keyed on identity.** `/.journal`
+  was refused to readers only while a log was *attached*, so every mount that
+  did not attach one served the metadata of every file an earlier boot
+  changed. Fixed by resolving the path at mount whatever the outcome and
+  refusing that inode unconditionally.
 
 - **A new way to reach an object must re-ask the question the old way
   answered.** `mmap(MAP_SHARED, PROT_WRITE)` resolved a descriptor to
@@ -125,8 +144,8 @@ open.
 > gaps in the numbering are expected and IDs are never reused. The git history is
 > the audit trail; `git log -- CVSS.md` recovers any entry that was here.
 
-The highest ID issued so far is **SLOPOS-2026-0054**. The next finding is
-`SLOPOS-2026-0055`.
+The highest ID issued so far is **SLOPOS-2026-0055**. The next finding is
+`SLOPOS-2026-0056`.
 
 ## Method
 
@@ -144,9 +163,6 @@ A sweep is three phases, and the third is what makes the output trustworthy:
    candidate that survives with a concrete attacker trigger becomes a finding;
    everything else is discarded or filed under `plans/` as an engineering
    defect.
-
-Tools: repository-wide static review (`grep`, `ast-grep`, targeted source
-inspection), plus NVD CVE lookups via `curl` + `jq` for prior-art analogs.
 
 ### Required cadence
 
@@ -253,6 +269,7 @@ Analogs worth citing when they match a finding's shape:
 | ID | Title | Score | Severity |
 |---|---|---|---|
 | SLOPOS-2026-0054 | the file-mapping page budget is global and charged to nobody | — | unscored (confidence 74) |
+| SLOPOS-2026-0055 | a process that frees another principal's blocks credits its own disk-block ledger | 5.5 | MEDIUM |
 
 ## Open SlopOS findings
 
@@ -295,10 +312,52 @@ Analogs worth citing when they match a finding's shape:
 - Remediation: charge the page set to the acquiring account through the same
   `PagesAxis`/`try_charge` mechanism the VMA reservation uses, so the caps
   become a registry bound rather than a shared resource one caller can corner.
-  That is the per-process disk/memory charge `plans/persistent-storage.md`
-  tracks as Phase 7.3, and it moves `KIND_COUNT` and every per-kind row of
-  `scripts/gates/quota/tests.txt`, which is why it is a commit of its own
-  rather than part of the change that introduced the registry.
+  `ResourceKind::DiskBlocks` is the same shape for ext2 blocks and shows what
+  that costs: it moved `KIND_COUNT` and every per-kind row of
+  `scripts/gates/quota/tests.txt`. A `filemap` kind would do the same.
+
+### SLOPOS-2026-0055
+- Title: a process that frees another principal's blocks credits its own
+  disk-block ledger, so the per-process ceiling bounds nothing it can reach a
+  foreign file from
+- Status: `open`
+- Confidence: 88 — evidence 40 (every link is direct code: the refund is
+  attributed to `geom.account()`, which `with_cached_fs` set from
+  `current_task_account()` on the way in, and `FileStat.uid` is a constant
+  zero on every inode so nothing refuses the foreign unlink), exploitability
+  28 (an unprivileged process and any unsealed file it did not create),
+  reproducibility 20 (deterministic step by step; not executed)
+- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` → **5.5
+  MEDIUM**. Availability only: the ledger drifts, no data is read or altered
+  beyond what deleting a file already does.
+- Impact: `ResourceKind::DiskBlocks` bounds a process's outstanding block
+  allocations, and the refund on free goes to whoever ran the free. A process
+  at its ceiling can therefore unlink or truncate a file it did not create,
+  watch its own row fall by that file's block count, and allocate again — as
+  often as there are foreign files. The mirror case denies without malice: a
+  process whose files someone else removed stays charged for blocks that no
+  longer exist until it exits, and meets `ENOSPC` at its ceiling with the
+  volume empty.
+- Evidence:
+  - `fs/src/ext2/alloc.rs` — `free_block` calls
+    `cache.note_blocks_freed(geom.account(), 1)`
+  - `fs/src/ext2_vfs.rs` — `with_cached_fs` sets that account per call from
+    `current_task_account()`
+  - `fs/src/ext2/cache.rs` — `settle_charges` refunds `op_freed` at the commit
+  - `fs/src/vfs/traits.rs` — `FileStat.uid` is filled with zero by every
+    filesystem, and no caller compares it, so no path refuses a foreign unlink
+- Repro: process A creates a file and writes *N* blocks; process B allocates to
+  its ceiling and is refused; B unlinks A's file; B allocates *N* more blocks
+  successfully. A is refused at its own ceiling until it exits.
+- Remediation: the ledger cannot be stronger than the permission model beneath
+  it, and ext2 records no owner for a block, so the fix is a file-ownership
+  model — a real `uid` on `FileStat` and a check on the unlink, truncate and
+  rename paths — not a change to the quota. Making the refund a per-operation
+  net (`freed.min(charged)`) was considered and rejected: it would stop a
+  process's *own* deletes from ever refunding, so a long-lived writer would
+  exhaust its ceiling legitimately. Until then the ceiling is what it is
+  documented as in `abi/src/quota.rs`: a bound on one live process's
+  outstanding allocations, absent cooperation from another process.
 
 ## Structural invariants the closed findings left behind
 

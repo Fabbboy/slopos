@@ -98,7 +98,7 @@ fn mount_and_probe(device: &(dyn BlockDevice + Send + Sync)) -> TestResult {
         Ok(v) => v,
         Err(e) => return fail!("mount_params: {:?}", e),
     };
-    let mut cache = match BlockCache::new(bs) {
+    let mut cache = match BlockCache::new_boxed(bs) {
         Ok(c) => c,
         Err(e) => return fail!("BlockCache::new: {:?}", e),
     };

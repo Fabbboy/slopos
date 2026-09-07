@@ -104,7 +104,7 @@ pub fn test_statfs_ext2_free_counts_follow_a_write() -> TestResult {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("the fixture did not mount: {:?}", e),
     };
-    let Ok(mut cache) = BlockCache::new(block_size) else {
+    let Ok(mut cache) = BlockCache::new_boxed(block_size) else {
         return TestResult::Skipped;
     };
     let Ok(mut fs) = Ext2Fs::new(&device, &mut cache, superblock, block_size, inode_size) else {

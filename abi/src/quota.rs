@@ -27,10 +27,13 @@ pub enum ResourceKind {
     /// Kernel-internal memory attributable to a principal: page tables, task
     /// stacks, slab backing.
     KernelMeta = 7,
+    /// Filesystem blocks allocated on a mounted disk. A block is 1-4 KiB, so
+    /// it is neither a bare count nor a page.
+    DiskBlocks = 8,
 }
 
 /// Width of every per-kind array in an account row.
-pub const KIND_COUNT: usize = 8;
+pub const KIND_COUNT: usize = 9;
 
 impl ResourceKind {
     /// Discriminant order — the iteration order of every dump and every audit.
@@ -43,6 +46,7 @@ impl ResourceKind {
         ResourceKind::PinnedBytes,
         ResourceKind::Custody,
         ResourceKind::KernelMeta,
+        ResourceKind::DiskBlocks,
     ];
 
     /// Row index into an account's per-kind arrays.
@@ -64,6 +68,7 @@ impl ResourceKind {
             ResourceKind::PinnedBytes => "pinnedbytes",
             ResourceKind::Custody => "custody",
             ResourceKind::KernelMeta => "kernelmeta",
+            ResourceKind::DiskBlocks => "diskblocks",
         }
     }
 
@@ -80,15 +85,17 @@ impl ResourceKind {
             ResourceKind::Pages | ResourceKind::KernelMeta | ResourceKind::PinnedBytes => {
                 Unit::Pages
             }
+            ResourceKind::DiskBlocks => Unit::Blocks,
         }
     }
 
     #[inline]
     pub const fn refund(self) -> Refund {
         match self {
-            // A `Task`'s destruction is deferred to the graveyard, so a
-            // `Drop`-refund would keep exited tasks charged until the drain.
-            ResourceKind::Task => Refund::OnExitLatch,
+            // Neither kind has an on-object home for a linear token: a
+            // `Task`'s destruction is deferred to the graveyard, and ext2
+            // records no owner for a block.
+            ResourceKind::Task | ResourceKind::DiskBlocks => Refund::OnExitLatch,
             _ => Refund::OnDrop,
         }
     }
@@ -105,6 +112,7 @@ impl ResourceKind {
             ResourceKind::Pages | ResourceKind::PinnedBytes | ResourceKind::KernelMeta => {
                 Errno::ENOMEM
             }
+            ResourceKind::DiskBlocks => Errno::ENOSPC,
         }
     }
 }
@@ -116,6 +124,8 @@ pub enum Unit {
     Count,
     Bytes,
     Pages,
+    /// A filesystem block, 1-4 KiB depending on the volume.
+    Blocks,
 }
 
 impl Unit {
@@ -125,6 +135,7 @@ impl Unit {
             Unit::Count => "count",
             Unit::Bytes => "bytes",
             Unit::Pages => "pages",
+            Unit::Blocks => "blocks",
         }
     }
 }
@@ -171,6 +182,12 @@ pub const fn default_process_limit(kind: ResourceKind) -> u32 {
         // to travel back on, whereas an RSS bound needs a reclaim disposition for
         // a process already over it. 256 MiB, against a measured worst of 30 998.
         ResourceKind::Pages => 65536,
+        // 32 MiB of blocks at 4 KiB, against a measured worst of 3875 (the
+        // tests image's disk-reserve filler). Bounds a process's *outstanding*
+        // allocations, not its footprint: ext2 records no owner, so the charge
+        // is released when the process is retired and a file it leaves behind
+        // costs a later one nothing.
+        ResourceKind::DiskBlocks => 8192,
     }
 }
 
@@ -271,6 +288,7 @@ axes! {
     PinnedBytesAxis,
     CustodyAxis,
     KernelMetaAxis,
+    DiskBlocksAxis,
 }
 
 #[cfg(test)]
@@ -304,6 +322,7 @@ mod tests {
         assert_eq!(ResourceKind::Process.errno(), Errno::EAGAIN);
         assert_eq!(ResourceKind::Pages.errno(), Errno::ENOMEM);
         assert_eq!(ResourceKind::KernelMeta.errno(), Errno::ENOMEM);
+        assert_eq!(ResourceKind::DiskBlocks.errno(), Errno::ENOSPC);
     }
 
     #[test]
@@ -364,13 +383,14 @@ mod tests {
         assert_eq!(rlimit_mapping(RLIMIT_NOFILE).unwrap().scale, 1);
     }
 
+    /// A kind latches at the exit latch exactly when its charge has no home on
+    /// the object it accounts for, so nothing's `Drop` can refund it.
     #[test]
-    fn only_task_refunds_at_the_exit_latch() {
+    fn kinds_without_an_on_object_token_home_latch_at_exit() {
         for kind in ResourceKind::ALL {
-            let want = if kind == ResourceKind::Task {
-                Refund::OnExitLatch
-            } else {
-                Refund::OnDrop
+            let want = match kind {
+                ResourceKind::Task | ResourceKind::DiskBlocks => Refund::OnExitLatch,
+                _ => Refund::OnDrop,
             };
             assert_eq!(kind.refund(), want, "{kind:?}");
         }
