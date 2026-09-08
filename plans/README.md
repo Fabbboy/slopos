@@ -15,7 +15,7 @@ editing.
 | Document | Scope |
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
-| `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
+| `self-hosting.md` | SlopOS as a development machine: persistent dev loop, POSIX floor, native toolchain, install path |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
