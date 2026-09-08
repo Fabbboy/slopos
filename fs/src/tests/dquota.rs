@@ -11,17 +11,21 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use slopos_abi::quota::{QuotaMode, ResourceKind};
 use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota::{
-    blocks_held, quota_mode, root, set_limit, set_quota_mode, stats,
+    self as quota, blocks_held, quota_mode, root, set_limit, set_quota_mode, stats,
 };
 use slopos_testing::{TestResult, fail};
 
 use super::{Ext2ImageSpec, FIX_FILE_BLOCK, ScratchProcess, build_ext2_image};
 use crate::blockdev::{BlockDevice, MemoryBlockDevice};
 use crate::ext2::Ext2Fs;
+use crate::ext2::blockcharge::{BlockCharges, MAX_ROWS};
 use crate::ext2::cache::BlockCache;
 
 /// Small enough that the first handful of files reaches it.
 const CEILING: u32 = 6;
+/// What the late allocator charges in the full-record test. Small because it
+/// is a real charge and lands in the headroom gate's measured peak.
+const LATE_BLOCKS: u32 = 2;
 const NAMES: [&[u8]; 12] = [
     b"q0", b"q1", b"q2", b"q3", b"q4", b"q5", b"q6", b"q7", b"q8", b"q9", b"qa", b"qb",
 ];
@@ -29,6 +33,9 @@ const NAMES: [&[u8]; 12] = [
 /// The account the mounted body charges to. A static rather than a parameter
 /// because the mount helper's frame has no room under the 2 KiB gate.
 static ACCOUNT: AtomicU64 = AtomicU64::new(0);
+/// The second principal, for a body that switches between them the way a
+/// mount does between two processes' calls.
+static OTHER: AtomicU64 = AtomicU64::new(0);
 /// Blocks the body left held, read back after it returns.
 static HELD: AtomicU64 = AtomicU64::new(0);
 
@@ -177,11 +184,128 @@ fn fill_and_keep(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// A refund credits the principal that was charged, not whoever ran the free:
+/// the unlinker is not credited for a file it did not create, and the creator
+/// stops being charged for blocks that no longer exist.
+///
+/// One mount for both principals: the attribution lives in the mount's block
+/// cache, which in production lives for the boot.
+pub fn test_quota_diskblocks_refund_follows_the_allocator() -> TestResult {
+    let Some(device) = image() else {
+        return TestResult::Skipped;
+    };
+    let Some(creator) = ScratchProcess::new() else {
+        return fail!("no scratch process");
+    };
+    let Some(remover) = ScratchProcess::new() else {
+        return fail!("no second scratch process");
+    };
+    ACCOUNT.store(creator.table().account().raw(), Ordering::Relaxed);
+    OTHER.store(remover.table().account().raw(), Ordering::Relaxed);
+
+    match with_mount(&device, foreign_unlink) {
+        Ok(()) => TestResult::Pass,
+        Err(msg) => fail!("{}", msg),
+    }
+}
+
+fn other() -> AccountId {
+    AccountId::from_raw(OTHER.load(Ordering::Relaxed))
+}
+
+fn foreign_unlink(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    let (owner, remover) = (account(), other());
+    let owner_before = blocks_held(owner);
+    let remover_before = blocks_held(remover);
+
+    let ino = fs.create_file(2, NAMES[0]).map_err(|_| "create")?;
+    fs.write_file(ino, 0, b"one block's worth")
+        .map_err(|_| "write")?;
+    let owned = blocks_held(owner).saturating_sub(owner_before);
+    if owned == 0 {
+        return Err("the creator was charged nothing, so the refund proves nothing");
+    }
+
+    fs.set_account(remover);
+    let mine = fs.create_file(2, NAMES[1]).map_err(|_| "create")?;
+    fs.write_file(mine, 0, b"one block's worth")
+        .map_err(|_| "write")?;
+    let held = blocks_held(remover).saturating_sub(remover_before);
+    if held == 0 {
+        return Err("the remover was charged nothing, so its ledger cannot drift");
+    }
+
+    fs.unlink_entry(2, NAMES[0]).map_err(|_| "foreign unlink")?;
+    if blocks_held(remover) != remover_before.saturating_add(held) {
+        return Err("unlinking a foreign file credited the remover's ledger");
+    }
+    if blocks_held(owner) != owner_before {
+        return Err("the creator stayed charged for blocks that were freed");
+    }
+
+    fs.unlink_entry(2, NAMES[1]).map_err(|_| "own unlink")?;
+    if blocks_held(remover) != remover_before {
+        return Err("deleting its own file did not give the remover its blocks back");
+    }
+    Ok(())
+}
+
+/// A table full of one principal's rows must not strip another's refunds: the
+/// next allocator keeps a refundable row.
+pub fn test_quota_diskblocks_a_full_record_costs_the_crowd() -> TestResult {
+    let Some(crowd) = ScratchProcess::new() else {
+        return fail!("no scratch process");
+    };
+    let Some(late) = ScratchProcess::new() else {
+        return fail!("no second scratch process");
+    };
+    let (crowd, late) = (crowd.table().account(), late.table().account());
+    let Ok(mut charges) = BlockCharges::new() else {
+        return fail!("the record would not allocate");
+    };
+
+    // One operation per row: the pending table holds too few pairs for one
+    // operation to publish this many. Recorded but not charged, because the
+    // record is what fills up and a fixture must not move the gate's peak.
+    for ino in 1..=MAX_ROWS as u32 {
+        charges.charge(Some(ino), crowd, 1);
+        charges.commit();
+    }
+
+    let before = blocks_held(late);
+    let ino = MAX_ROWS as u32 + 1;
+    if quota::charge_blocks(late, LATE_BLOCKS).is_err() {
+        return fail!("the late allocator was refused a block it is entitled to");
+    }
+    charges.charge(Some(ino), late, LATE_BLOCKS);
+    charges.commit();
+    charges.free(Some(ino), LATE_BLOCKS);
+    charges.commit();
+
+    let after = blocks_held(late);
+    if after != before {
+        return fail!(
+            "a full record left the late allocator holding {} of its own freed blocks (was {})",
+            after.saturating_sub(before),
+            before
+        );
+    }
+    TestResult::Pass
+}
+
 slopos_testing::stest!(
     name = test_quota_diskblocks_ceiling_refuses_and_refunds,
     suite = fs
 );
 slopos_testing::stest!(
     name = test_quota_diskblocks_release_at_exit_is_not_inheritance,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_quota_diskblocks_refund_follows_the_allocator,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_quota_diskblocks_a_full_record_costs_the_crowd,
     suite = fs
 );

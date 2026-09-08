@@ -35,7 +35,13 @@ static DRAINED: AtomicU32 = AtomicU32::new(0);
 static COUNTING_OPS: CountingOps = CountingOps;
 
 impl FileMapOps for CountingOps {
-    fn retain(&self, _map: FileMapRef, pages: u32, writable: bool) -> bool {
+    fn retain(
+        &self,
+        _map: FileMapRef,
+        pages: u32,
+        writable: bool,
+        _holder: slopos_ostd::process::AccountId,
+    ) -> bool {
         RETAINED.fetch_add(pages, Ordering::Relaxed);
         if writable {
             RETAINED_WRITABLE.fetch_add(pages, Ordering::Relaxed);

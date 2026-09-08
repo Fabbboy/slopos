@@ -1,3 +1,4 @@
+pub(crate) mod blockcharge;
 pub mod blockmap;
 pub mod cache;
 pub mod dir;
@@ -1191,7 +1192,7 @@ impl<'a> Ext2Fs<'a> {
             &mut |b| freed.push(b).map_err(|_| Ext2Error::OutOfMemory),
         )?;
         for blk in freed.iter() {
-            ext2_alloc::free_block(*blk, &geom, superblock, cache, device)?;
+            ext2_alloc::free_block(*blk, &geom, superblock, cache, device, owner)?;
         }
         Ok(())
     }
@@ -1477,6 +1478,7 @@ impl<'a> Ext2Fs<'a> {
                     &mut self.superblock,
                     &mut *self.cache,
                     self.device,
+                    BlockOwner::File(new_ino.raw()),
                 )?)
             } else {
                 None
@@ -1519,6 +1521,7 @@ impl<'a> Ext2Fs<'a> {
             &mut self.superblock,
             &mut *self.cache,
             self.device,
+            BlockOwner::File(new_ino.raw()),
         )?;
         {
             let mut blk = self.cache.get_zero_data(
@@ -2280,6 +2283,7 @@ impl<'a> Ext2Fs<'a> {
                     &mut self.superblock,
                     &mut *self.cache,
                     self.device,
+                    owner,
                 )?;
             }
         }
@@ -2315,6 +2319,7 @@ impl<'a> Ext2Fs<'a> {
                 &mut self.superblock,
                 &mut *self.cache,
                 self.device,
+                owner,
             )?;
         }
 

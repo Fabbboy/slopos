@@ -19,7 +19,8 @@ pub enum ResourceKind {
     Process = 3,
     /// Pages of mapped or reserved memory.
     Pages = 4,
-    /// Bytes pinned against reclaim, for DMA or a registered buffer.
+    /// Bytes pinned against reclaim: a DMA or registered buffer, or a file
+    /// mapping's page set.
     PinnedBytes = 5,
     /// An alias held by kernel state owned by neither party — in-flight
     /// `SCM_RIGHTS`, a ring's in-flight file reference.

@@ -2701,7 +2701,7 @@ pub fn process_vm_mmap_file_shared(
     // Retained before the first PTE: a stale handle means the set may already
     // be freeing these frames. Only a writable mapping arms writeback.
     let writable = prot & slopos_abi::syscall::PROT_WRITE != 0;
-    if !crate::filemap_hook::filemap_retain(map, page_count, writable) {
+    if !crate::filemap_hook::filemap_retain(map, page_count, writable, proc.vma_map.account()) {
         klog_info!("process_vm_mmap file: the page set handle is stale");
         return 0;
     }
@@ -3260,6 +3260,7 @@ fn clone_cow_populate_child(
                 map,
                 vma_page_count(vma_start, vma_end),
                 parent_region.protection.write,
+                child.vma_map.account(),
             );
         }
 

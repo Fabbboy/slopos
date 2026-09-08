@@ -8,14 +8,16 @@
 //! answers "is it on the device", which a re-read through the mount's own
 //! cache cannot.
 
+use slopos_ostd::process::AccountId;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex};
 use slopos_ostd::{KBox, KVec, lock_class};
 use slopos_testing::TestResult;
 
+use super::ScratchProcess;
 use crate::blockdev::MemoryBlockDevice;
 use crate::ext2::cache::BlockCache;
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Superblock};
-use crate::filemap::{self, FileMapError};
+use crate::filemap::{self, FileMapError, MAX_INODES_PER_ACCOUNT};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 
 /// 1 KiB blocks, so this is 512 KiB — room for the seventeen 4 KiB files the
@@ -340,7 +342,7 @@ pub fn test_filemap_populates_from_the_file() -> TestResult {
         return slopos_testing::fail!("pattern alloc failed");
     };
 
-    let (map, paddrs) = match filemap::acquire(test_fs(), inode, 0, 2, true) {
+    let (map, paddrs) = match filemap::acquire(test_fs(), inode, 0, 2, true, AccountId::NONE) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("acquire refused: {:?}", e),
     };
@@ -370,7 +372,7 @@ pub fn test_filemap_write_through_is_read_back() -> TestResult {
         Ok(i) => i,
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
-    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true) {
+    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true, AccountId::NONE) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("acquire refused: {:?}", e),
     };
@@ -411,7 +413,7 @@ pub fn test_filemap_read_stops_at_eof() -> TestResult {
         Ok(i) => i,
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
-    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true) {
+    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true, AccountId::NONE) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("acquire refused: {:?}", e),
     };
@@ -450,7 +452,7 @@ pub fn test_filemap_forget_unkeys_the_inode() -> TestResult {
         Ok(i) => i,
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
-    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true) {
+    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true, AccountId::NONE) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("acquire refused: {:?}", e),
     };
@@ -497,7 +499,7 @@ pub fn test_filemap_flush_reaches_the_device() -> TestResult {
         Ok(i) => i,
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
-    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true) {
+    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true, AccountId::NONE) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("acquire refused: {:?}", e),
     };
@@ -534,7 +536,7 @@ pub fn test_filemap_release_queues_the_writeback() -> TestResult {
         Ok(i) => i,
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
-    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true) {
+    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true, AccountId::NONE) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("acquire refused: {:?}", e),
     };
@@ -588,7 +590,7 @@ pub fn test_filemap_refuses_past_eof() -> TestResult {
         Ok(i) => i,
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
-    let refusal = filemap::acquire(test_fs(), inode, 1, 1, true);
+    let refusal = filemap::acquire(test_fs(), inode, 1, 1, true, AccountId::NONE);
     drop_file(b"shortfile");
     match refusal {
         Err(FileMapError::PastEof) => TestResult::Pass,
@@ -610,7 +612,7 @@ pub fn test_filemap_page_cap_refuses() -> TestResult {
         Ok(i) => i,
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
-    let refusal = filemap::acquire(test_fs(), inode, 0, 4096, true);
+    let refusal = filemap::acquire(test_fs(), inode, 0, 4096, true, AccountId::NONE);
     drop_file(b"capped");
     match refusal {
         Err(FileMapError::TooManyPages) => {
@@ -641,7 +643,9 @@ pub fn test_filemap_inode_cap_refuses() -> TestResult {
     };
 
     let overflow = match seed_file(b"cap-overflow", PAGE, 99) {
-        Ok(inode) => Ok(filemap::acquire(test_fs(), inode, 0, 1, true).map(|(map, _)| map)),
+        Ok(inode) => {
+            Ok(filemap::acquire(test_fs(), inode, 0, 1, true, AccountId::NONE).map(|(map, _)| map))
+        }
         Err(why) => Err(why),
     };
 
@@ -679,7 +683,7 @@ fn hold_every_slot() -> Result<KVec<slopos_mm::vma_region::FileMapRef>, &'static
         let name = cap_name(slot);
         slot += 1;
         let inode = seed_file(&name, PAGE, slot)?;
-        match filemap::acquire(test_fs(), inode, 0, 1, true) {
+        match filemap::acquire(test_fs(), inode, 0, 1, true, AccountId::NONE) {
             Ok((map, _)) => {
                 if held.push(map).is_err() {
                     filemap::release(map, 1);
@@ -710,6 +714,220 @@ fn drop_cap_files() {
     }
 }
 
+/// A principal may hold only its share of the registry, and the frames it
+/// holds are charged to it. Without both halves one process cornered all
+/// sixteen slots at no cost to its own budget.
+pub fn test_filemap_share_bounds_one_principal() -> TestResult {
+    if !ensure_mount() {
+        return slopos_testing::fail!("could not build the fixture image");
+    }
+    filemap::drain_pending();
+    let Some(first) = ScratchProcess::new() else {
+        return TestResult::Skipped;
+    };
+    let Some(second) = ScratchProcess::new() else {
+        return TestResult::Skipped;
+    };
+    let verdict = share_probe(first.table().account(), second.table().account());
+    filemap::drain_pending();
+    drop_share_files();
+    match verdict {
+        Ok(()) => TestResult::Pass,
+        Err(why) => slopos_testing::fail!("{}", why),
+    }
+}
+
+/// A set outlives the principal that grew it whenever another process is
+/// still mapping it. The holder is charged for it instead, so unreclaimable
+/// frames cannot end up charged to a retired account.
+pub fn test_filemap_orphaned_set_is_adopted_by_its_holder() -> TestResult {
+    if !ensure_mount() {
+        return slopos_testing::fail!("could not build the fixture image");
+    }
+    filemap::drain_pending();
+    let Some(grower) = ScratchProcess::new() else {
+        return TestResult::Skipped;
+    };
+    let Some(heir) = ScratchProcess::new() else {
+        return TestResult::Skipped;
+    };
+    let heir_account = heir.table().account();
+    let verdict = adopt_probe(grower, heir_account);
+    filemap::drain_pending();
+    drop_file(b"adopted");
+    match verdict {
+        Ok(()) => {
+            if pinned_pages(heir_account) != 0 {
+                return slopos_testing::fail!("the adopted charge outlived the page set");
+            }
+            TestResult::Pass
+        }
+        Err(why) => slopos_testing::fail!("{}", why),
+    }
+}
+
+#[inline(never)]
+fn adopt_probe(grower: ScratchProcess, heir: AccountId) -> Result<(), &'static str> {
+    let inode = seed_file(b"adopted", PAGE, 7)?;
+    let grower_account = grower.table().account();
+    let (map, _) = filemap::acquire(test_fs(), inode, 0, 1, true, grower_account)
+        .map_err(|_| "the fixture acquire was refused")?;
+    if pinned_pages(grower_account) == 0 {
+        filemap::release(map, 1);
+        return Err("the frames were not charged to the principal that grew the set");
+    }
+    // The set survives on this handle's reference; its owner does not.
+    drop(grower);
+
+    let adopted = filemap::retain(map, 1, false, heir) && pinned_pages(heir) == 1;
+    filemap::release(map, 1);
+    filemap::release(map, 1);
+    if !adopted {
+        return Err("the holder did not adopt a set whose owner had exited");
+    }
+    Ok(())
+}
+
+/// `shrNN`, the name the share fixtures are created under.
+fn share_name(slot: u8) -> [u8; 5] {
+    [b's', b'h', b'r', b'0' + slot / 10, b'0' + slot % 10]
+}
+
+fn drop_share_files() {
+    for slot in 0..=(2 * MAX_INODES_PER_ACCOUNT as u8) {
+        drop_file(&share_name(slot));
+    }
+}
+
+fn pinned_pages(account: AccountId) -> u32 {
+    slopos_ostd::process::quota::stats(account, slopos_abi::quota::ResourceKind::PinnedBytes)
+        .map(|stats| stats.used)
+        .unwrap_or(0)
+}
+
+/// A fresh file of `pages` pages, with its first `take` pages mapped on
+/// `account`'s behalf.
+#[inline(never)]
+fn seed_and_acquire(
+    slot: u8,
+    pages: usize,
+    take: u32,
+    account: AccountId,
+) -> Result<Result<(slopos_mm::vma_region::FileMapRef, InodeId), FileMapError>, &'static str> {
+    let name = share_name(slot);
+    let inode = seed_file(&name, pages * PAGE, slot + 1)?;
+    Ok(filemap::acquire(test_fs(), inode, 0, take, true, account).map(|(map, _)| (map, inode)))
+}
+
+/// Take one principal to its share, then check what it may no longer do and
+/// that the other principal still can. Its own frame: the handle list and the
+/// name buffers live here.
+#[inline(never)]
+fn share_probe(one: AccountId, two: AccountId) -> Result<(), &'static str> {
+    let share = MAX_INODES_PER_ACCOUNT;
+    let baseline = pinned_pages(one);
+    let mut held: KVec<slopos_mm::vma_region::FileMapRef> = KVec::new();
+    let mut verdict: Result<(), &'static str> = Ok(());
+    // Two pages long, mapped one page deep, so the other principal has a
+    // growth to ask for further down.
+    let mut shared: InodeId = 0;
+
+    for slot in 0..share {
+        let pages = if slot == 0 { 2 } else { 1 };
+        match seed_and_acquire(slot as u8, pages, 1, one) {
+            Ok(Ok((map, inode))) => {
+                if slot == 0 {
+                    shared = inode;
+                }
+                if held.push(map).is_err() {
+                    filemap::release(map, 1);
+                    verdict = Err("handle list alloc failed");
+                    break;
+                }
+            }
+            Ok(Err(_)) => {
+                verdict = Err("a principal was refused inside its own share");
+                break;
+            }
+            Err(why) => {
+                verdict = Err(why);
+                break;
+            }
+        }
+    }
+
+    if verdict.is_ok() && pinned_pages(one) != baseline.saturating_add(share as u32) {
+        verdict = Err("the frames were not charged to the mapping principal");
+    }
+
+    // The other principal's own share, which the registry still has slots for.
+    if verdict.is_ok() {
+        for slot in 0..share {
+            match seed_and_acquire(share as u8 + 1 + slot as u8, 1, 1, two) {
+                Ok(Ok((map, _))) => {
+                    if held.push(map).is_err() {
+                        filemap::release(map, 1);
+                        verdict = Err("handle list alloc failed");
+                        break;
+                    }
+                }
+                Ok(Err(_)) => {
+                    verdict = Err("a second principal was denied a slot the registry still had");
+                    break;
+                }
+                Err(why) => {
+                    verdict = Err(why);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Re-homing a set costs a slot exactly as claiming a fresh one does.
+    if verdict.is_ok() {
+        match filemap::acquire(test_fs(), shared, 0, 2, true, two) {
+            Err(FileMapError::TooManyInodes) => {}
+            Err(e) => {
+                verdict = Err(match e {
+                    FileMapError::TooManyPages => "the slot share answered the page refusal",
+                    _ => "wrong refusal re-homing past a principal's slot share",
+                });
+            }
+            Ok((map, _)) => {
+                filemap::release(map, 1);
+                verdict = Err("re-homing took a set past the slot share");
+            }
+        }
+    }
+
+    // One past its own share, on a slot the registry still has free.
+    if verdict.is_ok() {
+        match seed_and_acquire(share as u8, 1, 1, one) {
+            Ok(Err(FileMapError::TooManyInodes)) => {}
+            Ok(Err(e)) => {
+                verdict = Err(match e {
+                    FileMapError::TooManyPages => "the slot share answered the page refusal",
+                    _ => "wrong refusal past a principal's slot share",
+                });
+            }
+            Ok(Ok((map, _))) => {
+                filemap::release(map, 1);
+                verdict = Err("a principal took more than its share of the slots");
+            }
+            Err(why) => verdict = Err(why),
+        }
+    }
+
+    for map in held.iter() {
+        filemap::release(*map, 1);
+    }
+    filemap::drain_pending();
+    if verdict.is_ok() && pinned_pages(one) != baseline {
+        verdict = Err("the frame charge outlived the page set");
+    }
+    verdict
+}
+
 /// A `write(2)` crossing the trailing edge of a mapped range must not come
 /// back short: the loop in `FileOps::write` continues past the boundary.
 pub fn test_filemap_write_past_the_mapped_edge_is_whole() -> TestResult {
@@ -721,7 +939,7 @@ pub fn test_filemap_write_past_the_mapped_edge_is_whole() -> TestResult {
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
     // Page 0 only, so the second half of the write lands past the coverage.
-    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true) {
+    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true, AccountId::NONE) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("acquire refused: {:?}", e),
     };
@@ -774,7 +992,7 @@ pub fn test_filemap_write_from_below_reaches_the_set() -> TestResult {
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
     // The *second* page only: the write below it must stop at the boundary.
-    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 1, 1, true) {
+    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 1, 1, true, AccountId::NONE) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("acquire refused: {:?}", e),
     };
@@ -832,7 +1050,7 @@ pub fn test_filemap_queue_flush_on_a_forgotten_set_is_refused() -> TestResult {
         Ok(i) => i,
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
-    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true) {
+    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, true, AccountId::NONE) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("acquire refused: {:?}", e),
     };
@@ -875,12 +1093,12 @@ pub fn test_filemap_readonly_mapping_does_not_arm_writeback() -> TestResult {
         Ok(i) => i,
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
-    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, false) {
+    let (map, _paddrs) = match filemap::acquire(test_fs(), inode, 0, 1, false, AccountId::NONE) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("acquire refused: {:?}", e),
     };
     // One page-sized reference, as a read-only mapping takes.
-    if !filemap::retain(map, 1, false) {
+    if !filemap::retain(map, 1, false, AccountId::NONE) {
         return slopos_testing::fail!("retain reported a stale handle");
     }
     filemap::release(map, 1);
@@ -914,7 +1132,7 @@ pub fn test_filemap_acquire_drains_a_queued_release() -> TestResult {
         Ok(i) => i,
         Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
     };
-    let (map, _paddrs) = match filemap::acquire(test_fs(), first, 0, 1, true) {
+    let (map, _paddrs) = match filemap::acquire(test_fs(), first, 0, 1, true, AccountId::NONE) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("acquire refused: {:?}", e),
     };
@@ -928,7 +1146,7 @@ pub fn test_filemap_acquire_drains_a_queued_release() -> TestResult {
         Ok(i) => i,
         Err(why) => return slopos_testing::fail!("could not seed the second file: {}", why),
     };
-    let acquired = filemap::acquire(test_fs(), second, 0, 1, true);
+    let acquired = filemap::acquire(test_fs(), second, 0, 1, true, AccountId::NONE);
     let pending_after = filemap::pending_count();
     if let Ok((map2, _)) = acquired {
         filemap::release(map2, 1);
@@ -961,8 +1179,8 @@ pub fn test_filemap_sealed_inode_refuses_a_writable_set() -> TestResult {
         return slopos_testing::fail!("sealing the fixture failed");
     }
 
-    let writable = filemap::acquire(test_fs(), inode, 0, 1, true);
-    let readable = filemap::acquire(test_fs(), inode, 0, 1, false);
+    let writable = filemap::acquire(test_fs(), inode, 0, 1, true, AccountId::NONE);
+    let readable = filemap::acquire(test_fs(), inode, 0, 1, false, AccountId::NONE);
     if let Ok((map, _)) = readable {
         filemap::release(map, 1);
     }
@@ -1017,5 +1235,11 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_filemap_sealed_inode_refuses_a_writable_set,
+    suite = fs
+);
+slopos_testing::stest!(name = test_filemap_share_bounds_one_principal, suite = fs);
+
+slopos_testing::stest!(
+    name = test_filemap_orphaned_set_is_adopted_by_its_holder,
     suite = fs
 );

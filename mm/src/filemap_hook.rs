@@ -9,6 +9,7 @@
 //! not be decremented correctly.
 
 use slopos_ostd::lock_class;
+use slopos_ostd::process::AccountId;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 use crate::vma_region::FileMapRef;
@@ -23,7 +24,10 @@ pub trait FileMapOps: Sync {
     /// Add `pages` mapping references. `writable` arms the registry's
     /// writeback: a read-only mapping must not cause an unmodified file to be
     /// rewritten. `false` if the handle is stale, so the pages are not pinned.
-    fn retain(&self, map: FileMapRef, pages: u32, writable: bool) -> bool;
+    ///
+    /// `holder` is the principal taking the references, which the registry
+    /// charges the set to rather than leaving it charged to an exited owner.
+    fn retain(&self, map: FileMapRef, pages: u32, writable: bool, holder: AccountId) -> bool;
 
     /// Drop `pages` mapping references.
     fn release(&self, map: FileMapRef, pages: u32);
@@ -54,8 +58,8 @@ fn ops() -> Option<&'static dyn FileMapOps> {
 }
 
 /// `false` if no registry is published or the handle is stale.
-pub fn filemap_retain(map: FileMapRef, pages: u32, writable: bool) -> bool {
-    ops().is_some_and(|o| o.retain(map, pages, writable))
+pub fn filemap_retain(map: FileMapRef, pages: u32, writable: bool, holder: AccountId) -> bool {
+    ops().is_some_and(|o| o.retain(map, pages, writable, holder))
 }
 
 pub fn filemap_release(map: FileMapRef, pages: u32) {

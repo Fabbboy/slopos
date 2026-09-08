@@ -20,6 +20,7 @@ pub fn allocate_block_near(
     superblock: &mut Superblock,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
+    owner: BlockOwner,
 ) -> Result<BlockNum, Ext2Error> {
     if !reserve_permits_allocation(geom, superblock) {
         return Err(Ext2Error::NoSpace);
@@ -27,10 +28,10 @@ pub fn allocate_block_near(
     // Charged before the search, so a caller over its ceiling costs no bitmap
     // work, and given back below if the search finds nothing. The reserve
     // above is a system floor; this is the per-principal ceiling.
-    cache.charge_blocks(geom.account(), 1)?;
+    cache.charge_blocks(geom.account(), owner.charged_inode(), 1)?;
     let allocated = allocate_searching(goal, geom, superblock, cache, device);
     if allocated.is_err() {
-        cache.note_blocks_freed(geom.account(), 1);
+        cache.cancel_block_charge(geom.account(), owner.charged_inode(), 1);
     }
     allocated
 }
@@ -72,8 +73,9 @@ pub fn allocate_block(
     superblock: &mut Superblock,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
+    owner: BlockOwner,
 ) -> Result<BlockNum, Ext2Error> {
-    allocate_block_near(BlockNum::ZERO, geom, superblock, cache, device)
+    allocate_block_near(BlockNum::ZERO, geom, superblock, cache, device, owner)
 }
 
 pub fn allocate_inode(
@@ -112,14 +114,16 @@ pub fn free_block(
     superblock: &mut Superblock,
     cache: &mut BlockCache,
     device: &dyn BlockDevice,
+    owner: BlockOwner,
 ) -> Result<(), Ext2Error> {
     let (group, bit) = geom.locate_block(block).ok_or(Ext2Error::InvalidBlock)?;
     // Before the bitmap moves: no earlier log record may be replayed into
     // this block, because the next allocation may hand it out as file data.
     cache.note_revoke(block, device)?;
     // Deferred to the commit: a rollback restores the bitmap, so an operation
-    // that frees and then fails still owes the block.
-    cache.note_blocks_freed(geom.account(), 1);
+    // that frees and then fails still owes the block. Credited to the
+    // principal charged for it, not to this caller.
+    cache.note_blocks_freed(owner.charged_inode(), 1);
 
     let mut desc = read_group_desc(group, geom, cache, device)?;
     let bitmap_block = desc.block_bitmap;

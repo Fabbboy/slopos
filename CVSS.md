@@ -1,15 +1,46 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-**Two findings are open.** Last swept 2026-09-07 (Phase 7: the ext2 metadata
+**No findings are open.** Last swept 2026-09-07 (Phase 7: the ext2 metadata
 redo log, the bounded writeback pass, and the per-process disk-block quota —
 the new hostile input at replay, the new userland-reachable log file, and what
-"a ledger keyed on a principal" newly depends on).
+"a ledger keyed on a principal" newly depends on). The two entries that sweep
+and the one before it left open were resolved on 2026-09-08 and removed under
+the policy below; what they taught is kept as method here.
+
+Those two closures are each a class:
+
+- **A refund must credit the principal that was charged, not the caller.**
+  ext2's `free_block` refunded `geom.account()` — whoever ran the free — so a
+  process at its `DiskBlocks` ceiling could unlink a file it did not create,
+  watch its own row fall by that file's block count and allocate again, and
+  the mirror case denied without malice: a process whose files someone else
+  removed stayed charged for blocks that no longer existed. The ledger entry
+  proposed a file-ownership model; that was the wrong layer. This kernel has
+  no persistable principal at all (`getuid` is a literal zero, and an
+  `AccountId` is a live slot index whose generations restart each boot, so
+  writing one to an inode would name a stranger after a reboot), and an
+  ownership *check* on the unlink would not have fixed the mirror case.
+  Attribution did: `fs/src/ext2/blockcharge.rs` records, per mount, which
+  principal was charged for an inode's blocks, and the free credits that
+  record. The rule generalises past ext2 — **a ledger keyed on a principal
+  needs a record of which principal, kept wherever the resource is, not
+  inferred from whoever is running.**
+- **A budget that is shared and charged to nobody is not a bound.** The
+  file-mapping page sets had one system-wide ceiling of 16 inodes and 1024
+  unreclaimable pages, summed across every slot and attributed to no account,
+  so one process holding sixteen mapped inodes made file `mmap` and `msync`
+  answer `ENOMEM` for every other process at no cost to its own accounted
+  budget. Fixed by charging the frames to a principal on the `PinnedBytes`
+  axis — a frame under a user PTE is pinned against reclaim, which is what
+  that axis already counts — and by measuring a request against that
+  principal's *share* of the registry rather than against the whole of it.
 
 That sweep found eight defects. Seven were fixed inside the same unreleased
-change and are therefore not ledger entries; the eighth is
-`SLOPOS-2026-0055`. The Phase 6 sweep before it found six, of which five were
-fixed the same way and the sixth is `SLOPOS-2026-0054`. Both sets of fixes are
-recorded here as method, because each is a class rather than an instance:
+change and were therefore never ledger entries; the eighth was
+`SLOPOS-2026-0055`, closed above. The Phase 6 sweep before it found six, of
+which five were fixed the same way and the sixth was `SLOPOS-2026-0054`, also
+closed above. Both sets of fixes are recorded here as method, because each is
+a class rather than an instance:
 
 - **A block number read off the medium is a write offset.** The log's replay
   bounds-checked every field except the one it multiplies into an offset, so a
@@ -132,10 +163,9 @@ fix was to split the caller-argument case into `InvalidRange`, which
 `test_ext2_corruption_latches_but_caller_errors_do_not` pins both directions
 and was confirmed to fail against the vulnerable code.
 
-This file is the living ledger of open security findings. Nearly every entry
-recorded since 2026-03-17 has been fixed and removed under the pre-alpha
-policy below; what stays is the method, the tooling, and whatever is still
-open.
+This file is the living ledger of open security findings. Every entry recorded
+since 2026-03-17 has been fixed and removed under the pre-alpha policy below;
+what stays is the method and the tooling.
 
 > **Pre-alpha ledger policy.** SlopOS is pre-alpha with no backwards-compatibility
 > or audit-trail obligations, so this ledger tracks **open findings only**. When a
@@ -266,153 +296,5 @@ Analogs worth citing when they match a finding's shape:
 
 ## Open findings at a glance
 
-| ID | Title | Score | Severity |
-|---|---|---|---|
-| SLOPOS-2026-0054 | the file-mapping page budget is global and charged to nobody | — | unscored (confidence 74) |
-| SLOPOS-2026-0055 | a process that frees another principal's blocks credits its own disk-block ledger | 5.5 | MEDIUM |
-
-## Open SlopOS findings
-
-### SLOPOS-2026-0054
-- Title: the file-mapping page budget is global and charged to nobody, so one
-  process can deny file `mmap` to every other while it holds its mappings
-- Status: `open`
-- Confidence: 74 — evidence 36 (the caps, the system-wide `held` sum and the
-  absence of any charge were read directly, and the registry's own comment
-  says the memory is unreclaimable), exploitability 20 (any unprivileged
-  process, but only for as long as it holds the mappings: the permanent form
-  — a queued release nothing drained, on a boot with no writable ext2 flusher
-  — was fixed in this change by draining at the head of `acquire` and by
-  releasing inline where the caller can sleep), reproducibility 18 (the code
-  path is unconditional; the denial was not observed under QEMU, only derived)
-- CVSS vector/score: omitted — confidence is below 80. What would raise it: a
-  utest that holds `MAX_MAPPED_INODES` mappings in one process and observes a
-  second process's `mmap` answer `ENOMEM`, which would settle exploitability
-  and reproducibility together.
-- Impact: `MAX_MAPPED_INODES = 16` and `MAX_MAPPED_PAGES = 1024` are one
-  system-wide budget, and `plan_acquire` sums the pages held across every
-  slot. Nothing charges those kernel frames to the mapper: the `mmap` path
-  reserves *address-space* pages against the caller's quota, not the page
-  set's frames. So a process holding sixteen mapped inodes, or four megabytes
-  of one, makes file-backed `mmap` and `msync` unavailable to everything else
-  for as long as it likes, at no cost to its own accounted budget.
-- Evidence:
-  - `fs/src/filemap.rs` — `MAX_MAPPED_INODES` / `MAX_MAPPED_PAGES`, and the
-    module comment stating the pages are not visible to reclaim
-  - `fs/src/filemap.rs` — `plan_acquire` sums `held` across all slots before
-    refusing with `TooManyInodes` / `TooManyPages`
-  - `mm/src/process_vm.rs` — `process_vm_mmap_file_shared` reserves address
-    space through `vma_map.reserve_pages`; no `PagesAxis` charge covers the
-    frames the page set owns
-- Repro: in one process, `mmap(MAP_SHARED)` sixteen distinct files (or 1024
-  pages of fewer), and hold them; in another, `mmap(MAP_SHARED, fd, …)` of any
-  file answers `ENOMEM` until the first releases. `fs/src/tests/filemap.rs`'s
-  `test_filemap_inode_cap_refuses` already exercises the refusal itself — what
-  is missing is the cross-process half.
-- Remediation: charge the page set to the acquiring account through the same
-  `PagesAxis`/`try_charge` mechanism the VMA reservation uses, so the caps
-  become a registry bound rather than a shared resource one caller can corner.
-  `ResourceKind::DiskBlocks` is the same shape for ext2 blocks and shows what
-  that costs: it moved `KIND_COUNT` and every per-kind row of
-  `scripts/gates/quota/tests.txt`. A `filemap` kind would do the same.
-
-### SLOPOS-2026-0055
-- Title: a process that frees another principal's blocks credits its own
-  disk-block ledger, so the per-process ceiling bounds nothing it can reach a
-  foreign file from
-- Status: `open`
-- Confidence: 88 — evidence 40 (every link is direct code: the refund is
-  attributed to `geom.account()`, which `with_cached_fs` set from
-  `current_task_account()` on the way in, and `FileStat.uid` is a constant
-  zero on every inode so nothing refuses the foreign unlink), exploitability
-  28 (an unprivileged process and any unsealed file it did not create),
-  reproducibility 20 (deterministic step by step; not executed)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` → **5.5
-  MEDIUM**. Availability only: the ledger drifts, no data is read or altered
-  beyond what deleting a file already does.
-- Impact: `ResourceKind::DiskBlocks` bounds a process's outstanding block
-  allocations, and the refund on free goes to whoever ran the free. A process
-  at its ceiling can therefore unlink or truncate a file it did not create,
-  watch its own row fall by that file's block count, and allocate again — as
-  often as there are foreign files. The mirror case denies without malice: a
-  process whose files someone else removed stays charged for blocks that no
-  longer exist until it exits, and meets `ENOSPC` at its ceiling with the
-  volume empty.
-- Evidence:
-  - `fs/src/ext2/alloc.rs` — `free_block` calls
-    `cache.note_blocks_freed(geom.account(), 1)`
-  - `fs/src/ext2_vfs.rs` — `with_cached_fs` sets that account per call from
-    `current_task_account()`
-  - `fs/src/ext2/cache.rs` — `settle_charges` refunds `op_freed` at the commit
-  - `fs/src/vfs/traits.rs` — `FileStat.uid` is filled with zero by every
-    filesystem, and no caller compares it, so no path refuses a foreign unlink
-- Repro: process A creates a file and writes *N* blocks; process B allocates to
-  its ceiling and is refused; B unlinks A's file; B allocates *N* more blocks
-  successfully. A is refused at its own ceiling until it exits.
-- Remediation: the ledger cannot be stronger than the permission model beneath
-  it, and ext2 records no owner for a block, so the fix is a file-ownership
-  model — a real `uid` on `FileStat` and a check on the unlink, truncate and
-  rename paths — not a change to the quota. Making the refund a per-operation
-  net (`freed.min(charged)`) was considered and rejected: it would stop a
-  process's *own* deletes from ever refunding, so a long-lived writer would
-  exhaust its ceiling legitimately. Until then the ceiling is what it is
-  documented as in `abi/src/quota.rs`: a bound on one live process's
-  outstanding allocations, absent cooperation from another process.
-
-## Structural invariants the closed findings left behind
-
-Worth knowing before writing a new finding in these areas, because each one
-changes what a defect there would have to look like:
-
-- **`Ext2Geometry` is the only constructor of `GroupIdx`.** Superblock geometry
-  is validated once at mount, so an unbounded group index is not a value the
-  ext2 code can construct. A new ext2 caller inherits the bounds rather than
-  re-deriving them.
-- **`FdContainment` is total over `FileKind`.** A new descriptor kind must
-  state whether it can own other descriptions before it compiles, and only
-  `Leaf` kinds cross an ancillary transfer. This is what makes an SCM_RIGHTS
-  reference cycle unrepresentable rather than collected.
-- **`CursorUnmapHook::select_cr3` is the only path to a PCID.** The tag and the
-  right to skip the TLB flush are one decision, taken by the per-CPU pool that
-  owns the binding.
-- **`process_vm_reset_for_exec` and `create_process_vm_for` share one
-  definition of a fresh address space**, so exec is an address-space boundary
-  and a new region kind is added in one place.
-- **The per-tier aging backstop bounds how long a runnable tier can be passed
-  over**, so strict priority cannot starve a lower tier indefinitely.
-- **A verity trailer is recognised only beyond the filesystem's own extent.**
-  `build_verified` takes the superblock's block count, so bytes a user can
-  write into a file are never a trailer, and a trailer that is present but
-  unusable refuses the mount rather than mounting unverified. A **v1** trailer
-  write-protects the device; a **v2** one is writable and records which blocks
-  a boot rewrote, un-attesting every block a write touches — partial writes
-  included — so a rewritten block reads unverified rather than failing. The
-  bitmap is persisted *before* the filesystem is marked clean, and a mount
-  that finds an unclean image, or a bitmap whose CRC does not match, trusts
-  nothing for that boot. Read-only-ness is one rule
-  (`Ext2Fs::read_only_for`, keyed on `BlockDevice::write_protected`) and
-  reaches userland as `EROFS` through `MOUNT_RDONLY`, checked at every
-  `vfs::ops` mutation before the filesystem sees it.
-- **Filesystem identity is the address of a non-zero-sized `static`.**
-  `vfs::traits::same_filesystem` is the one comparison, and every mountable
-  filesystem carries at least a byte so the address is its own. `ptr::eq` is
-  the wrong tool here — a `&dyn FileSystem`'s vtable differs between the
-  crates that coerce it, so a cross-crate comparison of two references to one
-  filesystem answers `false`.
-- **A writable mapping of a file is authorised once, at `mmap`, by the
-  descriptor's open mode.** `open(2)` is where the seal and the read-only
-  mount are checked, so the mode is the proxy for both; `mprotect` refuses to
-  widen a file mapping to writable, because the descriptor that authorised it
-  is not reachable from there. The per-inode page set is the authority
-  `read(2)` is routed through for the ranges it covers, so a writable PTE over
-  it is write access to the file, not merely to a private copy.
-- **A `/dev` block node is read-only and entitlement-gated.** The exclusive
-  write claim belongs to the mount for the kernel's lifetime, so a node never
-  competes with it; and a read requires a kernel thread or
-  `TASK_FLAG_SYSTEM`, because a raw device read bypasses every filesystem
-  permission check above it and `unlink` is this kernel's only primitive for
-  making something unreadable.
-- **`mount(2)`'s target may not shadow a grant path.** Program-identity
-  privilege is keyed on a path, so a mount over `/bin` would confer it on
-  whatever the mount contains; the refusal is a scan of
-  `core::exec::grants`'s own table, which stays correct as the table grows.
+No open findings. The table returns when a sweep finds one; the format is
+above, and the next ID is `SLOPOS-2026-0056`.

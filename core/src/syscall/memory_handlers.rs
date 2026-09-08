@@ -59,8 +59,14 @@ fn mmap_regular_file(
     let last_page = (end - 1) / PAGE_SIZE;
     let page_count = u32::try_from(last_page - first_page + 1).map_err(|_| Errno::ENOMEM)?;
 
-    let (map, paddrs) =
-        filemap::acquire(fs, inode, first_page, page_count, writable).map_err(|e| e.to_errno())?;
+    // `AccountId::NONE` is exempt from the page set's per-principal share, so
+    // a process whose handle no longer resolves must not inherit it.
+    let owner = process.account();
+    if owner.is_none() {
+        return Err(Errno::ESRCH);
+    }
+    let (map, paddrs) = filemap::acquire(fs, inode, first_page, page_count, writable, owner)
+        .map_err(|e| e.to_errno())?;
 
     let result = if shared {
         slopos_mm::process_vm::process_vm_mmap_file_shared(

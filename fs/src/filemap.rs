@@ -34,16 +34,25 @@
 //! queues, and [`drain_pending`] — called at the head of [`acquire`], by
 //! `munmap` and `exec` once the address-space lock is dropped, and by the ext2
 //! flusher — completes the work.
+//!
+//! The two caps bound the kernel's unreclaimable memory; a principal's share
+//! of them is what stops one process cornering the whole budget and denying
+//! file `mmap` to every other. One slot holds one charge, so a set has one
+//! owner: the principal that most recently grew or mapped it, within that
+//! principal's share.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use slopos_abi::Errno;
 use slopos_abi::addr::PhysAddr;
+use slopos_abi::quota::PinnedBytesAxis;
 use slopos_mm::filemap_hook::FileMapOps;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::page_alloc::alloc_kernel_page;
 use slopos_mm::vma_region::FileMapRef;
 use slopos_ostd::mm::frame::{claim_owned_anon_page, release_owned_anon_page};
+use slopos_ostd::process::AccountId;
+use slopos_ostd::process::quota::{ChargeSlot, try_charge};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex, SpinLock};
 use slopos_ostd::{KVec, klog_info, lock_class};
 
@@ -59,6 +68,12 @@ const MAX_MAPPED_INODES: usize = 16;
 /// Pages every set may hold between them — 4 MiB. A page under a live user PTE
 /// is unreclaimable by construction, so this ceiling is the only bound on them.
 const MAX_MAPPED_PAGES: u32 = 1024;
+
+/// Slots and pages one principal may hold — a quarter of the registry each.
+/// Kernel work (`AccountId::NONE`) is outside the share, as it is outside
+/// ext2's block reserve: it is not a principal.
+pub(crate) const MAX_INODES_PER_ACCOUNT: usize = MAX_MAPPED_INODES / 4;
+const MAX_PAGES_PER_ACCOUNT: u32 = MAX_MAPPED_PAGES / 4;
 
 /// Why a page set could not be handed out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +133,13 @@ struct PageSet {
     /// `(filesystem, inode)` and stops being written back, while every live
     /// mapping keeps reading it.
     forgotten: bool,
+    /// The principal the frames are charged to. One charge per slot, so a
+    /// second principal takes the whole set rather than a share of it.
+    owner: AccountId,
+    /// The frames' charge, equal to `pages.len()` while the set is live. A
+    /// frame under a user PTE is pinned against reclaim, which is what the
+    /// `PinnedBytes` axis counts.
+    charge: ChargeSlot<PinnedBytesAxis>,
 }
 
 impl PageSet {
@@ -133,6 +155,8 @@ impl PageSet {
         pending_release: false,
         pending_flush: false,
         forgotten: false,
+        owner: AccountId::NONE,
+        charge: ChargeSlot::empty(),
     };
 
     /// Deliberately `false` once forgotten: the inode number may already have
@@ -195,6 +219,9 @@ struct AcquirePlan {
     kept: KVec<PhysAddr>,
     /// A slot claimed by this call; a failure must give it back.
     fresh: bool,
+    /// Pages this call added to the set's charge, for the failure path to give
+    /// back.
+    charged: u32,
 }
 
 /// Claim a page set for `[first_page, first_page + page_count)` of `inode`,
@@ -208,12 +235,17 @@ struct AcquirePlan {
 /// The returned [`FileMapRef`] carries one reference unit, which the caller
 /// releases once it has mapped the pages or given up, leaving the mapping's
 /// own per-page references behind.
+///
+/// `owner` is the principal the frames are charged to and whose share the
+/// request is measured against: the mapping process, not the task running the
+/// syscall for it.
 pub fn acquire(
     fs: &'static dyn FileSystem,
     inode: InodeId,
     first_page: u64,
     page_count: u32,
     writable: bool,
+    owner: AccountId,
 ) -> Result<(FileMapRef, KVec<u64>), FileMapError> {
     if page_count == 0 {
         return Err(FileMapError::EmptyRange);
@@ -230,7 +262,7 @@ pub fn acquire(
     }
     let _io = io_lock()?;
 
-    let plan = plan_acquire(fs, inode, first_page, page_count)?;
+    let plan = plan_acquire(fs, inode, first_page, page_count, owner)?;
     if let Some((union_first, union_count)) = plan.grow {
         match populate(fs, inode, &plan, union_first, union_count) {
             Ok(pages) => install(&plan, union_first, pages),
@@ -254,21 +286,30 @@ pub fn acquire(
 }
 
 /// The bookkeeping half of [`acquire`]: reserve the slot and the page budget,
-/// take the caller's reference, and say what is left to read.
+/// charge the frames the set is about to gain, take the caller's reference,
+/// and say what is left to read.
 #[inline(never)]
 fn plan_acquire(
     fs: &'static dyn FileSystem,
     inode: InodeId,
     first_page: u64,
     page_count: u32,
+    owner: AccountId,
 ) -> Result<AcquirePlan, FileMapError> {
     let mut sets = FILEMAP.lock();
 
     let mut held = 0u32;
+    let mut owned_pages = 0u32;
+    let mut owned_sets = 0usize;
     let mut existing = None;
     let mut free = None;
     for (idx, entry) in sets.iter().enumerate() {
-        held = held.saturating_add(entry.pages.len() as u32);
+        let pages = entry.pages.len() as u32;
+        held = held.saturating_add(pages);
+        if entry.fs.is_some() && !owner.is_none() && entry.owner == owner {
+            owned_pages = owned_pages.saturating_add(pages);
+            owned_sets += 1;
+        }
         if entry.holds(fs, inode) {
             existing = Some(idx);
         } else if entry.fs.is_none() && free.is_none() {
@@ -298,6 +339,7 @@ fn plan_acquire(
                 kept_first: 0,
                 kept,
                 fresh: false,
+                charged: 0,
             });
         }
         let end = (entry.first_page + entry.pages.len() as u64).max(first_page + page_count as u64);
@@ -307,7 +349,22 @@ fn plan_acquire(
     };
 
     let already = sets[slot].pages.len() as u32;
-    if union_count > already && held.saturating_add(union_count - already) > MAX_MAPPED_PAGES {
+    let growth = union_count.saturating_sub(already);
+    if held.saturating_add(growth) > MAX_MAPPED_PAGES {
+        return Err(FileMapError::TooManyPages);
+    }
+    // A set the caller does not own is re-homed whole, so it costs a slot and
+    // every page of it. A fresh slot is the same case: its owner is nobody.
+    let rehome = sets[slot].owner != owner;
+    if !owner.is_none() && rehome && owned_sets >= MAX_INODES_PER_ACCOUNT {
+        return Err(FileMapError::TooManyInodes);
+    }
+    let after = if rehome {
+        owned_pages.saturating_add(union_count)
+    } else {
+        owned_pages.saturating_add(growth)
+    };
+    if !owner.is_none() && after > MAX_PAGES_PER_ACCOUNT {
         return Err(FileMapError::TooManyPages);
     }
 
@@ -317,7 +374,17 @@ fn plan_acquire(
         kept.push(*pa).map_err(|_| FileMapError::NoMemory)?;
     }
 
+    let charge_now = if rehome { union_count } else { growth };
+    let reservation =
+        try_charge::<PinnedBytesAxis>(owner, charge_now).map_err(|_| FileMapError::TooManyPages)?;
+
     let entry = &mut sets[slot];
+    if rehome {
+        entry.charge.put(reservation);
+        entry.owner = owner;
+    } else {
+        entry.charge.grow(reservation);
+    }
     if fresh {
         entry.fs = Some(fs);
         entry.inode = inode;
@@ -336,6 +403,7 @@ fn plan_acquire(
         kept_first,
         kept,
         fresh,
+        charged: growth,
     })
 }
 
@@ -472,12 +540,18 @@ fn install(plan: &AcquirePlan, union_first: u64, pages: KVec<PhysAddr>) {
 }
 
 /// Undo [`plan_acquire`] after a failed populate.
+///
+/// The charge goes back whatever the reference count says: `populate` has
+/// already freed the frames it allocated. Only the growth goes back, so a
+/// failed re-homing leaves this caller charged for the frames the set still
+/// holds — which is what keeps the charge equal to them.
 fn abandon(plan: &AcquirePlan) {
     let mut sets = FILEMAP.lock();
     let entry = &mut sets[plan.slot];
     if entry.generation != plan.generation {
         return;
     }
+    entry.charge.shrink(plan.charged);
     entry.refs = entry.refs.saturating_sub(1);
     if entry.refs != 0 {
         return;
@@ -486,6 +560,8 @@ fn abandon(plan: &AcquirePlan) {
         entry.fs = None;
         entry.pages = KVec::new();
         entry.ready = false;
+        entry.charge.take();
+        entry.owner = AccountId::NONE;
         return;
     }
     // Reviving the set to take this reference dropped its release obligation;
@@ -525,8 +601,17 @@ fn snapshot_range(
 /// dirty bit and nothing in this kernel harvests it, so every page of such a
 /// set must be assumed written. Arming on a read-only mapping would rewrite an
 /// unmodified file, stamping its timestamps and un-attesting its blocks.
-pub fn retain(map: FileMapRef, pages: u32, writable: bool) -> bool {
+///
+/// The set is re-homed to `holder` within that principal's share, because a
+/// set whose owner has exited is charged to nobody and counted against
+/// nobody's share. `fork` is the case that decides the timing: the child
+/// retains while the parent is still alive, so waiting for an owner to die
+/// means never re-homing at all. A holder at its share re-homes nothing, so
+/// what a principal *holds* can exceed what it may *acquire* — `fork` is not
+/// refusable for an accounting reason.
+pub fn retain(map: FileMapRef, pages: u32, writable: bool, holder: AccountId) -> bool {
     let mut sets = FILEMAP.lock();
+    let (held_sets, held_pages) = owned_by(sets.as_slice(), holder);
     let Some(entry) = resolve(sets.as_mut_slice(), map) else {
         return false;
     };
@@ -534,8 +619,40 @@ pub fn retain(map: FileMapRef, pages: u32, writable: bool) -> bool {
     if writable {
         entry.dirtyable = true;
     }
+    rehome(entry, holder, held_sets, held_pages);
     revive(entry);
     true
+}
+
+/// Sets and pages `owner` is charged for.
+fn owned_by(sets: &[PageSet], owner: AccountId) -> (usize, u32) {
+    if owner.is_none() {
+        return (0, 0);
+    }
+    sets.iter()
+        .filter(|entry| entry.fs.is_some() && entry.owner == owner)
+        .fold((0usize, 0u32), |(count, pages), entry| {
+            (count + 1, pages.saturating_add(entry.pages.len() as u32))
+        })
+}
+
+/// Charge the set to `holder` instead of its current owner, when that fits in
+/// `holder`'s share. A refused charge leaves the set as it was: failing the
+/// retain would tear down a mapping over accounting.
+fn rehome(entry: &mut PageSet, holder: AccountId, held_sets: usize, held_pages: u32) {
+    if holder.is_none() || entry.owner == holder {
+        return;
+    }
+    let pages = entry.pages.len() as u32;
+    if held_sets >= MAX_INODES_PER_ACCOUNT
+        || held_pages.saturating_add(pages) > MAX_PAGES_PER_ACCOUNT
+    {
+        return;
+    }
+    if let Ok(reservation) = try_charge::<PinnedBytesAxis>(holder, pages) {
+        entry.charge.put(reservation);
+        entry.owner = holder;
+    }
 }
 
 /// Drop `pages` mapping references, queueing the writeback and the frame frees
@@ -617,6 +734,8 @@ fn drop_set(entry: &mut PageSet) {
     entry.pending_release = false;
     entry.pending_flush = false;
     entry.forgotten = false;
+    entry.charge.take();
+    entry.owner = AccountId::NONE;
     entry.generation = entry.generation.wrapping_add(1);
 }
 
@@ -1012,8 +1131,8 @@ struct FileMapHook;
 static FILEMAP_HOOK: FileMapHook = FileMapHook;
 
 impl FileMapOps for FileMapHook {
-    fn retain(&self, map: FileMapRef, pages: u32, writable: bool) -> bool {
-        retain(map, pages, writable)
+    fn retain(&self, map: FileMapRef, pages: u32, writable: bool, holder: AccountId) -> bool {
+        retain(map, pages, writable, holder)
     }
 
     fn release(&self, map: FileMapRef, pages: u32) {

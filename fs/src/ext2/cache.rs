@@ -4,6 +4,7 @@ use slopos_ostd::process::quota;
 use slopos_ostd::{KBTreeMap, KBox, KVec};
 
 use super::Ext2Error;
+use super::blockcharge::BlockCharges;
 use super::journal::Journal;
 use super::ondisk::EXT2_MAX_BLOCK_SIZE;
 use super::types::BlockNum;
@@ -55,6 +56,18 @@ pub enum BlockOwner {
     /// inodes, so publishing one before every inode table is on disk can
     /// resurrect a freed inode under a fresh name.
     Other,
+}
+
+impl BlockOwner {
+    /// The inode a block belongs to, when the owner names one — the same
+    /// question a block charge asks. `None` for allocation state and inode
+    /// tables, which are charged to no principal.
+    pub fn charged_inode(self) -> Option<u32> {
+        match self {
+            BlockOwner::File(ino) => Some(ino),
+            _ => None,
+        }
+    }
 }
 
 /// The `frame` is both the slot's storage and, through its typed metadata, the
@@ -163,9 +176,12 @@ pub struct BlockCache {
     /// Blocks the open operation has been charged for, refunded if it rolls
     /// back.
     op_charged: u32,
-    /// Blocks the open operation freed, given back at the commit — a rollback
-    /// restores the bitmap, so it still owes them.
-    op_freed: u32,
+    /// Blocks charged for an allocation that then failed, refunded at the
+    /// commit; a rollback gives back `op_charged` in full instead.
+    op_cancelled: u32,
+    /// Which principal each charged block belongs to, so a free credits the
+    /// account that paid.
+    charges: BlockCharges,
     /// An eviction wrote one of the open operation's *data* blocks home, so
     /// the commit owes a barrier whichever path it takes: publishing metadata
     /// that names a home write still in a device cache is what
@@ -199,7 +215,8 @@ impl BlockCache {
             scratch: KVec::new(),
             op_account: AccountId::NONE,
             op_charged: 0,
-            op_freed: 0,
+            op_cancelled: 0,
+            charges: BlockCharges::new()?,
             op_data_evicted: false,
         })
     }
@@ -232,45 +249,72 @@ impl BlockCache {
         self.journal.as_ref().is_none_or(|j| j.has_headroom())
     }
 
-    /// Charge `blocks` to `account` for the open operation.
+    /// Charge `blocks` to `account` for `ino`, for the open operation.
     ///
     /// Op-scoped because the transaction scope lives here: a rollback restores
     /// the bitmaps, so it owes the charge back too. `try_charge` takes no lock
     /// and allocates nothing, so this is legal under the mount lock.
-    pub fn charge_blocks(&mut self, account: AccountId, blocks: u32) -> Result<(), Ext2Error> {
+    ///
+    /// `ino` is what makes the refund answerable — see
+    /// [`super::blockcharge`].
+    pub fn charge_blocks(
+        &mut self,
+        account: AccountId,
+        ino: Option<u32>,
+        blocks: u32,
+    ) -> Result<(), Ext2Error> {
         if blocks == 0 {
             return Ok(());
         }
         quota::charge_blocks(account, blocks).map_err(|_| Ext2Error::NoSpace)?;
         self.op_account = account;
         self.op_charged = self.op_charged.saturating_add(blocks);
+        self.charges.charge(ino, account, blocks);
         Ok(())
     }
 
-    /// Give `blocks` back at the commit rather than here: a rollback restores
-    /// the bitmap, so an immediate refund would hand back a charge the
-    /// operation still owes.
-    pub fn note_blocks_freed(&mut self, account: AccountId, blocks: u32) {
+    /// Give `blocks` of `ino` back to whoever is charged for them, at the
+    /// commit rather than here: a rollback restores the bitmap and the
+    /// operation would still owe them. The freeing principal is not a
+    /// parameter because it is not the one being credited.
+    pub fn note_blocks_freed(&mut self, ino: Option<u32>, blocks: u32) {
         if blocks == 0 {
             return;
         }
+        self.charges.free(ino, blocks);
+        if self.op_depth == 0 {
+            self.charges.commit();
+        }
+    }
+
+    /// Give back a charge whose allocation never happened.
+    ///
+    /// Not a free: no block changed hands, so only this operation's own record
+    /// is undone. Deferred to the commit because a rollback refunds the whole
+    /// of `op_charged`, this charge among it.
+    pub fn cancel_block_charge(&mut self, account: AccountId, ino: Option<u32>, blocks: u32) {
+        if blocks == 0 {
+            return;
+        }
+        self.charges.cancel(ino, account, blocks);
         if self.op_depth == 0 {
             quota::refund_blocks(account, blocks);
             return;
         }
-        self.op_account = account;
-        self.op_freed = self.op_freed.saturating_add(blocks);
+        self.op_cancelled = self.op_cancelled.saturating_add(blocks);
     }
 
     fn settle_charges(&mut self, committed: bool) {
         self.op_data_evicted = false;
-        let (account, charged, freed) = (self.op_account, self.op_charged, self.op_freed);
+        let (account, charged, cancelled) = (self.op_account, self.op_charged, self.op_cancelled);
         self.op_account = AccountId::NONE;
         self.op_charged = 0;
-        self.op_freed = 0;
+        self.op_cancelled = 0;
         if committed {
-            quota::refund_blocks(account, freed);
+            self.charges.commit();
+            quota::refund_blocks(account, cancelled);
         } else {
+            self.charges.rollback();
             quota::refund_blocks(account, charged);
         }
     }

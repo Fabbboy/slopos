@@ -151,7 +151,7 @@ pub fn ensure_data_block(
         if inode.block[idx].is_valid() {
             return Ok((inode.block[idx], 0));
         }
-        let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
+        let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device, owner)?;
         drop(cache.get_zero_data(new_block, device, owner)?);
         inode.block[idx] = new_block;
         return Ok((new_block, 1));
@@ -159,7 +159,7 @@ pub fn ensure_data_block(
 
     let top_idx = path.offsets[0] as usize;
     if !inode.block[top_idx].is_valid() {
-        let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
+        let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device, owner)?;
         drop(cache.get_zero_owned(new_block, device, owner)?);
         inode.block[top_idx] = new_block;
         allocated += 1;
@@ -174,7 +174,7 @@ pub fn ensure_data_block(
         if child.is_valid() {
             current_indirect = child;
         } else {
-            let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
+            let new_block = ext2_alloc::allocate_block(geom, superblock, cache, device, owner)?;
             drop(cache.get_zero_owned(new_block, device, owner)?);
             let mut parent = cache.get_owned(current_indirect, device, owner)?;
             write_ptr(parent.data_mut(), path.offsets[level], new_block);
@@ -193,7 +193,7 @@ pub fn ensure_data_block(
         return Ok((existing, allocated));
     }
 
-    let new_data = ext2_alloc::allocate_block(geom, superblock, cache, device)?;
+    let new_data = ext2_alloc::allocate_block(geom, superblock, cache, device, owner)?;
     drop(cache.get_zero_data(new_data, device, owner)?);
     let mut parent = cache.get_owned(current_indirect, device, owner)?;
     write_ptr(parent.data_mut(), data_idx, new_data);
