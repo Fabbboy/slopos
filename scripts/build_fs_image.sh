@@ -20,11 +20,13 @@ set -euo pipefail
 #   PRESERVE_FS_IMAGE - `1` refreshes the binaries of an existing writable
 #                   image in place instead of running mkfs, so a developer
 #                   iterating on the kernel keeps whatever the guest wrote.
-#                   Ignored when no image exists, when the image is a
-#                   different size, or when the image carries a v1 trailer
-#                   (its hashes cover the bytes we would rewrite). A v2
-#                   trailer is recomputed at the end of the run, so it does
-#                   not block a refresh.
+#                   Ignored when no image exists. When an image *does* exist
+#                   and cannot be kept — damaged, left dirty by a killed boot,
+#                   smaller than asked for, or carrying a write-protecting v1
+#                   trailer — this script REFUSES and names the fix rather
+#                   than deleting it. A larger FS_IMAGE_SIZE grows it in
+#                   place. A v2 trailer is recomputed at the end of the run,
+#                   so it does not block a refresh.
 
 IMAGE_PATH="${1:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
 BUILD_DIR="${2:?Usage: build_fs_image.sh <image_path> <build_dir> <bin1> [bin2] ...}"
@@ -95,42 +97,88 @@ verity_trailer_version() {
     tail -c 32 "$1" | od -An -tu4 -j4 -N4 | tr -d ' \n'
 }
 
-# The filesystem's own extent, from the trailer header. Everything past it is
-# hash array, bitmap and pad, which no size check should count.
-verity_trailer_fs_bytes() {
-    local bs bc
-    bs=$(tail -c 32 "$1" | od -An -tu4 -j12 -N4 | tr -d ' \n')
-    bc=$(tail -c 32 "$1" | od -An -tu8 -j16 -N8 | tr -d ' \n')
-    echo $((bs * bc))
+# How big the *filesystem* is, which is what a size check asks: the file is
+# larger by whatever trailer is appended, and the trailer starts where the
+# filesystem ends.
+fs_extent_bytes() {
+    local hdr bc bs
+    hdr=$(dumpe2fs -h "$1" 2>/dev/null)
+    bc=$(echo "$hdr" | sed -n 's/^Block count: *\([0-9]*\)/\1/p')
+    bs=$(echo "$hdr" | sed -n 's/^Block size: *\([0-9]*\)/\1/p')
+    echo $(( ${bc:-0} * ${bs:-0} ))
 }
 
-# Only an image e2fsck vouches for: refreshing binaries into a damaged
-# filesystem propagates the damage into the next boot's /sbin/init, and the
-# fallback (a fresh mkfs) is the recovery a developer wants anyway.
-image_is_preservable() {
-    [ "$PRESERVE_FS_IMAGE" = "1" ] || return 1
-    [ -f "$IMAGE_PATH" ] || return 1
+# A preserved image is the developer's machine: nothing here deletes one, and
+# every refusal names the command that would.
+refuse() {
+    echo "" >&2
+    echo "preserve: $1" >&2
+    echo "  $IMAGE_PATH holds whatever the guest wrote, so this build stops here." >&2
+    echo "  Fix it:     $2" >&2
+    echo "  Discard it: rm -f '$IMAGE_PATH' '$STAMP_PATH'   (just boot-persist-reset)" >&2
+    exit 1
+}
+
+# Grow in place rather than refuse: raising FS_IMAGE_SIZE on a machine you are
+# living in must not be a reason to throw it away.
+grow_image() {
+    local have="$1" want="$2" trailer=""
+    command -v resize2fs >/dev/null 2>&1 ||
+        refuse "resize2fs is not installed, so the image cannot be grown to ${want}B" \
+               "install e2fsprogs, or set FS_IMAGE_SIZE back to $have"
+    # `resize2fs` refuses a filesystem whose last check predates its last
+    # write, and this kernel never stamps `s_lastcheck` because it runs no
+    # fsck. The image was proved sound and clean a moment ago; this pass is the
+    # formality e2fsprogs insists on performing itself.
+    e2fsck -fy "$IMAGE_PATH" >/dev/null 2>&1 ||
+        refuse "e2fsck could not ready the image for a resize" "e2fsck -fy '$IMAGE_PATH'"
+    # Kept aside until the resize lands, so a failure puts the image back
+    # exactly as it was. The trailer itself is rebuilt at the end of this run.
+    if image_carries_verity_trailer "$IMAGE_PATH"; then
+        trailer="$(mktemp "${IMAGE_DIR}/trailer.XXXXXX")"
+        tail -c "+$((have + 1))" "$IMAGE_PATH" > "$trailer"
+    fi
+    truncate -s "$have" "$IMAGE_PATH"
+    truncate -s "$want" "$IMAGE_PATH"
+    if ! resize2fs "$IMAGE_PATH" >/dev/null 2>&1; then
+        truncate -s "$have" "$IMAGE_PATH"
+        [ -z "$trailer" ] || cat "$trailer" >> "$IMAGE_PATH"
+        rm -f "$trailer"
+        refuse "resize2fs could not grow the image to ${want}B (it is unchanged)" \
+               "e2fsck -fy '$IMAGE_PATH'"
+    fi
+    rm -f "$trailer"
+    echo "preserve: grew $IMAGE_PATH from ${have}B to ${want}B, keeping its contents"
+}
+
+# Held to the same oracle CI holds a boot's output to: sound *and* clean.
+# `e2fsck -fn` alone exits 0 on a dirty superblock, which is what a boot killed
+# mid-write leaves. Clean also means the log is empty, which is what makes
+# install_journal's invalidation below safe.
+preserve_or_refuse() {
     local want have
     want=$(numfmt --from=iec "$FS_IMAGE_SIZE")
-    have=$(stat -c %s "$IMAGE_PATH" 2>/dev/null || echo 0)
-    if image_carries_verity_trailer "$IMAGE_PATH"; then
-        # A v1 trailer's hashes cover the bytes a refresh would rewrite; a v2
-        # trailer is recomputed at the end of this run.
-        if [ "$VERITY" != "rw" ] || [ "$(verity_trailer_version "$IMAGE_PATH")" != "2" ]; then
-            echo "preserve: $IMAGE_PATH carries a verity trailer — rebuilding"
-            return 1
-        fi
-        have=$(verity_trailer_fs_bytes "$IMAGE_PATH")
+    have=$(fs_extent_bytes "$IMAGE_PATH")
+    if [ "$have" = "0" ]; then
+        refuse "there is no ext2 superblock in the image" "e2fsck -fy '$IMAGE_PATH'"
     fi
-    if [ "$want" != "$have" ]; then
-        echo "preserve: $IMAGE_PATH is ${have}B, want ${want}B — rebuilding"
-        return 1
+    # A v1 trailer's hashes cover the bytes a refresh would rewrite; a v2
+    # trailer is recomputed at the end of this run.
+    if image_carries_verity_trailer "$IMAGE_PATH" &&
+       { [ "$VERITY" != "rw" ] || [ "$(verity_trailer_version "$IMAGE_PATH")" != "2" ]; }; then
+        refuse "the image carries a write-protecting v1 trailer, whose hashes cover the bytes a refresh rewrites" \
+               "build this image with VERITY=rw"
     fi
-    if ! e2fsck -fn "$IMAGE_PATH" >/dev/null 2>&1; then
-        echo "preserve: e2fsck rejects $IMAGE_PATH — rebuilding"
-        return 1
+    "${SCRIPT_DIR}/check_fs_image.sh" "$IMAGE_PATH" ||
+        refuse "the image is damaged, or a boot left it dirty (see above)" \
+               "e2fsck -fy '$IMAGE_PATH'"
+    if [ "$want" -lt "$have" ]; then
+        refuse "the image is ${have}B and FS_IMAGE_SIZE asks for ${want}B; shrinking would drop blocks in use" \
+               "set FS_IMAGE_SIZE to at least ${have}"
     fi
-    return 0
+    if [ "$want" -gt "$have" ]; then
+        grow_image "$have" "$want"
+    fi
 }
 
 # `write` refuses an existing name, so a refresh unlinks first. debugfs writes
@@ -153,17 +201,21 @@ install_file() {
     debugfs -w -R "write $src $dst" "$IMAGE_PATH" >/dev/null
 }
 
+# Asks first: `debugfs mkdir` on a name that exists allocates the inode, fails
+# at the link, and leaves the leak `e2fsck` reports as an unconnected inode.
 mkdir_p() {
+    if debugfs -R "stat $1" "$IMAGE_PATH" 2>/dev/null | grep -q '^Inode:'; then
+        return 0
+    fi
     debugfs -w -R "mkdir $1" "$IMAGE_PATH" >/dev/null 2>&1 || true
 }
 
-if [ -f "$STAMP_PATH" ] && [ "$PRESERVE_FS_IMAGE" = "1" ] \
-   && [ "$(cat "$STAMP_PATH")" = "$(build_stamp)" ] && image_is_preservable; then
-    echo "preserve: $IMAGE_PATH is current — leaving it and its contents alone"
-    exit 0
-fi
-
-if image_is_preservable; then
+if [ "$PRESERVE_FS_IMAGE" = "1" ] && [ -f "$IMAGE_PATH" ]; then
+    preserve_or_refuse
+    if [ -f "$STAMP_PATH" ] && [ "$(cat "$STAMP_PATH")" = "$(build_stamp)" ]; then
+        echo "preserve: $IMAGE_PATH is current — leaving it and its contents alone"
+        exit 0
+    fi
     echo "preserve: refreshing binaries in $IMAGE_PATH, keeping everything else"
     # A refresh that dies midway must not leave the old stamp, or the next run
     # reports an image missing a binary as current.
@@ -183,6 +235,7 @@ mkdir_p /sbin
 # whether a path is writable. Mirrors gen_initramfs.py's EMPTY_DIRS.
 mkdir_p /etc
 mkdir_p /var
+mkdir_p /home
 
 # The metadata log (fs/src/ext2/journal.rs). A plain preallocated file, so
 # `e2fsck` sees a file and the format carries no feature bit; the seal is what
@@ -212,7 +265,9 @@ install_journal() {
         # Kept, not rebuilt: a preserved image's log may hold transactions the
         # next mount owes a replay. Its superblock is zeroed after a binary
         # refresh, because debugfs rewrote inodes the log knows nothing about
-        # and replaying stale copies of them would lose the fresh ones.
+        # and replaying stale copies of them would lose the fresh ones. Safe
+        # only because a preserved image is clean, and a clean image's log is
+        # empty.
         if [ "$REFRESHED_BINARIES" = "1" ]; then
             dd if=/dev/zero of="$IMAGE_PATH" bs=1 count=4 conv=notrunc status=none \
                 seek="$(journal_first_byte)" 2>/dev/null || true

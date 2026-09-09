@@ -1144,6 +1144,9 @@ pub fn test_ext2_device_write_error_on_metadata() -> TestResult {
     let Some(device) = build_minimal_ext2_image(64, 32) else {
         return TestResult::Pass;
     };
+    // A mounted image already carries `EXT2_ERROR_FS`, so a mutation owes no
+    // stamp; without it this fixture measures that stamp's write failing.
+    device.with_buffer_mut(|buf| buf[1024 + 58..1024 + 60].copy_from_slice(&2u16.to_le_bytes()));
     let failing = WriteFailingDevice::new(device);
     let (sb, bs, is) = match Ext2Fs::mount_params(&failing) {
         Ok(v) => v,

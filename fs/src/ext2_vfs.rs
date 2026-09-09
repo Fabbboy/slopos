@@ -856,9 +856,13 @@ pub fn ext2_vfs_shutdown_sync() {
     mark_filesystem_clean();
 }
 
-/// Clear the not-clean bit, so the next mount knows the image was shut down
-/// in an orderly way. Runs after the final sync: a failure to flush must
-/// leave the image marked dirty.
+/// Declare the image clean on the medium whenever it genuinely is: nothing
+/// dirty, nothing unbarriered, no superblock drift, an empty log.
+///
+/// Runs at shutdown and from every idle flusher pass, so a rude power-off
+/// leaves an image that still mounts writable rather than one `root=auto`
+/// demotes to `/mnt`. The thaw is [`Ext2Fs::transaction`]'s re-stamp, which
+/// reaches the medium before any write it covers.
 fn mark_filesystem_clean() {
     if !EXT2_VFS_INIT.is_set() {
         return;
@@ -869,6 +873,9 @@ fn mark_filesystem_clean() {
     let Some(cached) = guard.as_mut() else {
         return;
     };
+    if cached.read_only || cached.superblock.state == crate::ext2::ondisk::EXT2_VALID_FS {
+        return;
+    }
     // A non-empty log counts as unflushed state: stamping clean over one tells
     // the next mount there is nothing to replay while the homes still lack it.
     if cached.cache.dirty_count() > 0
@@ -876,9 +883,6 @@ fn mark_filesystem_clean() {
         || cached.superblock_dirty
         || !cached.cache.journal_is_empty()
     {
-        return;
-    }
-    if cached.read_only {
         return;
     }
     // The verity attested bitmap goes down, and is flushed, BEFORE the clean
@@ -951,6 +955,8 @@ fn ext2_flusher_entry(token: KernelIoToken<'static>) {
         backoff_ms = if result.is_err() {
             (backoff_ms * 2).clamp(FLUSH_BACKOFF_MIN_MS, FLUSH_BACKOFF_MAX_MS)
         } else {
+            // Nothing left to write, so say so on the medium.
+            mark_filesystem_clean();
             0
         };
         if waited == KthreadWait::Stop {

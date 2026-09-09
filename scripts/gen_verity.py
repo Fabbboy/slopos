@@ -15,7 +15,9 @@ CRC-32 of the whole hash array, so a corrupt array is self-detecting.
 
 Version 2 adds the attested bitmap and spends the header's `reserved` u32 on
 its CRC-32: a set bit means the block still matches its build-time hash. A v2
-image is a writable root; a v1 image is write-protected outright.
+image is a writable root; a v1 image is write-protected outright. A re-run
+AND-s an existing v2 bitmap into the new one: the hashes are recomputed from
+the current bytes, so re-blessing would vouch for whatever the last boot wrote.
 
 The pad makes the finished file a whole number of 512-byte sectors. A block
 device reports its capacity in sectors, so an unpadded trailer whose header
@@ -108,6 +110,39 @@ def attested_bitmap(n: int, block_size: int) -> bytearray:
     return bitmap
 
 
+def prior_attested(data: bytes) -> bytearray | None:
+    """The attested bitmap of a v2 trailer already on `data`, or `None`.
+
+    Must be read before the trailer is stripped. A torn one attests nothing:
+    it says nothing about which blocks are still as built.
+    """
+    if len(data) < HEADER_SIZE:
+        return None
+    magic, version, _algo, _bs, block_count, _root, bitmap_crc = struct.unpack(
+        HEADER_FMT, data[-HEADER_SIZE:]
+    )
+    if magic != MAGIC or version != 2:
+        return None
+    length = (block_count + 7) // 8
+    end = len(data) - HEADER_SIZE
+    if length > end:
+        return None
+    bitmap = bytearray(data[end - length : end])
+    if zlib.crc32(bytes(bitmap)) & 0xFFFFFFFF != bitmap_crc:
+        return bytearray(length)
+    return bitmap
+
+
+def carry_forward(fresh: bytearray, prior: bytearray | None) -> bytearray:
+    """`fresh` AND `prior` over the blocks both describe. Blocks past the old
+    bitmap are new (a grown image), and this build did write them."""
+    if prior is None:
+        return fresh
+    for i in range(min(len(fresh), len(prior))):
+        fresh[i] &= prior[i]
+    return fresh
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="append a SlopOS verity trailer")
     parser.add_argument("image", help="raw ext2 image to seal in place")
@@ -125,6 +160,7 @@ def main() -> int:
     with open(path, "rb") as f:
         data = f.read()
 
+    prior = prior_attested(data)
     data = strip_trailer(data)
     block_size = ext2_block_size(data)
 
@@ -143,7 +179,7 @@ def main() -> int:
 
     root = zlib.crc32(bytes(arr)) & 0xFFFFFFFF
     if version == 2:
-        bitmap = bytes(attested_bitmap(n, block_size))
+        bitmap = bytes(carry_forward(attested_bitmap(n, block_size), prior))
         reserved = zlib.crc32(bitmap) & 0xFFFFFFFF
     else:
         bitmap = b""
@@ -167,7 +203,10 @@ def main() -> int:
     total = unpadded + pad
     assert total % SECTOR_SIZE == 0, f"image is {total} bytes, not sector-aligned"
 
-    attested = "" if version == 1 else f", {len(bitmap)}B attested bitmap crc 0x{reserved:08x}"
+    attested = ""
+    if version == 2:
+        kept = sum(bin(b).count("1") for b in bitmap)
+        attested = f", {kept}/{n} blocks attested (crc 0x{reserved:08x})"
     print(
         f"verity: appended v{version} trailer for {n} blocks ({block_size}B),"
         f" root crc 0x{root:08x}{attested}, {pad}B pad, {total} bytes total"

@@ -522,3 +522,61 @@ slopos_testing::stest!(
     name = test_ext2_journal_orphan_removal_publishes_the_head_first,
     suite = fs
 );
+
+/// A superblock field as the medium holds it, not as a handle remembers it.
+fn on_disk_u16(device: &dyn BlockDevice, field_offset: u64) -> u16 {
+    let mut buf = [0u8; 2];
+    if device.read_at(1024 + field_offset, &mut buf).is_err() {
+        return u16::MAX;
+    }
+    u16::from_le_bytes(buf)
+}
+
+/// An image marked clean while still mounted must be re-stamped dirty before
+/// the next mutation reaches the medium, or a crash leaves a superblock
+/// claiming a consistency its blocks do not have and nothing tells `e2fsck` to
+/// look. Observed as the offset of the first device write — 1024 is the
+/// superblock, and without the thaw it is this operation's log block. An idle
+/// window is not a mount, so the re-stamp must not bill one.
+pub fn test_ext2_clean_stamp_thaws_before_the_next_write() -> TestResult {
+    use crate::ext2::ondisk::{EXT2_ERROR_FS, EXT2_VALID_FS};
+
+    // `journal_image` ends in `mark_clean`: a clean image carrying a log, which
+    // is what an idle boot leaves behind.
+    let Some(image) = journal_image() else {
+        return TestResult::Skipped;
+    };
+    let device = ProbeDevice::new(image);
+    if on_disk_u16(&device, 58) != EXT2_VALID_FS {
+        return fail!("the fixture is not clean, so there is nothing to thaw");
+    }
+    let mounts = on_disk_u16(&device, 52);
+
+    if let Err(msg) = with_log(&device, thaw_body) {
+        return fail!("{}", msg);
+    }
+    if PROBE_FIRST.load(Ordering::Relaxed) != 1024 {
+        return fail!("the mutation wrote before it stamped the image dirty");
+    }
+    if on_disk_u16(&device, 58) != EXT2_ERROR_FS {
+        return fail!("a mutated image is still marked clean on the medium");
+    }
+    if on_disk_u16(&device, 52) != mounts {
+        return fail!("the thaw billed a second mount");
+    }
+    TestResult::Pass
+}
+
+fn thaw_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+    // The attach writes the log's own superblock, so measure after it.
+    attach(fs)?;
+    PROBE_FIRST.store(u64::MAX, Ordering::Relaxed);
+    fs.create_file(2, b"thaw.txt")
+        .map(|_| ())
+        .map_err(|_| "create")
+}
+
+slopos_testing::stest!(
+    name = test_ext2_clean_stamp_thaws_before_the_next_write,
+    suite = fs
+);

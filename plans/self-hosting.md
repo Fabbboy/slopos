@@ -16,8 +16,9 @@ appetite.
 `librustc_driver.so` is a single 161 MB shared object loaded through `PT_INTERP`;
 `builddir/target` holds 52 GB across 219,895 files. Against that, SlopOS today
 caps an executable at 1 MiB (`mm/src/slab/mod.rs:61` bounds the `KVec` at
-`core/src/exec/mod.rs:463`), ships a 32 MiB root image with ~2 k inodes, and
-refuses `PT_INTERP` outright (`mm/src/elf.rs:591`). The gap is three orders of
+`core/src/exec/mod.rs:463`), boots a 512 MiB dev root with 32 k inodes against
+a 1 GiB kernel-side ceiling, and refuses `PT_INTERP` outright
+(`mm/src/elf.rs:591`). The gap is three orders of
 magnitude in four independent dimensions, and every constant that produces it
 was chosen correctly for an appliance.
 
@@ -56,107 +57,41 @@ sleepable page-fault path, dynamic linking, and the compiler bootstrap itself).
 
 ---
 
-## Phase 0 — A dev loop that keeps what you wrote
+## The loop this plan starts from
 
-**Outcome:** `just boot-persist` is a machine whose state survives, including a
-rude QEMU exit, and the host build never destroys guest data.
+`just boot-persist` is a machine whose state survives, including a rude QEMU
+exit, and no host build destroys guest data. Every measurement below depends on
+that, because a root that silently reverts to RAM makes each of them a
+measurement of the initramfs.
 
-This phase is first because it is broken *now*, and because every measurement in
-Phase 1 onward is worthless on a root that silently reverts to RAM.
+What it rests on, in case a later phase disturbs it:
 
-### Root cause (proven, not inferred)
-
-A writable ext2 mount stamps `s_state = EXT2_ERROR_FS` at mount time by design
-(`fs/src/ext2_vfs.rs:700-711`, `fs/src/ext2/mod.rs:559-565`) and clears it only
-in `mark_filesystem_clean` (`fs/src/ext2_vfs.rs:862-903`), whose only non-test
-caller is `boot/src/shutdown.rs:35` on `power::shutdown`. `boot-persist` runs
-QEMU interactively: closing the window or Ctrl-C never runs `/bin/halt`, so the
-image stays dirty. On the next boot `mount_read_only_reason` returns
-`NotCleanlyUnmounted` (`fs/src/ext2/mod.rs:474-476`); the 5 s flusher has already
-drained the log, so `attach_journal` replays nothing and the read-only latch
-stands (`fs/src/ext2_vfs.rs:574-580`); `root=auto` then treats a read-only disk
-exactly as it treats no disk and boots the initramfs, demoting the image to
-`/mnt` (`boot/src/boot_services.rs:108-135`). The disk is intact; `/` is a fresh
-RAM copy, so nothing the developer does persists.
-
-Observed on the checked-in artifact and two boots of the current ISO:
-
-```
-$ dumpe2fs -h fs/assets/ext2-persist.img | grep state
-Filesystem state:         not clean with errors
-$ e2fsck -fn fs/assets/ext2-persist.img; echo $?
-0                                     # the host preserve gate's oracle says "fine"
-# boot 1, dirty image:
-ext2: MOUNTING READ-ONLY — the image was never marked clean …
-ROOTFS: unpacked 26 initramfs entries (6145224 bytes) into RAM root
-VFS: mounted ext2 at /mnt (secondary, read-only)
-# after `e2fsck -fy`, boot 2:
-ROOTFS: root=disk — / is the ext2 disk, and what it holds persists
-VFS: mounted / (ext2, read-write), /tmp (ramfs), /dev (devfs)
-```
-
-The missing `root=` on `boot-persist`'s cmdline is **not** the bug: the unset
-default is `ROOT_AUTO` (`boot/src/early_init.rs:508-510`), which is what this
-recipe wants. The v2 (`VERITY=rw`) trailer is **not** the bug either: it permits
-writes end to end (`fs/src/verity.rs:326-338`).
-
-### Workstream 0.1 — Mark the image clean while it is idle (guest, **S**)
-
-`mark_filesystem_clean` already computes exactly the right predicate — no dirty
-blocks, no unbarriered writes, no dirty superblock, empty journal
-(`fs/src/ext2_vfs.rs:874-878`). Call it from the flusher when that predicate
-holds, and re-stamp on the next mutation: `mark_dirty_on_disk` is already
-idempotent and returns early when the state is already `EXT2_ERROR_FS`
-(`fs/src/ext2/mod.rs:559-565`), so only the first write after an idle window
-pays a superblock write. The ordering obligation is unchanged and load-bearing:
-the dirty stamp must reach the device *before* any mutation it covers.
-
-A rude exit then loses at most the writes of the last idle window, instead of
-converting the image into one that never mounts writable again.
-
-### Workstream 0.2 — Never let the host wipe a preserved image (host, **S**)
-
-- `image_is_preservable` uses `e2fsck -fn` as its only oracle
-  (`scripts/build_fs_image.sh:129-132`), which `scripts/check_fs_image.sh:10-13`
-  documents as blind to the dirty bit — so the latch is sticky and silent. Add
-  the `dumpe2fs -h` state assertion, reusing `check_image` rather than writing a
-  second copy.
-- When a `PRESERVE_FS_IMAGE=1` image fails any check, **refuse and exit
-  non-zero** with the `e2fsck -fy` command to run. Today the fallback is
-  `rm -f "$IMAGE_PATH"` + `mkfs` announced by one line inside a noisy build
-  (`scripts/build_fs_image.sh:172-176`) — that is the reported "it overwrites my
-  image". Move the destructive branch behind an explicit `just boot-persist-reset`.
-- Gate the `/.journal` superblock zeroing (`scripts/build_fs_image.sh:216-219`)
-  on a clean image: on a dirty one the log may hold the only copy of committed
-  metadata, and the refresh destroys the evidence the kernel would have replayed.
-- Carry the existing attested bitmap forward AND-ed with the fresh one instead of
-  regenerating all-ones (`scripts/gen_verity.py:97-107`), so a block the guest
-  rewrote stays un-attested across rebuilds. Today every `boot-persist`
-  silently re-blesses whatever the guest wrote, contradicting
-  `fs/src/verity.rs:166-167`.
-
-### Workstream 0.3 — Stop the host refresh from eating guest work (host, **S**)
-
-`_fs-image-persist` runs on every `boot-persist` and unlinks + rewrites every
-`/bin/*` and `/sbin/init` whenever any userland hash changes. Carve a `/home`
-(and keep `/var`) that the refresh never touches, and say in the recipe's
-`[doc]` string that `/tmp` is RAM and that `shutdown` — not the window's X — is
-what commits.
-
-### Workstream 0.4 — Give the machine room and a way in (host, **S**)
-
-`FS_IMAGE_SIZE=32M`, `FS_JOURNAL_SIZE=4M`, `QEMU_MEM=512M`. A workspace disk
-needs GB. Add a `DISK_SIZE` knob and a second virtio-blk device
-(`scripts/qemu_run.sh:452-457` already parameterises disk1) so the workspace is
-separate from the root, and raise `QEMU_MEM` for the persist recipe.
-
-**Phase 0 exit criteria:**
-- `just boot-persist`, write a file, close the QEMU window, `just boot-persist`
-  again — the file is there, and the boot log says `ROOTFS: root=disk`.
-- A dirty or damaged persist image is never silently rebuilt; the script says
-  what to run.
-- `just test` green; `check-fs-image`, `test-persist` and the four boot-log
-  ratchets re-measured.
+- **The image is marked clean while it is idle.** The flusher calls
+  `mark_filesystem_clean` (`fs/src/ext2_vfs.rs`) on every pass that leaves
+  nothing dirty, nothing unbarriered, no superblock drift and an empty log, and
+  `Ext2Fs::transaction` re-stamps `EXT2_ERROR_FS` before the next mutation
+  reaches the device. That is ext4's freeze/thaw ordering, arrived at
+  automatically rather than through `fsfreeze`. A rude exit costs the last idle
+  window instead of an image that mounts read-only forever, which `root=auto`
+  would then demote to `/mnt` while booting the initramfs.
+  `test_ext2_clean_stamp_thaws_before_the_next_write` holds the ordering to the
+  offset of the first device write.
+- **The host refuses rather than rebuilds.** `build_fs_image.sh` holds a
+  `PRESERVE_FS_IMAGE=1` image to `check_fs_image.sh` — sound *and* clean, since
+  `e2fsck -fn` alone exits 0 on a dirty superblock — and an image it cannot
+  keep stops the build with the command that repairs it. `just
+  boot-persist-reset` is the only path that deletes one. A larger
+  `PERSIST_IMAGE_SIZE` grows the existing image through `resize2fs` with the
+  trailer kept aside, so a failed resize leaves it byte-identical.
+- **A rebuild no longer re-blesses guest writes.** `gen_verity.py` AND-s the
+  old attested bitmap into the new one, so a block a boot rewrote stays
+  un-attested across rebuilds — what `fs/src/verity.rs:166-167` already said
+  the bitmap meant.
+- **The persist root is 512M against a 32M shipped image, and 1 GiB is the
+  ceiling.** The verity hash array is one contiguous `KVec` of 4 bytes per
+  4 KiB block against a 1 MiB `MAX_ALLOC_SIZE`, so a 1 GiB image allocates
+  exactly the cap twice at mount. Workstream 3.1 is what lifts that; until it
+  does, no phase here may assume a bigger root.
 
 ---
 
@@ -290,7 +225,9 @@ bitmap it is about to need. The journal is 4 MiB regardless of image size, with
 `resident_slot` a linear backward scan (`fs/src/ext2/journal.rs:255-267`), so
 simply growing it makes every miss quadratic. `allocate_searching` restarts at
 bit 0 of each group with no hint. Verity's hash array is 4 bytes per block in
-one contiguous `KVec` — 64 MiB of kernel memory for a 64 GiB volume. Directory
+one contiguous `KVec`, which is not a sizing preference but the hard ceiling on
+this whole phase: `MAX_ALLOC_SIZE` is 1 MiB, so 1 GiB is the largest image that
+mounts at all and a 64 GiB volume would want 64 MiB of it. Directory
 lookup is a linear scan with no htree, so `target/debug/deps` with 20 k entries
 makes the build O(n²).
 
@@ -576,17 +513,23 @@ and the KTAP transport vanish exactly when bare-metal debugging starts.
       authority per syscall, Verus proofs, KernMiri, the ratchets, the
       retractable filesystem.
 - [ ] **Does the dev root stay attested?** A machine that rewrites `/usr` while
-      building itself un-attests exactly the blocks it changes. Decide which
-      paths stay verified and what `verity=require` asserts for a workbench.
+      building itself un-attests exactly the blocks it changes — and now keeps
+      them un-attested across host rebuilds, so the count only ever falls.
+      Decide which paths stay verified and what `verity=require` asserts for a
+      workbench.
 - [ ] **How does source get in before the guest can fetch it?** A host-built
       disk image, a 9p/virtiofs mount, or a plain TCP transfer — each is a
-      different amount of throwaway work. Cheapest: a second virtio-blk disk
-      built by the host with the vendored tree on it (Workstream 0.4).
+      different amount of throwaway work. The cheapest answer *was* a second
+      virtio-blk disk carrying the vendored tree, and `scripts/qemu_run.sh`
+      already parameterises one; it is not buildable yet, because there is
+      exactly one ext2 instance in the kernel and it is bound at boot, so a
+      second disk can be the root or nothing. Workstream 3.3 is the
+      prerequisite, not a host-side knob.
 
 **Decided.** Rust toolchain: Rust-hosted (cranelift + a Rust linker), no LLVM
 and no C++ toolchain port; time is not the constraint. C is *not* excluded — a
 C library and a Rust-written C frontend are Workstream 5.6, off the critical
-path. Scope: the full in-guest loop, Phases 0–6, in QEMU; bare metal is not
+path. Scope: the full in-guest loop, Phases 1–6, in QEMU; bare metal is not
 committed. Identity: single-user, uid 0, permanently — no persistable
 principal, so file ownership and a medium-resident quota ledger stay out of
 scope and `stat`'s uid/gid fields exist for layout only.
@@ -595,13 +538,6 @@ scope and `stat`'s uid/gid fields exist for layout only.
 
 ## Touch list (current paths — verify before editing)
 
-- `scripts/build_fs_image.sh:107-176,216-219` — preserve gate, refresh branch,
-  journal zeroing (Phase 0).
-- `scripts/gen_verity.py:97-107` — attested-bitmap regeneration (Phase 0).
-- `justfile:100-102,188-197` — `_fs-image-persist`, `boot-persist` (Phase 0).
-- `scripts/qemu_run.sh:445-466` — disk attachment, boot order (Phases 0, 6).
-- `fs/src/ext2_vfs.rs:862-903,922-960` — `mark_filesystem_clean`, the flusher
-  (Phase 0).
 - `core/src/exec/mod.rs:41-43,458-490` — argv caps, ELF staging (Phase 1).
 - `mm/src/elf.rs:56-59,591` — image caps, `PT_INTERP` (Phases 1, 5).
 - `mm/src/process_vm.rs:2185-2229,3005-3021,3092-3126` — brk, mprotect, fork
@@ -629,6 +565,7 @@ scope and `stat`'s uid/gid fields exist for layout only.
   `font/src/lib.rs:29-48` — shell, key encoding, glyph coverage (Phase 4).
 - `scripts/patch_std.sh`, `targets/x86_64-slos-userland.json`,
   `userland/userland.ld:44-50` — the std/target/unwinding triangle (Phase 5).
+- `scripts/qemu_run.sh:445-466` — disk attachment, boot order (Phase 6).
 - `fs/src/devfs/mod.rs:309-323`, `fs/src/partition.rs` — writable block nodes,
   partition writing (Phase 6).
 - `AGENTS.md:324` — the QEMU-only execution boundary, which forbids exactly the

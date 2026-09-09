@@ -15,6 +15,11 @@ fs_image         := fs_image_dir / "ext2.img"
 fs_image_tests   := fs_image_dir / "ext2-tests.img"
 fs_image_persist := fs_image_dir / "ext2-persist.img"
 fs_image_size    := env("FS_IMAGE_SIZE", "32M")
+# Sized on its own: this disk holds work, not the shipped appliance root. The
+# ceiling is 1 GiB — the verity hash array is one contiguous KVec of 4 bytes
+# per 4 KiB block against a 1 MiB `MAX_ALLOC_SIZE`.
+persist_image_size := env("PERSIST_IMAGE_SIZE", "512M")
+persist_qemu_mem   := env("PERSIST_QEMU_MEM", "2G")
 initramfs        := build_dir / "initramfs.cpio"
 initramfs_tests  := build_dir / "initramfs-tests.cpio"
 
@@ -96,9 +101,10 @@ _fs-image-tests: _build-userland-tests
 # mounts it as a writable `/` that is still attested for every block no boot
 # rewrote, preserved across builds so what the guest wrote survives, and
 # separate from the shipped image so `just boot`'s `verity=require` keeps
-# meaning what it says. Refreshes only the binaries that changed.
+# meaning what it says. Refreshes only the binaries that changed, never deletes
+# the image, and grows it in place when `PERSIST_IMAGE_SIZE` rises.
 _fs-image-persist: _build-userland
-    FS_IMAGE_SIZE={{fs_image_size}} VERITY=rw PRESERVE_FS_IMAGE=1 \
+    FS_IMAGE_SIZE={{persist_image_size}} VERITY=rw PRESERVE_FS_IMAGE=1 \
         scripts/build_fs_image.sh "{{fs_image_persist}}" "{{build_dir}}" {{userland_bins}}
 
 _initramfs: _build-userland
@@ -185,6 +191,8 @@ boot-fast:
     BOOT_CMDLINE="{{boot_cmdline_effective}} roulette=skip" just _iso-notests
     just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 
+# `shutdown` is the exit that flushes on demand; closing the window loses at
+# most what the 5-second flusher had not yet written.
 [doc("Boot from a persistent, writable disk root that survives rebuilds (fs/assets/ext2-persist.img)")]
 boot-persist:
     #!/usr/bin/env bash
@@ -194,7 +202,16 @@ boot-persist:
     # `roulette=skip` as `boot-fast` does.
     BOOT_CMDLINE="tests=off roulette=skip" just _iso-notests
     just _fs-image-persist
-    just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image_persist}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
+    QEMU_MEM="${QEMU_MEM:-{{persist_qemu_mem}}}" \
+        just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image_persist}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
+
+[doc("Discard the persistent disk and everything on it, then boot a fresh one")]
+boot-persist-reset:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f "{{fs_image_persist}}" "{{fs_image_persist}}.stamp"
+    echo "boot-persist-reset: discarded {{fs_image_persist}}"
+    just boot-persist
 
 [doc("Boot SlopOS with release-optimized kernel (production build)")]
 boot-prod:

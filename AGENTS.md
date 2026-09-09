@@ -15,6 +15,24 @@ Boot targets rebuild a secondary `builddir/slop-notests.iso` with `tests=off`; o
 
 **The disk is the root.** `root=auto` mounts a writable `disk0` at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the shipped verified `ext2.img`, so `just boot` still runs `/sbin/init` from RAM with the attested disk at `/mnt`). `root=` also accepts `initramfs`, `virtio`, and a device name — `/dev/vda`, `/dev/vda1`, `vdb2` — where the partition comes from the GPT or MBR table on that device; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot-persist` is the developer's persistent machine: it boots `fs/assets/ext2-persist.img`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`, binaries only) so what the guest wrote survives. `VERITY=on` builds the shipped v1 trailer, which write-protects the device and is what `just boot`'s `verity=require` asserts; `VERITY=off` builds no trailer. The shipped and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
 
+**A rude exit is survivable.** The flusher marks the image clean *on the
+medium* whenever a pass leaves nothing dirty, nothing unbarriered, no
+superblock drift and an empty log — the state ext4 reaches for `fsfreeze`,
+here reached automatically at idle — and `Ext2Fs::transaction` re-stamps it
+dirty before the next mutation reaches the device. Closing the QEMU window
+therefore costs at most the last idle window's writes, instead of leaving an
+image that mounts read-only forever after and that `root=auto` then demotes to
+`/mnt` while booting the initramfs. The host half is the same promise:
+`build_fs_image.sh` never deletes a `PRESERVE_FS_IMAGE=1` image. One that is
+damaged, left dirty, or built under a different `VERITY` stops the build
+naming the command that repairs it; `just boot-persist-reset` is the only
+thing that discards one; a larger `PERSIST_IMAGE_SIZE` grows the image with
+`resize2fs` rather than rebuilding it; and `gen_verity.py` AND-s the old
+attested bitmap into the new one, so a block the guest rewrote stays
+un-attested across rebuilds. The persist default is 512M and 1 GiB is the
+ceiling: the verity hash array is one contiguous `KVec` of 4 bytes per 4 KiB
+block against a 1 MiB `MAX_ALLOC_SIZE`.
+
 **A write is logged before it lands.** A writable ext2 image carries a metadata
 redo log in a preallocated sealed file at `/.journal` (`FS_JOURNAL_SIZE`,
 default 4M; `0` builds none), located at mount by path lookup and used as a

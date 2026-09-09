@@ -28,7 +28,7 @@ MODE_DIR = S_IFDIR | 0o755
 # Directories nothing writes into at build time, so they need their own record.
 # Mirrors build_fs_image.sh: the ext2 root does not auto-create parents the way
 # ramfs does, and both roots must agree about whether a path is writable.
-EMPTY_DIRS = (b"/etc", b"/var")
+EMPTY_DIRS = (b"/etc", b"/var", b"/home")
 
 # Mirror the kernel's per-component name cap (fs/src/lib.rs MAX_NAME_LEN).
 MAX_NAME_LEN = 32

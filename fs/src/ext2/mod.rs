@@ -527,6 +527,9 @@ impl<'a> Ext2Fs<'a> {
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<R, Ext2Error>,
     ) -> Result<R, Ext2Error> {
+        // An idle window may have marked the image clean; the dirty stamp must
+        // reach the medium before anything this scope publishes.
+        self.restamp_dirty()?;
         // The only point at which the log can be emptied: a check point
         // publishes committed content, and mid-operation the same blocks hold
         // uncommitted content.
@@ -557,13 +560,24 @@ impl<'a> Ext2Fs<'a> {
     /// Mark the image as not cleanly unmounted, so a later fsck knows it must
     /// run, and record the mount in the fields `e2fsck` reports.
     pub fn mark_dirty_on_disk(&mut self) -> Result<(), Ext2Error> {
+        self.stamp_dirty(true)
+    }
+
+    /// [`Self::mark_dirty_on_disk`] for a mount that already counted itself.
+    fn restamp_dirty(&mut self) -> Result<(), Ext2Error> {
+        self.stamp_dirty(false)
+    }
+
+    fn stamp_dirty(&mut self, mounting: bool) -> Result<(), Ext2Error> {
         if self.read_only || self.superblock.state == EXT2_ERROR_FS {
             return Ok(());
         }
         self.superblock.state = EXT2_ERROR_FS;
-        self.write_superblock_state(true)
+        self.write_superblock_state(mounting)
     }
 
+    /// Declare the image consistent on the medium. The caller owes the
+    /// predicate: nothing dirty, nothing unbarriered, an empty log.
     pub fn mark_clean(&mut self) -> Result<(), Ext2Error> {
         if self.read_only {
             return Ok(());
